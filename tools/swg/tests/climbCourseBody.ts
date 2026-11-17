@@ -19,7 +19,7 @@ import { WALL_ON } from '../../../src/player/wallClimb.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { climbCourse, lipPiece, type ClimbCourse, type CourseLip, type CoursePiece } from '../../../src/anim/climbCourse.ts';
-import { buildCourseColliders, courseToWorld, courseWayToWorld, worldToCourse, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
+import { buildCourseColliders, courseToWorld, courseWayToWorld, worldToCourse, type CourseCollider, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
 
 /** How far under its slab's top the ground stands (the game's `climbTest` stands each slab this far over the highest ground under it). */
 export const SLAB_LIFT = 0.05;
@@ -31,6 +31,8 @@ export interface Stood {
   frame: CourseFrame;
   /** Its lips in the world, and each one's chain (its name less a trailing number: a polyline's segments, a run of steps). */
   lips: { name: string; chain: string; a: [number, number, number]; b: [number, number, number] }[];
+  /** Its colliders (the feedback round: a refused climb up names the course's solid it met, as the game's `climbTest` does). */
+  colliders: CourseCollider[];
 }
 
 export async function standPiece(piece: CoursePiece): Promise<Stood> {
@@ -38,7 +40,7 @@ export async function standPiece(piece: CoursePiece): Promise<Stood> {
   ground(physics, -SLAB_LIFT);
   const frame: CourseFrame = { ox: piece.at[0], oz: -piece.at[1], h: 0, ref: () => 0 };
   const one: ClimbCourse = { pieces: [piece], floor: 1, reach: { standing: 0, running: 0 }, lipSlope: 0, unknown: [] };
-  buildCourseColliders(physics.world, one, frame);
+  const colliders = buildCourseColliders(physics.world, one, frame);
   physics.stepOnce();
   const w = { x: 0, y: 0, z: 0 };
   const lips = piece.lips.map((L: CourseLip) => {
@@ -47,7 +49,15 @@ export async function standPiece(piece: CoursePiece): Promise<Stood> {
     courseToWorld(frame, piece, L.b[0], L.b[1], L.b[2], w);
     return { name: L.name, chain: L.name.replace(/\d+$/, ''), a, b: [w.x, w.y, w.z] as [number, number, number] };
   });
-  return { physics, piece, frame, lips };
+  return { physics, piece, frame, lips, colliders };
+}
+
+/** A collider of a stood piece by its name on the course (`the course's beam (room-beam)`), as the game's `climbTest` names its own; null for another (the harness's ground). */
+export function courseNamer(s: Stood): (c: { handle: number }) => string | null {
+  return (c) => {
+    const k = s.colliders.find((q) => q.collider.handle === c.handle);
+    return k ? `the course's ${k.role} (${k.piece})` : null;
+  };
 }
 
 // ---- the lips in the world: nearest, and along a chain ---------------------------------------------------------------------
@@ -168,6 +178,7 @@ export function bodyAt(s: Stood, start: string, fps: number): { b: TestBody; w: 
   (s.physics as unknown as { acc: number }).acc = 0;
   const b = new TestBody(s.physics);
   b.jka.forceLevel = 0;
+  b.ledge.namer = courseNamer(s);
   const w = { x: 0, y: 0, z: 0 };
   courseToWorld(s.frame, s.piece, st.at[0], st.at[1], st.at[2], w);
   b.place(w.x, w.y, w.z);
@@ -835,6 +846,38 @@ async function freeRunScript(p: CoursePiece, fps: number, trace: Hash): Promise<
   return done();
 }
 
+/**
+ * The feedback round, item 2: a climb up that only nearly fits. A standing jump at the lip (E held, as every grab), then W:
+ * the climb up taken whole, short or refused, run to its end (6 s at the most: the free climb's clip is 3.9 s), and half a
+ * second more on the top. Recorded: what the climb came to (stood on the top at a depth in from the lip, or the words that
+ * refused it), what the room tests found (`LedgeHang.room`), how long the climb's one-off took (a cut clip ends sooner), and
+ * whether the body is still kept crouched there.
+ */
+async function roomScript(p: CoursePiece, fps: number, trace: Hash): Promise<PieceRun> {
+  const s = await standPiece(p);
+  const run = newRun(s, fps);
+  const g = grab(s, 'stand', 'stand', fps);
+  run.grab.push(g.rec);
+  if (g.rec.ok) {
+    const b = g.b;
+    fill(b);
+    const words0 = b.ledgeWords.length;
+    tap(b, 'KeyW', fps);
+    const took = runUntil(b, fps, 6, () => !b.ledge.holding);
+    b.run(fps, 0.5);
+    const c = here(s, b);
+    const R = b.ledge.room;
+    // How far in from the lip (the piece's own z) the feet stand.
+    const lipZ = p.lips[0].a[2];
+    run.climb = !b.ledge.holding && b.grounded ? `stood ${r3(c.z - lipZ)} m in at y ${r3(c.y)}` : b.ledgeWords.slice(words0).join(' ') || (b.ledge.holding ? 'still hanging' : `fell to y ${r3(c.y)}`);
+    run.stages.push(`room ${R.rule}: ${R.result || '-'}${R.test ? ` (${R.test}${R.leg ? ` ${R.leg}` : ''}${R.depth === R.depth ? ` ${r3(R.depth)} m in` : ''}${R.met ? `, met ${R.met}` : ''}${R.past === R.past ? ` ${r3(R.past)} m` : ''})` : ''}${R.cut ? ', cut' : ''}`);
+    if (Number.isFinite(took)) run.stages.push(`the climb took ${r3(took)} s`);
+    if (!b.ledge.holding) run.stages.push(b.ledge.keepCrouched ? 'kept crouched' : 'standing');
+  }
+  fold(run, s, g.b, g.w, trace);
+  return run;
+}
+
 /** One piece at one rate, by its kind. */
 export async function runPiece(p: CoursePiece, fps: number, trace: Hash): Promise<PieceRun> {
   switch (p.kind) {
@@ -860,6 +903,8 @@ export async function runPiece(p: CoursePiece, fps: number, trace: Hash): Promis
       return obstacleScript(p, fps, trace);
     case 'run':
       return freeRunScript(p, fps, trace);
+    case 'room':
+      return roomScript(p, fps, trace);
   }
 }
 

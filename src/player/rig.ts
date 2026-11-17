@@ -203,6 +203,14 @@ const lookAlignQ = new THREE.Quaternion();
 const lookRootQ = new THREE.Quaternion();
 const lookRootInvQ = new THREE.Quaternion();
 const lookParentQ = new THREE.Quaternion();
+/** How long the duck's crouch layer takes to come in or go from nought to whole, seconds (the rig's own fade between two clips). */
+const DUCK_FADE = 0.18;
+/** The most of the bones' pose the duck's layers ever take (the state's clip keeps a little, so its weight is never divided by nought). */
+const DUCK_MOST = 0.98;
+/** A value moved toward a target by at most a step. */
+function approach(v: number, to: number, step: number): number {
+  return v < to ? (v + step < to ? v + step : to) : v - step > to ? v - step : to;
+}
 const restWorld = new THREE.Vector3();
 const dirWorld = new THREE.Vector3();
 const tmpA = new THREE.Vector3();
@@ -262,6 +270,24 @@ export class CharacterRig {
   readonly headLook = new HeadLook();
   /** The neck and the head, found once: null once looked for and not found. */
   private lookBones: { neck: THREE.Bone | null; head: THREE.Bone | null } | null = null;
+  /**
+   * Climbing II's feedback round, item 4 (the duck, `src/player/bodyShape.ts`): the crouch's share wanted in the pose this
+   * frame (nought to one) and whether the body moves, written by the caller before `update`, which takes them and puts the
+   * share back to nought, so a frame that does not ask (a hang, a wall, a ride) eases the layer out. Nothing at all while no
+   * share was ever asked.
+   */
+  duckWant = 0;
+  duckMoving = false;
+  /** The duck's two layers (the crouch's idle and its walk), their shares as eased, and their actions (made once, per clip). */
+  private duckIdleShare = 0;
+  private duckWalkShare = 0;
+  private readonly duckActions = new Map<string, THREE.AnimationAction | null>();
+  private duckIdle: THREE.AnimationAction | null = null;
+  private duckWalk: THREE.AnimationAction | null = null;
+  /** The arms' joints (the upper arms and all under them), which the duck's layer leaves to the state's clip. */
+  private armBoneNames: Set<string> | null = null;
+  /** The neck's forward bend past the crouch (item 4), with its clean and bent poses, put back before the next mixer update. */
+  private readonly duckNeckTurn = { clean: new THREE.Quaternion(), turned: new THREE.Quaternion(), bone: null as THREE.Bone | null, on: false };
   private readonly roles = new Map<BoneRole, THREE.Bone | null>();
   private readonly restArm = new Map<'left' | 'right', THREE.Vector3>();
   /** Bind-pose rotations of the arm bones: relative to the root (upper arms) and to the parent (forearms). */
@@ -1242,6 +1268,7 @@ export class CharacterRig {
   update(dt: number): void {
     this.stepDt = dt;
     if (this.syncOn) this.stepSync(dt);
+    this.stepDuck(dt); // item 4: the duck layer
     // The feet's placement (wave 3, src/player/footIk.ts) turned the legs after the mixer last frame: their clean pose
     // goes back before the mixer runs, since it writes a joint only when its clip's value moved, and a leg the clip held
     // still would otherwise keep last frame's turn and the next placement would stack on it.
@@ -1257,6 +1284,12 @@ export class CharacterRig {
     if (this.lookTurned && this.lookBones) {
       this.cleanLookBone(this.lookBones.neck);
       this.cleanLookBone(this.lookBones.head);
+    }
+    // The duck's neck bend (item 4), laid on under the look: put back after the look's own, the last laid first.
+    const dn = this.duckNeckTurn;
+    if (dn.on && dn.bone) {
+      if (dn.bone.quaternion.equals(dn.turned)) dn.bone.quaternion.copy(dn.clean);
+      dn.on = false;
     }
     if (this.upperShot) {
       this.upperShotTime += dt;
@@ -1571,6 +1604,112 @@ export class CharacterRig {
       this.spines = found;
     }
     return this.spines;
+  }
+
+  /**
+   * The feedback round, item 4: the duck's crouch layered over the state's clip, by share. Two layers (the crouch's idle while
+   * still, its walk while moving), each a copy of the crouch clip with the arms' tracks left out (so what the hands hold keeps
+   * the state's pose), mixed in by the mixer's own weighted average: a layer at share s of the bones over a state at weight one
+   * is a weight of s over one less the shares. The walk's layer keeps step with a striding state clip (the incoming clip's
+   * phase, as a fade between two strides does), else plays at the state's rate. A share eases in and out over `DUCK_FADE`.
+   */
+  private stepDuck(dt: number): void {
+    // Nothing asked and nothing still easing out: nothing to step (the frame of a body that never ducks).
+    if (!(this.duckWant > 0 || this.duckIdleShare > 0 || this.duckWalkShare > 0)) return;
+    const want = this.duckWant > 1 ? 1 : this.duckWant;
+    this.duckWant = 0;
+    const step = dt / DUCK_FADE;
+    const toWalk = this.duckMoving ? want : 0;
+    const toIdle = this.duckMoving ? 0 : want;
+    this.duckIdleShare = approach(this.duckIdleShare, toIdle, step);
+    this.duckWalkShare = approach(this.duckWalkShare, toWalk, step);
+    let sum = this.duckIdleShare + this.duckWalkShare;
+    if (sum > DUCK_MOST) sum = DUCK_MOST;
+    const base = 1 - sum;
+    this.duckIdle = this.duckLayer(this.duckIdle, 'crouch', this.duckIdleShare, base);
+    this.duckWalk = this.duckLayer(this.duckWalk, 'crouchWalk', this.duckWalkShare, base);
+    const walk = this.duckWalk;
+    const cur = this.current;
+    if (walk && walk.isScheduled() && cur) {
+      const a = cur.enabled ? this.strideOf(cur) : null;
+      const b = a ? this.strideOf(walk) : null;
+      if (a && b) {
+        walk.timeScale = 0;
+        walk.time = timeAtPhase(phaseAt(cur.time, a), b, walk.getClip().duration);
+      } else walk.timeScale = cur.timeScale;
+    }
+  }
+
+  /** One of the duck's layers at a share: played, weighted, and stopped once its share is nought. */
+  private duckLayer(action: THREE.AnimationAction | null, state: RigState, share: number, base: number): THREE.AnimationAction | null {
+    if (share <= 0) {
+      if (action && action.isScheduled()) action.stop();
+      return action;
+    }
+    const clip = this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]) ?? null;
+    let a = clip ? this.duckActionFor(clip) : null;
+    if (action && action !== a && action.isScheduled()) action.stop();
+    if (!a) return null;
+    if (!a.isScheduled() || !a.enabled) a.reset().setLoop(THREE.LoopRepeat, Infinity).play();
+    const w = share / (base > 0.02 ? base : 0.02);
+    a.setEffectiveWeight(w);
+    return a;
+  }
+
+  /** A crouch clip with the arms' tracks left out, as an action of its own (made once a clip). */
+  private duckActionFor(clip: string): THREE.AnimationAction | null {
+    let a = this.duckActions.get(clip);
+    if (a !== undefined) return a;
+    const src = this.actions.get(clip)?.getClip();
+    a = null;
+    if (src) {
+      const arms = this.armBones();
+      const tracks = src.tracks.filter((t) => !arms.has(THREE.PropertyBinding.parseTrackName(t.name).nodeName ?? ''));
+      if (tracks.length) a = this.mixer.clipAction(new THREE.AnimationClip(`duck:${clip}`, src.duration, tracks));
+    }
+    this.duckActions.set(clip, a);
+    return a;
+  }
+
+  /** The arms' joints: each upper arm and everything under it (found once). */
+  private armBones(): Set<string> {
+    if (this.armBoneNames) return this.armBoneNames;
+    const names = new Set<string>();
+    for (const role of ['leftUpperArm', 'rightUpperArm'] as const) this.boneFor(role)?.traverse((o) => names.add(o.name));
+    this.armBoneNames = names;
+    return names;
+  }
+
+  /** How much of the duck's crouch the mixer laid on this frame (the console's), nought to one. */
+  get duckShare(): number {
+    return this.duckIdleShare + this.duckWalkShare;
+  }
+
+  /**
+   * The feedback round, item 4: the neck bent forward by `pitch` radians past the crouch (about the figure's own right axis,
+   * in the neck's parent frame), over whatever the clip and the spine's twist left; put back before the next mixer update,
+   * so it never stacks. Call after `twistTorso`, with the world matrices current; nought does nothing.
+   */
+  bendNeck(pitch: number): void {
+    if (pitch === 0) return;
+    const dn = this.duckNeckTurn;
+    if (!dn.bone) {
+      dn.bone = this.neckBone() ?? this.boneFor('head');
+      if (!dn.bone) return;
+    }
+    const bone = dn.bone;
+    const parent = bone.parent;
+    if (!parent) return;
+    dn.clean.copy(bone.quaternion);
+    this.root.getWorldQuaternion(lookRootQ);
+    lookRootInvQ.copy(lookRootQ).invert();
+    lookQ.setFromAxisAngle(RIGHT_AXIS, pitch);
+    parent.getWorldQuaternion(lookParentQ);
+    lookAlignQ.copy(lookParentQ).invert().multiply(lookRootQ).multiply(lookQ).multiply(lookRootInvQ).multiply(lookParentQ);
+    bone.quaternion.premultiply(lookAlignQ);
+    dn.turned.copy(bone.quaternion);
+    dn.on = true;
+    bone.updateMatrixWorld(true);
   }
 
   /**

@@ -6,6 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
+import { moveBefore } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -183,6 +184,36 @@ export interface ClimbTune {
   hopBehind: number;
   /** The least depth behind a lip a top must have to be stood on (`thinTop`), metres (ours: 0.35, the body's own capsule radius). */
   topMin: number;
+  /**
+   * Climbing II, the feedback round, item 1 (the owner, after playing: "The grab holds you too long"): 'share' a grab (the
+   * jump's, E's from the ground, the grapple haul's hand-over) still starts its clip, but from `grabFreeAt` of its length on
+   * the hang takes the keys: a shimmy, W, a hop, Space, the crouch's let-go and the look-away begin there, the body put on the
+   * hang place and the grab blended into what was asked over the move's own blend (`ease`); a press made earlier in the grab
+   * is kept until then. Nothing asked, the grab plays out as ever. 'whole': today's (the whole grab before any key).
+   */
+  grabFree: 'share' | 'whole';
+  /** Item 1: the share of a grab's length after which the hang takes the keys (the round's start, 0.35: the hands are on the lip by then in the braced and free grabs). */
+  grabFreeAt: number;
+  /**
+   * Item 2: 'why' a climb up refused says which test failed (the top's room for a crouched body at a depth in from the lip,
+   * or the climb's own way out, up and in) and what it met (a placed thing's template, the course's solid, the ground, a
+   * planting, a building's shell or room) and how far into it, on the message line, and in full on
+   * `__debug.climb({ room: true })`. 'before': today's words ("No room to climb up here.").
+   */
+  roomSay: 'why' | 'before';
+  /**
+   * Item 2 (the owner's idea): 'fit' where today's climb up does not fit, a shorter one is tried before it is refused: its
+   * end nearer the lip (down to half the capsule's radius in), the body tucked crouched where standing would meet something
+   * on the way up (it stays crouched on the top until there is room, as after every climb), a lower way in over the lip (the
+   * lift over it down to `liftLeast`), and all of them again with a brush of `roomBrush` allowed; a climb ending nearer or
+   * tucked has its clip cut where its figure crouches on the top, the rest blended out. 'strict': today's (refused where the
+   * whole climb does not fit).
+   */
+  roomRule: 'fit' | 'strict';
+  /** Item 2: how far the body may brush what stands still on a short climb, metres (the round's start, 0.04: under a hand's thickness). */
+  roomBrush: number;
+  /** Item 2: the least lift over the lip a lower way in is tried down to, metres (ours: nought, the climb's own skin of 0.02 still under the feet; today's lift is 0.05). */
+  liftLeast: number;
 }
 
 /**
@@ -206,10 +237,35 @@ export const CLIMB_TWO_BEFORE: Readonly<Record<string, string>> = {
   grabSweep: 'before',
 };
 
-/** Every phase 2 switch put to its 'before' setting (today's climbing). */
+/**
+ * Every phase 2 switch put to its 'before' setting (today's climbing). Phase 1's climbing also had none of the feedback
+ * round's (`CLIMB_FEEDBACK_BEFORE`), so those are put to theirs too: the wave 4 suites and `climbToday.test.ts`, which hold
+ * phase 1's rules, ask this one call.
+ */
 export function climbTwoBefore(): void {
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_TWO_BEFORE)) t[k] = v;
+  climbFeedbackBefore();
+}
+
+/**
+ * Climbing II, the feedback round (after phase 2, the owner's notes from playing): every switch it adds to the climbing, at
+ * its other setting (the climbing as `12ae8ad` shipped it). `climbAfter.test.ts` holds phase 2's course with these so.
+ */
+export const CLIMB_FEEDBACK_BEFORE: Readonly<Record<string, string>> = {
+  grabFree: 'whole',
+  roomSay: 'before',
+  roomRule: 'strict',
+};
+
+/**
+ * The feedback round's switches at their other setting (`12ae8ad`'s climbing and body): the climbing's (`CLIMB_FEEDBACK_BEFORE`)
+ * and the body's shape on foot (items 3 and 4, `MOVE_BEFORE` in `moveTune.ts`: prone the crouch's upright capsule, no duck).
+ */
+export function climbFeedbackBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_FEEDBACK_BEFORE)) t[k] = v;
+  moveBefore();
 }
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
@@ -290,6 +346,12 @@ export const CLIMB_TUNE: ClimbTune = {
   lookArm: 0.6,
   hopBehind: 3,
   topMin: 0.35,
+  grabFree: 'share',
+  grabFreeAt: 0.35,
+  roomSay: 'why',
+  roomRule: 'fit',
+  roomBrush: 0.04,
+  liftLeast: 0,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -346,6 +408,9 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   lookArm: { min: 0, max: 1 },
   hopBehind: { min: 0, max: 8 },
   topMin: { min: 0, max: 1 },
+  grabFreeAt: { min: 0, max: 1 },
+  roomBrush: { min: 0, max: 0.15 },
+  liftLeast: { min: 0, max: 0.05 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -366,6 +431,9 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   thinTop: ['hang', 'before'],
   slopeLimit: ['inclusive', 'before'],
   grabSweep: ['swept', 'before'],
+  grabFree: ['share', 'whole'],
+  roomSay: ['why', 'before'],
+  roomRule: ['fit', 'strict'],
 };
 
 /**

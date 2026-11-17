@@ -11,7 +11,7 @@
 //    every one of its switches at its 'before' setting (`climbTwoBefore`), set here before anything runs.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { climbCourse, TODAY_REACH } from '../../../src/anim/climbCourse.ts';
+import { climbCourse, COURSE_TWO_IDS, TODAY_REACH } from '../../../src/anim/climbCourse.ts';
 import { climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { RATES, reachAt, runCourse, summarize } from './climbCourseBody.ts';
 import { createHash } from 'node:crypto';
@@ -39,9 +39,11 @@ const TODAY = {
 // ---- 1. the whole course at every rate ---------------------------------------------------------------------------------------
 {
   const t0 = performance.now();
-  const { runs, digest } = await runCourse();
+  // The course's pieces as phase 1 laid them (the feedback round adds a row after them, which `COURSE_TWO_IDS` leaves out:
+  // the rows before it stand where they stood).
+  const { runs, digest } = await runCourse(COURSE_TWO_IDS);
   const ms = performance.now() - t0;
-  const pieces = climbCourse().pieces;
+  const pieces = climbCourse({ pieces: COURSE_TWO_IDS }).pieces;
   ok(runs.length === pieces.length * RATES.length && pieces.every((p) => RATES.every((fps) => runs.some((r) => r.id === p.id && r.fps === fps && r.frames > 0))), `the harness ran every piece (${pieces.length}) at every rate (${RATES.join(', ')}): ${runs.length} runs, ${runs.reduce((n, r) => n + r.frames, 0)} frames in ${(ms / 1000).toFixed(1)} s`);
   const lines = runs.map(summarize);
   const sumDigest = createHash('sha256').update(lines.join('\n')).digest('hex');

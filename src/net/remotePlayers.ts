@@ -18,7 +18,7 @@ import { LOOK, unpackPitch } from '../player/lookAt.ts';
 import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
-import { measureBox, peerBodies, peerLow, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+import { measureBox, peerBodies, peerLow, peerLying, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { MX } from '../anim/animRules.ts';
 import { ANIM_TUNE } from '../anim/animTune.ts';
 import { CARRY_FULL, CARRY_ORIGINAL, LegOpts, carryOf, gunClassIndex } from '../anim/bodyLoco.ts';
@@ -121,6 +121,11 @@ export interface PeerView {
    * their body here wears that capsule and is aimed at its middle (the AI handoff's step 2). Nothing new on the wire.
    */
   low: boolean;
+  /**
+   * Lying: the state they last sent is a prone one (`peerLying`), so under this browser's `proneShape` 'lying' their body
+   * here is a lying sensor turned by their heading, as yours is (the feedback round, item 3). Nothing new on the wire.
+   */
+  lying?: boolean;
   /** Their blade is lit, and the colour they lit it. */
   saber: boolean;
   saberColor: number;
@@ -625,6 +630,7 @@ export class RemotePlayers {
     v.maxHp = r.maxHp;
     v.down = r.down;
     v.low = peerLow(r.state);
+    v.lying = peerLying(r.state);
     v.saber = r.saber && !r.down;
     v.saberColor = r.saberColor;
     // In `viewOf`, beside the other fields. `dockPos`/`dockQuat` are the module scratch this file

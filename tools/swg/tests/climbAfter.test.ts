@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
-import { resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { climbFeedbackBefore, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { COURSE_TWO_IDS } from '../../../src/anim/climbCourse.ts';
 import { RATES, runCourse, summarize } from './climbCourseBody.ts';
 
 let checks = 0;
@@ -32,10 +33,13 @@ const AFTER = {
 };
 
 resetClimbTune();
+// The feedback round's switches at their other setting (the climbing as phase 2 shipped it, `12ae8ad`), and the course's pieces
+// as phase 2 had them (the round adds a row of its own, `COURSE_TWO_IDS` leaves it out): the digests below are phase 2's.
+climbFeedbackBefore();
 const t0 = performance.now();
-const { runs, digest } = await runCourse();
+const { runs, digest } = await runCourse(COURSE_TWO_IDS);
 const ms = performance.now() - t0;
-const pieces = climbCourse().pieces;
+const pieces = climbCourse({ pieces: COURSE_TWO_IDS }).pieces;
 ok(runs.length === pieces.length * RATES.length, `the harness ran every piece (${pieces.length}) at every rate (${RATES.join(', ')}) at the shipped settings: ${runs.length} runs, ${runs.reduce((n, r) => n + r.frames, 0)} frames in ${(ms / 1000).toFixed(1)} s`);
 const lines = runs.map(summarize);
 const sumDigest = createHash('sha256').update(lines.join('\n')).digest('hex');

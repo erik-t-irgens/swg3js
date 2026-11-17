@@ -43,6 +43,8 @@ import { StairSense } from './stairSense.ts';
 import { ClimbAsk, LedgeHang, LedgeIn, climbTakesUseFirst, type LedgeWorld } from './ledge.ts';
 import { LimbPlace } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
+import { MOVE_TUNE, shapeRulesOn } from '../anim/moveTune.ts';
+import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
 import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
@@ -513,6 +515,16 @@ export class Player {
    * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
    */
   readonly climbAsk = new ClimbAsk();
+  /**
+   * Climbing II's feedback round, items 3 and 4 (`src/player/bodyShape.ts`, under `MOVE_TUNE`): the capsule lying along a
+   * prone body, and ducked under what stands over the body and ahead along its travel. With both switches at their other
+   * setting it never writes the collider and today's `setCrouchCollider` does. The grapple's harness steps the very same
+   * calls in the same places.
+   */
+  readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
+  private readonly shapeIn = new ShapeIn();
+  /** The placing hand holds something (a building or a prop being put down): the game sets it; the duck waits while it does. */
+  handPlacing: (() => boolean) | null = null;
   readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
   /** The rig's root was put off the body's place by the hang (its x and z): what `placeVisual` puts back. */
   private ledgeRooted = false;
@@ -708,7 +720,8 @@ export class Player {
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
-  private colliderCrouched = false;
+  /** What today's crouch rule last wrote onto the collider; null once the body's shape (`shape`) wrote it, so the next write is never skipped. */
+  private colliderCrouched: boolean | null = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
   /** Noclip flying speed in m/s (Shift multiplies it); adjusted from the keyboard. */
@@ -1328,6 +1341,15 @@ export class Player {
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.group.position.copy(p);
+    // The feedback round, items 3 and 4: stood up fresh on its feet, standing (under 'lying' a prone body gets up, since its
+    // lying capsule was never asked for room here; with both switches off the shape never wrote the collider).
+    if (shapeRulesOn()) {
+      if (MOVE_TUNE.proneShape === 'lying') this.prone = false;
+      if (this.shape.kind === LYING || this.shape.tall !== STAND_TALL) this.shape.writeUpright(this.collider, p.x, p.y, p.z, STAND_TALL);
+      this.shape.reset();
+      this.colliderOffsetY = this.shape.offsetY;
+      this.colliderCrouched = null;
+    }
   }
 
   /** Launch the player into the air (used by Force Jump). */
@@ -1582,7 +1604,11 @@ export class Player {
   get postureEye(): number {
     if (this.mounted || this.aboard || this.eva || this.swimming) return 1.5;
     // A roll is a crouch that moves: the view stays down through it, as the game's does.
-    return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching || this.jka.rolling ? 1.05 : 1.5;
+    if (this.prone) return 0.45;
+    if (this.kneeling) return 1.0;
+    const posture = this.crouching || this.jka.rolling ? 1.05 : 1.5;
+    // The feedback round, item 4: ducked under something, the view comes down with the capsule (first person reads the head).
+    return MOVE_TUNE.duck === 'on' ? this.shape.eyeFor(posture) : posture;
   }
 
   /**
@@ -2778,10 +2804,13 @@ export class Player {
     // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
     const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching };
     const onGround = !this.mounted && !this.noclip && !this.swimming;
-    if (input.pressedAction('prone') && onGround) this.prone = !this.prone;
+    // The feedback round, item 3 (`proneShape` 'lying'): going prone asks for room for the lying capsule and getting up for
+    // room to stand (`proneAsk`); with the switch at 'crouch' both are today's toggles.
+    const lyingRule = MOVE_TUNE.proneShape === 'lying';
+    if (input.pressedAction('prone') && onGround) this.prone = lyingRule ? this.proneAsk(!this.prone, input) : !this.prone;
     if (input.pressedAction('kneel') && onGround) {
       this.kneeling = !this.kneeling;
-      if (this.kneeling) this.prone = false;
+      if (this.kneeling) this.prone = lyingRule ? this.proneAsk(false, input) : false;
     }
     if (this.prone) this.kneeling = false;
     // Getting up on the jump key is only that: the jump itself waits for the key to be let go and pressed again.
@@ -2789,10 +2818,15 @@ export class Player {
     if (!input.held('jump')) this.jumpLatched = false;
     const wasProne = this.jumpLatched;
     const getsUp = this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block')));
-    if (this.prone && getsUp) this.prone = false;
+    // Lying, the water over the feet deeper than the body lies is water to stand up in, as the swim already stands it.
+    const lyingDrowns = lyingRule && this.prone && this.waterDepth > 2 * MOVE_TUNE.lyingRadius;
+    if (this.prone && (getsUp || lyingDrowns)) this.prone = lyingRule && !this.swimming ? this.proneAsk(false, input) : false;
     if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
     this.crouching = !this.swimming && !this.prone && !this.kneeling && (input.held('crouch') || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.moveFilter())));
-    this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
+    // The feedback round, items 3 and 4: either switch on, the body's shape decides the capsule (`stepShape`); both off,
+    // today's crouch rule, to the line.
+    if (shapeRulesOn()) this.stepShape(dt, moving, move);
+    else this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
     // own rather than a write to `speedMultiplier`, which Force Speed rewrites from scratch each
@@ -3055,6 +3089,10 @@ export class Player {
     // On real ground only: the slope rule's last verdict found something under the body (a body pressed against a sheer wall
     // in the air is called grounded by the controller, and is no step's: its Jedi wall moves stay as they were).
     su.ruled = this.grounded && !this.swimming && !this.grapple.attached && !this.grapple.released && !this.slope.sliding;
+    // The feedback round, item 3: a lying capsule is no upright one the step casts for (the controller's own autostep has it),
+    // but where the step would reach the body its collider is still put where the body is before the move (`syncLying`).
+    const lyingSync = this.shape.kind === LYING && su.ruled;
+    if (this.shape.kind === LYING) su.ruled = false;
     // Where the slope rule found nothing under the body to stand on, the step is the body's only with a floor within the
     // step's height under it (`StepUp.reach`: a capsule wedged on a nosing over the tread below, yes; a body pressed against
     // a sheer wall in the air, no).
@@ -3075,6 +3113,7 @@ export class Player {
     // at its own 60 Hz step, and the controller works the move out from it: at 144 frames a second two moves in three began a
     // frame or two back, and the body stalled at a riser), in the engine's own sums so a collider already there moves by no bit.
     else this.stepUp.sync(this.collider);
+    if (lyingSync) this.shape.syncLying(this.collider, su);
     // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds.
     this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
     this.slope.at.dt = dt;
@@ -3115,7 +3154,9 @@ export class Player {
     slopeAt.y = this.pos.y;
     slopeAt.z = this.pos.z;
     slopeAt.offsetY = this.colliderOffsetY;
+    // The feedback round, item 3: lying, the rule's sphere is the lying capsule's middle ball (its radius at its middle).
     slopeAt.r = CAPSULE_RADIUS;
+    if (this.shape.kind === LYING) slopeAt.r = this.shape.radius;
     slopeAt.filter = filter;
     this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released, this.body, this.walkPast);
     if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y, this.moveProfile === 'jka' ? this.jka.gravity : g));
@@ -3361,6 +3402,8 @@ export class Player {
       const back = camYaw + this.aimBodyNow - this.heading;
       this.torsoTwist = Math.atan2(Math.sin(back), Math.cos(back)) * LOCO_TUNE.turn.torso;
     }
+    // The feedback round, item 3: lying, the heading just decided turns the lying capsule, or is slid or refused by it.
+    if (this.shape.kind === LYING) this.turnLying();
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
@@ -4108,6 +4151,12 @@ export class Player {
       rig.prefer(legs.state, legs.clip);
       rig.setState(legs.state, speed, null, this.legOpts);
     } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
+    // The feedback round, item 4: ducked under something, the crouch's share of the pose, laid on by the mixer (`stepDuck`).
+    const ducks = MOVE_TUNE.duck === 'on' && this.shape.kind !== LYING;
+    if (ducks && this.shape.share > 0) {
+      rig.duckWant = this.shape.share;
+      rig.duckMoving = moving;
+    }
     // The stairs wave: a stair cycle just taken on starts where its next footfall lands on a tread (`StairStep`'s snap).
     if (legs && this.loco.snap === this.loco.snap) rig.setTime(legs.clip, this.loco.snap);
     rig.update(dt);
@@ -4139,7 +4188,13 @@ export class Player {
     const spineFix = this.loco.on && gunUp ? THREE.MathUtils.clamp(this.aimFix.yaw - this.aimBodyNow, -wideSpine, wideSpine) : THREE.MathUtils.clamp(this.aimFix.yaw, -this.aimSpineMax, this.aimSpineMax);
     // Seated, the spine keeps the clip's own pose: no view-following twist or aim tilt carried over from on foot.
     const straight = wholeJka || !!this.mounted;
-    rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, straight ? 0 : this.torsoPitch + this.aimFix.pitch);
+    // The feedback round, item 4: past the crouch's own height the spine bends forward (`duckBend` at the deepest duck) and
+    // the neck with it (`duckNeck`), laid after the mixer, put back before its next update; the first-person eye reads the head.
+    const duckBend = ducks && !straight ? this.shape.bend : 0;
+    let pitch = straight ? 0 : this.torsoPitch + this.aimFix.pitch;
+    if (duckBend > 0) pitch += (duckBend * MOVE_TUNE.duckBend * Math.PI) / 180;
+    rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, pitch);
+    if (duckBend > 0) rig.bendNeck((duckBend * MOVE_TUNE.duckNeck * Math.PI) / 180);
     // An imported clip posing the arms (the jump's start, a loop of the air, a landing) holds the gun wherever the clip
     // has it, so the barrel says nothing of the aim while it plays.
     this.correctAim(dt, gunUp, rig.armSource().startsWith('mx_'));
@@ -4243,9 +4298,114 @@ export class Player {
    */
   private aimBodyNow = 1e-9;
 
+  /**
+   * The feedback round, item 3 (`proneShape` 'lying'): whether the body lies prone after a press that asked `want`. Lying down
+   * is refused in words with the grappling rope out (its collider sync stands the capsule upright), in water deeper than the
+   * body lies, and where the lying capsule does not fit; getting up, where the upright capsule it gets up into (the crouch's
+   * with the duck on, the crouch held or a kneel asked, else standing) does not, and it stays down.
+   */
+  private proneAsk(want: boolean, input: Input): boolean {
+    const w = this.physics.world as unknown as ShapeWorld;
+    const S = this.shape;
+    if (want === this.prone) return want;
+    if (want) {
+      if (this.grapple.out || this.grapple.released) S.said = S.last = 'Not with the grappling rope out.';
+      else if (this.waterDepth > 2 * MOVE_TUNE.lyingRadius) S.said = S.last = 'Too deep to lie down here.';
+      else if (S.mayLie(w, this.pos.x, this.pos.y, this.pos.z, this.heading, this.ledgeScale(), this.moveFilter())) return true;
+      if (S.said) this.onLedgeWords?.(S.said);
+      S.said = '';
+      return false;
+    }
+    const tall = MOVE_TUNE.duck === 'on' || input.held('crouch') || this.kneeling ? CROUCH_TALL : STAND_TALL;
+    if (S.mayRise(w, this.pos.x, this.pos.y, this.pos.z, tall, this.moveFilter())) return false;
+    if (S.said) this.onLedgeWords?.(S.said);
+    S.said = '';
+    return true;
+  }
+
+  /**
+   * The feedback round, items 3 and 4: the capsule as the body's shape decides it this frame (`src/player/bodyShape.ts`):
+   * lying along the heading while prone under 'lying', else upright, ducked under what stands over the body and ahead along
+   * its travel (on its feet with the duck on), crouched by the key, kneeling and (under 'crouch') prone on the ground, or
+   * standing. Written onto the collider, and its middle kept for everything that reads the worn capsule.
+   */
+  private stepShape(dt: number, moving: boolean, move: THREE.Vector3): void {
+    const S = this.shape;
+    const w = this.physics.world as unknown as ShapeWorld;
+    const lying = this.prone && MOVE_TUNE.proneShape === 'lying';
+    const f = this.shapeIn;
+    f.dt = dt;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    this.groundPlaneInto(f);
+    if (lying) S.holdLying(f, this.collider);
+    else {
+      f.vx = this.vel.x;
+      f.vz = this.vel.z;
+      f.moveX = moving ? move.x : 0;
+      f.moveZ = moving ? move.z : 0;
+      // On its feet on the ground: never in the air, swimming, prone or kneeling, riding, at the controls, on the rope,
+      // aboard the boots' surface, sliding down a face, nor with the placing hand holding something.
+      f.feet = this.grounded && !this.swimming && !this.prone && !this.kneeling && !this.mounted && !this.piloting && !this.noclip && !this.grapple.attached && !this.grapple.released && !this.slope.sliding && !(this.aboard !== null && isSurfaceRoom(this.aboard)) && !(this.handPlacing?.() ?? false);
+      f.crouch = (this.crouching || this.prone || this.kneeling) && this.grounded;
+      f.lying = false;
+      // The slope under the feet (the slope rule's plane, last judged): how far the floor rises under the capsule's rim.
+      const pny = this.slope.planeNy;
+      const pt = pny > 0.1 ? Math.sqrt(this.slope.planeNx * this.slope.planeNx + this.slope.planeNz * this.slope.planeNz) / pny : 0;
+      f.rise = pt > 0 ? (pt < 1 ? pt : 1) * 0.35 : 0;
+      S.stepUpright(w, f, this.collider);
+    }
+    this.colliderOffsetY = S.offsetY;
+    this.colliderCrouched = null;
+  }
+
+  /**
+   * After the heading is decided, a lying body's turn (item 3): the capsule turned with it where it fits, slid out of what it
+   * met where that clears it, else the turn refused for this frame. Nothing while the heading holds still.
+   */
+  private turnLying(): void {
+    const S = this.shape;
+    if (S.kind !== LYING || !this.prone) return;
+    const w = this.physics.world as unknown as ShapeWorld;
+    const f = this.shapeIn;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    this.groundPlaneInto(f);
+    S.turnLyingIn(w, f, this.collider);
+    if (S.slideX !== 0 || S.slideZ !== 0) {
+      this.pos.x += S.slideX;
+      this.pos.z += S.slideZ;
+      this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    }
+    this.heading = S.lyingYaw;
+  }
+
+  /** The ground's plane under the feet as the slope rule last judged it, into the shape's frame (a lying capsule lies along it). */
+  private groundPlaneInto(f: ShapeIn): void {
+    f.nx = this.slope.planeNx;
+    f.ny = this.slope.planeNy;
+    f.nz = this.slope.planeNz;
+  }
+
+  /** How far the body reaches toward a point across the ground (`PlayerTarget.radiusToward`): the lying capsule's along its length. */
+  reachToward(at: THREE.Vector3): number {
+    return this.shape.reachToward(at.x, at.z, this.worldPos.x, this.worldPos.z);
+  }
+
   /** The capsule shrinks to the crouch height while ducking (its feet stay where they are). */
   private setCrouchCollider(crouched: boolean): void {
     if (crouched === this.colliderCrouched) return;
+    // The body's shape left it lying (item 3): upright again before today's rule writes it.
+    if (this.shape.kind === LYING) this.shape.writeUpright(this.collider, this.pos.x, this.pos.y, this.pos.z, STAND_TALL);
+    this.shape.followCrouch(crouched);
     this.colliderCrouched = crouched;
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);

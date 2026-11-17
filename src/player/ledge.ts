@@ -34,7 +34,7 @@ import { STILL_FLAGS } from './stairSense.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
+import { LEDGE_CLIMB_CUT, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
 
 /** The little of a physics world the ledges ask (rapier's `World`). */
 export interface LedgeWorld {
@@ -491,11 +491,65 @@ class Move {
   l1 = 0.5;
   l2 = 0.5;
   l3 = 0.5;
+  /**
+   * The feedback round (`climb.roomRule` 'fit'): a climb up tucked crouched from this share of its path on, where standing
+   * would meet something on the way up (more than one: never, today's path).
+   */
+  crouchFrom = 2;
+}
+
+/**
+ * The feedback round, item 2: what the last climb up's room tests found (`__debug.climb({ room: true })`): which test failed
+ * first (`top`: the crouched body's room on the top at a depth in from the lip; `path`: the climb's own way out from the
+ * face, up past the lip and in over the top; `noTop`: no top found behind the lip; `narrow`, `steep`), where, what it met
+ * and how far into it, and what the rule made of it (`whole`, `nearer`, `tucked`, `lower`, `brushed`, or `refused`). Written
+ * only as a climb up is asked (an event, never a frame).
+ */
+export class RoomReport {
+  asked = 0;
+  test = '';
+  /** The top test's depth in from the lip, metres (NaN for none). */
+  depth = Number.NaN;
+  /** The path's leg ('out', 'up', 'in') and the share along it. */
+  leg = '';
+  along = Number.NaN;
+  /** Standing or crouched, and the brush, of the capsule that met something. */
+  crouched = false;
+  brush = 0;
+  /** The capsule's middle there (the world's frame). */
+  x = Number.NaN;
+  y = Number.NaN;
+  z = Number.NaN;
+  /** What it met: its handle (-1 none), its name (the game's, else its kind), and how far into it the capsule reached, metres (NaN not measured). */
+  handle = -1;
+  met = '';
+  past = Number.NaN;
+  rule = '';
+  result = '';
+  /** Where a short climb ended: its depth in from the lip, its lift over it, and whether it tucked or was cut. */
+  endDepth = Number.NaN;
+  lift = Number.NaN;
+  cut = false;
+  words = '';
 }
 
 const PATH_LINE = 0;
 const PATH_CURVE = 1;
 const PATH_LEGS = 2;
+/** The feedback round (`climb.roomRule` 'fit'): how many depth steps nearer the lip than the clip's own end a short climb tries (ours: enough to reach half the capsule's radius in from a large figure's end). */
+const SHORT_NEAR = 6;
+
+/**
+ * The feedback round, item 2: a collider's kind by its collision groups (`src/core/physics.ts`'s `Group`), where the game
+ * knows no name for it: the terrain's heightfield, a building's shell, a building's room or what stands in it, else plain.
+ */
+function colliderKind(c: RAPIER.Collider): string {
+  const m = c.collisionGroups() >>> 16;
+  if (m === 0x0001) return 'the ground';
+  if (m === 0x0002) return "a building's shell";
+  if (m === 0x0004) return "a building's room";
+  return 'something standing still';
+}
 /** The capsule's room along a path is tested this often, metres (ours: under half its radius). */
 const PATH_EVERY = 0.15;
 /** A climb's capsule rises clear of the top by this before it goes in over it, metres (ours). */
@@ -708,6 +762,39 @@ export class LedgeHang {
   behindHops = 0;
   /** `climb.grabSweep`: the feet's height at the last `sense` (NaN while something holds the body): the frame's rise or fall, which the reach band is swept over. */
   private seenY = 0.5;
+  /**
+   * The feedback round, item 1 (`climb.grabFree` 'share'): the jump, forward and crouch presses made during a grab before it
+   * hands the hang the keys, kept for that frame (put down as the grab ends).
+   */
+  private pendJump = false;
+  private pendForward = false;
+  private pendCrouch = false;
+  /** The move keys held as the kept jump was pressed (its way: a side, W or S with it). */
+  private pendLeft = false;
+  private pendRight = false;
+  private pendFwd = false;
+  private pendBack = false;
+  /** Grabs that handed the hang the keys before their clip was done (the console's and the tests'). */
+  grabsFreed = 0;
+  /**
+   * The feedback round, item 2: names a collider the climb up's room tests met (the game's: a placed thing's template, the
+   * test course's solid, the ground, a planting), or null where it knows none (then its kind by its collision groups). Asked
+   * only as a climb up is refused.
+   */
+  namer: ((c: RAPIER.Collider) => string | null) | null = null;
+  /** What the last climb up's room tests found (`RoomReport`). */
+  readonly room = new RoomReport();
+  /** The collider the last shape test met (null for none): a refusal names it. */
+  private met: RAPIER.Collider | null = null;
+  /** The room tests' brush (`climb.roomBrush` on a short climb's last tries; nought otherwise) and the capsules shrunk by it. */
+  private brushNow = 0.5;
+  private brushOf = 0.5;
+  private shapeStandB: RAPIER.Shape | null = null;
+  private shapeCrouchB: RAPIER.Shape | null = null;
+  /** `pathClear` may tuck the climb crouched where standing meets something on the way up (the feedback round's 'fit'). */
+  private tuckOk = false;
+  /** Climbs up made short by `climb.roomRule` 'fit' (the console's and the tests'). */
+  climbsShort = 0;
 
   constructor(makers: LedgeMakers) {
     this.makers = makers;
@@ -739,6 +826,8 @@ export class LedgeHang {
     this.lookDx = 0;
     this.lookDz = 0;
     this.seenY = Number.NaN;
+    this.brushNow = 0;
+    this.brushOf = -1;
     // Fields that will hold fractions start as one (wave 2a's lesson) and are put to nought here.
     this.dtNow = 0;
     this.goalHands = 0;
@@ -806,6 +895,9 @@ export class LedgeHang {
     this.look = 0;
     this.poseClip = '';
     this.seenY = Number.NaN;
+    this.pendJump = false;
+    this.pendForward = false;
+    this.pendCrouch = false;
   }
 
   /** After a let-go the drawn offset eases out over this long more (seconds left, and the whole). */
@@ -856,12 +948,28 @@ export class LedgeHang {
       if (crouched) this.shapeCrouch = shape;
       else this.shapeStand = shape;
     }
+    // The feedback round's brush (a short climb's last tries only): the capsule a brush thinner all round, about the same middle.
+    if (this.brushNow > 0) shape = this.brushShape(crouched);
     const at = this.shapeAt;
     at.x = this.qx;
     at.y = this.qy + LEDGE_CAPSULE.r + half;
     at.z = this.qz;
     this.casts++;
-    return world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt) === null;
+    const c = world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt);
+    this.met = c;
+    return c === null;
+  }
+
+  /** The capsule shrunk all round by `brushNow` (made again only when the brush moves: an event, a climb up's). */
+  private brushShape(crouched: boolean): RAPIER.Shape {
+    if (this.brushOf !== this.brushNow) {
+      this.brushOf = this.brushNow;
+      const r = LEDGE_CAPSULE.r - this.brushNow;
+      const k = r > 0.05 ? r : 0.05;
+      this.shapeStandB = this.makers.capsule(LEDGE_CAPSULE.stand, k);
+      this.shapeCrouchB = this.makers.capsule(LEDGE_CAPSULE.crouch, k);
+    }
+    return (crouched ? this.shapeCrouchB : this.shapeStandB) as RAPIER.Shape;
   }
 
   // ---- the lip along its own edge (the fix round's) --------------------------------------------------------------------------
@@ -1386,10 +1494,61 @@ export class LedgeHang {
       // A skin over the feet (a climb ends standing on the top: touching it is no want of room).
       this.qy = this.pqy + CLIMB_SKIN;
       this.qz = this.pqz;
-      if (!this.clear(world, this.pathCrouched)) return false;
+      if (this.clear(world, this.pathCrouched)) continue;
+      // The feedback round ('fit', a climb up's): standing meets something on the way, so the body tucks crouched from here
+      // on (the in-leg is crouched already), where a crouched one is clear.
+      if (this.tuckOk && !this.pathCrouched) {
+        const met = this.met;
+        if (this.clear(world, true)) {
+          m.crouchFrom = this.pu;
+          continue;
+        }
+        this.met = met;
+      }
+      if (m.path === PATH_LEGS) this.notePath(this.pathCrouched);
+      return false;
     }
     return true;
   }
+
+  /** The feedback round: a climb up's path met something at `pu` (its first failure only, while a climb up is asked). */
+  private notePath(crouched: boolean): void {
+    const R = this.room;
+    if (R.test !== '' || !this.noting) return;
+    const m = this.move;
+    const total = m.l1 + m.l2 + m.l3;
+    const d = this.pu * total;
+    R.test = 'path';
+    if (d <= m.l1 && m.l1 > 1e-9) {
+      R.leg = 'out';
+      R.along = d / m.l1;
+    } else if (d <= m.l1 + m.l2 && m.l2 > 1e-9) {
+      R.leg = 'up';
+      R.along = (d - m.l1) / m.l2;
+    } else {
+      R.leg = 'in';
+      R.along = m.l3 > 1e-9 ? (d - m.l1 - m.l2) / m.l3 : 1;
+    }
+    this.noteMet(crouched);
+  }
+
+  /** The feedback round: the collider the last shape test met, and the capsule that met it, into the room report. */
+  private noteMet(crouched: boolean): void {
+    const R = this.room;
+    const c = this.met;
+    R.crouched = crouched;
+    R.brush = this.brushNow;
+    R.x = this.shapeAt.x;
+    R.y = this.shapeAt.y;
+    R.z = this.shapeAt.z;
+    R.handle = c ? c.handle : -1;
+    this.metCollider = c;
+  }
+
+  /** The room report's collider (kept until its words are worked out, the same event). */
+  private metCollider: RAPIER.Collider | null = null;
+  /** A climb up is being asked: its room tests' first failure goes into the report (`room`). */
+  private noting = false;
 
   /** A path's length (a curve's, by eight chords). */
   private pathLength(): number {
@@ -1440,11 +1599,14 @@ export class LedgeHang {
     if (m.path === PATH_LEGS) {
       const total = m.l1 + m.l2 + m.l3;
       let d = u * total;
+      // The feedback round ('fit'): tucked crouched from `crouchFrom` on (never, today's: more than one).
+      const tuck = m.crouchFrom <= u;
       if (d <= m.l1 && m.l1 > 1e-9) {
         const k = d / m.l1;
         this.pqx = m.fx + (m.p1x - m.fx) * k;
         this.pqy = m.fy + (m.p1y - m.fy) * k;
         this.pqz = m.fz + (m.p1z - m.fz) * k;
+        this.pathCrouched = tuck;
         return;
       }
       d -= m.l1;
@@ -1453,6 +1615,7 @@ export class LedgeHang {
         this.pqx = m.p1x + (m.p2x - m.p1x) * k;
         this.pqy = m.p1y + (m.p2y - m.p1y) * k;
         this.pqz = m.p1z + (m.p2z - m.p1z) * k;
+        this.pathCrouched = tuck;
         return;
       }
       d -= m.l2;
@@ -1460,7 +1623,7 @@ export class LedgeHang {
       this.pqx = m.p2x + (m.tx - m.p2x) * k;
       this.pqy = m.p2y + (m.ty - m.p2y) * k;
       this.pqz = m.p2z + (m.tz - m.p2z) * k;
-      this.pathCrouched = d > 1e-9 || m.l2 <= 1e-9;
+      this.pathCrouched = d > 1e-9 || m.l2 <= 1e-9 || tuck;
       return;
     }
     this.pqx = m.fx + (m.tx - m.fx) * u;
@@ -1939,6 +2102,7 @@ export class LedgeHang {
     m.h0 = this.heading;
     m.spin = 0;
     m.path = PATH_LINE;
+    m.crouchFrom = 2;
     m.lip.copy(lip);
     const s = this.s;
     const h0 = this.heading;
@@ -2039,11 +2203,19 @@ export class LedgeHang {
     this.ended = false;
     this.stood = false;
     if (this.phase === LEDGE_MOVE) {
-      // A climb or a turn takes no stamina of its own; the hang under it drains as hanging does.
-      stam.step(dt, -T.stamina.hang, i.pool, LOCO_TUNE);
-      // Climbing II, item 7: a look-away eased out through a one-off (the spine's turn back with it).
-      this.lookStep(i);
-      return this.moveStep(world, b, i, true);
+      // The feedback round, item 1 (`climb.grabFree` 'share'): a grab past its share hands the hang the keys asked (the
+      // presses made earlier in it kept for then), the body put on the hang place with its drawn figure where it is; the
+      // hang below takes the keys this very frame. Nothing asked, the grab goes on as ever.
+      if (T.grabFree === 'share' && this.move.kind === 'grab' && this.grabFreed(i)) this.freeGrab(world, b, i);
+      else {
+        // A climb or a turn takes no stamina of its own; the hang under it drains as hanging does.
+        stam.step(dt, -T.stamina.hang, i.pool, LOCO_TUNE);
+        // Climbing II, item 7: a look-away eased out through a one-off (the spine's turn back with it).
+        this.lookStep(i);
+        return this.moveStep(world, b, i, true);
+      }
+      // Ended into a hang that went straight on into a one-off of its own (a free hang onto the wall): that, carried.
+      if ((this.phase as number) !== LEDGE_HANG) return this.begun(world, b, i);
     }
     // Hanging.
     stam.step(dt, -(this.shimmy !== 0 ? T.stamina.shimmy : T.stamina.hang), i.pool, LOCO_TUNE);
@@ -2143,6 +2315,83 @@ export class LedgeHang {
   private begun(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
     if (this.phase === LEDGE_MOVE && this.move.time === this.move.t0) return this.moveStep(world, b, i, true);
     return this.phase !== LEDGE_NONE;
+  }
+
+  /**
+   * The feedback round, item 1 (`climb.grabFree` 'share'): whether the grab under way hands the hang the keys this frame: it
+   * is `grabFreeAt` of its length through (its own clock, so alike at every frame rate) and a key the hang answers is asked
+   * (A or D alone held, the look-away's view, or a jump, W or crouch pressed since the grab began, which is kept until then:
+   * never the grab's own first frame, whose presses are the jump that brought the body here). Fields only.
+   */
+  private grabFreed(i: LedgeIn): boolean {
+    if (!this.fresh) {
+      // A jump pressed is kept with the move keys held as it was pressed (a hop's way: a side, W or S with it).
+      if (i.jumpPressed) {
+        this.pendJump = true;
+        this.pendLeft = i.leftHeld;
+        this.pendRight = i.rightHeld;
+        this.pendFwd = i.forwardHeld;
+        this.pendBack = i.backHeld;
+      }
+      if (i.forwardPressed) this.pendForward = true;
+      if (i.crouchPressed) this.pendCrouch = true;
+    }
+    const m = this.move;
+    const span = m.T - m.t0;
+    if (span > 1e-6 && (m.time - m.t0) / span < CLIMB_TUNE.grabFreeAt - 1e-9) return false;
+    if ((i.leftHeld || i.rightHeld) && !(i.leftHeld && i.rightHeld)) return true;
+    return this.pendJump || this.pendForward || this.pendCrouch || this.lookWanted(i);
+  }
+
+  /** Item 1: the braced look-away would begin from the hang the grab under way ends in (`lookStep`'s own threshold). */
+  private lookWanted(i: LedgeIn): boolean {
+    const T = CLIMB_TUNE;
+    if (T.lookAway !== 'reach' || !this.move.braced || i.leftHeld || i.rightHeld) return false;
+    const v = i.viewYaw;
+    if (!(v === v)) return false;
+    let off = v - this.move.heading;
+    off -= Math.round(off / TAU) * TAU;
+    const a = off < 0 ? -off : off;
+    return a > (T.lookStart * Math.PI) / 180;
+  }
+
+  /**
+   * Item 1: the grab under way ended early into its hang. The body goes onto the hang place, its drawn figure left where it
+   * is (the offset takes the move back, as a wall climb's hand-over does) and eased into the hang's line-up over `climb.ease`
+   * while the rig blends the grab's clip out (`ended`, the caller's); the presses kept handed to the hang's keys this frame.
+   */
+  private freeGrab(world: LedgeWorld, b: LedgeBody, i: LedgeIn): void {
+    const m = this.move;
+    this.offX += b.pos.x - m.tx;
+    this.offY += b.pos.y - m.ty;
+    this.offZ += b.pos.z - m.tz;
+    // Asked on its own first frame (a share of nought): no grab clip begun at all, and the frame's own presses are the jump
+    // that brought the body here, never the hang's.
+    if (this.fresh) {
+      this.startClip = '';
+      i.jumpPressed = false;
+      i.forwardPressed = false;
+      i.crouchPressed = false;
+    }
+    const jump = this.pendJump;
+    const forward = this.pendForward;
+    const crouch = this.pendCrouch;
+    const left = this.pendLeft;
+    const right = this.pendRight;
+    const fwd = this.pendFwd;
+    const back = this.pendBack;
+    this.endMove(world, b, i);
+    // A jump kept is the hang's with the keys it was pressed with (the frame's own held keys stand in for none of them).
+    if (jump) {
+      i.jumpPressed = true;
+      i.leftHeld = left;
+      i.rightHeld = right;
+      i.forwardHeld = fwd;
+      i.backHeld = back;
+    }
+    if (forward) i.forwardPressed = true;
+    if (crouch) i.crouchPressed = true;
+    this.grabsFreed++;
   }
 
   /** A frame of a one-off: the body carried, the figure's offset and the hands' line along with it; its end at its end. */
@@ -2411,6 +2660,10 @@ export class LedgeHang {
   /** A one-off's end: the hang, standing on the top, or the fall. */
   private endMove(world: LedgeWorld, b: LedgeBody, i: LedgeIn): void {
     const m = this.move;
+    // (The feedback round's presses kept through a grab go with it.)
+    this.pendJump = false;
+    this.pendForward = false;
+    this.pendCrouch = false;
     b.pos.x = m.tx;
     b.pos.y = m.ty;
     b.pos.z = m.tz;
@@ -3208,70 +3461,170 @@ export class LedgeHang {
     this.letGo(b, 'jumped off a little', L.nx * T.offPush, up, L.nz * T.offPush);
   }
 
-  /** Space or W: up onto the top where a crouched capsule fits there (and over the lip on the way), else refused in words. */
+  /**
+   * Space or W: up onto the top where a crouched capsule fits there (and over the lip on the way), else refused in words.
+   * Today's climb is asked first, to the letter: the top at three depths in from where the clip's own travel puts the feet,
+   * the first that fits, then the capsule's own way up to it. The feedback round: where that refuses, `climb.roomRule` 'fit'
+   * tries a shorter climb (`climbShort`) before the refusal, and `climb.roomSay` 'why' names the test that failed first and
+   * what it met (`room`, `roomWhy`).
+   */
   private climbUp(world: LedgeWorld, b: LedgeBody, i: LedgeIn): void {
+    const T = CLIMB_TUNE;
     const s = this.s;
     const L = this.lip;
+    const R = this.room;
+    this.roomBegin();
     const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
     if (L.topNy < walk) {
       this.said = 'The top is too steep to stand on.';
+      R.test = 'steep';
+      R.result = 'refused';
+      R.words = this.said;
       return;
     }
     const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
     const f = LEDGE_FACTS[roles.climb];
     // Where the clip's own travel puts the feet: that far along its forward from the hang place, on the top.
     const fwd = f.net[2] * s;
-    let in0 = fwd - (CLIMB_TUNE.gripOut + (this.braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle]).g0[2]) * s;
+    let in0 = fwd - (T.gripOut + (this.braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle] : LEDGE_FACTS[LEDGE_ROLES.free.idle]).g0[2]) * s;
     if (in0 < LEDGE_CAPSULE.r * 0.5) in0 = LEDGE_CAPSULE.r * 0.5;
     this.qflt = i.filter;
-    let ok = false;
-    let topY = L.ey;
     // `climb.thinTop` 'hang': a top shallower than `topMin` behind its lip is no top to stand on.
-    const deep = CLIMB_TUNE.thinTop === 'hang' ? CLIMB_TUNE.topMin * s : 0;
-    let narrow = false;
-    for (let k = 0; k < 3 && !ok; k++) {
-      const d = in0 + k * 0.15;
-      // The top there (it may be a narrow wall's).
-      this.qx = L.ex - L.nx * d;
-      this.qy = L.ey + 0.3;
-      this.qz = L.ez - L.nz * d;
-      this.qdx = 0;
-      this.qdy = -1;
-      this.qdz = 0;
-      this.qlen = 0.6;
-      if (!this.cast(world) || this.hit.ny < walk) continue;
-      topY = this.hit.y;
-      if (deep > d) {
-        // The top goes on as far behind the lip as a body needs to stand on it, at its own height.
-        this.qx = L.ex - L.nx * deep;
-        this.qy = L.ey + 0.3;
-        this.qz = L.ez - L.nz * deep;
-        this.qlen = 0.6;
-        if (!this.cast(world) || this.hit.ny < walk || this.hit.y - topY > 0.1 || topY - this.hit.y > 0.1) {
-          narrow = true;
-          continue;
-        }
-      }
-      this.qx = L.ex - L.nx * d;
-      this.qy = topY + 0.02;
-      this.qz = L.ez - L.nz * d;
-      if (this.clear(world, true)) {
-        ok = true;
-        this.bx = this.qx;
-        this.by = topY;
-        this.bz = this.qz;
-      }
-    }
-    if (!ok) {
-      this.said = narrow ? 'The top is too narrow to stand on.' : 'No room to climb up here.';
+    const deep = T.thinTop === 'hang' ? T.topMin * s : 0;
+    this.narrowSeen = false;
+    this.noting = true;
+    let ok = false;
+    for (let k = 0; k < 3 && !ok; k++) ok = this.topAt(world, L, in0 + k * 0.15, deep, walk);
+    const narrow = this.narrowSeen;
+    if (!ok && R.test === '') R.test = narrow ? 'narrow' : 'noTop';
+    // An end found: a depth nearer it that met something is not why the climb is refused (its way up is asked next).
+    if (ok) this.roomUnnote();
+    const pathOk = ok && this.climbPath(world, b, L, CLIMB_LIFT, false);
+    this.noting = false;
+    if (pathOk) {
+      // Under 'fit' a climb that ends where no standing body fits ends crouched, its clip cut there (today's: played whole).
+      const crouched = T.roomRule === 'fit' && !this.standsAt(world);
+      this.climbBegin(b, L, roles.climb, crouched);
+      R.result = crouched ? 'whole, crouched' : 'whole';
+      R.endDepth = this.endDepth;
+      R.lift = CLIMB_LIFT;
       return;
     }
+    // The feedback round's shorter climbs, where today's does not fit.
+    if (T.roomRule === 'fit' && this.climbShort(world, b, L, roles.climb, in0, deep, walk)) {
+      // (The console's report names what today's climb met, as a refusal's words would.)
+      this.metWords();
+      return;
+    }
+    R.result = 'refused';
+    // Today's words where no end fitted (the narrow top before the room), and at the way up; or which test failed and why
+    // (worked out whichever words are said, for the console's report).
+    const why = this.roomWhy();
+    if (!ok && narrow) this.said = 'The top is too narrow to stand on.';
+    else this.said = T.roomSay === 'why' ? why : 'No room to climb up here.';
+    R.words = this.said;
+  }
+
+  /** A climb up's report begun afresh (an event: a press of W or Space at the hang). */
+  private roomBegin(): void {
+    const R = this.room;
+    R.asked++;
+    R.test = '';
+    R.depth = Number.NaN;
+    R.leg = '';
+    R.along = Number.NaN;
+    R.crouched = false;
+    R.brush = 0;
+    R.x = Number.NaN;
+    R.y = Number.NaN;
+    R.z = Number.NaN;
+    R.handle = -1;
+    R.met = '';
+    R.past = Number.NaN;
+    R.rule = CLIMB_TUNE.roomRule;
+    R.result = '';
+    R.endDepth = Number.NaN;
+    R.lift = Number.NaN;
+    R.cut = false;
+    R.words = '';
+    this.metCollider = null;
+  }
+
+  /** The report's failure put down again (an end was found: what failed before it is no reason). */
+  private roomUnnote(): void {
+    const R = this.room;
+    R.test = '';
+    R.depth = Number.NaN;
+    R.crouched = false;
+    R.x = Number.NaN;
+    R.y = Number.NaN;
+    R.z = Number.NaN;
+    R.handle = -1;
+    this.metCollider = null;
+  }
+
+  /** A narrow top was met by the last climb up's depths. */
+  private narrowSeen = false;
+  /** The depth in from the lip the last top found stands at (`topAt`'s), metres. */
+  private endDepth = 0.5;
+
+  /**
+   * The top `d` in from the lip (`L`): found by one ray down, deep enough to stand on (`deep`, the thin top's), and room for a
+   * crouched body on it (a skin over it), into `bx/by/bz`. Today's test, one depth of it; its first failure noted while a climb
+   * up is asked.
+   */
+  private topAt(world: LedgeWorld, L: Lip, d: number, deep: number, walk: number): boolean {
+    // The top there (it may be a narrow wall's).
+    this.qx = L.ex - L.nx * d;
+    this.qy = L.ey + 0.3;
+    this.qz = L.ez - L.nz * d;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = 0.6;
+    if (!this.cast(world) || this.hit.ny < walk) return false;
+    const topY = this.hit.y;
+    if (deep > d) {
+      // The top goes on as far behind the lip as a body needs to stand on it, at its own height.
+      this.qx = L.ex - L.nx * deep;
+      this.qy = L.ey + 0.3;
+      this.qz = L.ez - L.nz * deep;
+      this.qlen = 0.6;
+      if (!this.cast(world) || this.hit.ny < walk || this.hit.y - topY > 0.1 || topY - this.hit.y > 0.1) {
+        this.narrowSeen = true;
+        return false;
+      }
+    }
+    this.qx = L.ex - L.nx * d;
+    this.qy = topY + 0.02;
+    this.qz = L.ez - L.nz * d;
+    if (this.clear(world, true)) {
+      this.bx = this.qx;
+      this.by = topY;
+      this.bz = this.qz;
+      this.endDepth = d;
+      return true;
+    }
+    const R = this.room;
+    if (this.noting && R.test === '') {
+      R.test = 'top';
+      R.depth = d;
+      this.noteMet(true);
+    }
+    return false;
+  }
+
+  /**
+   * The capsule's own way up to the top found (`bx/by/bz`; the fix round's): out from the face until it stands clear of it,
+   * up until its feet are `lift` over the top, then in onto the top crouched; every step of it clear of what stands still.
+   * With `tuck` (the feedback round's 'fit') the body tucks crouched from where standing would meet something on the way up.
+   * The move's path fields are written for `climbBegin`.
+   */
+  private climbPath(world: LedgeWorld, b: LedgeBody, L: Lip, lift: number, tuck: boolean): boolean {
+    const m = this.move;
     const tx = this.bx;
     const ty = this.by;
     const tz = this.bz;
-    // The capsule's own way up (the fix round's): out from the face until it stands clear of it, up until its feet are over
-    // the top, then in onto the top crouched; every step of it clear of what stands still, or refused in words.
-    const m = this.move;
     const away = (b.pos.x - L.ex) * L.nx + (b.pos.z - L.ez) * L.nz;
     const need = LEDGE_CAPSULE.r + CLIMB_SKIN;
     const push = away < need ? need - away : 0;
@@ -3285,7 +3638,7 @@ export class LedgeHang {
     m.p1y = b.pos.y;
     m.p1z = b.pos.z + L.nz * push;
     m.p2x = m.p1x;
-    m.p2y = (L.ey > ty ? L.ey : ty) + CLIMB_LIFT;
+    m.p2y = (L.ey > ty ? L.ey : ty) + lift;
     m.p2z = m.p1z;
     m.l1 = push;
     m.l2 = m.p2y > m.p1y ? m.p2y - m.p1y : 0;
@@ -3294,10 +3647,24 @@ export class LedgeHang {
     const dz = tz - m.p2z;
     m.l3 = Math.sqrt(dx * dx + dy * dy + dz * dz);
     m.path = PATH_LEGS;
-    if (!this.pathClear(world)) {
-      this.said = 'No room to climb up here.';
-      return;
-    }
+    m.crouchFrom = 2;
+    this.tuckOk = tuck;
+    const ok = this.pathClear(world);
+    this.tuckOk = false;
+    return ok;
+  }
+
+  /**
+   * The climb's one-off begun along the path `climbPath` worked out; `cut` (a short climb ending nearer the lip or tucked):
+   * the clip ends where its figure crouches on the top with both feet down (`LEDGE_CLIMB_CUT`), lined up there by its feet,
+   * and the rest of it is blended out as the climb ends (`ended`); a clip with no such row (the braced climb, which ends in its
+   * crouch) is played whole.
+   */
+  private climbBegin(b: LedgeBody, L: Lip, clip: string, cut: boolean): void {
+    const m = this.move;
+    const tx = this.bx;
+    const ty = this.by;
+    const tz = this.bz;
     const p1x = m.p1x;
     const p1y = m.p1y;
     const p1z = m.p1z;
@@ -3305,7 +3672,8 @@ export class LedgeHang {
     const l1 = m.l1;
     const l2 = m.l2;
     const l3 = m.l3;
-    this.startMove(roles.climb, 'climb', b.pos.x, b.pos.y, b.pos.z, tx, ty, tz, AFTER_STAND, this.braced, this.heading, 'idle', 'feet', L);
+    const tuckAt = m.crouchFrom;
+    this.startMove(clip, 'climb', b.pos.x, b.pos.y, b.pos.z, tx, ty, tz, AFTER_STAND, this.braced, this.heading, 'idle', 'feet', L);
     m.path = PATH_LEGS;
     m.p1x = p1x;
     m.p1y = p1y;
@@ -3316,6 +3684,128 @@ export class LedgeHang {
     m.l1 = l1;
     m.l2 = l2;
     m.l3 = l3;
+    m.crouchFrom = tuckAt;
+    const c = cut ? LEDGE_CLIMB_CUT[clip] : undefined;
+    if (c && c.t > m.t0 && c.t < m.T) {
+      m.T = c.t;
+      m.o1y = (LEDGE_REST.ankle - c.ankle) * this.s;
+      this.room.cut = true;
+    }
+  }
+
+  /**
+   * The feedback round, item 2 (`climb.roomRule` 'fit'): today's climb up does not fit, so a shorter one is tried. Ends: today's
+   * three depths, then nearer the lip (a depth step at a time, down to half the capsule's radius in); for each end found, the
+   * way up at today's lift and then at `liftLeast`, the body tucked crouched where standing meets something; then all of them
+   * again with a brush of `roomBrush` allowed. The first that fits is begun (cut where it ends nearer or tucked), and the
+   * report says what it was. False where none does. Only as a climb up is asked (an event).
+   */
+  private climbShort(world: LedgeWorld, b: LedgeBody, L: Lip, clip: string, in0: number, deep: number, walk: number): boolean {
+    const T = CLIMB_TUNE;
+    const R = this.room;
+    const least = LEDGE_CAPSULE.r * 0.5;
+    const lowest = T.liftLeast < CLIMB_LIFT ? T.liftLeast : CLIMB_LIFT;
+    for (let pass = 0; pass < 2; pass++) {
+      const brush = pass === 0 ? 0 : T.roomBrush;
+      if (pass === 1 && !(brush > 0)) break;
+      this.brushNow = brush;
+      for (let e = 0; e < 3 + SHORT_NEAR; e++) {
+        const d = e < 3 ? in0 + e * 0.15 : in0 - (e - 2) * 0.15;
+        if (e >= 3 && d < least - 1e-9) break;
+        if (!this.topAt(world, L, d, deep, walk)) continue;
+        for (let w = 0; w < 2; w++) {
+          const lift = w === 0 ? CLIMB_LIFT : lowest;
+          if (w === 1 && lift === CLIMB_LIFT) break;
+          if (!this.climbPath(world, b, L, lift, true)) continue;
+          this.brushNow = 0;
+          const nearer = d < in0 - 1e-9;
+          const deeper = d > in0 + 1e-9;
+          const tucked = this.move.crouchFrom <= 1;
+          const crouched = !this.standsAt(world);
+          this.climbBegin(b, L, clip, nearer || tucked || crouched);
+          const parts: string[] = [];
+          if (nearer) parts.push('nearer');
+          if (deeper) parts.push('deeper');
+          if (tucked) parts.push('tucked');
+          if (lift < CLIMB_LIFT) parts.push('lower');
+          if (brush > 0) parts.push('brushed');
+          if (crouched) parts.push('crouched');
+          R.result = parts.length ? parts.join(', ') : 'another end';
+          R.endDepth = d;
+          R.lift = lift;
+          this.climbsShort++;
+          return true;
+        }
+      }
+    }
+    this.brushNow = 0;
+    return false;
+  }
+
+  /** Whether a standing body fits where the top found stands (`bx/by/bz`, a skin over it): else the climb ends crouched. One shape test. */
+  private standsAt(world: LedgeWorld): boolean {
+    this.qx = this.bx;
+    this.qy = this.by + 0.02;
+    this.qz = this.bz;
+    return this.clear(world, false);
+  }
+
+  /** The refusal in words: which test failed first, where, what it met and how far into it (`roomSay` 'why'). */
+  private roomWhy(): string {
+    const R = this.room;
+    // What it met first (the message line cuts a long line at its end): its name, how far it reaches in, then where.
+    const what = this.metWords();
+    if (R.test === 'top') return `No room to climb up: ${what} in the way of a crouched body ${Math.round(R.depth * 100) / 100} m in from the lip.`;
+    if (R.test === 'path') return `No room to climb up: ${what} in the way ${R.leg === 'out' ? 'out from the face' : R.leg === 'up' ? 'up past the lip' : 'in over the top'}.`;
+    return 'No room to climb up: no top to stand on behind the lip.';
+  }
+
+  /** What the room test met, in words (the game's name, else its kind) and how far into it the capsule reached; into the report. */
+  private metWords(): string {
+    const R = this.room;
+    const c = this.metCollider;
+    if (!c) return 'something';
+    const name = (this.namer ? this.namer(c) : null) ?? colliderKind(c);
+    R.met = name;
+    // How far into it: the capsule that met it, where it met it (Rapier's contact: a negative distance is a reach into it).
+    const shape = R.crouched ? this.shapeCrouch : this.shapeStand;
+    if (shape && R.x === R.x) {
+      try {
+        const hit = c.contactShape(shape, { x: R.x, y: R.y, z: R.z }, this.shapeRot, 0);
+        if (hit) R.past = hit.distance < 0 ? -hit.distance : 0;
+      } catch {
+        // (A shape the engine has no contact for: said without how far.)
+      }
+    }
+    // A placed thing's template said by its file's own name on the message line (the whole path stays in the report).
+    const said = name.includes('/') ? name.replace(/^.*\//, '').replace(/^shared_/, '').replace(/\.iff$/, '') : name;
+    return R.past === R.past ? `${said}, ${Math.round(R.past * 100)} cm` : said;
+  }
+
+  /** What `__debug.climb({ room: true })` says of the last climb up (`RoomReport`). */
+  roomReport(): Record<string, unknown> {
+    const R = this.room;
+    const n = (v: number) => (v === v ? Math.round(v * 1000) / 1000 : null);
+    return {
+      asked: R.asked,
+      rule: R.rule,
+      result: R.result,
+      test: R.test || null,
+      depth: n(R.depth),
+      leg: R.leg || null,
+      along: n(R.along),
+      crouched: R.crouched,
+      brush: n(R.brush),
+      at: R.x === R.x ? [n(R.x), n(R.y), n(R.z)] : null,
+      met: R.met || null,
+      handle: R.handle,
+      pastM: n(R.past),
+      endDepth: n(R.endDepth),
+      lift: n(R.lift),
+      cut: R.cut,
+      words: R.words || null,
+      short: this.climbsShort,
+    };
   }
 
   /** After a climb up: whether a standing capsule now fits at the feet (then it stands, as the crouch key lets it). One shape test while asked. */

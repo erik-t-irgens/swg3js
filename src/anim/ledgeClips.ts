@@ -127,6 +127,17 @@ export const LEDGE_ROLES: Readonly<{ braced: LedgeRoles; free: LedgeRoles }> = {
   },
 };
 
+/**
+ * Climbing II, the feedback round (`climb.roomRule` 'fit'): where a climb up that ends nearer the lip or tucked crouched has
+ * its clip cut, its figure crouched on the top with both feet down: the time, seconds, and the ankles' middle height there
+ * (the figure's own frame, as `a1`). Measured on the human male as the table is (the hips' and ankles' path through the
+ * clip): the free climb's feet are both on the top at 3.05 s (ankles 2.439, against its end's 2.444), after which it stands
+ * up for 0.8 s more; the braced climb's own end is its crouch, so it is never cut and has no row.
+ */
+export const LEDGE_CLIMB_CUT: Readonly<Record<string, { t: number; ankle: number }>> = {
+  freehang_climb: { t: 3.05, ankle: 2.439 },
+};
+
 /** The jump off backward (braced) and the step down into a hang (free; braced is the free one then `toOther`). */
 export const LEDGE_JUMP_OFF = 'jump_from_wall';
 export const LEDGE_STEP_DOWN = 'drop_to_freehang';

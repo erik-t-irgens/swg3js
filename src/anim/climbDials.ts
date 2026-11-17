@@ -146,6 +146,18 @@ export const CLIMB_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Climbing II: the grab and the climb up',
+    note: 'Each switch\'s other word is the climbing as phase 2 left it. grabFree share: from a share of the grab\'s clip on, the hang takes the keys (a shimmy, W, a hop, Space, the crouch, the look-away), the grab blended into what was asked; a key pressed earlier in the grab waits for it. roomSay why: a climb up refused says which test failed and what it met. roomRule fit: where the whole climb up does not fit, a shorter one is tried (ending nearer the lip, tucked crouched, over the lip lower, then all of them with a brush allowed) before it is refused.',
+    dials: [
+      choice('grabFree', 'A grab takes the keys', 'share: from the share below on; whole: only once its clip is done.'),
+      dial('grabFreeAt', 'From this share of the grab\'s clip', 0.01, 'of its length', 'The round\'s 0.35: the hands are on the lip by then in the braced and free grabs.'),
+      choice('roomSay', 'A refused climb up says', 'why: which test failed and what it met, and how far into it; before: only that there is no room.'),
+      choice('roomRule', 'A climb up that does not quite fit', 'fit: climbed short (nearer, tucked, lower, then brushing); strict: refused.'),
+      dial('roomBrush', 'A short climb may brush what stands by', 0.005, 'm', 'The round\'s 0.04: under a hand\'s thickness.'),
+      dial('liftLeast', 'A lower way in over the lip lifts the feet at least', 0.005, 'm', 'Ours: nought (the climb\'s own 0.02 of skin still under the feet); the whole climb lifts 0.05.'),
+    ],
+  },
+  {
     title: 'The hands bracing',
     note: 'before: the arms as they were (nothing is felt for). on: moving into a wall the hand on that side rests on it (head on, both), in a passage narrower than the tight share both touch its sides, among people the hand on their side rests on them, and drifting in space near a surface both hands reach to it and step along it.',
     dials: [

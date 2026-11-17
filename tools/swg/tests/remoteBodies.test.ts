@@ -75,7 +75,9 @@ function peer(id: number, x: number, y: number, z: number, opts: { shown?: boole
   ok(near(PEER_BODY_TUNE.lowHalf, crouch), `2: and a peer crouching, kneeling or prone wears the player's own low capsule (${crouch})`);
   ok(/class PlayerTarget implements Living \{[\s\S]*?get halfHeight\(\): number \{\s*return playerMiddle\(this\.capsule\);/.test(world), "2: the player's middle is read off the player's own capsule, never a copy");
   ok(/this\.colliderOffsetY = CAPSULE_RADIUS \+ half;/.test(player) && /colliderOffsetY = CAPSULE_RADIUS \+ STAND_HALF_HEIGHT;/.test(player), "2: ... which the player's crouch writes as radius plus the half it wears");
-  const reach = /class PlayerTarget implements Living \{[\s\S]*?radiusToward\(\): number \{\s*return ([\d.]+);/.exec(world)?.[1];
+  // (The feedback round, item 3: the player's reach is the capsule's radius, and along a lying body's length while it lies
+  // (`Player.reachToward`), with the plain radius as the fallback; a peer's the same, `PeerBody.radiusToward`.)
+  const reach = /class PlayerTarget implements Living \{[\s\S]*?radiusToward\(at\?: THREE\.Vector3\): number \{[\s\S]*?: ([\d.]+);\n?\s*\}/.exec(world.replace(/\r/g, ''))?.[1];
   ok(reach !== undefined && near(PEER_BODY_TUNE.radius, Number(reach)), `2: and a brain reaches for them at the same radius it reaches for you (${reach})`);
   // The blade colour a peer is drawn with before their own browser says: the game's own default,
   // written as a number where the peers are rather than read out of the player at load time.

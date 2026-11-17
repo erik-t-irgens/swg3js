@@ -75,6 +75,8 @@ import type { PeerView, PeerWatcher } from './remotePlayers.ts';
 import { newReckonState, type ReckonState } from './peerReckon.ts';
 // The AI handoff's step 2: a peer is aimed at the posture the state they send says, and its switch (`aiLedger.ts`).
 import { AI_FIX, OLD_PLAYER_MIDDLE, PLAYER_SHOT_FROM } from '../world/aiLedger.ts';
+import { MOVE_TUNE } from '../anim/moveTune.ts';
+import { LYING_LENGTH } from '../player/bodyShape.ts';
 
 /** The record a vehicle whose view hands none over reads: no motion, never written. */
 const NO_RECKON = newReckonState();
@@ -150,6 +152,26 @@ export function peerLow(state: string): boolean {
   return LOW_STATES.has(state);
 }
 
+/** The rig states a player draws lying prone (the feedback round, item 3): what makes a peer's body a lying sensor here. */
+const LYING_STATES: ReadonlySet<string> = new Set(['prone', 'proneMove', 'gunProneIdle', 'gunProneMove', 'gunProneReadyIdle', 'gunProneReadyMove', 'gunProneAimIdle', 'gunProneAimMove']);
+
+/** Whether the state a peer sent is a prone one. */
+export function peerLying(state: string): boolean {
+  return LYING_STATES.has(state);
+}
+
+/**
+ * Whether a peer's body here lies along them (the feedback round, item 3): the state they sent is a prone one and this
+ * browser's own `proneShape` is 'lying', as the player's own capsule then is; `AI_FIX.posture` off stands them as before.
+ */
+export function peerLiesDown(p: { readonly lying?: boolean }): boolean {
+  return AI_FIX.posture && MOVE_TUNE.proneShape === 'lying' && p.lying === true;
+}
+
+/** A quarter turn about the figure's right axis: a capsule's own up laid along the figure's front (a lying sensor's turn in their frame). */
+const LIE_TURN = { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+const UPRIGHT_TURN = { x: 0, y: 0, z: 0, w: 1 };
+
 /** The figure of another player: something a bolt, a blade or a power can find, that hurts nobody here. */
 class PeerBody implements Living {
   readonly key = nextLivingKey();
@@ -164,12 +186,18 @@ class PeerBody implements Living {
   low = false;
   /** The straight half its capsule was last made or reshaped to, so a change of posture reshapes it once. */
   shapeHalf = PEER_BODY_TUNE.halfHeight;
+  /** Lying along them, as the state they last sent and this browser's `proneShape` say (`peerLiesDown`), and their heading. */
+  lying = false;
+  yaw = 0;
+  /** Whether its sensor was last made or reshaped lying (its radius and turn). */
+  shapeLying = false;
   /**
    * Where everything aims at them, over their feet: the middle of the capsule they are wearing (the AI handoff's step
    * 2), standing or low, as `PlayerTarget.halfHeight` is yours. `AI_FIX.posture` off is the 0.9 it was.
    */
   get halfHeight(): number {
     if (!AI_FIX.posture) return OLD_PLAYER_MIDDLE;
+    if (this.lying) return MOVE_TUNE.lyingRadius;
     return PEER_BODY_TUNE.radius + (this.low ? PEER_BODY_TUNE.lowHalf : PEER_BODY_TUNE.halfHeight);
   }
   /** Where their shots are taken to come from by anything that judges cover against them: yours (`PLAYER_SHOT_FROM`). */
@@ -202,8 +230,16 @@ class PeerBody implements Living {
     this.owner = owner;
   }
 
-  radiusToward(): number {
-    return PEER_BODY_TUNE.radius;
+  radiusToward(at?: THREE.Vector3): number {
+    if (!this.lying || !at) return PEER_BODY_TUNE.radius;
+    // Lying, the radius and the straight half's share along their heading (the feedback round, item 3).
+    const dx = at.x - this.pos.x;
+    const dz = at.z - this.pos.z;
+    const n = Math.sqrt(dx * dx + dz * dz);
+    const r = MOVE_TUNE.lyingRadius;
+    if (n < 1e-6) return r;
+    const c = (dx * Math.sin(this.yaw) + dz * Math.cos(this.yaw)) / n;
+    return r + (LYING_LENGTH / 2 - r) * (c < 0 ? -c : c);
   }
 
   /**
@@ -547,10 +583,16 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     // The capsule they are wearing on their own screen (the AI handoff's step 2): the low one while the state they sent
     // says they crouch, kneel or lie prone, as the player's own is (`peerLow`); `AI_FIX.posture` off stands them.
     f.low = !!p.low;
-    const half = AI_FIX.posture && f.low ? PEER_BODY_TUNE.lowHalf : PEER_BODY_TUNE.halfHeight;
+    // Lying prone under this browser's 'lying' (the feedback round, item 3): a lying sensor along them, its middle the lying
+    // radius over their feet, turned with them (their whole turn already turns the body).
+    f.lying = peerLiesDown(p);
+    const lyingR = MOVE_TUNE.lyingRadius;
+    const half = f.lying ? LYING_LENGTH / 2 - lyingR : AI_FIX.posture && f.low ? PEER_BODY_TUNE.lowHalf : PEER_BODY_TUNE.halfHeight;
+    const radius = f.lying ? lyingR : PEER_BODY_TUNE.radius;
+    if (f.lying) f.yaw = 2 * Math.atan2(g.quaternion.y, g.quaternion.w);
     // The capsule stands along the figure's own up, not the world's: a peer aboard a banked hull or
     // adrift in space is not upright, and their whole turn is what the relay carries for them.
-    this.up.set(0, PEER_BODY_TUNE.radius + half, 0).applyQuaternion(g.quaternion);
+    this.up.set(0, f.lying ? lyingR : PEER_BODY_TUNE.radius + half, 0).applyQuaternion(g.quaternion);
     this.at.x = g.position.x + this.up.x;
     this.at.y = g.position.y + this.up.y;
     this.at.z = g.position.z + this.up.z;
@@ -562,9 +604,11 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       f.body = w.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(this.at.x, this.at.y, this.at.z).setRotation(this.turn));
       // The floor is the knob's, not a guess: a capsule of zero comes back with a handle that is not
       // a handle. A shape changed by hand shows on the bodies made after it, never on the ones up.
-      f.collider = w.world.createCollider(RAPIER.ColliderDesc.capsule(Math.max(SHAPE_FLOOR, half), Math.max(SHAPE_FLOOR, PEER_BODY_TUNE.radius)).setSensor(true), f.body);
+      // (Lying, the sensor's own up is laid along their front: the feedback round, item 3.)
+      f.collider = w.world.createCollider(RAPIER.ColliderDesc.capsule(Math.max(SHAPE_FLOOR, half), Math.max(SHAPE_FLOOR, radius)).setSensor(true).setRotation(f.lying ? LIE_TURN : UPRIGHT_TURN), f.body);
       f.collider.setCollisionGroups(PEER_GROUPS);
       f.shapeHalf = half;
+      f.shapeLying = f.lying;
       w.markPeer(f.collider);
       this.byCollider.set(f.collider.handle, f);
       this.standingList.push(f);
@@ -577,6 +621,12 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     if (f.shapeHalf !== half && f.collider) {
       f.collider.setHalfHeight(Math.max(SHAPE_FLOOR, half));
       f.shapeHalf = half;
+    }
+    // Lying down or up again (item 3): the sensor's radius and its turn in their frame, changed in place, nothing made.
+    if (f.shapeLying !== f.lying && f.collider) {
+      f.collider.setRadius(Math.max(SHAPE_FLOOR, radius));
+      f.collider.setRotationWrtParent(f.lying ? LIE_TURN : UPRIGHT_TURN);
+      f.shapeLying = f.lying;
     }
     f.body.setNextKinematicTranslation(this.at);
     f.body.setNextKinematicRotation(this.turn);

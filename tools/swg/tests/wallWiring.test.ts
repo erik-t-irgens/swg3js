@@ -72,7 +72,7 @@ ok(order(main, ['this.remotes.cameraAt.copy(this.cam.camera.position);', 'this.r
 const packText = read('src/anim/mixamoPack.ts');
 ok(packText.includes('...LEDGE_IDS, ...WALL_IDS]') && packText.includes('if (STAIR_IDS.includes(id) || WALL_IDS.includes(id)) return {'), 'the game asks the pack for both wall clips, fitted as loops with their climb taken out');
 const menu = read('src/ui/menu.ts');
-ok(menu.includes("forward: 'Move forward (held into a steep face: climb it; on a wall: up)'") && menu.includes("crouch: 'Crouch (tap moving: roll; on a wall or a ledge: let go)'") && menu.includes("jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off)'"), "the Controls page says what the move keys, the jump and the crouch do on a wall or a ledge (no key of its own)");
+ok(menu.includes("forward: 'Move forward (held into a steep face: climb it; on a wall: up)'") && menu.includes("crouch: 'Crouch (tap moving: roll; on a wall or a ledge: let go; under a low roof: duck further)'") && menu.includes("jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off)'"), "the Controls page says what the move keys, the jump and the crouch do on a wall or a ledge (no key of its own)");
 
 // ---- every number on a slider, and the switches --------------------------------------------------------------------------------
 resetClimbTune();

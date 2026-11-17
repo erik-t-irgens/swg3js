@@ -134,7 +134,9 @@ import { rebasedCount } from './anim/jkaSpine.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
 import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climbTune.ts';
 import { climbDialsFor } from './anim/climbDials.ts';
-import { climbCourse, courseIds, type ClimbCourse } from './anim/climbCourse.ts';
+import { moveDialsFor } from './anim/moveDials.ts';
+import { MOVE_TUNE, moveBefore, resetMoveTune, tuneMove } from './anim/moveTune.ts';
+import { climbCourse, courseIds, extraIds, type ClimbCourse } from './anim/climbCourse.ts';
 import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
@@ -577,6 +579,8 @@ interface ClimbDebugOptions {
   tune?: unknown;
   reset?: boolean;
   letGo?: boolean;
+  /** The feedback round: answer the last climb up's room tests in full (`LedgeHang.roomReport`) instead of the rest. */
+  room?: boolean;
 }
 
 /** What `__debug.loco` takes. */
@@ -2692,6 +2696,10 @@ class App {
     this.player.onHarm = (lost, kind) => this.encounters.hurt(lost, kind);
     // Wave 4: what a ledge says (too tired to hold on, no room to climb up, a hop refused) goes to the message line.
     this.player.onLedgeWords = (words) => this.messages.system(words);
+    // Climbing II, the feedback round: a refused climb up names what it met (`climbColliderName`).
+    this.player.ledge.namer = (c) => this.climbColliderName(c.handle);
+    // The feedback round, item 4: the duck waits while the placing hand holds a building or a prop.
+    this.player.handPlacing = () => this.placing !== null || this.propPlacing !== null;
     this.player.onDodge = (source) => this.encounters.dodged(source as Living | null);
     this.player.onRolled = (fell, saved) => {
       const at = sharedClock.now();
@@ -6922,13 +6930,15 @@ class App {
        * wall climb read as the world's own still geometry, stood behind a short curtain so nothing is built in play.
        * `pieces` stands only those ids; `{ clear: true }` takes it down (so do a travel, the select screen and a reload).
        */
-      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number } = {}) => {
+      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean } = {}) => {
         const cleared = this.dropClimbTest('cleared');
         if (o.clear) return { cleared };
         if (!this.inWorld || this.traveling) return { cleared, error: 'not now: enter the world first' };
         if (this.world.planet.space) return { cleared, error: 'a space zone has no ground to stand a course on' };
-        const plan = climbCourse({ pieces: o.pieces, gap: o.gap });
-        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds() };
+        // The owner's extra rows (the ladders and the vertical pieces) stand too unless `extras: false`.
+        const extras = o.extras ?? true;
+        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras });
+        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : []) };
         const h = this.player.heading;
         const ahead = o.ahead ?? 4;
         const p = this.player.worldPos;
@@ -6958,7 +6968,7 @@ class App {
           deep = Math.max(deep, hi - lo + 0.55);
         }
         const floor = Math.ceil(deep * 10) / 10;
-        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor });
+        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras });
         const frame: CourseFrame = { ox, oz, h, ref: (q) => refs.get(q.id) ?? 0 };
         await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');
         const out = course.pieces.map((piece) => {
@@ -8147,6 +8157,7 @@ class App {
        */
       loco: (o: LocoDebugOptions = {}) => this.locoDebug(o),
       climb: (o: ClimbDebugOptions = {}) => this.climbDebug(o),
+      move: (o: { tune?: unknown; reset?: boolean; before?: boolean } = {}) => this.moveDebug(o),
       /** Mount the nearest vehicle, or dismount, as E does. */
       mount: () => {
         this.handleMount();
@@ -12483,7 +12494,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -28764,6 +28775,17 @@ class App {
     camera.updateMatrixWorld();
   }
 
+  /**
+   * Climbing II, the feedback round: what a collider a refused climb up met is, in words (an event, never a frame): the test
+   * course's solid (`__debug.climbTest`), a placed thing's template, the ground or a planting, else null (the ledges then
+   * name it by its kind).
+   */
+  private climbColliderName(handle: number): string | null {
+    const k = this.climbTestStood?.colliders.find((q) => q.collider.handle === handle);
+    if (k) return `the course's ${k.role} (${k.piece})`;
+    return this.world.colliderNameOf(handle);
+  }
+
   /** `__debug.climb`: see its row in the README. */
   private climbDebug(o: ClimbDebugOptions): unknown {
     const words: string[] = [];
@@ -28775,6 +28797,9 @@ class App {
     if (o.tune !== undefined) words.push(...tuneClimb(o.tune));
     if (o.letGo && p.ledge.holding) p.ledge.letGo(p as never, 'console', 0, 0, 0);
     if (o.letGo && p.wall.holding) p.wall.letGo(p as never, 'console', 0, 0, 0);
+    // The feedback round: the last climb up's room tests in full (which test, where, what it met and how far into it, and
+    // what the rule made of it), and nothing else.
+    if (o.room) return { room: p.ledge.roomReport(), roomRule: CLIMB_TUNE.roomRule, roomSay: CLIMB_TUNE.roomSay, grabFree: CLIMB_TUNE.grabFree, grabsFreed: p.ledge.grabsFreed };
     return {
       ...(words.length ? { words } : {}),
       ledges: CLIMB_TUNE.ledges,
@@ -28784,6 +28809,46 @@ class App {
       brace: p.brace.report(),
       limbs: p.limbs.report(),
       tune: JSON.parse(JSON.stringify(CLIMB_TUNE)) as unknown,
+    };
+  }
+
+  /**
+   * `__debug.move`: the body's shape on foot (Climbing II's feedback round, items 3 and 4): the capsule worn now (upright or
+   * lying, its height, its middle), the room the duck last measured over the feet and what it allows, the crouch's share
+   * and the bend in the pose, the lying heading, the last refusal in words, and the table. `tune` moves it; `reset` puts it
+   * back as shipped; `before` puts both switches to their other setting (today's capsule).
+   */
+  private moveDebug(o: { tune?: unknown; reset?: boolean; before?: boolean } = {}): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (o.reset) resetMoveTune();
+    if (o.before) moveBefore();
+    if (o.tune !== undefined) words.push(...tuneMove(o.tune));
+    const S = p.shape;
+    const n = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(3)) : v);
+    return {
+      ...(words.length ? { words } : {}),
+      proneShape: MOVE_TUNE.proneShape,
+      duck: MOVE_TUNE.duck,
+      prone: p.prone,
+      crouching: p.crouching,
+      shape: S.kind === 1 ? 'lying' : S.ducked ? 'ducked' : 'upright',
+      tall: n(S.tall),
+      middle: n(p.colliderOffsetY),
+      radius: n(S.radius),
+      room: n(S.room),
+      allows: n(S.want),
+      share: n(S.share),
+      bend: n(S.bend),
+      poseShare: n(p.rig?.duckShare ?? 0),
+      lyingYaw: n((S.lyingYaw * 180) / Math.PI),
+      lyingTiltDeg: n((S.lyingTilt * 180) / Math.PI),
+      lyingSynced: S.synced,
+      eye: n(p.eyeHeight),
+      asks: S.asks,
+      pathBox: { asked: S.boxAsked, kept: S.boxKept },
+      last: S.last || null,
+      tune: { ...MOVE_TUNE },
     };
   }
 

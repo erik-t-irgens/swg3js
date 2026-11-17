@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BEHIND_SPANS, GAP_SPANS, LIP_HEIGHTS, TODAY_REACH, climbCourse, courseIds, solidFoot, type CoursePiece, type CourseSolid } from '../../../src/anim/climbCourse.ts';
+import { BEHIND_SPANS, GAP_SPANS, LIP_HEIGHTS, ROOM_HEIGHT, ROOM_ROOF_TOP, ROOM_ROW, TODAY_REACH, climbCourse, courseIds, solidFoot, type CoursePiece, type CourseSolid } from '../../../src/anim/climbCourse.ts';
 import { buildCourseColliders, courseToWorld, courseTriangles, solidCorners, worldToCourse, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { Physics, RAPIER } from '../../../src/core/physics.ts';
@@ -290,6 +290,27 @@ function topAt(s: CourseSolid, x: number, z: number): number {
     const [a, b, c, d] = nonFloor(p);
     ok(near(minX(b) - maxX(a), p.numbers.hop as number) && near(topOf(c) - topOf(b), p.numbers.wall as number) && near(topOf(c) - topOf(d), p.numbers.drop as number) && near(maxZ(b), minZ(c)) && near(maxZ(c), minZ(d)) && near(maxX(b), 3), `run: a hop of ${minX(b) - maxX(a)} m, a lip round B's outer corner, a wall ${topOf(c) - topOf(b)} m over B's top and a drop of ${(topOf(c) - topOf(d)).toFixed(1)} m off its far side`);
   }
+  // The feedback round's climbs up that only nearly fit: each lip at the round's height, braced (its wall from the floor) or
+  // free (a plate and a back wall), and what stands over or on its top where its numbers say, in the course's last row.
+  const room = course.pieces.filter((q) => q.kind === 'room');
+  ok(room.map((p) => p.id).join() === 'room-beam,room-roof,room-sill,room-bump,room-none' && room.every((p) => p.row === ROOM_ROW) && course.pieces.slice(-room.length).every((p) => p.kind === 'room'), `the round's pieces stand in a row of their own, the course's last (${room.length})`);
+  for (const p of room) {
+    const H = p.numbers.height as number;
+    const atLip = nonFloor(p).filter((s) => near(minZ(s), 5) && near(topOf(s), H) && s.role !== 'roof');
+    assert.ok(near(H, ROOM_HEIGHT) && atLip.length === 1 && near(maxX(atLip[0]) - minX(atLip[0]), 6), `${p.id}: one solid at its lip, ${ROOM_HEIGHT} m over its floor, 6 m long`);
+    if (p.numbers.braced) assert.ok(near(y0Of(atLip[0]), 0) && near(maxZ(atLip[0]) - minZ(atLip[0]), 2), `${p.id}: braced, its wall from the floor and its top 2 m deep`);
+    else assert.ok(atLip[0].role === 'plate' && near(topOf(atLip[0]) - y0Of(atLip[0]), 0.3) && byRole(p, 'wall').length === 1 && near(minZ(byRole(p, 'wall')[0]) - 5, 2), `${p.id}: free, a plate 0.3 m thick 2 m out from its back wall`);
+    const what = p.numbers.what as string;
+    if (what === 'bump') {
+      const ribs = byRole(p, 'bump');
+      const at = String(p.numbers.ribs).split(',').map(Number);
+      assert.ok(ribs.length === 3 && ribs.every((r, k) => near(y0Of(r), H) && near(topOf(r) - H, p.numbers.bump as number) && near(minZ(r) - 5, at[k]) && near(maxZ(r) - minZ(r), p.numbers.rib as number)), `${p.id}: three ribs ${p.numbers.bump} m tall on its top at ${at.join(', ')} m in`);
+    } else {
+      const over = what === 'beam' ? byRole(p, 'beam') : byRole(p, 'roof');
+      assert.ok(over.length === 1 && near(y0Of(over[0]) - H, p.numbers.over as number) && near(minZ(over[0]) - 5, p.numbers.from as number) && (what === 'beam' ? near(maxZ(over[0]) - minZ(over[0]), p.numbers.deep as number) : near(topOf(over[0]) - H, ROOM_ROOF_TOP)), `${p.id}: its ${what === 'beam' ? 'beam' : 'roof'}'s underside ${p.numbers.over} m over the top, from ${p.numbers.from} m in`);
+    }
+  }
+  ok(true, `the round's pieces measure back: their lips, braced or free, and the beam, roofs, lintel and ribs over and on their tops (${room.length})`);
 }
 
 // ---- 4. the colliders and the triangles stand exactly the solids, in a turned and raised frame ------------------------------
@@ -350,7 +371,8 @@ function topAt(s: CourseSolid, x: number, z: number): number {
   const at = main.indexOf('climbTest: async (');
   ok(at > 0, 'the game has `__debug.climbTest`');
   const body = main.slice(at, main.indexOf('\n      },\n', at));
-  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
+  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, extras \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor, extras \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
+  ok(body.includes('const extras = o.extras ?? true;'), "the game's command stands the owner's extra rows (the ladders and the vertical pieces) unless asked not to");
   ok(body.includes("await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');"), 'it stands them behind a short curtain (its sweep builds the one program before the screen lifts)');
   const stand = main.slice(main.indexOf('  private standClimbCourse('), main.indexOf('  private dropClimbTest('));
   ok(stand.includes('buildCourseColliders(this.physics.world, course, frame)') && stand.includes('courseTriangles(course, frame)'), 'its colliders and its mesh are the builder\'s two answers over the same course and frame');

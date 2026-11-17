@@ -13,11 +13,11 @@
 
 import { CLIMB_TUNE } from './climbTune.ts';
 
-/** What a piece is for (the design's list). */
-export type CourseKind = 'lip' | 'wall' | 'corner' | 'slope' | 'steps' | 'gap' | 'bar' | 'rope' | 'pole' | 'obstacle' | 'run';
+/** What a piece is for (the design's list; `room` the feedback round's climbs up that only nearly fit). */
+export type CourseKind = 'lip' | 'wall' | 'corner' | 'slope' | 'steps' | 'gap' | 'bar' | 'rope' | 'pole' | 'obstacle' | 'run' | 'room';
 
 /** What a solid is to its piece (the floor slab every piece stands on, and what stands on it). */
-export type SolidRole = 'floor' | 'wall' | 'plate' | 'platform' | 'bar' | 'beam' | 'rope' | 'pole' | 'obstacle';
+export type SolidRole = 'floor' | 'wall' | 'plate' | 'platform' | 'bar' | 'beam' | 'rope' | 'pole' | 'obstacle' | 'roof' | 'bump';
 
 /** A box: its middle, its half sizes along its own axes, and its turn about up (its own x along (cos turn, sin turn) of the piece's x and z). */
 export interface CourseBox {
@@ -95,6 +95,13 @@ export interface CourseOptions {
   lipSlope?: number;
   /** The two jump reaches (`TODAY_REACH`). */
   reach?: { standing?: number; running?: number };
+  /**
+   * The owner's extra rows (2026-11-17: "a section of ladder-like things so I can test hop-ups and hop-downs and a vertical
+   * portion to the gauntlet that lets me combine a bunch of things"), laid out after every other row: the ladders, the
+   * vertical pieces, and (the feedback round's) the low pieces to duck and crawl under (`extraPieces`). Off unless asked, so
+   * the harness, `courseIds()` and every digest are as they were; the game's `__debug.climbTest()` asks for them by default.
+   */
+  extras?: boolean;
 }
 
 /**
@@ -420,6 +427,59 @@ function runPiece(id: string, floor: number): CoursePiece {
   return piece(id, 'run', 'free run', solids, lips, [stand(-4)], { hop: 0.9, corner: 'outer 90', wall: 6, drop: round(H + 6 - 4), height: H }, floor);
 }
 
+/** The feedback round's climbs up: the lip's height (a standing jump grabs it, braced and free alike: 0.70 and 1.17 s at 60). */
+export const ROOM_HEIGHT = 2.4;
+/** The row the feedback round's pieces stand in (after every other, so no piece before it moves). */
+export const ROOM_ROW = 'climbs up short';
+/**
+ * How far over the lip a room piece's roof, lintel or ceiling reaches at its top, metres: past a hop up's reach (`hopUp`
+ * 1.5 and the band's 0.1), so W at the lip climbs up rather than hopping to the roof's own front edge.
+ */
+export const ROOM_ROOF_TOP = 1.8;
+
+/**
+ * The feedback round, item 2: a lip whose climb up only nearly fits, each made so that today's climb up refuses it at one
+ * test and a short climb (`climb.roomRule` 'fit') takes it one way. Braced (a wall 2 m deep under the lip) unless free:
+ *  - `beam` (free: the free lip's plate and back wall): a beam 0.3 m deep over the plate's top 0.6 m in from the lip, its
+ *    underside 0.9 m over the top, under which no crouched body (1.0 m and a 0.02 m skin) fits: the top's room at the free
+ *    climb's own end (0.66 m in) and the two deeper ones meet it; nearer, 0.21 m in, the body fits (the climb ends nearer);
+ *  - `roof`: a roof over the top and 0.6 m out over the face, its underside 1.3 m over the top: a crouched body fits on the
+ *    top, but standing on the way up past the lip meets it (the climb tucks crouched);
+ *  - `sill` (free, as `beam`): a lintel over the plate's top from its lip in, its underside 1.04 m over the top: a crouched
+ *    body fits on the top under it, but the crouched way in over the lip at today's lift (0.05 m and the skin) meets it by a
+ *    centimetre as it passes under its edge, and at no lift passes under it (the lower way in); no standing body fits there,
+ *    so the climb ends crouched;
+ *  - `bump`: three ribs 0.03 m tall and 0.04 m deep across the top, each 0.01 to 0.05 m in front of one of the braced
+ *    climb's three depths: a crouched body's foot meets each by under a centimetre (the brush);
+ *  - `none`: a ceiling over the top from 0.03 m behind the face, its underside 0.85 m over the top: nothing fits (refused
+ *    under either rule).
+ */
+function roomPiece(id: string, what: 'beam' | 'roof' | 'sill' | 'bump' | 'none', floor: number): CoursePiece {
+  const H = ROOM_HEIGHT;
+  const free = what === 'beam' || what === 'sill';
+  const solids: CourseSolid[] = free
+    ? [aabb('wall', -3, 0, FACE_Z + 2, 3, H, FACE_Z + 3), aabb('plate', -3, H - 0.3, FACE_Z, 3, H, FACE_Z + 2)]
+    : [aabb('wall', -3, 0, FACE_Z, 3, H, FACE_Z + 2)];
+  const numbers: CoursePiece['numbers'] = { height: H, braced: !free, what };
+  if (what === 'beam') {
+    solids.push(aabb('beam', -3, H + 0.9, FACE_Z + 0.6, 3, H + 1.1, FACE_Z + 0.9));
+    Object.assign(numbers, { over: 0.9, from: 0.6, deep: 0.3, overhang: 2, plate: 0.3 });
+  } else if (what === 'roof') {
+    solids.push(aabb('roof', -3, H + 1.3, FACE_Z - 0.6, 3, H + ROOM_ROOF_TOP, FACE_Z + 2));
+    Object.assign(numbers, { over: 1.3, from: -0.6, top: ROOM_ROOF_TOP });
+  } else if (what === 'sill') {
+    solids.push(aabb('roof', -3, H + 1.04, FACE_Z, 3, H + ROOM_ROOF_TOP, FACE_Z + 2));
+    Object.assign(numbers, { over: 1.04, from: 0, top: ROOM_ROOF_TOP, overhang: 2, plate: 0.3 });
+  } else if (what === 'bump') {
+    for (const z of [0.125, 0.275, 0.425]) solids.push(aabb('bump', -3, H, FACE_Z + z, 3, H + 0.03, FACE_Z + z + 0.04));
+    Object.assign(numbers, { bump: 0.03, ribs: '0.125,0.275,0.425', rib: 0.04 });
+  } else {
+    solids.push(aabb('roof', -3, H + 0.85, FACE_Z + 0.03, 3, H + ROOM_ROOF_TOP, FACE_Z + 2));
+    Object.assign(numbers, { over: 0.85, from: 0.03, top: ROOM_ROOF_TOP });
+  }
+  return piece(id, 'room', ROOM_ROW, solids, [frontLip('A', -3, 3, H, FACE_Z)], [stand(0)], numbers, floor);
+}
+
 // ---- the course ---------------------------------------------------------------------------------------------------------
 
 /** Every piece, in its rows' order (its own frame, `at` not yet given). */
@@ -457,6 +517,8 @@ function allPieces(floor: number, lipSlope: number, reach: { standing: number; r
   for (const h of OBSTACLE_HEIGHTS) for (const d of OBSTACLE_DEPTHS) out.push(obstaclePiece(`obstacle-${f1(h)}x${f1(d)}`, h, d, false, floor));
   for (const h of CLAMBER_HEIGHTS) out.push(obstaclePiece(`clamber-${f1(h)}`, h, 4, true, floor));
   out.push(runPiece('run', floor));
+  // The feedback round's row, last: no piece before it moves.
+  for (const w of ['beam', 'roof', 'sill', 'bump', 'none'] as const) out.push(roomPiece(`room-${w}`, w, floor));
   return out;
 }
 
@@ -464,6 +526,14 @@ function allPieces(floor: number, lipSlope: number, reach: { standing: number; r
 export function courseIds(): string[] {
   return allPieces(1, CLIMB_TUNE.lipSlope, TODAY_REACH).map((p) => p.id);
 }
+
+/**
+ * The course's pieces as phases 1 and 2 had them (every row but the feedback round's): `climbToday.test.ts` and
+ * `climbAfter.test.ts` hold their digests over these, laid out alone as they always stood (the round's row comes after them).
+ */
+export const COURSE_TWO_IDS: readonly string[] = allPieces(1, CLIMB_TUNE.lipSlope, TODAY_REACH)
+  .filter((p) => p.row !== ROOM_ROW)
+  .map((p) => p.id);
 
 /**
  * The course: every piece (or the ones `pieces` names), one family a row, each row centred across the course's x with
@@ -476,6 +546,7 @@ export function climbCourse(o: CourseOptions = {}): ClimbCourse {
   const gap = o.gap ?? 2;
   const rowGap = o.rowGap ?? 4;
   let pieces = allPieces(floor, lipSlope, reach);
+  if (o.extras) pieces = pieces.concat(extraPieces(floor));
   const unknown: string[] = [];
   if (o.pieces) {
     const want = new Set(o.pieces);
@@ -499,4 +570,173 @@ export function climbCourse(o: CourseOptions = {}): ClimbCourse {
     rowZ += deep + rowGap;
   }
   return { pieces, floor, reach, lipSlope, unknown };
+}
+
+// ---- the owner's extra rows: ladders and the vertical pieces (`extras`) ------------------------------------------------------
+
+/** A ladder's rungs: how far each stands out from the wall, how thick, how many, and how wide. */
+export const RUNG_DEEP = 0.3;
+export const RUNG_THICK = 0.2;
+export const LADDER_RUNGS = 6;
+/** The rung spacings of the straight ladders, the zigzags and the shelves, metres. */
+export const LADDER_STEPS = [0.75, 1, 1.25, 1.5, 2] as const;
+export const ZIGZAG_STEPS = [1, 1.5] as const;
+export const SHELF_STEPS = [1, 1.5, 2] as const;
+
+/** A rung: a plate standing `RUNG_DEEP` out of a wall's face at `z` (looking toward -z), its top at `h`, and its lip. */
+function rung(name: string, x0: number, x1: number, h: number, z: number): { solid: CourseBox; lip: CourseLip } {
+  return { solid: aabb('plate', x0, round(h - RUNG_THICK), round(z - RUNG_DEEP), x1, h, z), lip: frontLip(name, x0, x1, h, round(z - RUNG_DEEP)) };
+}
+
+/**
+ * A ladder of lips straight up a flat wall: `LADDER_RUNGS` rungs 4 m wide, `step` apart, the first at the lip height (a
+ * standing jump grabs it), the last flush with the wall's top (1.5 m deep to climb out onto): hop up rung to rung with W
+ * or Space, and from the top hang on the last rung and hop down.
+ */
+function ladderPiece(id: string, step: number, floor: number): CoursePiece {
+  const top = round(LIP_HEIGHT + (LADDER_RUNGS - 1) * step);
+  const solids: CourseSolid[] = [aabb('wall', -2, 0, FACE_Z, 2, top, FACE_Z + 1.5)];
+  const lips: CourseLip[] = [];
+  for (let k = 0; k < LADDER_RUNGS; k++) {
+    const r = rung(`R${k}`, -2, 2, round(LIP_HEIGHT + k * step), FACE_Z);
+    solids.push(r.solid);
+    lips.push(r.lip);
+  }
+  const starts: CourseStart[] = [stand(0, round(FACE_Z - RUNG_DEEP - STAND_OFF)), { name: 'top', at: [0, top, FACE_Z + 1], face: [0, -1] }];
+  return piece(id, 'gap', 'ladders', solids, lips, starts, { dir: 'ladder', step, rungs: LADDER_RUNGS, deep: RUNG_DEEP, first: LIP_HEIGHT, top }, floor);
+}
+
+/** A ladder whose rungs (2 m wide, 0.5 m apart across) go left and right in turn as they rise `step` each: diagonal hops up and down. */
+function zigzagPiece(id: string, step: number, floor: number): CoursePiece {
+  const rungs = 7;
+  const top = round(LIP_HEIGHT + (rungs - 1) * step);
+  const solids: CourseSolid[] = [aabb('wall', -2.5, 0, FACE_Z, 2.5, top, FACE_Z + 1.5)];
+  const lips: CourseLip[] = [];
+  for (let k = 0; k < rungs; k++) {
+    const left = k % 2 === 0;
+    const r = rung(`R${k}`, left ? -2.25 : 0.25, left ? -0.25 : 2.25, round(LIP_HEIGHT + k * step), FACE_Z);
+    solids.push(r.solid);
+    lips.push(r.lip);
+  }
+  const starts: CourseStart[] = [stand(-1.25, round(FACE_Z - RUNG_DEEP - STAND_OFF)), { name: 'top', at: [-1.25, top, FACE_Z + 1], face: [0, -1] }];
+  return piece(id, 'gap', 'ladders', solids, lips, starts, { dir: 'zigzag', step, rungs, across: 2, apart: 0.5, first: LIP_HEIGHT, top }, floor);
+}
+
+/** Six tiers rising `step` each, every tier stepped 0.6 m back from the one below (a lip with open air over it at every tier), the top tier 1.5 m deep. */
+function shelvesPiece(id: string, step: number, floor: number): CoursePiece {
+  const tiers = 6;
+  const back = 0.6;
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  for (let k = 0; k < tiers; k++) {
+    const z0 = round(FACE_Z + k * back);
+    const z1 = round(k < tiers - 1 ? z0 + back : z0 + 1.5);
+    const h = round(LIP_HEIGHT + k * step);
+    solids.push(aabb('wall', -2, 0, z0, 2, h, z1));
+    lips.push(frontLip(`T${k}`, -2, 2, h, z0));
+  }
+  const top = round(LIP_HEIGHT + (tiers - 1) * step);
+  const starts: CourseStart[] = [stand(0), { name: 'top', at: [0, top, round(FACE_Z + (tiers - 1) * back + 1)], face: [0, -1] }];
+  return piece(id, 'gap', 'ladders', solids, lips, starts, { dir: 'shelves', step, tiers, back, first: LIP_HEIGHT, top }, floor);
+}
+
+/**
+ * A chimney: two walls 12 m tall facing each other across a corridor 2.5 m wide, rungs on each face in turn, 1.2 m apart
+ * in height (the far wall's at 2.6, 5.0, 7.4 and 9.8, the near wall's at 3.8, 6.2, 8.6 and 11.0; 1.9 m across between the
+ * two faces' lips): up by the braced look-away and the hop behind, face to face, and out onto either top.
+ */
+function chimneyPiece(id: string, floor: number): CoursePiece {
+  const span = 2.5;
+  const top = 12;
+  const near = FACE_Z - span;
+  const solids: CourseSolid[] = [aabb('wall', -2, 0, FACE_Z, 2, top, FACE_Z + 1.5), aabb('wall', -2, 0, near - 1.5, 2, top, near)];
+  const lips: CourseLip[] = [frontLip('Atop', -2, 2, top, FACE_Z), { name: 'Btop', a: [2, top, near], b: [-2, top, near], out: [0, 1] }];
+  [2.6, 5.0, 7.4, 9.8].forEach((h, k) => {
+    const r = rung(`A${k}`, -2, 2, h, FACE_Z);
+    solids.push(r.solid);
+    lips.push(r.lip);
+  });
+  [3.8, 6.2, 8.6, 11.0].forEach((h, k) => {
+    solids.push(aabb('plate', -2, round(h - RUNG_THICK), near, 2, h, round(near + RUNG_DEEP)));
+    lips.push({ name: `B${k}`, a: [2, h, round(near + RUNG_DEEP)], b: [-2, h, round(near + RUNG_DEEP)], out: [0, 1] });
+  });
+  const starts: CourseStart[] = [{ name: 'stand', at: [0, 0, round(FACE_Z - RUNG_DEEP - STAND_OFF)], face: [0, 1] }];
+  return piece(id, 'gap', 'vertical', solids, lips, starts, { dir: 'chimney', span, top, rise: 1.2, across: round(span - 2 * RUNG_DEEP) }, floor);
+}
+
+/**
+ * The tower, one line of everything (the owner's "a vertical portion to the gauntlet that lets me combine a bunch of
+ * things"), left to right and up: grab A (2.6 m), shimmy right up two steps of 0.35 m (S1, S2), hop up 1.25 m twice (U1,
+ * U2, each stepped 0.3 m back), hop right 2 m across a gap to C (5.8 m), climb onto C's shelf (0.8 m deep), wall-climb the
+ * 5 m face above it (C2) and top out at 10.8 m, hop down and right 2 m across and 1.8 m down to D (9.0 m), shimmy round
+ * D's outer corner onto its side, drop 4 m off its back onto a platform (P, 5.0 m), cross a pit 4 m wide on two bars
+ * 2 m apart 2.4 m over P (for the bars phase) to G, and climb down the pole beside G (for the poles phase).
+ */
+function towerPiece(id: string, floor: number): CoursePiece {
+  const F = FACE_Z;
+  const r = 0.035;
+  const pr = 0.04;
+  const solids: CourseSolid[] = [
+    aabb('wall', -7, 0, F, -3, 2.6, F + 3),
+    aabb('wall', -3, 0, F, -1.5, 2.95, F + 3),
+    aabb('wall', -1.5, 0, F, 0, 3.3, F + 0.3),
+    aabb('wall', -1.5, 0, F + 0.3, 0, 4.55, F + 0.6),
+    aabb('wall', -1.5, 0, F + 0.6, 0, 5.8, F + 3),
+    aabb('wall', 2, 0, F + 0.6, 5, 5.8, F + 1.4),
+    aabb('wall', 2, 0, F + 1.4, 5, 10.8, F + 3.6),
+    aabb('wall', 7, 0, F + 1.4, 10, 9.0, F + 4.4),
+    aabb('platform', 7, 0, F + 4.4, 12, 5.0, F + 10),
+    aabb('platform', 7, 0, F + 14, 12, 5.0, F + 18),
+    aabb('bar', 7, 7.4 - r, F + 11 - r, 12, 7.4 + r, F + 11 + r),
+    aabb('bar', 7, 7.4 - r, F + 13 - r, 12, 7.4 + r, F + 13 + r),
+    aabb('pole', 12.5 - pr, 0, F + 16 - pr, 12.5 + pr, 8, F + 16 + pr),
+  ];
+  const lips: CourseLip[] = [
+    frontLip('A', -7, -3, 2.6, F),
+    frontLip('S1', -3, -1.5, 2.95, F),
+    frontLip('S2', -1.5, 0, 3.3, F),
+    frontLip('U1', -1.5, 0, 4.55, F + 0.3),
+    frontLip('U2', -1.5, 0, 5.8, F + 0.6),
+    frontLip('C', 2, 5, 5.8, F + 0.6),
+    frontLip('C2', 2, 5, 10.8, F + 1.4),
+    frontLip('D', 7, 10, 9.0, F + 1.4),
+    { name: 'D1', a: [10, 9.0, F + 1.4], b: [10, 9.0, F + 4.4], out: [1, 0] },
+  ];
+  const starts: CourseStart[] = [stand(-5), { name: 'onC', at: [3.5, 5.8, F + 1], face: [0, 1] }, { name: 'onP', at: [9.5, 5.0, F + 8], face: [0, 1] }];
+  return piece(id, 'run', 'vertical', solids, lips, starts, { steps: 0.35, hopUp: 1.25, hopSide: 2, wall: 5, hopDown: '2 across, 1.8 down', drop: 4, bars: 2, pit: 4, pole: 8, top: 10.8 }, floor);
+}
+
+/** The low pieces' undersides, metres over their floor: beams to walk under ducking, and slabs to crawl under lying prone. */
+export const DUCK_UNDER = [1.5, 1.2, 0.9] as const;
+export const CRAWL_UNDER = [0.6, 0.55] as const;
+
+/**
+ * A low piece (the feedback round's, for the duck and lying prone): something 4 m wide and 0.3 m thick across the way,
+ * its underside `under` over the floor, `long` along the way from the face line (a beam 0.4 m, a tunnel or a slab 4 m),
+ * standing on nothing (a fixed collider needs no posts), and a start 3 m short of it facing it: walk, run, crouch or crawl
+ * under it with nothing pressed but the move keys.
+ */
+function lowPiece(id: string, under: number, long: number, dir: string, floor: number): CoursePiece {
+  const solids: CourseSolid[] = [aabb(long > 1 ? 'roof' : 'beam', -2, under, FACE_Z, 2, round(under + 0.3), round(FACE_Z + long))];
+  const starts: CourseStart[] = [{ name: 'stand', at: [0, 0, round(FACE_Z - 3)], face: [0, 1] }];
+  return piece(id, 'obstacle', 'low', solids, [], starts, { dir, under, long }, floor);
+}
+
+/** The extra rows' pieces, in their order (its own frame, `at` not yet given): the ladders, the vertical pieces, the low pieces. */
+function extraPieces(floor: number): CoursePiece[] {
+  const out: CoursePiece[] = [];
+  for (const s of LADDER_STEPS) out.push(ladderPiece(`ladder-${f1(s)}`, s, floor));
+  for (const s of ZIGZAG_STEPS) out.push(zigzagPiece(`ladder-zigzag-${f1(s)}`, s, floor));
+  for (const s of SHELF_STEPS) out.push(shelvesPiece(`shelves-${f1(s)}`, s, floor));
+  out.push(chimneyPiece('chimney-2.5', floor));
+  out.push(towerPiece('tower', floor));
+  for (const h of DUCK_UNDER) out.push(lowPiece(`duck-${f1(h)}`, h, 0.4, 'duck', floor));
+  out.push(lowPiece('tunnel-0.9', 0.9, 4, 'tunnel', floor));
+  for (const h of CRAWL_UNDER) out.push(lowPiece(`crawl-${f1(h)}`, h, 4, 'crawl', floor));
+  return out;
+}
+
+/** Every id the extra rows have, in their order. */
+export function extraIds(): string[] {
+  return extraPieces(1).map((p) => p.id);
 }
