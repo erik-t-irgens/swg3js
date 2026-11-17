@@ -26,6 +26,24 @@
 // of 15.4, which would bloom, so a card's scene luminance is held under `bloomCap` (0.84, just under the bloom
 // pass's 0.85).
 
+/**
+ * The guards the card light's arithmetic takes against a division by nought, named once: this mirror's own and the
+ * WebGL shader text's (which writes the same numbers itself), so the WebGPU node graph (`gpuCard.ts`) is built from them.
+ */
+export const CARD_FLOORS = {
+  /** The exposure the inversion divides by. */
+  exposure: 1e-3,
+  /** A vector's length under which it is taken as none (`unit`). */
+  unit: 1e-12,
+  /** The point lights' blended normal's length under which the face stands in. */
+  pointFlat: 1e-4,
+  /** The shader's: a card plane's length under which it is none, the stored normal's under which the drawn one stands in, the `scene` curve's front row and the mip level's squared derivative. */
+  plane: 1e-4,
+  stored: 1e-6,
+  front: 1e-4,
+  lod: 1e-12,
+} as const;
+
 /** One RGB triple, plain numbers. */
 export type Rgb = [number, number, number];
 
@@ -95,14 +113,35 @@ export interface CardColours {
 
 // ---------------------------------------------------------------- the colour spaces (three's own formulas)
 
+/**
+ * The two sRGB curves' numbers, named once so the WebGPU node graph is built from the very numbers this mirror computes
+ * with (the GPU port's step 4, `gpuCard.ts`); the WebGL shader text writes the same numbers itself and is untouched.
+ */
+export const SRGB_CURVE = {
+  /** sRGB to linear: below this a straight line. */
+  toLinearBelow: 0.04045,
+  toLinearLine: 0.0773993808,
+  toLinearScale: 0.9478672986,
+  toLinearOffset: 0.0521327014,
+  toLinearPower: 2.4,
+  /** Linear to sRGB: below this a straight line. */
+  toSrgbBelow: 0.0031308,
+  toSrgbLine: 12.92,
+  toSrgbScale: 1.055,
+  toSrgbPower: 0.41666,
+  toSrgbOffset: 0.055,
+} as const;
+
 /** sRGB-encoded 0..1 to linear, three's `SRGBToLinear`. */
 export function srgbToLinear(c: number): number {
-  return c < 0.04045 ? c * 0.0773993808 : Math.pow(c * 0.9478672986 + 0.0521327014, 2.4);
+  const k = SRGB_CURVE;
+  return c < k.toLinearBelow ? c * k.toLinearLine : Math.pow(c * k.toLinearScale + k.toLinearOffset, k.toLinearPower);
 }
 
 /** Linear to sRGB-encoded 0..1, three's `LinearToSRGB` (and its shader's `sRGBTransferOETF`). */
 export function linearToSrgb(c: number): number {
-  return c < 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 0.41666) - 0.055;
+  const k = SRGB_CURVE;
+  return c < k.toSrgbBelow ? c * k.toSrgbLine : k.toSrgbScale * Math.pow(c, k.toSrgbPower) - k.toSrgbOffset;
 }
 
 // ---------------------------------------------------------------- three's ACES fit, both ways
@@ -149,24 +188,32 @@ const mul3 = (m: readonly (readonly number[])[], v: readonly number[], out: numb
   return out;
 };
 
+/**
+ * Three's RRT and ODT fit's numbers, `(v (v + a) − b) / (v (c v + d) + e)`, and the scale inside the fit: named once so
+ * the WebGPU node graph is built from this mirror's own numbers (`gpuCard.ts`).
+ */
+export const ACES_FIT = { a: 0.0245786, b: 0.000090537, c: 0.983729, d: 0.432951, e: 0.238081, scale: 0.6 } as const;
+
 /** Three's RRT and ODT fit, one channel. */
 export function acesFit(v: number): number {
-  return (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  const k = ACES_FIT;
+  return (v * (v + k.a) - k.b) / (v * (k.c * v + k.d) + k.e);
 }
 
 /** The fit solved for its input, one channel: the larger root of its quadratic, for an output held to 0..1. */
 export function acesFitInverse(y: number): number {
+  const k = ACES_FIT;
   const yy = Math.min(1, Math.max(0, y));
-  const A = 1 - 0.983729 * yy;
-  const B = 0.0245786 - 0.432951 * yy;
-  const C = -(0.000090537 + 0.238081 * yy);
+  const A = 1 - k.c * yy;
+  const B = k.a - k.d * yy;
+  const C = -(k.b + k.e * yy);
   return (-B + Math.sqrt(Math.max(0, B * B - 4 * A * C))) / (2 * A);
 }
 
 /** Three's ACES filmic at an exposure: scene-linear in, display-linear (0..1) out. */
 export function acesForward(rgb: Rgb, exposure = 1): Rgb {
   const t = [0, 0, 0];
-  mul3(ACES_IN, [(rgb[0] * exposure) / 0.6, (rgb[1] * exposure) / 0.6, (rgb[2] * exposure) / 0.6], t);
+  mul3(ACES_IN, [(rgb[0] * exposure) / ACES_FIT.scale, (rgb[1] * exposure) / ACES_FIT.scale, (rgb[2] * exposure) / ACES_FIT.scale], t);
   const f = [acesFit(t[0]), acesFit(t[1]), acesFit(t[2])];
   const o = [0, 0, 0];
   mul3(ACES_OUT, f, o);
@@ -180,7 +227,7 @@ export function acesInverse(display: Rgb): Rgb {
   const f = [acesFitInverse(v[0]), acesFitInverse(v[1]), acesFitInverse(v[2])];
   const x = [0, 0, 0];
   mul3(ACES_IN_INV, f, x);
-  return [Math.max(0, x[0] * 0.6), Math.max(0, x[1] * 0.6), Math.max(0, x[2] * 0.6)];
+  return [Math.max(0, x[0] * ACES_FIT.scale), Math.max(0, x[1] * ACES_FIT.scale), Math.max(0, x[2] * ACES_FIT.scale)];
 }
 
 // ---------------------------------------------------------------- the client's sum
@@ -224,9 +271,12 @@ export function clientDisplay(texel: Rgb, g: Rgb, c: CardColours, shadow: number
   return out;
 }
 
+/** Rec. 709's luminance weights, named once so the WebGPU node graph is built from them (`gpuCard.ts`). */
+export const LUMINANCE = [0.2126, 0.7152, 0.0722] as const;
+
 /** Linear luminance, Rec. 709. */
 export function luminance(rgb: Rgb): number {
-  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  return LUMINANCE[0] * rgb[0] + LUMINANCE[1] * rgb[1] + LUMINANCE[2] * rgb[2];
 }
 
 /** A scene colour scaled down whole where its luminance passes the cap: what a card may hand the bloom pass. */
@@ -243,7 +293,7 @@ export function capBloom(rgb: Rgb, cap: number): Rgb {
 export function clientScene(display: Rgb, t: Pick<CardLightTune, 'exposureRef' | 'bloomCap'>): Rgb {
   const lin: Rgb = [srgbToLinear(display[0]), srgbToLinear(display[1]), srgbToLinear(display[2])];
   const x = acesInverse(lin);
-  const e = Math.max(t.exposureRef, 1e-3);
+  const e = Math.max(t.exposureRef, CARD_FLOORS.exposure);
   return capBloom([x[0] / e, x[1] / e, x[2] / e], t.bloomCap);
 }
 
@@ -258,7 +308,7 @@ export function displayOf(scene: Rgb, exposure = 1): Rgb {
 /** A unit vector, or the zero vector for a degenerate one (never a NaN). */
 function unit(v: readonly number[]): Rgb {
   const l = Math.hypot(v[0], v[1], v[2]);
-  return l > 1e-12 ? [v[0] / l, v[1] / l, v[2] / l] : [0, 0, 0];
+  return l > CARD_FLOORS.unit ? [v[0] / l, v[1] / l, v[2] / l] : [0, 0, 0];
 }
 
 /**
@@ -287,7 +337,7 @@ export function pointFlatNormal(normal: readonly number[], face: readonly number
   const t = Math.min(1, Math.max(0, k));
   const m = [normal[0] + (face[0] - normal[0]) * t, normal[1] + (face[1] - normal[1]) * t, normal[2] + (face[2] - normal[2]) * t];
   const l = Math.hypot(m[0], m[1], m[2]);
-  if (l > 1e-4) {
+  if (l > CARD_FLOORS.pointFlat) {
     out[0] = m[0] / l;
     out[1] = m[1] / l;
     out[2] = m[2] / l;

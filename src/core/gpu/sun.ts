@@ -15,6 +15,9 @@
 
 import * as THREE from 'three';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
+import { reference, renderGroup } from 'three/tsl';
+import { leafBiasNode } from './gpuCard.ts';
+import { LOOKS_AT_LOAD } from './looks.ts';
 import type { GpuSun, GpuSunOptions } from '../gpuSwitch.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -25,6 +28,8 @@ const SUN_BACK = 100;
 export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.PerspectiveCamera, opts: GpuSunOptions): GpuSun {
   const light = new THREE.DirectionalLight(0xffffff, 0);
   light.name = 'gpu sun';
+  // The one light the leaf cards take as the sun (`gpuCard.ts`): its direction and its cascades' shadow feed their sum.
+  light.userData.swgSun = true;
   light.castShadow = true;
   light.shadow.mapSize.set(opts.mapSize, opts.mapSize);
   const node: Any = new CSMShadowNode(light, { cascades: 3, maxFar: opts.maxFar, mode: 'custom', customSplitsCallback: opts.splits, lightMargin: opts.lightMargin });
@@ -40,6 +45,9 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
     camera.updateProjectionMatrix();
   }
   if (typeof node._init === 'function') node._init({ camera, renderer });
+  // Each cascade's bias raised by the leaf cards' acne floor where a card asks for it (`gpuCard.ts`, step 4): nought, and so
+  // the cascade's own bias to the bit, in every other material's lookup. Only with the leaf cards' part taken in at load.
+  if (LOOKS_AT_LOAD.card) for (const l of node.lights as { shadow: Any }[]) l.shadow.biasNode = leafBiasNode(reference('bias', 'float', l.shadow).setGroup(renderGroup));
   let fittedReversed = camera.reversedDepth === true;
   const sun: GpuSun = {
     light,

@@ -12,6 +12,7 @@
 // import of its module.
 
 import type * as THREE from 'three';
+import type { DomeCapture } from '../world/envmap.ts';
 
 /** How the switch was read. */
 export type RendererChoice = 'webgl' | 'webgpu';
@@ -59,10 +60,30 @@ export interface GpuBundles {
   pass(seesWorld: boolean): void;
 }
 
+/**
+ * Reflections on WebGPU (`src/core/gpu/gpuEnv.ts`, the port's step 4): our sky captured and filtered by three's WebGPU
+ * generator through the WebGL path's own `DomeCapture`, and the black stand-in of the same kind. The world calls these
+ * on WebGPU alone (`World.refreshEnvironmentGpu`).
+ */
+export interface GpuEnvironment {
+  /** Whether our sky is captured and handed to the registry now (taken in at load, and the console's look switch on). */
+  readonly capturing: boolean;
+  /** The black filtered stand-in the registry hands every registered material while the world has none; null when left out at load. */
+  readonly standIn: THREE.Texture | null;
+  /** The dome's capture, made once for the session and warmed with one capture of an empty scene. */
+  makeDome(): DomeCapture;
+  /** An area's own cube (the 'game' source) filtered at its own size into a target of its own, the caller's to free. */
+  filterCube(cube: THREE.Texture): THREE.RenderTarget;
+  /** What `__debug.gpu()` says of it. */
+  report(): Record<string, unknown>;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** The region tiers' bundles (item 7). */
   readonly bundles: GpuBundles;
+  /** Reflections (step 4, item 2). */
+  readonly environment: GpuEnvironment;
   /** Answers once everything the warm-up has been handed is built and every pipeline asked for has landed (item 9). */
   compiled(): Promise<void>;
   /** The warm-up's count of compiles so far: `compiledSince` waits for the ones made after it alone. */
@@ -88,8 +109,11 @@ export interface GpuRuntime {
   frameDraws(): number;
   /** Everything `__debug.gpu()` says. */
   report(extra: Record<string, unknown>): Record<string, unknown>;
-  /** The stand-ins' look dials (`GPU_LOOK`), moved live; answers them as they stand. */
-  look(o: Record<string, unknown>): Record<string, number>;
+  /**
+   * The stand-ins' look dials (`GPU_LOOK`) and the models' looks' switches (`GPU_LOOKS`: `spec`, `env`, `detail`, step 4),
+   * moved live; answers them as they stand.
+   */
+  look(o: Record<string, unknown>): Record<string, number | boolean>;
   /** After each frame is drawn: the frame's counters taken, and whether a loading screen was up (pipelines made in play). */
   endFrame(loading: boolean): void;
   /** The console's helpers that reach under three's WebGL renderer, made to answer in words (`consoleWords.ts`); once, at boot. */

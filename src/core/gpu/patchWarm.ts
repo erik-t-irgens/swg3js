@@ -69,6 +69,15 @@ export const WARM_STATS = {
   asyncInPlay: 0,
   /** Labels of the last few pipelines a draw made in play. */
   lastInPlay: [] as string[],
+  /** Flora stand-ins built as the batches draw, receiving the sun's shadow (`holdOut`). */
+  floraReceive: 0,
+  /** Flora stand-ins listed for the sun's cascades too, casting as the batches cast (`holdOut`). */
+  floraCast: 0,
+  /**
+   * Pipelines made for a console self-test's own objects (`userData.swgSelfTest`), counted here and never as made in play:
+   * the self-tests draw materials of their own on a stage of their own, and a walk's count must not read their draws.
+   */
+  selfTestMade: 0,
   errors: 0,
   lastError: '',
 };
@@ -143,6 +152,11 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
   if (WARM_PATCH.applied) {
     const createRenderPipeline = be.createRenderPipeline.bind(be);
     be.createRenderPipeline = (ro: Any, promises: Any) => {
+      // A self-test's own (`selfTestMade`): counted apart, in no other count.
+      if (ro?.object?.userData?.swgSelfTest === true) {
+        WARM_STATS.selfTestMade++;
+        return createRenderPipeline(ro, promises);
+      }
       const behind = deps.loading();
       if (promises === null || promises === undefined) {
         if (behind) WARM_STATS.drawMadeBehind++;
@@ -152,7 +166,9 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
           // Whether the warm-up had been handed this object at all: the console's clue to what is not warmed.
           const was = !!ro?.object && builtFor.has(ro.object);
           if (was) WARM_STATS.drawInPlayOfWarmed++;
-          const warmed = was ? `warmed as ${builtHow.get(ro.object) ?? '?'}, drawn as ${howOf(ro)}` : 'never warmed';
+          // What it was drawn as either way (its pass, scene, lights and key), so a body never handed over says which pass
+          // met it unwarmed: a clone of a look the warm-up built drawn where its prototype was not, or keyed otherwise.
+          const warmed = was ? `warmed as ${builtHow.get(ro.object) ?? '?'}, drawn as ${howOf(ro)}` : `never warmed, drawn as ${howOf(ro)}`;
           const name = `${m?.isShadowPassMaterial ? 'shadow of ' : ''}${m?.name || m?.type || '?'}#${m?.id ?? '?'} on ${ro?.object?.name || ro?.object?.type || '?'}#${ro?.object?.id ?? '?'} (${warmed})`;
           WARM_STATS.lastInPlay.push(name.slice(0, 320));
           if (WARM_STATS.lastInPlay.length > 12) WARM_STATS.lastInPlay.shift();
@@ -363,7 +379,24 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
   const holdOut = (root: Any): Any => {
     drawables.length = 0;
     root.traverse((o: Any) => {
-      if ((o.isMesh || o.isLine || o.isPoints || o.isSprite) && o.material) drawables.push(o);
+      if ((o.isMesh || o.isLine || o.isPoints || o.isSprite) && o.material) {
+        // A flora stand-in is built for the region batches' and the chunks' plants, which receive the sun's shadow, and
+        // three keys a WebGPU program on `receiveShadow` (`RenderObject.getCacheKey`; on WebGL it is a uniform): left at
+        // three's false, every batch of a species first seen in play built its pipeline at its first draw. The stand-in is
+        // the warm-up's alone (never shown, let go after), so it is told once, before its items are built.
+        if (o.name === 'flora stand-in' && o.receiveShadow !== true) {
+          o.receiveShadow = true;
+          WARM_STATS.floraReceive++;
+        }
+        // And told to cast, so the sun's cascades list it too: the shadow pass lists casters alone (`list`), and a stand-in
+        // left at three's `castShadow` false warmed no shadow pipeline for the batches that cast, each of which a species
+        // first met in play then built at its first shadow draw (`shadow of ShadowMaterial ... on flora batch (never warmed)`).
+        if (o.name === 'flora stand-in' && o.castShadow !== true) {
+          o.castShadow = true;
+          WARM_STATS.floraCast++;
+        }
+        drawables.push(o);
+      }
     });
     kept.length = 0;
     for (const o of drawables) {

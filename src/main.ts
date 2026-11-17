@@ -2044,8 +2044,10 @@ class App {
     this.world.waterBodies.attach(this.renderer);
     // And every reflective material carries that same black stand-in whenever the world has no environment
     // of its own, so its program never loses the environment between worlds: a hull a jump carries to another
-    // system, and whatever its crew wear and hold, are drawn all through the unload (`envmap.ts`).
-    setEnvironmentStandIn(this.world.waterBodies.blackEnvironment);
+    // system, and whatever its crew wear and hold, are drawn all through the unload (`envmap.ts`). On WebGPU (the GPU port's
+    // step 4) the stand-in is three's WebGPU generator's own (`gpuEnv.ts`): the water's is WebGL's and is not made there.
+    if (GPU.webgpu) setEnvironmentStandIn(GPU.rt!.environment.standIn);
+    else setEnvironmentStandIn(this.world.waterBodies.blackEnvironment);
     // The volumetrics' settings into the one record the frame reads (`VOL_TUNE`) before the chain is built: the chain is
     // given the volume pass only with the master on (`makePostFX`). With `swg.vol` '0' the master is held off for the
     // session and nothing of the pass is ever made.
@@ -3410,16 +3412,20 @@ class App {
        * frame's draws and triangles, the pipelines held and made in play, the materials WebGPU cannot draw by name and
        * count, the stand-ins drawn, each private patch of three's and whether it applied, the region tiers' render bundles,
        * the warm-up, and everything forced off there. `{ look: { skyZenithAt, lavaGlow, groundGrey } }` moves the stand-ins'
-       * look live; `{ bundles: false }` draws the tiers' still meshes one by one again; `{ patches: { shadow, still, warm,
+       * look live, and `{ look: { spec, env, detail, card } }` switches the models' own looks (step 4: the client's highlight,
+       * our sky's reflections, the detail map, the leaf cards; each true by default, a uniform, `localStorage['swg.gpu.<part>'] = '0'` leaves one out
+       * at load); `{ bundles: false }` draws the tiers' still meshes one by one again; `{ patches: { shadow, still, warm,
        * stencil } }` switches a patch (each true by default); `{ warm: { sliceMs, sliceInPlayMs, inFlight } }` the warm-up's pace;
-       * `{ dynamicHint: true }` keeps the game's dynamic-draw hint on what the scene holds (dropped on WebGPU by default).
+       * `{ dynamicHint: true }` keeps the game's dynamic-draw hint on what the scene holds (dropped on WebGPU by default);
+       * `{ carries: true }` checks what three's node copies carry of the scene's materials (step 4: the person keys, the
+       * emissive splits, unlit, decals, flip-books and scrolls, the stencil reference), and `stays` says what is step 3's still.
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGL; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true) ? rt.tune({ ...o, scene: this.scene }) : undefined;
         return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
       },
       /**
@@ -24117,7 +24123,7 @@ class App {
    * What is held off on WebGPU this step (the GPU port's step 3), each named for `__debug.gpu()`: the effects chain (the
    * scene draws straight to the canvas with three's tone mapping), the far rings (a program of ours: far tiles stand), the
    * volumetrics' master (its remake is the owner's), the sun's shadow hold and shadow batches (every cascade drawn every
-   * frame, every caster drawing itself) and the leaf cards' shadow skip (a hook of ours WebGPU does not run).
+   * frame, every caster drawing itself), and the leaf cards' shadow skip only where their part (step 4) is left out at load.
    */
   private forceGpuOff(): void {
     const rt = GPU.rt!;
@@ -24126,13 +24132,17 @@ class App {
     rt.forced('volumetrics', 'the master is held off: its remake is the owner\'s');
     rt.forced('shadow hold', 'every cascade is drawn every frame');
     rt.forced('shadow batches', 'every caster draws itself');
-    rt.forced('leaf skip', 'the leaf cards\' own shadow skip is a hook of ours: every card receives as any surface does');
     HORIZON_TUNE.ground = 'tiles';
     VOL_TUNE.on = false;
     SHADOW_PASS_TUNE.cadence = false;
     SHADOW_PASS_TUNE.batches = false;
     SHADOW_BATCH_HATCH.on = false;
-    CARD_LIGHT_TUNE.shadow = 'all';
+    // The leaf cards' own shadow skip is ported (step 4, `gpuCard.ts`); with that part left out at load
+    // (`localStorage['swg.gpu.card'] = '0'`) it is held off, as step 3 held it.
+    if (rt.look({}).card !== true) {
+      rt.forced('leaf skip', 'the leaf cards\' part is left out at load: every card receives as any surface does');
+      CARD_LIGHT_TUNE.shadow = 'all';
+    }
   }
 
   private makePostFX(): PostFX {

@@ -3772,8 +3772,8 @@ export class World {
    * only where it has none, which is what this did before.
    */
   private refreshEnvironment(dt: number): void {
-    // No reflections on WebGPU this step (the GPU port's step 3): the filter is WebGL's, and the sky's capture is a remake.
-    if (GPU.webgpu) return;
+    // On WebGPU (the GPU port's step 4) our sky is captured and filtered by three's WebGPU generator (`gpuEnv.ts`).
+    if (GPU.webgpu) return this.refreshEnvironmentGpu(dt);
     const sky = this.swgSky;
     if (!sky || !this.renderer) return;
     this.pmrem ??= this.makePmrem(this.renderer);
@@ -3833,6 +3833,63 @@ export class World {
   }
 
   /**
+   * WebGPU's half of `refreshEnvironment` (the GPU port's step 4), on WebGPU alone: the same rules through the WebGL path's
+   * own `DomeCapture` handed three's WebGPU generator (`src/core/gpu/gpuEnv.ts`), so every registered material is handed
+   * one kept texture filled in place, and an area's own cube (the 'game' source) a target of its own. The console's look
+   * switch off (`__debug.gpu({ look: { env: false } })`) hands the registry the black stand-in, which reflects and fills
+   * nothing; the 'scene' comparison is WebGL's and the dome is kept here either way.
+   */
+  private refreshEnvironmentGpu(dt: number): void {
+    const env = GPU.rt!.environment;
+    const sky = this.swgSky;
+    if (!sky || !this.renderer) return;
+    if (!env.capturing) {
+      if (this.envTexture) {
+        this.envTexture = null;
+        this.envWant = null;
+        setEnvironment(null);
+      }
+      return;
+    }
+    const dome = (this.dome ??= env.makeDome());
+    const cube = REFLECTIONS.source === 'game' ? (this.day.isDay ? sky.environment.day : sky.environment.night) : null;
+    const skyPack = this.skyPack;
+    const usable = skyPack && cube && cube.faces.length && !this.envFailed.has(cube.faces[0]) ? cube : null;
+    if (usable && skyPack) {
+      const want = usable.faces[0];
+      if (this.envWant === want) return;
+      this.envWant = want;
+      new THREE.CubeTextureLoader().load(
+        usable.faces.map((f) => skyPack.url(f)),
+        (tex) => {
+          if (this.swgSky !== sky || this.envWant !== want || !GPU.rt!.environment.capturing) {
+            tex.dispose();
+            return;
+          }
+          tex.colorSpace = THREE.SRGBColorSpace;
+          const target = env.filterCube(tex);
+          tex.dispose();
+          this.useEnvironment(target.texture, target as unknown as THREE.WebGLRenderTarget);
+        },
+        undefined,
+        () => {
+          console.warn(`sky: reflection cube map ${want} failed to load; reflecting the sky instead`);
+          this.envFailed.add(want);
+          if (this.envWant === want) this.envWant = null;
+        },
+      );
+      return;
+    }
+    this.envWant = null;
+    this.envTimer += dt;
+    if (this.envTimer < 4) return;
+    this.envTimer = 0;
+    const renderer = this.renderer;
+    const captured = dome.capture((camera) => camera.update(renderer, sky.domeScene));
+    if (captured) this.useEnvironment(captured, null);
+  }
+
+  /**
    * The environment for every reflective surface: handed to all of them only when it is another texture than the one
    * they hold (the dome's capture is the same texture every time, filled in place, so a capture tells nobody anything),
    * and only then is the last target of its own freed, so nothing registered is ever left sampling a target that has
@@ -3857,7 +3914,7 @@ export class World {
    * every reflective material in the world was rebuilt at once.
    */
   async reflectionsReady(ms: number): Promise<void> {
-    if (GPU.webgpu) return;
+    if (GPU.webgpu && !GPU.rt!.environment.capturing) return;
     if (!this.swgSky || !this.renderer) return;
     if (!this.envTexture) {
       this.envTimer = 99;
@@ -8974,11 +9031,13 @@ export class World {
     // The environment filter's own programs, built here with everything else's rather than in the
     // loader callback that brings the first cube in, which lands after the screen has lifted; and the
     // dome's own capture with its kept targets beside it.
-    // Neither on WebGPU (the GPU port's step 3): no environment is filtered there this step.
+    // Neither on WebGPU: there the dome is three's WebGPU generator's (the GPU port's step 4, below).
     if (this.renderer && !GPU.webgpu) {
       this.pmrem ??= this.makePmrem(this.renderer);
       this.dome ??= this.makeDome(this.renderer);
     }
+    // On WebGPU (the port's step 4) the dome's capture is made here behind the screen all the same (`gpuEnv.ts`).
+    if (this.renderer && GPU.webgpu && GPU.rt!.environment.capturing) this.dome ??= GPU.rt!.environment.makeDome();
     // The sound of the place, as early as it can be had: on an arrival this runs before the pack is
     // in, so it usually only hands the weather its channel sink and the first frames of `update` do
     // the rest, still behind the loading screen.

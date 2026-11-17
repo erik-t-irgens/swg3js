@@ -12,14 +12,21 @@
 
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial, MeshStandardNodeMaterial, NodeMaterial } from 'three/webgpu';
-import { attribute, float, mix, normalize, positionGeometry, positionLocal, smoothstep, uniform, vec3, vec4, vertexColor } from 'three/tsl';
+import { attribute, float, mix, normalize, positionGeometry, positionLocal, renderGroup, smoothstep, uniform, vec3, vec4, vertexColor } from 'three/tsl';
 import type { GpuStandIns, LiveColour } from '../gpuSwitch.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-/** A colour the WebGL path keeps, as three's colour uniform: the very object, so its writes reach the picture. */
-const colour = (c: LiveColour): Any => uniform(c as THREE.Color);
+/**
+ * A colour the WebGL path keeps, as three's colour uniform: the very object, so its writes reach the picture. In the shared
+ * render group, written once a render: in three's object group a uniform is written only when its object is first drawn or
+ * its material or matrix moves, so a mesh that stands still (the dome's copy the sky's capture draws, a lava flow) kept the
+ * colour of its first draw for good (the GPU port's step 4 found it: every reflection on WebGPU was the first capture's sky).
+ */
+const colour = (c: LiveColour): Any => uniform(c as THREE.Color).setGroup(renderGroup);
+/** A dial read once a render, in the shared render group for the same reason. */
+const dial = (read: () => number): Any => uniform(read()).setGroup(renderGroup).onRenderUpdate(read);
 
 export function makeStandIns(): GpuStandIns {
   return {
@@ -29,7 +36,7 @@ export function makeStandIns(): GpuStandIns {
       m.fog = false;
       // The dome is a sphere about the camera, so its local direction is the view's: up its elevation from the horizon
       // colour to the zenith's, over the share of the way up the dial says.
-      const up = uniform(GPU_LOOK.skyZenithAt).onRenderUpdate(() => GPU_LOOK.skyZenithAt);
+      const up = dial(() => GPU_LOOK.skyZenithAt);
       const elev = normalize(positionLocal).y;
       m.colorNode = mix(colour(horizon), colour(zenith), smoothstep(float(0), up, elev));
       return m;
@@ -37,7 +44,7 @@ export function makeStandIns(): GpuStandIns {
     lava(c) {
       const m = new MeshBasicNodeMaterial();
       m.name = 'gpu stand-in: lava';
-      const glow = uniform(GPU_LOOK.lavaGlow).onRenderUpdate(() => GPU_LOOK.lavaGlow);
+      const glow = dial(() => GPU_LOOK.lavaGlow);
       m.colorNode = colour(c).mul(glow);
       return m;
     },
@@ -49,8 +56,8 @@ export function makeStandIns(): GpuStandIns {
       m.name = 'gpu stand-in: ground';
       m.roughness = 1;
       m.metalness = 0;
-      const grey = uniform(GPU_LOOK.groundGrey).onRenderUpdate(() => GPU_LOOK.groundGrey);
-      const shade = uniform(GPU_LOOK.groundTint).onRenderUpdate(() => GPU_LOOK.groundTint);
+      const grey = dial(() => GPU_LOOK.groundGrey);
+      const shade = dial(() => GPU_LOOK.groundTint);
       m.colorNode = source === 'tint' ? attribute('aGroundTint', 'vec3').pow(vec3(2.2)).mul(shade) : source === 'color' ? vertexColor().rgb : vec3(grey, grey, grey);
       m.roughnessNode = float(1);
       m.metalnessNode = float(0);

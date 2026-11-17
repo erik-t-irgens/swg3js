@@ -37,6 +37,9 @@ export interface LeafBox {
   max: [number, number, number];
 }
 
+/** The smallest step either way a direction's component is taken as, so no division is by nought (the shader's own 1e-6). */
+export const CROWN_DIR_FLOOR = 1e-6;
+
 /**
  * How far a ray from `p` along the unit `dir` stays inside `box` before it leaves it, in the box's units, scaled
  * by `scale`: the slab exit, never under nought (a box behind the point skips nothing). A zero component of the
@@ -45,7 +48,7 @@ export interface LeafBox {
 export function crownExit(box: LeafBox, p: readonly number[], dir: readonly number[], scale = 1): number {
   let exit = Number.POSITIVE_INFINITY;
   for (let k = 0; k < 3; k++) {
-    const d = dir[k] >= 0 ? Math.max(dir[k], 1e-6) : Math.min(dir[k], -1e-6);
+    const d = dir[k] >= 0 ? Math.max(dir[k], CROWN_DIR_FLOOR) : Math.min(dir[k], -CROWN_DIR_FLOOR);
     const t1 = (box.min[k] - p[k]) / d;
     const t2 = (box.max[k] - p[k]) / d;
     exit = Math.min(exit, Math.max(t1, t2));

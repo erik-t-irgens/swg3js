@@ -57,7 +57,13 @@ export interface SpecTune {
 export const SPEC_TUNE: SpecTune = { use: 'client', gain: 1, cap: 1, film: 1, gate: 0 };
 
 /** The floor every base is held to before it is raised to a power, so nothing is ever `pow` of nought or less. */
-const FLOOR = 1e-6;
+export const SPEC_FLOOR = 1e-6;
+const FLOOR = SPEC_FLOOR;
+/** The gate's own test (`gate`): a face counts as facing the light from N.L of this. */
+export const GATE_NL = 1e-4;
+/** A mode code under this draws no highlight; over `MODE_BAND_ABOVE` the band (the codes are 0, 1 and 2: `SPEC_MODE_CODE`). */
+export const MODE_NONE_BELOW = 0.5;
+export const MODE_BAND_ABOVE = 1.5;
 
 /** What a converted material says of its highlight (`userData.swgSpec`), made safe for a uniform: a mode, an RGB colour and a power. */
 export interface SpecValues {
@@ -103,7 +109,7 @@ export function bandShape(nh: number, power: number): number {
 
 /** The shape for a mode code: the band times N.L on aniso, the plain power otherwise (nought for none is the caller's). */
 export function specShape(mode: number, nh: number, nl: number, power: number): number {
-  if (mode > 1.5) return bandShape(nh, power) * Math.min(1, Math.max(0, nl));
+  if (mode > MODE_BAND_ABOVE) return bandShape(nh, power) * Math.min(1, Math.max(0, nl));
   return blinnShape(nh, power);
 }
 
@@ -118,7 +124,7 @@ export function clientSpecular(out: Vec3, light: Vec3, color: Vec3, mask: number
   out[0] = 0;
   out[1] = 0;
   out[2] = 0;
-  if (mode < 0.5) return out;
+  if (mode < MODE_NONE_BELOW) return out;
   const hx = l[0] + v[0];
   const hy = l[1] + v[1];
   const hz = l[2] + v[2];
@@ -128,7 +134,7 @@ export function clientSpecular(out: Vec3, light: Vec3, color: Vec3, mask: number
   const nh = (n[0] * hx + n[1] * hy + n[2] * hz) / len;
   const shape = specShape(mode, nh, nl, power);
   const gateShare = Math.min(1, Math.max(0, tune.gate));
-  const gate = 1 + ((nl >= 1e-4 ? 1 : 0) - 1) * gateShare;
+  const gate = 1 + ((nl >= GATE_NL ? 1 : 0) - 1) * gateShare;
   const k = (mask * shape * gate * Math.max(tune.gain, 0)) / Math.PI;
   const cap = Math.max(tune.cap, 0) / Math.PI;
   for (let i = 0; i < 3; i++) out[i] = Math.min(light[i] * color[i] * k, light[i] * cap);
@@ -158,8 +164,8 @@ export function filmShare(wet: number, tune: SpecTune = SPEC_TUNE): number {
 
 /** The highlight at its peak, relative to a white surface facing the same light: the colour's channel times the mask, as the client drew it, until the cap. */
 export function relativePeak(color: number, mask: number, mode: number, power: number, tune: SpecTune = SPEC_TUNE): number {
-  if (mode < 0.5) return 0;
-  const peak = mode > 1.5 ? bandShape(BAND_PEAK_NH, power) : blinnShape(1, power);
+  if (mode < MODE_NONE_BELOW) return 0;
+  const peak = mode > MODE_BAND_ABOVE ? bandShape(BAND_PEAK_NH, power) : blinnShape(1, power);
   return Math.min(color * mask * peak * Math.max(tune.gain, 0), Math.max(tune.cap, 0));
 }
 

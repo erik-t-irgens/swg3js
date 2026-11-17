@@ -10,7 +10,8 @@
 //  3. anywhere under `src/` outside `src/core/gpu/`, nothing imports three's WebGPU build or the port's runtime, statically
 //     or dynamically, but `main.ts`'s one dynamic import in `startGpu`, which the boot makes only with the switch at WebGPU;
 //  4. each guarded site: the line it had kept whole as the WebGL branch right after its WebGPU line, or the guard folded into
-//     the line itself (`if (!GPU.webgpu) ...`, `... && !GPU.webgpu)`).
+//     the line itself (`if (!GPU.webgpu) ...`, `... && !GPU.webgpu)`); step 4's (the models' own looks: the registry's
+//     stand-in, the world's capture of our sky) the same way, and its modules reached only through `start.ts`.
 //
 // Run: node tools/swg/tests/gpuOff.test.ts
 import assert from 'node:assert/strict';
@@ -246,6 +247,77 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(dirty.length === 2 && l[dirty[0] + 1] === 'if (r.hidden === 0) {' && l[dirty[1] + 1] === 'const saved = r.saved;', 'layoutStream.ts: hiding and showing in place each record the tier again, before the lines they had');
     const poke = l.flatMap((x, i) => (x === 'if (GPU.webgpu) GPU.rt!.bundles.poke();' ? [i] : []));
     ok(poke.length === 2 && l[poke[0] + 1] === 'for (const region of this.regions.values()) {' && l[poke[1] - 2] === 'st.ms = performance.now() - t0;' && l[poke[1] + 1] === '}', 'layoutStream.ts: a caster switch and a level sweep each poke the bundles, beside the lines they had');
+  }
+  // Step 4's sites (the models' own looks on WebGPU). The registry's black stand-in on WebGPU is three's WebGPU generator's;
+  // the WebGL branch hands over the water's, the line it had.
+  {
+    const l = lines('src/main.ts');
+    const at = l.flatMap((x, i) => (x === 'if (GPU.webgpu) setEnvironmentStandIn(GPU.rt!.environment.standIn);' ? [i] : []));
+    ok(at.length === 1 && l[at[0] + 1] === 'else setEnvironmentStandIn(this.world.waterBodies.blackEnvironment);', "main.ts: the registry's stand-in is the WebGPU generator's on WebGPU, the water's in the WebGL branch, as it was");
+  }
+  // The world's reflections on WebGPU: step 3's guards (`if (GPU.webgpu) return;`) now hand WebGPU its own half or ask the
+  // runtime whether it captures; the lines 1446f2a had after each stand right after them, and the dome made behind the
+  // first screen on WebGPU stands after the WebGL block, folded into one line of its own.
+  const step4: [string, string, string][] = [
+    ['src/world/world.ts', 'if (GPU.webgpu) return this.refreshEnvironmentGpu(dt);', 'const sky = this.swgSky;'],
+    ['src/world/world.ts', 'if (GPU.webgpu && !GPU.rt!.environment.capturing) return;', 'if (!this.swgSky || !this.renderer) return;'],
+    ['src/world/world.ts', 'if (this.renderer && GPU.webgpu && GPU.rt!.environment.capturing) this.dome ??= GPU.rt!.environment.makeDome();', '// The sound of the place, as early as it can be had: on an arrival this runs before the pack is'],
+  ];
+  for (const [f, gpu, gl] of step4) {
+    const l = lines(f);
+    const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
+    ok(at.length === 1, `${f}: the WebGPU line is there once: ${gpu}`);
+    ok(l[at[0] + 1] === gl, `${f}: the line 1446f2a had there follows the WebGPU line: ${gl}`);
+  }
+  {
+    const l = lines('src/world/world.ts');
+    const dome = l.indexOf('if (this.renderer && GPU.webgpu && GPU.rt!.environment.capturing) this.dome ??= GPU.rt!.environment.makeDome();');
+    ok(dome > 4 && l[dome - 2] === '}' && l[dome - 3] === 'this.dome ??= this.makeDome(this.renderer);' && l[dome - 4] === 'this.pmrem ??= this.makePmrem(this.renderer);' && l[dome - 5] === 'if (this.renderer && !GPU.webgpu) {', "world.ts: the WebGL warm-up's pmrem and dome lines stand as they were, before WebGPU's own dome");
+    // WebGPU's own half is a method of its own, called only from the guard above: nothing of it runs on WebGL.
+    const calls = l.filter((x) => x.includes('this.refreshEnvironmentGpu(')).length;
+    ok(calls === 1, `world.ts: refreshEnvironmentGpu is called from the WebGPU guard alone (${calls})`);
+  }
+  // What step 4 adds under src/core/gpu/ is reached only through start.ts (section 2 holds the WebGL graph loads none of it);
+  // the one file of the WebGL path it touches beyond the guards is specMath.ts, whose new names are the numbers its own
+  // functions and the WebGL shader text use.
+  {
+    const m = readFileSync(join(SRC, 'world', 'specMath.ts'), 'utf8');
+    for (const want of ['export const SPEC_FLOOR = 1e-6;', 'export const GATE_NL = 1e-4;', 'export const MODE_NONE_BELOW = 0.5;', 'export const MODE_BAND_ABOVE = 1.5;']) ok(m.includes(want), `specMath.ts: ${want}`);
+    for (const g of ['looks.ts', 'gpuSpec.ts', 'gpuDetail.ts', 'gpuEnv.ts', 'gpuSpecSelfTest.ts', 'gpuCard.ts', 'gpuCardSelfTest.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g)), `step 4's ${g} is under src/core/gpu/`);
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(/LOOK_PARTS\.push\(detailPart, specPart, cardPart\);\s*installLooks\(renderer\);/.test(startText) && startText.indexOf('installLooks(renderer);') > startText.indexOf('const fallback: FallbackStats = installFallback(renderer);'), "start.ts: the looks go on the node library after the fallback's wrap");
+  }
+  // The leaf cards' part (step 4, item 4): the two files of the WebGL path it touches are the mirrors, whose new names are
+  // the numbers their own functions and the WebGL shader text use; and the one guarded site is inside `forceGpuOff`, which
+  // runs on WebGPU alone, holding the skip off only where the part is left out at load.
+  {
+    const m = readFileSync(join(SRC, 'world', 'cardLightMath.ts'), 'utf8');
+    for (const want of ['export const ACES_FIT = { a: 0.0245786, b: 0.000090537, c: 0.983729, d: 0.432951, e: 0.238081, scale: 0.6 } as const;', 'export const LUMINANCE = [0.2126, 0.7152, 0.0722] as const;', '  toSrgbBelow: 0.0031308,', '  toLinearBelow: 0.04045,', '  exposure: 1e-3,']) ok(m.includes(want), `cardLightMath.ts: ${want.trim()}`);
+    const s = readFileSync(join(SRC, 'world', 'leafShadow.ts'), 'utf8');
+    ok(s.includes('export const CROWN_DIR_FLOOR = 1e-6;'), 'leafShadow.ts: the crown exit\'s floor is the shader\'s 1e-6');
+    const l = lines('src/main.ts');
+    const f = l.indexOf('private forceGpuOff(): void {');
+    const g = l.indexOf("if (rt.look({}).card !== true) {");
+    ok(f > 0 && g > f && g - f < 20 && l[g + 2] === "CARD_LIGHT_TUNE.shadow = 'all';", "main.ts: the leaf skip is held off on WebGPU only inside forceGpuOff, and only with the leaf cards' part left out at load");
+    const sun = readFileSync(join(SRC, 'core', 'gpu', 'sun.ts'), 'utf8');
+    ok(sun.includes('light.userData.swgSun = true;') && sun.includes('if (LOOKS_AT_LOAD.card) for (const l of node.lights'), "sun.ts: the sun is marked for the cards and its cascades carry the leaf floor's bias node only with the part in");
+  }
+  // Items 5 and 6 (step 4): the carries' check and the stays are WebGPU's own module, reached through start.ts; main.ts
+  // asks for the check only past the WebGL return of `gpu()`; and the flora stand-ins are told to receive the sun's
+  // shadow inside the warm patch alone (WebGPU's), never in flora.ts, whose stand-ins WebGL builds as they were.
+  {
+    ok(existsSync(join(SRC, 'core', 'gpu', 'carries.ts')), "step 4's carries.ts is under src/core/gpu/");
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes("import { carriesReport, STAYS } from './carries.ts';") && startText.includes('stays: { ...STAYS },'), 'start.ts: the report says what stays and the tune checks what the copies carry');
+    const l = lines('src/main.ts');
+    const back = l.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
+    const ask = l.findIndex((x) => x.includes('o.carries === true) ? rt.tune({ ...o, scene: this.scene })'));
+    ok(back > 0 && ask > back && ask - back < 6, "main.ts: gpu() asks for the carries' check only after its WebGL return");
+    const warm = readFileSync(join(SRC, 'core', 'gpu', 'patchWarm.ts'), 'utf8');
+    ok(warm.includes("if (o.name === 'flora stand-in' && o.receiveShadow !== true) {"), 'patchWarm.ts: the flora stand-ins are told to receive as the batches do, inside the warm patch');
+    ok(warm.includes("if (o.name === 'flora stand-in' && o.castShadow !== true) {"), "patchWarm.ts: and told to cast, so the sun's cascades list their shadow pipelines, inside the warm patch");
+    const flora = readFileSync(join(SRC, 'world', 'flora.ts'), 'utf8');
+    ok(!/receiveShadow|castShadow/.test(flora.slice(flora.indexOf('standIns(): THREE.InstancedMesh[] {'), flora.indexOf('materials(out: Set<THREE.Material>'))), 'flora.ts: the stand-ins are made as 1446f2a made them');
   }
   // The doorways on WebGPU: their two ways of being drawn each wear a material of their own, the WebGL lines after the guard.
   {

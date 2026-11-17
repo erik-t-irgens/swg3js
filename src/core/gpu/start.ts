@@ -25,6 +25,14 @@ import { applyPatches, isPatchName, patchReport, setPatch } from './patches.ts';
 import { installWarm, WARM_PATCH, WARM_STATS, WARM_TUNE } from './patchWarm.ts';
 import { BUNDLE_TUNE, TierBundles } from './bundles.ts';
 import { installUsageHint, setUsageHint, USAGE_HINT } from './usageHint.ts';
+import { installLooks, LOOK_PARTS, looksReport, setLooks } from './looks.ts';
+import { DETAIL_GPU_STATS, detailPart } from './gpuDetail.ts';
+import { SPEC_GPU_STATS, specPart } from './gpuSpec.ts';
+import { specSelfTestGpu } from './gpuSpecSelfTest.ts';
+import { CARD_GPU_STATS, cardPart } from './gpuCard.ts';
+import { cardLightSelfTestGpu, leafShadowSelfTestGpu } from './gpuCardSelfTest.ts';
+import { carriesReport, STAYS } from './carries.ts';
+import { makeGpuEnvironment } from './gpuEnv.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -97,6 +105,10 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   // The game's `DynamicDrawUsage` hint dropped as it is set, before any world is made (`usageHint.ts`).
   installUsageHint();
   const fallback: FallbackStats = installFallback(renderer);
+  // The models' own looks on the node copies three makes (step 4): the detail map's colour, then the client's highlight,
+  // then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
+  LOOK_PARTS.push(detailPart, specPart, cardPart);
+  installLooks(renderer);
   // The four private patches (item 8), each only where three is the revision it was written for.
   applyPatches(renderer);
   const forcedOff = new Map<string, string>();
@@ -132,17 +144,26 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     loading: () => loadingNow,
   });
   RT_HOOKS.compile = (_r, scene, camera, target) => warm.compile(scene, camera, target);
+  // Reflections (step 4): the black stand-in made here, at start, behind the first loading screen, with the dome's generator.
+  const environment = makeGpuEnvironment(renderer);
   const rt: GpuRuntime & {
     fallback: FallbackStats;
     adapter: AdapterInfo;
   } = {
     look(o: Record<string, unknown>) {
-      return { ...tuneGpuLook(o as Partial<typeof GPU_LOOK>) };
+      return { ...tuneGpuLook(o as Partial<typeof GPU_LOOK>), ...setLooks(o) };
     },
     wrapConsole(debug: Record<string, unknown>) {
-      wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: renderer.backend?.trackTimestamp === true ? 'on' : "off (localStorage['swg.gpu.timestamps'] = '1' and a reload)" }));
+      wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: renderer.backend?.trackTimestamp === true ? 'on' : "off (localStorage['swg.gpu.timestamps'] = '1' and a reload)" }), {
+        // The client's highlight drawn through the lighting model of ours and held to its mirror (step 4).
+        specSelfTest: () => specSelfTestGpu(renderer),
+        // The leaf cards drawn through the parts of ours and held to their mirror (step 4).
+        cardLightSelfTest: () => cardLightSelfTestGpu(renderer),
+        leafShadowSelfTest: () => leafShadowSelfTestGpu(renderer),
+      });
     },
     renderer: renderer as THREE.WebGLRenderer,
+    environment,
     standIns,
     fallback,
     adapter,
@@ -174,6 +195,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         out.warm = { ...WARM_TUNE };
       }
       if (typeof o.dynamicHint === 'boolean') out.dynamicHint = setUsageHint((o.scene as THREE.Object3D | undefined) ?? null, o.dynamicHint);
+      // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
+      if (o.carries === true) out.carries = carriesReport(renderer, (o.scene as THREE.Object3D | undefined) ?? null);
       return out;
     },
     makeSun(scene: THREE.Scene, camera: THREE.PerspectiveCamera, o: GpuSunOptions) {
@@ -217,13 +240,16 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         unsupported: Object.fromEntries([...fallback.unsupported.entries()].sort((a, b) => b[1] - a[1])),
         standIns: Object.fromEntries(fallback.standIns.entries()),
         forcedOff: Object.fromEntries(forcedOff.entries()),
+        // What stays as step 3 left it (step 4, item 5); `__debug.gpu({ carries: true })` checks what the node copies carry.
+        stays: { ...STAYS },
         look: { ...GPU_LOOK },
+        looks: looksReport({ spec: { ...SPEC_GPU_STATS, by: "a lighting model of ours extending three's physical one, its direct specular the client's term (gpuSpec.ts)" }, detail: { ...DETAIL_GPU_STATS, by: "the node copy's colour times the detail at uv(1) (gpuDetail.ts)" }, card: { ...CARD_GPU_STATS, by: "the card rule's cut, the stored normal, the client's sum after three's indirect light, the sun's shadow from the cascades' own node, the leaf skip as the lookup's place moved toward the sun (gpuCard.ts)" }, env: environment.report() }),
         sun: sunNow ? sunNow.describe() : 'no cascades yet (the first world makes them)',
         gpuErrors: { count: errors, last: lastError || null },
         warmUp: {
           by: WARM_PATCH.on && WARM_PATCH.applied ? "the warm patch: every pass's items and every sun cascade's casters listed by three's walk and built ahead" : "three's own compileAsync (the warm patch is off or did not apply): no shadow pass warmed",
           pending: warm.pending(),
-          pipelinesMade: { byDrawInPlay: WARM_STATS.drawMadeInPlay, byDrawBehindScreen: WARM_STATS.drawMadeBehind, aheadInPlay: WARM_STATS.asyncInPlay, aheadBehindScreen: WARM_STATS.asyncBehind, lastByDrawInPlay: [...WARM_STATS.lastInPlay] },
+          pipelinesMade: { byDrawInPlay: WARM_STATS.drawMadeInPlay, byDrawBehindScreen: WARM_STATS.drawMadeBehind, aheadInPlay: WARM_STATS.asyncInPlay, aheadBehindScreen: WARM_STATS.asyncBehind, lastByDrawInPlay: [...WARM_STATS.lastInPlay], forSelfTests: WARM_STATS.selfTestMade },
         },
         patches: patchReport(),
         bundles: bundles.report(),
