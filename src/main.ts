@@ -134,6 +134,8 @@ import { rebasedCount } from './anim/jkaSpine.ts';
 import { IMPACT_MUTES } from './anim/animRules.ts';
 import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climbTune.ts';
 import { climbDialsFor } from './anim/climbDials.ts';
+import { climbCourse, courseIds, type ClimbCourse } from './anim/climbCourse.ts';
+import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
@@ -6911,6 +6913,68 @@ class App {
           out.push({ scale: s, riserM: Number((RISER * s[1]).toFixed(3)), treadM: Number((TREAD * s[2]).toFixed(3)), stood, at: [Number(bx.toFixed(1)), Number(y.toFixed(2)), Number(bz.toFixed(1))] });
         }
         return { cleared, flights: out, note: 'each flight\'s foot is `at` (the game\'s frame); walk up from there. `__debug.stairsTest({ clear: true })` takes them down.' };
+      },
+      /**
+       * Climbing II, phase 1 (the owner's 2026-11-16: "spawn edges (both hanging and braced) in a gauntlet of various turns
+       * and heights and jumps to test out distances"): the test course of `src/anim/climbCourse.ts` stood in front of the
+       * player, one family a row across the view, each piece on a level slab of its own 0.05 m over the highest ground under
+       * it, `ahead` (4) m along the way the body faces; plain boxes in one material and fixed colliders the ledges and the
+       * wall climb read as the world's own still geometry, stood behind a short curtain so nothing is built in play.
+       * `pieces` stands only those ids; `{ clear: true }` takes it down (so do a travel, the select screen and a reload).
+       */
+      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number } = {}) => {
+        const cleared = this.dropClimbTest('cleared');
+        if (o.clear) return { cleared };
+        if (!this.inWorld || this.traveling) return { cleared, error: 'not now: enter the world first' };
+        if (this.world.planet.space) return { cleared, error: 'a space zone has no ground to stand a course on' };
+        const plan = climbCourse({ pieces: o.pieces, gap: o.gap });
+        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds() };
+        const h = this.player.heading;
+        const ahead = o.ahead ?? 4;
+        const p = this.player.worldPos;
+        const ox = p.x + Math.sin(h) * ahead;
+        const oz = p.z + Math.cos(h) * ahead;
+        // Each piece's slab: its top 0.05 m over the highest ground under it (sampled every 2 m and at its corners), and every
+        // slab as deep as the most the ground falls under any of them, so no slab's edge stands over the ground.
+        const flat: CourseFrame = { ox, oz, h, ref: () => 0 };
+        const refs = new Map<string, number>();
+        let deep = 1;
+        const w = { x: 0, y: 0, z: 0 };
+        for (const piece of plan.pieces) {
+          const b = piece.bounds;
+          const nx = Math.ceil((b.x1 - b.x0) / 2);
+          const nz = Math.ceil((b.z1 - b.z0) / 2);
+          let hi = -Infinity;
+          let lo = Infinity;
+          for (let i = 0; i <= nx; i++) {
+            for (let j = 0; j <= nz; j++) {
+              courseToWorld(flat, piece, b.x0 + ((b.x1 - b.x0) * i) / nx, 0, b.z0 + ((b.z1 - b.z0) * j) / nz, w);
+              const g = this.world.terrain.heightAt(w.x, w.z);
+              hi = Math.max(hi, g);
+              lo = Math.min(lo, g);
+            }
+          }
+          refs.set(piece.id, hi + 0.05);
+          deep = Math.max(deep, hi - lo + 0.55);
+        }
+        const floor = Math.ceil(deep * 10) / 10;
+        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor });
+        const frame: CourseFrame = { ox, oz, h, ref: (q) => refs.get(q.id) ?? 0 };
+        await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');
+        const out = course.pieces.map((piece) => {
+          const st = piece.starts[0];
+          courseToWorld(frame, piece, st.at[0], st.at[1], st.at[2], w);
+          const f = courseWayToWorld(frame, st.face[0], st.face[1], { x: 0, z: 0 });
+          return { id: piece.id, kind: piece.kind, numbers: piece.numbers, start: [Number(w.x.toFixed(2)), Number(w.y.toFixed(2)), Number(w.z.toFixed(2))], heading: Number(Math.atan2(f.x, f.z).toFixed(3)), starts: piece.starts.map((s) => s.name) };
+        });
+        return {
+          cleared,
+          stood: this.climbTestStood ? course.pieces.length : 0,
+          unknown: plan.unknown,
+          floor,
+          pieces: out,
+          note: "each piece's `start` is where a body starts on it (its first start, the game's frame) facing `heading`; `__debug.teleport(x, z)` there and walk, run or jump at it. The numbers are what it was made to test. `__debug.climbTest({ clear: true })` takes it down; `__debug.shaders().builtInPlay` should name nothing of it.",
+        };
       },
       // Show a converted model (path under assets-private/) in front of the player, playing a clip.
       show: async (file: string, clip?: string) => {
@@ -21618,6 +21682,8 @@ class App {
   private trackHeldUnsaved = false;
   /** The test flights `__debug.stairsTest` stood (by the keys they are filed under), taken down by `{ clear: true }`. */
   private stairTestKeys: string[] = [];
+  /** The test course `__debug.climbTest` stood (its one mesh and material, its colliders, how many pieces), taken down by `dropClimbTest`. */
+  private climbTestStood: { mesh: THREE.Mesh; material: THREE.Material; colliders: CourseCollider[]; pieces: number } | null = null;
   private readonly trackFilesSaved = new Set<string>();
   private trackArm: { what: string; until: number } | null = null;
   /** The editor's list in the debug menu, made the first time the menu asks for it. */
@@ -21837,6 +21903,8 @@ class App {
 
   /** Leaving a world (an arrival, the select screen): the run ends, the track in hand is put down, and nothing of either is shown. */
   private leaveTracks(why: string): void {
+    // The climbing test course is the world's too (in the same task as the unload: no collider of it outlives the world).
+    this.dropClimbTest(why);
     if (this.raceRun) this.endRun(why);
     this.clearRun();
     if (this.trackHeld && this.trackHeldUnsaved) console.info(`tracks: ${this.trackHeld.id} was put down unsaved (${why})`);
@@ -21848,6 +21916,44 @@ class App {
     this.gateShapesFor = null;
     this.gateShapeCount = 0;
     this.raceHud.hideBlock();
+  }
+
+  /**
+   * The climbing test course stood (inside `__debug.climbTest`'s curtain, whose sweep builds its one program): its solids as
+   * one mesh of the builder's triangles in one plain material, casting and taking shadows, and as the builder's fixed
+   * colliders with no body in the exterior group.
+   */
+  private standClimbCourse(course: ClimbCourse, frame: CourseFrame): void {
+    const tri = courseTriangles(course, frame);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(tri.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(tri.normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(tri.colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
+    material.name = 'climbTest';
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'climbTest';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.world.scene.add(mesh);
+    const colliders = buildCourseColliders(this.physics.world, course, frame);
+    this.climbTestStood = { mesh, material, colliders, pieces: course.pieces.length };
+  }
+
+  /** The climbing test course taken down: its colliders out of the physics, its mesh out of the scene, its material out of the world's sets, all disposed. How many pieces it held. */
+  private dropClimbTest(why: string): number {
+    const s = this.climbTestStood;
+    if (!s) return 0;
+    this.climbTestStood = null;
+    for (const c of s.colliders) this.physics.removeCollider(c.collider);
+    s.mesh.removeFromParent();
+    this.world.forgetMaterials([s.material]);
+    s.mesh.geometry.dispose();
+    s.material.dispose();
+    console.info(`climbTest: the course came down (${why})`);
+    return s.pieces;
   }
 
   /** A track of this world's file by its id, or null. */
@@ -31122,7 +31228,7 @@ class App {
    * needs, the queue flushed), so the ring program, the bake's decode and upload, or the far tiles' builds are never a
    * frame's work.
    */
-  private async groundCurtain(what: string, work: () => Promise<void> | void): Promise<void> {
+  private async groundCurtain(what: string, work: () => Promise<void> | void, title = 'the far ground'): Promise<void> {
     let held = false;
     await runCurtain(
       {
@@ -31150,7 +31256,7 @@ class App {
         now: () => performance.now(),
         wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
       },
-      'the far ground',
+      title,
       what,
       async () => {
         await work();
