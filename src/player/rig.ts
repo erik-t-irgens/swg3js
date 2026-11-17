@@ -12,6 +12,7 @@ import { phaseAt, sharedRate, timeAtPhase, type ClipFacts } from '../anim/locoPh
 import { STAIR_WINDOWS, stairCyclesFor, type StairCycleFacts, type StairCycles } from '../anim/stairCycle.ts';
 import { ANIM_TUNE, watchJkaSpine } from '../anim/animTune.ts';
 import { applyJkaSpine, isJkaClip, rebaseJkaClips, spineRebaseFor } from '../anim/jkaSpine.ts';
+import { forgetMixerWrites, poseAtRest } from '../anim/poseReset.ts';
 
 // The Jedi Academy spine's switch moved (`__debug.anim({ tune: { jkaSpine } })`, its dial): every clip rebased so far
 // takes the keys the switch names, written in place (an event, never a frame).
@@ -1873,6 +1874,21 @@ export class CharacterRig {
       if (bone.quaternion.equals(turn.turned)) bone.quaternion.copy(turn.clean);
     }
     this.lookTurned = false;
+  }
+
+  /**
+   * Back to the clips alone after something posed the bones directly (a ragdoll): every bone on its rest and the
+   * mixer told so (`src/anim/poseReset.ts`), so the next update writes every joint the clips drive and leaves the rest
+   * at rest. The placements laid after the mixer (the limbs', the legs', the look's, the duck's neck) are let go first,
+   * so none puts back a pose from before.
+   */
+  retakePose(): void {
+    this.limbPose?.restore();
+    this.legPose?.restore();
+    this.clearLook();
+    this.duckNeckTurn.on = false;
+    poseAtRest(this.bones.values(), this.restLocal, this.restPosition, this.restScale);
+    forgetMixerWrites(this.mixer);
   }
 
   /**

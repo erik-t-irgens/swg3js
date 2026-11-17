@@ -1279,6 +1279,10 @@ export class Player {
     this.ragdoll.dispose();
     this.ragdoll = null;
     this.body.setEnabled(true);
+    // The ragdoll posed every bone it had a body for; the clips take the skeleton back from its rest, or a joint no clip
+    // drives (the face, the extra forearm joints the Mixamo clips leave alone) keeps the ragdoll's turn (the owner,
+    // 2026-11-17: the eyes and mouth out of the back of the head after a respawn).
+    this.rig?.retakePose();
   }
 
   /** Stand the player somewhere, keeping health and the rest as they are (stepping off a ship). */
