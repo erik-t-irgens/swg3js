@@ -42,7 +42,7 @@ import { isStairPick } from '../anim/locoTable.ts';
 import { PeerHang, PeerHangIn, figureScaleOf, isHangState } from '../player/peerHang.ts';
 import { PeerWall } from '../player/peerWall.ts';
 import { isWallState, wallRateOf, wallClipOf } from '../player/wallClimb.ts';
-import { wallClipName } from '../anim/wallClips.ts';
+import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
 import { BraceIn, Crowd, HandBrace } from '../player/brace.ts';
 import { LimbPlace } from '../player/limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
@@ -1353,6 +1353,8 @@ export class RemotePlayers {
           // Wave 4, item B: on a wall, the climb's clip at the rate its state's speed asks (so its planted hands stay put
           // on the face), held still where it is; the clip they held still on is the one they last moved with.
           if (state === 'wallStill' && r.wall) rig.prefer('wallStill', wallClipName(r.wall.wall.rigClip || wallClipOf(state)));
+          // Climbing II, item 6: sideways the clip their state plays (the braced shimmy under `climb.wallSide` 'shimmy').
+          else if (state === 'wallLeft' || state === 'wallRight') rig.prefer(state, WALL_CLIP_NAMES[wallClipOf(state)]);
           PEER_WALL.rate = wallRateOf(state, figureScaleOf(rig));
           PEER_WALL.fade = CLIMB_TUNE.ease;
           rig.setState(state, 0, null, PEER_WALL);

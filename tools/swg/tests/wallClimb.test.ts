@@ -11,13 +11,18 @@
 //  - walking free in the open asks no ray of the climb, and under `climb.wall` 'before' nothing is ever climbed.
 import assert from 'node:assert/strict';
 import { TestBody, box, ground, makePhysics, type Physics } from './grappleBody.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, resetClimbTune, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { LEDGE_CAPSULE, LEDGE_HANG } from '../../../src/player/ledge.ts';
 import { WALL_ON, wallRateOf } from '../../../src/player/wallClimb.ts';
 import { WALL_CLIPS, WALL_FACTS } from '../../../src/anim/wallClips.ts';
 import { RAPIER } from '../../../src/core/physics.ts';
 import { wedge } from './wallScenes.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -64,6 +69,7 @@ function tap(b: TestBody, code: string, fps: number): void {
 
 const restore = () => {
   resetClimbTune();
+  climbTwoBefore();
 };
 const onWall = (b: TestBody) => b.wall.phase === WALL_ON;
 

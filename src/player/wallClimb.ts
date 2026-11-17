@@ -31,10 +31,11 @@ import type { RAPIER } from '../core/physics.ts';
 import { STILL_FLAGS } from './stairSense.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { PALM_OFF, WALL_CLIPS, WALL_FACTS, WALL_PLANT } from '../anim/wallClips.ts';
+import { PALM_OFF, WALL_CLIPS, WALL_FACTS, WALL_PLANT, WALL_SIDE } from '../anim/wallClips.ts';
 import { LEDGE_FACTS, LEDGE_JUMP_OFF } from '../anim/ledgeClips.ts';
 import { LEDGE_CAPSULE, Lip, type LedgeBody, type LedgeHang, type LedgeIn, type LedgeMakers, type LedgeStamina, type LedgeWorld } from './ledge.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
+import { ClimbHolds } from './climbHolds.ts';
 
 /** Off the wall, and on it. */
 export const WALL_NONE = 0;
@@ -49,8 +50,15 @@ export function isWallState(state: string): boolean {
   return (WALL_STATES as readonly string[]).includes(state);
 }
 
-/** The clip a climb state plays, by the clip's id (sideways and still the up clip; still keeps whichever was playing, for a peer the up clip). */
+/**
+ * The clip a climb state plays, by the clip's id (still keeps whichever was playing, for a peer the up clip): sideways the
+ * up clip, or under `climb.wallSide` 'shimmy' (Climbing II, item 6) the braced shimmy clip of that way.
+ */
 export function wallClipOf(state: string): string {
+  if (CLIMB_TUNE.wallSide === 'shimmy') {
+    if (state === 'wallLeft') return WALL_SIDE.left;
+    if (state === 'wallRight') return WALL_SIDE.right;
+  }
   return state === 'wallDown' ? WALL_CLIPS.down : WALL_CLIPS.up;
 }
 
@@ -68,6 +76,8 @@ export function wallRateOf(state: string, s: number): number {
       return T.down / (WALL_FACTS[WALL_CLIPS.down].stride * k);
     case 'wallLeft':
     case 'wallRight':
+      // Climbing II, item 6: the braced shimmy clips at the sideways speed over their own pace.
+      if (CLIMB_TUNE.wallSide === 'shimmy') return T.side / (SIDE_PACE * k);
       return T.side / (WALL_FACTS[WALL_CLIPS.up].stride * k);
     default:
       return 0;
@@ -104,6 +114,14 @@ const TAU = Math.PI * 2;
 const UP_HIPS = WALL_FACTS[WALL_CLIPS.up].hips;
 const UP_STRIDE = WALL_FACTS[WALL_CLIPS.up].stride;
 const DOWN_STRIDE = WALL_FACTS[WALL_CLIPS.down].stride;
+/**
+ * Climbing II, item 6: the braced shimmy clips' own pace (their hands' travel along the lip a second, the human male's), their
+ * grip points at their start (lined up a palm off the face, at the up clip's hands' mean height: src/anim/wallClips.ts).
+ */
+const SIDE_PACE = Math.abs(LEDGE_FACTS[WALL_SIDE.right].net[0]) / LEDGE_FACTS[WALL_SIDE.right].dur;
+const SIDE_L_G = LEDGE_FACTS[WALL_SIDE.left].g0;
+const SIDE_R_G = LEDGE_FACTS[WALL_SIDE.right].g0;
+const UP_HANDS = WALL_FACTS[WALL_CLIPS.up].hands;
 
 export class WallClimb {
   /** `WALL_NONE` or `WALL_ON`. */
@@ -158,6 +176,8 @@ export class WallClimb {
   lastLetGo = '';
   /** The lip a climb up looks out for (the ledges' own). */
   readonly lip = new Lip();
+  /** Climbing II, item 6 (`climb.wallLimbs` 'held'): each hand's and foot's hold on the face until its next reach (src/player/climbHolds.ts). */
+  readonly holds = new ClimbHolds();
   private readonly makers: LedgeMakers;
   private ray: RAPIER.Ray | null = null;
   private shape: RAPIER.Shape | null = null;
@@ -300,6 +320,7 @@ export class WallClimb {
     this.stood = false;
     this.toLedge = false;
     this.handRay.fill(Number.NaN);
+    this.holds.reset();
   }
 
   // ---- the engine's two questions ------------------------------------------------------------------------------------------
@@ -459,7 +480,17 @@ export class WallClimb {
       this.press = 0;
       return false;
     }
-    if (i.busy || stam.tired || i.crouchHeld || !i.forwardHeld || !i.blocked) {
+    // Climbing II, item 1: under 'use' the climb starts on the use key handed to the climb (held), at once and with no W or
+    // pressing into the face; rising it waits (a lip may yet come into the hands' reach, which the ledges take first: the
+    // jump's own first frames still read grounded); 'auto' is today's (W held into a face the move was cut short by, for
+    // `climb.wallStart`).
+    const use = T.grab === 'use';
+    if (use) {
+      if (i.busy || stam.tired || i.crouchHeld || !i.use || b.vel.y > 0) {
+        this.press = 0;
+        return false;
+      }
+    } else if (i.busy || stam.tired || i.crouchHeld || !i.forwardHeld || !i.blocked) {
       this.press = 0;
       return false;
     }
@@ -470,10 +501,16 @@ export class WallClimb {
     }
     let dx = i.moveX;
     let dz = i.moveZ;
-    const dl = Math.sqrt(dx * dx + dz * dz);
+    let dl = Math.sqrt(dx * dx + dz * dz);
     if (!(dl > 1e-6)) {
-      this.press = 0;
-      return false;
+      if (!use) {
+        this.press = 0;
+        return false;
+      }
+      // On the use key with no way pushed: the way the body faces.
+      dx = Math.sin(i.heading);
+      dz = Math.cos(i.heading);
+      dl = 1;
     }
     dx /= dl;
     dz /= dl;
@@ -507,8 +544,10 @@ export class WallClimb {
       this.press = 0;
       return false;
     }
-    this.press += i.dt;
-    if (this.press < T.wallStart) return false;
+    if (!use) {
+      this.press += i.dt;
+      if (this.press < T.wallStart) return false;
+    }
     this.press = 0;
     // Onto the wall: held off the face, where a standing capsule fits.
     this.s = s;
@@ -521,6 +560,11 @@ export class WallClimb {
     this.qy = b.pos.y;
     this.qz = this.bz;
     if (!this.clear(world)) return false;
+    // On the use key from a step off the face: the figure drawn on from where it stood, eased onto the wall.
+    if (use) {
+      this.offX = b.pos.x - this.bx;
+      this.offZ = b.pos.z - this.bz;
+    }
     b.pos.x = this.bx;
     b.pos.z = this.bz;
     b.vel.x = 0;
@@ -541,10 +585,46 @@ export class WallClimb {
     this.stood = false;
     this.toLedge = false;
     this.handRay.fill(Number.NaN);
+    this.holds.reset();
     // The drawn figure from where it stands (its offset nought, upright) into the climb's line-up over `climb.ease`.
     this.beginFade();
     this.climbs++;
     return true;
+  }
+
+  /**
+   * Climbing II, item 1: whether the use key would start the climb now (the action bar's "climb", gathered a few times a
+   * second): a climbable face at the chest the way the keys push or the body faces, going on up past the hands, as the start
+   * asks; nothing begun. Two rays.
+   */
+  canClimb(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
+    if (CLIMB_TUNE.wall !== 'on' || this.phase !== WALL_NONE || i.busy) return false;
+    let dx = i.moveX;
+    let dz = i.moveZ;
+    let dl = Math.sqrt(dx * dx + dz * dz);
+    if (!(dl > 1e-6)) {
+      dx = Math.sin(i.heading);
+      dz = Math.cos(i.heading);
+      dl = 1;
+    }
+    const s = i.scale;
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    const lean = Math.sqrt(1 - walk * walk);
+    const chestReach = LEDGE_CAPSULE.r / lean + ((CHEST * s - LEDGE_CAPSULE.r) * walk) / lean + 0.05;
+    this.qflt = i.filter;
+    this.qdx = dx / dl;
+    this.qdy = 0;
+    this.qdz = dz / dl;
+    this.qx = b.pos.x;
+    this.qy = b.pos.y + CHEST * s;
+    this.qz = b.pos.z;
+    this.qlen = chestReach > LEDGE_CAPSULE.r + FEEL ? chestReach : LEDGE_CAPSULE.r + FEEL;
+    if (!this.cast(world) || !this.climbable()) return false;
+    const run = this.hny > 0 ? this.hny / Math.sqrt(this.hnx * this.hnx + this.hnz * this.hnz) : 0;
+    const handsReach = this.htoi + (HANDS_UP - CHEST) * s * run + 0.5;
+    this.qy = b.pos.y + HANDS_UP * s;
+    this.qlen = handsReach > LEDGE_CAPSULE.r + FEEL + 0.5 ? handsReach : LEDGE_CAPSULE.r + FEEL + 0.5;
+    return this.cast(world) && this.climbable();
   }
 
   // ---- a frame on the wall -------------------------------------------------------------------------------------------------
@@ -675,12 +755,17 @@ export class WallClimb {
     }
     if (state !== 'wallStill' || !want) this.stalled = false;
     // The clip: up or down while moving that way, the up clip sideways; held still, whichever was playing stops where it is.
+    // Climbing II, item 6: sideways alone, under `climb.wallSide` 'shimmy', the braced shimmy clip of that way.
+    const clipWas = this.rigClip;
+    const shimmy = T.wallSide === 'shimmy';
     if (state === 'wallDown') this.rigClip = WALL_CLIPS.down;
+    else if (shimmy && state === 'wallLeft') this.rigClip = WALL_SIDE.left;
+    else if (shimmy && state === 'wallRight') this.rigClip = WALL_SIDE.right;
     else if (state !== 'wallStill') this.rigClip = WALL_CLIPS.up;
     const was = this.rigState;
     this.rigState = state;
     this.rateFor(state);
-    if (was !== state && (state === 'wallDown' || was === 'wallDown')) this.beginFade();
+    if ((was !== state && (state === 'wallDown' || was === 'wallDown')) || (shimmy && clipWas !== this.rigClip)) this.beginFade();
     this.dtNow = dt;
     this.drawOffset(b);
     // The hands and feet onto the face over the ease.
@@ -696,7 +781,7 @@ export class WallClimb {
     const k = s > 1e-6 ? s : 1;
     if (state === 'wallUp') this.rate = T.up / (UP_STRIDE * k);
     else if (state === 'wallDown') this.rate = T.down / (DOWN_STRIDE * k);
-    else if (state === 'wallLeft' || state === 'wallRight') this.rate = T.side / (UP_STRIDE * k);
+    else if (state === 'wallLeft' || state === 'wallRight') this.rate = CLIMB_TUNE.wallSide === 'shimmy' ? T.side / (SIDE_PACE * k) : T.side / (UP_STRIDE * k);
     else this.rate = 0;
   }
 
@@ -738,8 +823,15 @@ export class WallClimb {
     const f = WALL_FACTS[this.rigClip] ?? WALL_FACTS[WALL_CLIPS.up];
     const s = this.s;
     // clipWall and clipLift written out (a number handed back across a call the compiler leaves out is a number made).
-    const w = (f.hand + PALM_OFF) * s;
-    const lift = (UP_HIPS - f.hips) * s;
+    let w = (f.hand + PALM_OFF) * s;
+    let lift = (UP_HIPS - f.hips) * s;
+    // Climbing II, item 6: a braced shimmy clip lined up by its hands, as the hang lines it up on a lip: its grip a palm off
+    // the face, at the up clip's hands' mean height.
+    if (this.rigClip === WALL_SIDE.left || this.rigClip === WALL_SIDE.right) {
+      const g = this.rigClip === WALL_SIDE.left ? SIDE_L_G : SIDE_R_G;
+      w = (g[2] + PALM_OFF) * s;
+      lift = (UP_HANDS - g[1]) * s;
+    }
     // The origin O = body + lift up + forward by kk: its clip's wall (w ahead of O, turned by the lean) on the face's plane.
     const d = (b.pos.x - this.px) * nx + (b.pos.y - this.py) * ny + (b.pos.z - this.pz) * nz;
     const kk = (d + lift * cy - w) / ch;
@@ -771,6 +863,7 @@ export class WallClimb {
     this.outDur = Math.max(CLIMB_TUNE.ease, 1e-3);
     this.outT = this.outDur;
     this.handRay.fill(Number.NaN);
+    this.holds.reset();
   }
 
   /** Let the body go, its velocity what it is thrown at. */
@@ -842,10 +935,21 @@ export class WallClimb {
     const palm = PALM_OFF * s;
     const hr = this.handRay;
     const handN = this.handN;
+    // Climbing II, item 6: under `climb.wallLimbs` 'held' each hand (and, through the limbs' solve, each foot) on its hold.
+    const H = CLIMB_TUNE.wallLimbs === 'held' ? this.holds : null;
+    if (H) {
+      H.dt = this.dtNow;
+      H.ease = CLIMB_TUNE.ease;
+      H.most = CLIMB_TUNE.holdMost * s;
+      // The hands take no reach test (the figure is drawn toward them); the feet's solve writes its own.
+      H.reach = 0;
+    }
+    lp.holds = H;
     for (let side = 0; side < 2; side++) {
       const g = this.hands > 0 ? lp.gripNow(rig, side, toPhys, gripV) : null;
       if (!g) {
         lp.handW[side] = 0;
+        if (H) H.drop(side);
         continue;
       }
       const o = side * 7;
@@ -878,6 +982,12 @@ export class WallClimb {
       }
       if (!this.handOk[side]) {
         lp.handW[side] = 0;
+        if (H) {
+          H.px = g.x;
+          H.py = g.y;
+          H.pz = g.z;
+          H.drop(side);
+        }
         continue;
       }
       const fnx = handN[side * 3];
@@ -886,10 +996,23 @@ export class WallClimb {
       // How far the grip stands off the face beyond a flat palm's, along the face's normal.
       const d = (g.x - hr[o + 3]) * fnx + (g.y - hr[o + 4]) * fny + (g.z - hr[o + 5]) * fnz - palm;
       const plant = d <= near ? 1 : d >= far ? 0 : 1 - (d - near) / (far - near);
-      lp.hand[side * 3] = g.x - fnx * d;
-      lp.hand[side * 3 + 1] = g.y - fny * d;
-      lp.hand[side * 3 + 2] = g.z - fnz * d;
-      lp.handW[side] = this.hands * plant;
+      if (H) {
+        // On its hold until its next reach (where the clip has it on the face handed over, the hold's target and weight taken).
+        H.px = g.x - fnx * d;
+        H.py = g.y - fny * d;
+        H.pz = g.z - fnz * d;
+        H.plant = plant;
+        H.step(side);
+        lp.hand[side * 3] = H.tx;
+        lp.hand[side * 3 + 1] = H.ty;
+        lp.hand[side * 3 + 2] = H.tz;
+        lp.handW[side] = this.hands * H.w;
+      } else {
+        lp.hand[side * 3] = g.x - fnx * d;
+        lp.hand[side * 3 + 1] = g.y - fny * d;
+        lp.hand[side * 3 + 2] = g.z - fnz * d;
+        lp.handW[side] = this.hands * plant;
+      }
       lp.palmW[side] = 0;
     }
     // A hand the clip has at the top of its reach for its next hold may stand a few centimetres short of the face: the
@@ -1052,6 +1175,8 @@ export class WallClimb {
       lean: n((this.lean * 180) / Math.PI),
       hands: n(this.hands),
       climbs: this.climbs,
+      // Climbing II, item 6: the limbs' holds (each on its hold or not, whose turn it is to reach, and the counts).
+      holds: { on: Array.from(this.holds.on), mover: this.holds.mover, taken: this.holds.taken, reaches: this.holds.reaches, forced: this.holds.forced, beyond: this.holds.beyond, waited: this.holds.waited },
       casts: this.casts,
       // The last look for a lip while climbing up: where the climb would hand the body over, or that it found none.
       stall: this.stallWhy || null,

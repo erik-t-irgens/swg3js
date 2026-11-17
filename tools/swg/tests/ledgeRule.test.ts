@@ -15,12 +15,17 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestBody, box, ground, makePhysics, THREE, type Physics } from './grappleBody.ts';
-import { CLIMB_TUNE, CLIMB_TUNE_SHIPPED, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, CLIMB_TUNE_SHIPPED, CLIMB_TWO_BEFORE, resetClimbTune, tuneClimb, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { REPO } from './oldModules.ts';
 import { Group, RAPIER, TRIMESH_FLAGS, cleanTrimesh, groups } from '../../../src/core/physics.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -89,6 +94,7 @@ function standingJump(top: number, fps: number, z = 1.2): Promise<{ b: TestBody;
 const FPS = [30, 60, 144] as const;
 const restore = () => {
   resetClimbTune();
+  climbTwoBefore();
 };
 
 // ---- 1. the grab --------------------------------------------------------------------------------------------------------------
@@ -450,7 +456,7 @@ const restore = () => {
   }
   restore();
 }
-ok(JSON.stringify(CLIMB_TUNE) === JSON.stringify(CLIMB_TUNE_SHIPPED), 'and the tune is back as shipped');
+ok(JSON.stringify(CLIMB_TUNE) === JSON.stringify({ ...CLIMB_TUNE_SHIPPED, ...CLIMB_TWO_BEFORE }), "and the tune is back as shipped (phase 2's switches at their 'before', as this suite holds them)");
 
 void THREE;
 note(`casts: a standing jump at a lip costs the rays shown in the console's report (one a frame in open air, four a frame near a face)`);

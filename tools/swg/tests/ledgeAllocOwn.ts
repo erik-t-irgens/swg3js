@@ -16,11 +16,16 @@ import { TestBody, box, ground, makePhysics } from './grappleBody.ts';
 import { LedgeHang, LedgeIn, LEDGE_HANG, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { LimbPlace } from '../../../src/player/limbPlace.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
-import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LEDGE_IDS, ledgeClipName } from '../../../src/anim/ledgeClips.ts';
 import { MixamoPack } from '../../../src/anim/mixamoPack.ts';
 import { figureScaleOf } from '../../../src/player/peerHang.ts';
 import { glbSkeleton, repoRoot, speciesBodies, targetSkeleton } from './animFixtures.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let scavenges = 0;
 new PerformanceObserver((l) => {

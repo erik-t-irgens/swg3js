@@ -20,11 +20,16 @@ import { MixamoPack } from '../../../src/anim/mixamoPack.ts';
 import { LEDGE_FACTS, LEDGE_IDS, ledgeClipName } from '../../../src/anim/ledgeClips.ts';
 import { LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { BALL_OFF, LimbPlace } from '../../../src/player/limbPlace.ts';
-import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { RAPIER } from '../../../src/core/physics.ts';
 import { glbSkeleton, speciesBodies, targetSkeleton } from './animFixtures.ts';
 import { REPO } from './oldModules.ts';
 import { PeerHang, PeerHangIn, figureScaleOf } from '../../../src/player/peerHang.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {

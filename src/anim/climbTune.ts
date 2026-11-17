@@ -86,6 +86,130 @@ export interface ClimbTune {
   wallStamina: { climb: number; still: number };
   /** The hands' bracing (the owner's brief's line 19), every number of its feel. */
   brace: BraceTune;
+  /**
+   * Climbing II, phase 2, item 1 (the owner's: "pressing or holding E/Use will actively try to grab the closest ledge if
+   * it's close enough, and will also activate wall grabbing for climbing up/down walls so walking up to a wall doesn't make
+   * you climb it automatically"). 'use': a lip is grabbed and a wall climb started only while the use key, handed to the
+   * climb by the game's one use-key dispatch (`climbTakesUse`), is held: the first lip in the hands' reach (on the ground as
+   * well as in the air), else a climbable face ahead within the start's reach, at once; walking into a wall or falling past
+   * a lip does neither. 'auto': today's (a lip grabbed in the air by moving at it, a wall started by W pressed into it for
+   * `wallStart`).
+   */
+  grab: 'use' | 'auto';
+  /** Item 2: 'hop' W at a ledge hops up to a lip above (searched as `hops` says) where there is one, else climbs onto the top; 'before' W climbs onto the top. */
+  wUp: 'hop' | 'before';
+  /**
+   * Item 3: 'jump' Space with nothing to hop to jumps a little up and off the wall (`offUp`, `offPush`), so a press always
+   * does something; a lip to hop to is hopped to as ever. 'before': today's (Space alone climbs up, Space with a way to
+   * nowhere says so and stays).
+   */
+  spaceOff: 'jump' | 'before';
+  /**
+   * Item 4: 'band' a hop's target is searched in the asked way with a tolerance either side and up and down: sideways out
+   * to `hopSide` from the held lip's end, `hopUp` above to `hopDown` below, its face up to `hopDepth` in front of or behind
+   * the held one's; up and down (W, S with Space) to `hopUp` and `hopDown`, `hopSlack` either side; the nearest good lip
+   * taken, near and far alike, its way there arced by `hopArc`. 'before': today's look (sideways along the held face's
+   * line, `hopSide` from the body; up straight over it).
+   */
+  hops: 'band' | 'before';
+  /** Item 5: 'hands' a step up or down along a lip of at most `stepMax` is crossed hand by hand; 'before' a step is the lip's end (or a corner round its side). */
+  steps: 'hands' | 'before';
+  /**
+   * The small jump off the wall (item 3), as a small jump from the ground: how high it rises, metres (ours: half a plain
+   * jump's 0.8 m apex), and how hard it pushes off the face, m/s (the free hang's own push back, `freePush`'s start).
+   */
+  offUp: number;
+  offPush: number;
+  /** How far down a hop reaches for a lower lip, metres (item 4; ours: `hopUp`'s start, so up and down reach alike). */
+  hopDown: number;
+  /** How far to either side of straight up or down a hop up or down may land, metres (item 4; ours: about the hands' span and a hand more). */
+  hopSlack: number;
+  /** How far in front of or behind the held face a hop's target face may stand, metres (item 4; ours: a stepped wall's setback, 0.3, with room). */
+  hopDepth: number;
+  /** How far a hop's way rises at its middle, a share of its length (item 4; ours: a 3 m hop rises 0.3 m, so it reads as a leap). */
+  hopArc: number;
+  /** The tallest step up or down along a lip the hands cross (item 5; the owner's 0.5 m). */
+  stepMax: number;
+  /**
+   * How far ahead of the body's middle the use key reaches for a lip (item 1, under 'use'; never less than `reachAhead`),
+   * metres. Ours: as far as the wall climb's start feels for a face (0.8 upright, 0.93 at the climb limit) and a little more,
+   * so a lip over a wall in reach is grabbed rather than climbed up to.
+   */
+  useReach: number;
+  /**
+   * Climbing II, item 6 (maker B): 'shimmy' A or D alone on a wall plays the braced hang's shimmy clips (left and right), at
+   * the rate that keeps their hands where they are at the sideways speed; 'before' the up clip slowed to the sideways share.
+   */
+  wallSide: 'shimmy' | 'before';
+  /**
+   * Item 6: 'held' every hand and foot the clip plants on the face is held where it was planted (its hold, in the world) until
+   * that limb's next reach, and only one limb reaches at a time (one lifted while another is still reaching stays held until
+   * that one is planted again); a limb whose hold the body has moved `holdMost` from where its clip has it reaches anyway.
+   * 'before' each limb is put on the face where the clip has it, frame by frame.
+   */
+  wallLimbs: 'held' | 'before';
+  /**
+   * Item 7: 'reach' braced and still, the view turned more than `lookStart` from the wall turns the spine toward it by
+   * `lookTwist`; the leading hand (the side looked to) leaves the lip into a reach-back pose held from its hop clip's start
+   * (`lookPose` seconds in), reaching `lookArm` of the way toward the view, the trailing hand staying; Space then hops to a lip
+   * behind in the view's way (out to `hopBehind`, the band's slack and reach up and down), else the small jump off. 'before':
+   * the hang holds the view free.
+   */
+  lookAway: 'reach' | 'before';
+  /**
+   * The faults phase 1 found (CLIMB1-notes), each mended behind its own switch. 'ramp': every corner along a lip turns the
+   * hands' faces over the same span either side of it (`CORNER_RAMP`), found to under a millimetre, so the body's heading at a
+   * place on a corner's lip is the place's and never the rail's history (the extra turn at a lip's end differed by frame
+   * rate); 'before' as the rail's sampling put it.
+   */
+  corners: 'ramp' | 'before';
+  /** 'hang': a top shallower than `topMin` behind its lip is no top to stand on (the climb up is refused in words and the body hangs, a wall climb's hang included); 'before': a top the crouched capsule fits on is climbed onto however thin. */
+  thinTop: 'hang' | 'before';
+  /** 'inclusive': a lip exactly as steep as `lipSlope` is shimmied along (a millimetre over a rail step for the rays' own rounding); 'before': refused at its foot. */
+  slopeLimit: 'inclusive' | 'before';
+  /** 'swept': a lip is grabbed where the hands' reach band passed it at any point of the frame's rise or fall, not only where the frame ended (the same grab at any frame rate); 'before': where the frame ended. */
+  grabSweep: 'swept' | 'before';
+  /** Item 6: how far a held limb may stand from where its clip has it before it reaches anyway, metres (ours: a forearm, 0.3). */
+  holdMost: number;
+  /** Item 7: how far the view turns from the wall before the look-away begins, degrees (ours: 100, a little past square to the wall, so a glance along it never lets go). */
+  lookStart: number;
+  /** Item 7: the most the spine turns toward the view, degrees (ours: 40, where a body hanging by one hand still has its hips to the wall; the rig's own clamp is 69). */
+  lookTwist: number;
+  /** Item 7: how far into the leading side's hop clip the reach-back pose is held, seconds (the clips' coil: the hips risen, the arms bent, the hands still on the lip; they leave at 0.35 to 0.45). */
+  lookPose: number;
+  /** Item 7: how much of the way the leading hand reaches toward the view (ours: 0.6; nought leaves it where the held pose has it). */
+  lookArm: number;
+  /** Item 7: how far behind a hop reaches, metres (ours: 3, twice the side hop's start, a leap with the whole body behind it). */
+  hopBehind: number;
+  /** The least depth behind a lip a top must have to be stood on (`thinTop`), metres (ours: 0.35, the body's own capsule radius). */
+  topMin: number;
+}
+
+/**
+ * Climbing II, phase 2: every switch the phase adds, at its 'before' setting (what each switch's other word is: today's
+ * climbing, `1e7f577`). The course's digest of today (`climbToday.test.ts`) and the wave 4 suites, which test today's rules,
+ * set them so; a later maker's switches join this table.
+ */
+export const CLIMB_TWO_BEFORE: Readonly<Record<string, string>> = {
+  grab: 'auto',
+  wUp: 'before',
+  spaceOff: 'before',
+  hops: 'before',
+  steps: 'before',
+  // Maker B's: items 6 and 7, and the faults phase 1 found.
+  wallSide: 'before',
+  wallLimbs: 'before',
+  lookAway: 'before',
+  corners: 'before',
+  thinTop: 'before',
+  slopeLimit: 'before',
+  grabSweep: 'before',
+};
+
+/** Every phase 2 switch put to its 'before' setting (today's climbing). */
+export function climbTwoBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_TWO_BEFORE)) t[k] = v;
 }
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
@@ -139,6 +263,33 @@ export const CLIMB_TUNE: ClimbTune = {
   wallSpeed: { up: 1, down: 1.2, side: 0.8 },
   wallStamina: { climb: 8, still: 4 },
   brace: { rule: 'on', tight: 1.4, people: 'on', spaceReach: 1.2, ease: 0.2, reach: 0.7, press: 0.35, moving: 0.4, height: 1.3 },
+  grab: 'use',
+  wUp: 'hop',
+  spaceOff: 'jump',
+  hops: 'band',
+  steps: 'hands',
+  offUp: 0.4,
+  offPush: 1.5,
+  hopDown: 1.5,
+  hopSlack: 0.75,
+  hopDepth: 0.5,
+  hopArc: 0.1,
+  stepMax: 0.5,
+  useReach: 0.95,
+  wallSide: 'shimmy',
+  wallLimbs: 'held',
+  lookAway: 'reach',
+  corners: 'ramp',
+  thinTop: 'hang',
+  slopeLimit: 'inclusive',
+  grabSweep: 'swept',
+  holdMost: 0.3,
+  lookStart: 100,
+  lookTwist: 40,
+  lookPose: 0.3,
+  lookArm: 0.6,
+  hopBehind: 3,
+  topMin: 0.35,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -180,6 +331,21 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   'brace.press': { min: 0, max: 1 },
   'brace.moving': { min: 0, max: 3 },
   'brace.height': { min: 0.8, max: 1.7 },
+  offUp: { min: 0, max: 2 },
+  offPush: { min: 0, max: 6 },
+  hopDown: { min: 0, max: 8 },
+  hopSlack: { min: 0, max: 3 },
+  hopDepth: { min: 0, max: 2 },
+  hopArc: { min: 0, max: 0.5 },
+  stepMax: { min: 0, max: 1 },
+  useReach: { min: 0.3, max: 2 },
+  holdMost: { min: 0.05, max: 1 },
+  lookStart: { min: 0, max: 180 },
+  lookTwist: { min: 0, max: 69 },
+  lookPose: { min: 0, max: 1.4 },
+  lookArm: { min: 0, max: 1 },
+  hopBehind: { min: 0, max: 8 },
+  topMin: { min: 0, max: 1 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -188,6 +354,18 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   wall: ['on', 'before'],
   'brace.rule': ['on', 'before'],
   'brace.people': ['on', 'off'],
+  grab: ['use', 'auto'],
+  wUp: ['hop', 'before'],
+  spaceOff: ['jump', 'before'],
+  hops: ['band', 'before'],
+  steps: ['hands', 'before'],
+  wallSide: ['shimmy', 'before'],
+  wallLimbs: ['held', 'before'],
+  lookAway: ['reach', 'before'],
+  corners: ['ramp', 'before'],
+  thinTop: ['hang', 'before'],
+  slopeLimit: ['inclusive', 'before'],
+  grabSweep: ['swept', 'before'],
 };
 
 /**

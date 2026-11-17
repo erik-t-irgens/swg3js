@@ -40,13 +40,13 @@ import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 import { FootIk, stairFeetOf } from './footIk.ts';
 import { StairSense } from './stairSense.ts';
-import { LedgeHang, LedgeIn, type LedgeWorld } from './ledge.ts';
+import { ClimbAsk, LedgeHang, LedgeIn, climbTakesUseFirst, type LedgeWorld } from './ledge.ts';
 import { LimbPlace } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
-import { wallClipName } from '../anim/wallClips.ts';
+import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
 import { BraceIn, Crowd, HandBrace } from './brace.ts';
 import { hostileSides } from '../combat/targets.ts';
 import { PLAYER_KEY } from '../combat/kit.ts';
@@ -508,6 +508,11 @@ export class Player {
    */
   readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   private readonly ledgeIn = new LedgeIn();
+  /**
+   * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
+   * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
+   */
+  readonly climbAsk = new ClimbAsk();
   readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
   /** The rig's root was put off the body's place by the hang (its x and z): what `placeVisual` puts back. */
   private ledgeRooted = false;
@@ -3480,7 +3485,28 @@ export class Player {
     li.pool = this.staminaPool;
     li.blocked = this.wallBlocked;
     li.airWallMove = false;
+    li.use = this.climbAsk.on;
     return li;
+  }
+
+  /**
+   * Climbing II, item 1: on foot and falling, where the use key goes to the climb before anything else may take it
+   * (`climbTakesUseFirst`, the game's dispatch asks it).
+   */
+  get climbFalls(): boolean {
+    return climbTakesUseFirst(CLIMB_TUNE.grab, !this.mounted && !this.piloting && !this.aboard && !this.noclip && !this.swimming, this.grounded, this.vel.y);
+  }
+
+  /**
+   * Climbing II, item 1: whether the use key would grab a lip or start a wall climb here (the action bar's "climb", gathered a
+   * few times a second): on foot, nothing else holding the body, a lip in the hands' reach or a climbable face ahead.
+   */
+  climbReach(): boolean {
+    if (CLIMB_TUNE.grab !== 'use' || this.mounted || this.piloting || this.aboard || this.noclip || this.swimming || this.climbHolds || this.grapple.out || this.eva || this.hp <= 0) return false;
+    const li = this.fillLedgeIn(0, null, null, false);
+    li.busy = false;
+    const w = this.physics.world as unknown as LedgeWorld;
+    return this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li);
   }
 
   /**
@@ -3520,6 +3546,8 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.grounded = false;
     this.heading = this.ledge.heading;
+    // (Climbing II, item 7: no look-away pose carried over from a hang before.)
+    this.posePlaying = '';
   }
 
   /** Off the ledge: a let-go's clocks (`LedgeHang.tick`): the drop's clip handed to the falling loop, the jump off's turn round. */
@@ -3550,6 +3578,12 @@ export class Player {
     this.lockedHeading = null;
     this.crouching = false;
     const li = this.fillLedgeIn(dt, input, null, false);
+    // Climbing II, item 7: where the view looks, for the braced look-away (none aboard a ship's rooms, whose frame is the hull's).
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
     this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
     // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
     this.setCrouchCollider(this.ledge.crouchedNow);
@@ -3588,14 +3622,27 @@ export class Player {
     this.hangFade.fade = CLIMB_TUNE.ease;
     if (L.startClip) rig.play(ledgeClipName(L.startClip), { from: L.startFrom, fadeIn: L.startFade, hold: L.holding });
     else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
+    // Climbing II, item 7: the reach-back pose held from the leading side's hop clip while looking away, and let go of.
+    else if (L.poseClip !== this.posePlaying) {
+      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0 });
+      else rig.stopOverride(CLIMB_TUNE.ease);
+      this.posePlaying = L.poseClip;
+    }
+    // A one-off begun or ended takes the held pose's place: it is held again from the next frame where still looking away.
+    if (L.startClip || L.ended) this.posePlaying = '';
     if (L.rigState) {
       rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
       rig.setState(L.rigState as RigState, 0, null, this.hangFade);
     } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
-    rig.twistTorso(0, 0);
+    // Climbing II, item 7: the spine turned toward the view while looking away (nought otherwise, every hang frame, so with
+    // no look-away this is phase 1's own call to the letter: it eases the steady share and puts the clean pose back).
+    rig.twistTorso(L.lookTwistNow, 0);
   }
+
+  /** The hop clip held as the look-away's pose on the rig now ('' for none). */
+  private posePlaying = '';
 
   /** The rig's root put where the ledge draws the figure against the body (its offset, the world's frame, into the group's). */
   private applyLedgeRoot(): void {
@@ -3724,6 +3771,8 @@ export class Player {
     if (W.startClip) rig.play(ledgeClipName(W.startClip), { from: W.startFrom, fadeIn: W.startFade, hold: false });
     if (W.rigState) {
       if (W.rigState === 'wallStill') rig.prefer('wallStill', wallClipName(W.rigClip));
+      // Climbing II, item 6: sideways the clip the climb says (the braced shimmy of that way under `climb.wallSide` 'shimmy').
+      else if (W.rigState === 'wallLeft' || W.rigState === 'wallRight') rig.prefer(W.rigState, WALL_CLIP_NAMES[W.rigClip] ?? wallClipName(W.rigClip));
       this.wallRate.rate = W.rate;
       this.wallRate.fade = CLIMB_TUNE.ease;
       rig.setState(W.rigState as RigState, 0, null, this.wallRate);

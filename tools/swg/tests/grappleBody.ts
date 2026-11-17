@@ -19,7 +19,7 @@ import { makeHullController, type PeerHulls } from '../../../src/player/grappleF
 import { SlopeRule } from '../../../src/player/slopeRule.ts';
 import { StepUp } from '../../../src/player/stepUp.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
-import { LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
+import { ClimbAsk, LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { WallClimb } from '../../../src/player/wallClimb.ts';
@@ -201,6 +201,8 @@ export class TestBody implements GrappleBody {
   /** Wave 4: the ledges (`climb.ledges`), stepped in the player's own places: the hang in place of the movement, the grab after the move, the haul's hand-over after the rope's step. */
   readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   readonly ledgeIn = new LedgeIn();
+  /** Climbing II: the use key handed to the climb, as the game's one dispatch hands it (nothing else in the harness takes the key). */
+  readonly climbAsk = new ClimbAsk();
   /** Wave 2a's stamina pool (100 points) as the player's `loco.stamina` keeps it. */
   readonly stamina = new Stamina(100);
   /** The body's heading, radians (the ledges turn it to face the wall). */
@@ -409,6 +411,11 @@ export class TestBody implements GrappleBody {
     this.t += dt;
     // The key block: the grapple's own part, as `stepGrappleKeys` calls it.
     if (this.hooks) g.stepKeys(input, this, this.mutes, this.fireNow);
+    // Climbing II: the use key, as the game's dispatch hands it (here nothing else takes it, so every press is the climb's),
+    // held while it is held, and let go while the hands already hold something (the game mutes the key then).
+    const climbHolds = this.ledge.holding || this.wall.holding;
+    if (!climbHolds && input.pressedAction('mount')) this.climbAsk.press();
+    this.climbAsk.hold(!climbHolds && input.held('mount'));
     // Wave 4: hanging, the ledge has the body in place of the movement (the player's `hangFrame`).
     if (this.ledge.holding) {
       this.hangFrame(dt);
@@ -634,6 +641,9 @@ export class TestBody implements GrappleBody {
     li.busy = false;
     li.blocked = this.wallBlocked;
     li.airWallMove = false;
+    li.use = this.climbAsk.on;
+    // Climbing II, item 7: where the view looks (the camera's flattened forward), as the player's `hangFrame` hands it.
+    li.viewYaw = Math.atan2(this.forward.x, this.forward.z);
     return li;
   }
 

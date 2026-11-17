@@ -81,3 +81,18 @@ export function clipLift(f: WallClipFacts): number {
 }
 /** A clip's name on a rig (the pack's `mx_` prefix). */
 export const wallClipName = (id: string): string => `mx_${id}`;
+
+/**
+ * Climbing II, item 6 (`climb.wallSide` 'shimmy'): A or D alone on a wall plays the braced hang's shimmy clips, which are the
+ * ledges' own (src/anim/ledgeClips.ts: `braced_hang_shimmy_1` goes left, `braced_hang_shimmy` right). Lined up on a face by
+ * their hands, as the hang lines them up on a lip: their grip points (`g0`) a palm off the face, at the up clip's hands'
+ * mean height; played at the sideways speed over their own pace (their hands' travel along the lip a second), so the hands
+ * keep their holds.
+ */
+export const WALL_SIDE = { left: 'braced_hang_shimmy_1', right: 'braced_hang_shimmy' } as const;
+
+/** Every clip a wall climb may play (the up and down clips, and the sideways shimmies), by id. */
+export const WALL_ALL_IDS: readonly string[] = [WALL_CLIPS.up, WALL_CLIPS.down, WALL_SIDE.left, WALL_SIDE.right];
+
+/** The rig names of the wall's clips, made once (a template string is a string made, and the frame asks every frame). */
+export const WALL_CLIP_NAMES: Readonly<Record<string, string>> = Object.fromEntries(WALL_ALL_IDS.map((id) => [id, wallClipName(id)]));

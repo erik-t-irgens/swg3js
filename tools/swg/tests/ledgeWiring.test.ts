@@ -64,6 +64,13 @@ ok(has(peerHang, 'L.applyTilt(rig.root);\n      this.onY += L.tiltLift;\n      t
 ok(has(main, '|| this.player.grapple.out || this.player.climbHolds) return;') && ['emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'switchClass'].every((a) => LEDGE_MUTES.includes(a)), 'no emote plays while hanging or climbing (its keys muted, and `playEmote` refuses for the band and the console), and the class is not switched');
 ok(has(player, 'li.airWallMove = !this.grounded && this.jka.airWallMoveOpen(this.pos, this.vel);') && has(harness, 'li.airWallMove = !this.grounded && this.jka.airWallMoveOpen(this.pos, this.vel);'), 'the wall climb is told when Jedi Academy\'s own wall move is open in the air, in the player and the harness alike');
 ok(has(player, 'bi.blocked = !space && this.wallBlocked;'), 'the bracing is told when the move was cut short (a face pressed into is felt for at once)');
+{
+  // Climbing II's fixer: the hang asks the spine's twist on every frame, as phase 1 did (`twistTorso(0, 0)` eases the steady
+  // share and puts the clean pose back), the look-away's twist in its place: no switch of phase 2 may make it a frame's choice.
+  const animate = player.slice(player.indexOf('  private animateHang(dt: number): void {'), player.indexOf('  /** The hop clip held as the look-away'));
+  const after = animate.slice(animate.lastIndexOf('this.group.updateMatrixWorld(true);'));
+  ok(animate.length > 0 && /^this\.group\.updateMatrixWorld\(true\);\n(\s*\/\/[^\n]*\n)*\s*rig\.twistTorso\(L\.lookTwistNow, 0\);\n\s*\}\n/.test(after), 'the hang turns the spine (nought with no look-away) on every frame after its clips, never behind a test');
+}
 
 // ---- the grapple, the keys, the words, the helper ---------------------------------------------------------------------------
 ok(has(grapple, "if (s.climbing) return 'climbing';") && has(player, 's.climbing = this.climbHolds;'), 'the grapple refuses to fire while the hands hold a lip, and the player says when');

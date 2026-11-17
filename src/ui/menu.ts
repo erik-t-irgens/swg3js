@@ -75,7 +75,7 @@ const ACTION_LABELS: Record<Action, string> = {
   saberThrow: 'Throw saber / kick',
   saberToggle: 'Saber on and off',
   saberStyle: 'Next saber style / blaster',
-  mount: 'Mount, dismount, elevator',
+  mount: 'Mount, dismount, elevator, climb (grab a lip, start a wall climb)',
   ship: 'Ship menu (in a ship)',
   switchClass: 'Switch class (developer)',
   map: 'Map',

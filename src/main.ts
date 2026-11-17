@@ -15082,6 +15082,8 @@ class App {
     s.near = near ? (near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount') : peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ? 'board' : '';
     s.eva = p.eva;
     this.gatherGate(s);
+    // Climbing II: the use key would grab a lip or start a wall climb (`climb.grab` 'use'): first while falling, else last.
+    s.climb = p.climbReach() ? (p.climbFalls ? 'air' : 'ground') : '';
     return s;
   }
 
@@ -34846,7 +34848,11 @@ class App {
     if (!p.aboard) this.physics.stepOnce();
   }
 
-  private handleMount(): void {
+  /**
+   * The use key's last owner in the dispatch: a vehicle, a hull or the boots. True where it did something (Climbing II: a
+   * press it leaves is the climb's).
+   */
+  private handleMount(): boolean {
     const p = this.player;
     if (isSurfaceRoom(p.aboard)) {
       // Standing on a surface: E climbs into a ship within arm's reach, and takes the boots off otherwise.
@@ -34858,7 +34864,7 @@ class App {
         if (near.spec.ship && near.def) this.lastShipDef = near.def;
         this.cam.distance = Math.max(this.cam.distance, 9.5);
       }
-      return;
+      return true;
     }
     if (p.aboard) {
       const room = p.aboard;
@@ -34867,7 +34873,7 @@ class App {
         // Letting go of the controls, in flight too: the ship carries on as it was (there is no
         // landing place in space), and the room stays a still room around whoever is aboard.
         p.piloting = null;
-        return;
+        return true;
       }
       // Which hull this is: one of this world's, or one another player flies. Read before the
       // controls, because you do not fly somebody else's ship -- aboard theirs there is no spot to
@@ -34878,7 +34884,7 @@ class App {
         p.piloting = v;
         this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
         this.messages.note(`at the controls of the ${v.spec.label}`);
-        return;
+        return true;
       }
       // The two hulls are clamped together and this walker stands at the room's own way in: E crosses
       // into the other ship's rooms rather than stepping out of a door that opens onto the hull it
@@ -34887,14 +34893,14 @@ class App {
       const across = side && this.docking.clamp.crossing(side, p.pos);
       if (across) {
         void this.crossTo(room, across);
-        return;
+        return true;
       }
       this.leaveShip(false);
-      return;
+      return true;
     }
     if (p.mounted) {
       this.dismountBeside(p.mounted);
-      return;
+      return true;
     }
     let best = null;
     let bestD = MOUNT_RANGE;
@@ -34907,19 +34913,19 @@ class App {
     }
     if (best?.interior) {
       this.boardShip(best);
-      return;
+      return true;
     }
     if (best?.upsideDown) {
       // On its back: E turns it over rather than climbing on.
       best.rightSelf();
       this.physics.stepOnce();
-      return;
+      return true;
     }
     if (best) {
       p.mount(best);
       if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
-      return;
+      return true;
     }
     // Nothing of this world's within reach, but a hull another player flies may be: E boards it, which
     // builds their rooms here the first time. A hull of our own always wins, so nothing about walking
@@ -34928,10 +34934,14 @@ class App {
     const near = peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ?? 0;
     if (near) {
       void this.boardPeerShip(near);
-      return;
+      return true;
     }
     // Nothing to climb into, and out in space: the gravity boots take hold of whatever is within reach.
-    if (this.world.planet.space && p.eva) this.bootsTake(null);
+    if (this.world.planet.space && p.eva) {
+      this.bootsTake(null);
+      return true;
+    }
+    return false;
   }
 
   /** A note the boots left (why they would not take hold), shown in the prompt for a moment. */
@@ -35644,10 +35654,16 @@ class App {
             else if (!this.hyperspace.locksControls) {
               // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
               // what is underfoot, a port's own things, a story's thing, the companion lying down beside you,
-              // somebody you are looking at, a gate, and a vehicle.
-              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleRevive() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
+              // somebody you are looking at, a gate, and a vehicle. Climbing II: falling with a lip or a face in
+              // reach, the climb has the key first (`climb.grab` 'use': a lip or a wall grabbed while it is held),
+              // as the bar offers it ('air'); otherwise it has whatever press nothing else in reach took, falling
+              // too, so a key held past a lip still grabs it (under 'auto' nothing reads it and the chain is today's).
+              if (player.climbFalls && player.climbReach()) player.climbAsk.press();
+              else if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleRevive() && !this.handleTalk() && !this.handleZoneGate() && !this.handleMount()) player.climbAsk.press();
             } else this.pressJumpE();
           }
+          // The press handed to the climb holds while the key does (let go while the hands hold something: the key is muted).
+          player.climbAsk.hold(input.held('mount'));
           // The key still held beside the companion lying down: the hold that gets them up goes on.
           this.stepRevive(dt);
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -35966,6 +35982,8 @@ class App {
         // room for where it goes, and this is the one place the name is written every frame rather
         // than said once.
         else if (S8.gate) prompt = S8.gate === 'travel' ? `<b>E</b> go to ${this.promptGate}` : '<b>E</b> this gate leads nowhere the pack names';
+        // Climbing II: the use key grabs a lip in reach or starts a wall climb.
+        else if (S8.climb) prompt = '<b>E</b> climb';
       }
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(S8.lift) ?? prompt;

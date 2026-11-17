@@ -17,6 +17,7 @@ import { TestBody, ground, makePhysics, type Physics } from './grappleBody.ts';
 import { LEDGE_HANG } from '../../../src/player/ledge.ts';
 import { WALL_ON } from '../../../src/player/wallClimb.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
+import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { climbCourse, lipPiece, type ClimbCourse, type CourseLip, type CoursePiece } from '../../../src/anim/climbCourse.ts';
 import { buildCourseColliders, courseToWorld, courseWayToWorld, worldToCourse, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
 
@@ -95,7 +96,7 @@ const SEED = new Float64Array(8);
 const HAND = { x: 0, y: 0, z: 0 };
 
 /** What a frame watch measures while a script runs. */
-class Watch {
+export class Watch {
   hash: Hash = createHash('sha256');
   frames = 0;
   /** The hands' worst distance off the lip they hold, while hanging. */
@@ -203,6 +204,8 @@ export function tap(b: TestBody, code: string, fps: number): void {
 }
 
 const hangs = (b: TestBody) => b.ledge.phase === LEDGE_HANG;
+/** Climbing II, phase 2: the climb takes the use key (`climb.grab` 'use'), so a script presses E where it grabs or climbs. */
+const useGrab = (): boolean => CLIMB_TUNE.grab === 'use';
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 const here = (s: Stood, b: TestBody) => worldToCourse(s.frame, s.piece, b.pos.x, b.pos.y, b.pos.z, { x: 0, y: 0, z: 0 });
 const lipNow = (s: Stood, b: TestBody) => nearestLip(s, b.ledge.lip.ex, b.ledge.lip.ey, b.ledge.lip.ez);
@@ -242,11 +245,17 @@ export async function reachAt(how: 'stand' | 'run', fps: number, lo = 2.6, hi = 
  * hang (2 s at most): the window is the script's, not the game's, and a hang that came 17 ms after it (the 3.6 m lip's at
  * 240 frames a second) is no difference by frame rate. The time is the whole of it, from the first key.
  */
-function jump(b: TestBody, how: 'stand' | 'run', fps: number): { ok: boolean; t: number; viaWall: boolean } {
+export function jump(b: TestBody, how: 'stand' | 'run', fps: number): { ok: boolean; t: number; viaWall: boolean } {
   fill(b);
   const climbs0 = b.wall.climbs;
   b.key('KeyW', true);
   if (how === 'run') b.run(fps, 0.45);
+  // Climbing II, phase 2: under `climb.grab` 'use' a lip is grabbed only on the use key, pressed on the jump's own frame and
+  // held (maker B: pressed a frame after it, as maker A had it, it came 33 ms into the jump at 30 frames a second against 4 at
+  // 240, and a low lip had passed the hands by then at 30 alone; held on the ground before the jump, a wall in reach would be
+  // climbed instead of jumped at, and on the jump's frame the wall climb waits while the body rises).
+  const use = useGrab();
+  if (use) b.key('KeyE', true);
   tap(b, 'Space', fps);
   let flew = false;
   const t = runUntil(b, fps, 2.5, () => {
@@ -266,6 +275,7 @@ function jump(b: TestBody, how: 'stand' | 'run', fps: number): { ok: boolean; t:
     const c = runUntil(b, fps, 2, () => hangs(b) || !b.ledge.holding);
     took += Number.isFinite(c) ? c : 2;
   }
+  if (use) b.key('KeyE', false);
   const ok = hangs(b);
   // W held against the face in the air starts the wall climb too (after `climb.wallStart`), which carries the body up to any
   // lip and hands it to a hang there: that is no jump's grab, and the record says which it was.
@@ -331,7 +341,7 @@ function grab(s: Stood, start: string, how: 'stand' | 'run', fps: number): { b: 
  * A key held along the lip until the leading hand is at the end of the chain it holds ('end'), the body has made no way for
  * 0.4 s ('stopped'), it is no longer hanging ('fell'), it is `until` along the chain, or the time runs out.
  */
-function shimmy(s: Stood, b: TestBody, w: Watch, key: 'KeyA' | 'KeyD', fps: number, max = 20, until = Number.NaN): Shimmy {
+export function shimmy(s: Stood, b: TestBody, w: Watch, key: 'KeyA' | 'KeyD', fps: number, max = 20, until = Number.NaN): Shimmy {
   fill(b);
   const L = b.ledge;
   const dir = key === 'KeyD' ? 1 : -1;
@@ -391,7 +401,7 @@ const xyz = (p: { x: number; y: number; z: number }): [number, number, number] =
  * A hop (a key and Space pressed on one frame, both let go after: the hang decides on the press, and a key still held after
  * a refusal would shimmy on), run until hanging again or 3 s; reached where it hangs from a lip of `to`'s chain.
  */
-function hop(s: Stood, b: TestBody, key: 'KeyA' | 'KeyD' | 'KeyW' | 'KeyS', fps: number, to: string): Hop {
+export function hop(s: Stood, b: TestBody, key: 'KeyA' | 'KeyD' | 'KeyW' | 'KeyS', fps: number, to: string): Hop {
   fill(b);
   const L = b.ledge;
   const from = L.holding ? lipNow(s, b).name : '';
@@ -399,15 +409,22 @@ function hop(s: Stood, b: TestBody, key: 'KeyA' | 'KeyD' | 'KeyW' | 'KeyS', fps:
   b.key(key, true);
   tap(b, 'Space', fps);
   b.key(key, false);
+  // Climbing II: on the use key, a jump off backward (S with Space) is caught by a lip behind only with E held in the air.
+  const catchBehind = useGrab() && key === 'KeyS';
+  if (catchBehind) b.key('KeyE', true);
   let left = false;
   const t = runUntil(b, fps, 3, () => {
     if (L.phase !== LEDGE_HANG) left = true;
     return left && hangs(b);
   });
+  if (catchBehind) b.key('KeyE', false);
   const now = hangs(b) ? lipNow(s, b) : null;
   const words = b.ledgeWords.slice(words0).join(' ');
   return { key: key.replace('Key', ''), from, to: now ? now.name : '', reached: !!now && now.chain === to.replace(/\d+$/, '') && now.name !== from, words, t: Number.isFinite(t) ? r3(t) : Infinity };
 }
+
+/** Climbing II, item 3: Space with nowhere to hop jumps a little up and off the wall (`climb.spaceOff` 'jump'). */
+const offJumps = (): boolean => CLIMB_TUNE.spaceOff === 'jump';
 
 /** W pressed at the hang: up onto the top (stood there, the ledges let go of it), or the words that refused it. */
 function climbUp(s: Stood, b: TestBody, fps: number): string {
@@ -460,9 +477,26 @@ function stepDown(s: Stood, start: string, fps: number): { b: TestBody; w: Watch
 async function lipScript(p: CoursePiece, fps: number, trace: Hash): Promise<PieceRun> {
   const s = await standPiece(p);
   const run = newRun(s, fps);
-  const g = grab(s, 'stand', 'stand', fps);
+  let g = grab(s, 'stand', 'stand', fps);
   run.grab.push(g.rec);
-  if (g.rec.ok) {
+  if (g.rec.ok && offJumps()) {
+    // Climbing II, item 3: a hop to nowhere jumps a little up and off the wall, so each hop is a body of its own (the lip
+    // grabbed again from the start for the next), and the climb up a third.
+    run.shimmies.push(shimmy(s, g.b, g.w, 'KeyD', fps));
+    if (hangs(g.b)) run.shimmies.push(shimmy(s, g.b, g.w, 'KeyA', fps));
+    if (hangs(g.b)) run.hops.push(hop(s, g.b, 'KeyD', fps, 'none'));
+    run.stages.push(`after D and Space ${hangs(g.b) ? 'still hanging' : g.b.ledge.lastLetGo}`);
+    for (const next of ['KeyA', 'climb'] as const) {
+      fold(run, s, g.b, g.w, trace);
+      g = grab(s, 'stand', 'stand', fps);
+      run.grab.push(g.rec);
+      if (!g.rec.ok) break;
+      if (next === 'KeyA') {
+        run.hops.push(hop(s, g.b, 'KeyA', fps, 'none'));
+        run.stages.push(`after A and Space ${hangs(g.b) ? 'still hanging' : g.b.ledge.lastLetGo}`);
+      } else run.climb = climbUp(s, g.b, fps);
+    }
+  } else if (g.rec.ok) {
     run.shimmies.push(shimmy(s, g.b, g.w, 'KeyD', fps));
     if (hangs(g.b)) run.shimmies.push(shimmy(s, g.b, g.w, 'KeyA', fps));
     if (hangs(g.b)) run.hops.push(hop(s, g.b, 'KeyD', fps, 'none'));
@@ -535,7 +569,11 @@ async function upDownScript(p: CoursePiece, fps: number, trace: Hash): Promise<P
     if (d.rec.ok && d.rec.lip === 'B') atB = d;
     else fold(run, s, d.b, d.w, trace);
   }
-  if (atB) {
+  if (atB && CLIMB_TUNE.hops === 'band') {
+    // Climbing II, item 4: from B, S with Space hops down to A.
+    run.hops.push(hop(s, atB.b, 'KeyS', fps, 'A'));
+    fold(run, s, atB.b, atB.w, trace);
+  } else if (atB) {
     const b = atB.b;
     fill(b);
     const from = lipNow(s, b).name;
@@ -583,7 +621,47 @@ async function behindScript(p: CoursePiece, fps: number, trace: Hash): Promise<P
   run.grab.push(g.rec);
   if (g.rec.ok) run.hops.push(hop(s, g.b, 'KeyS', fps, 'B'));
   fold(run, s, g.b, g.w, trace);
+  // Climbing II, item 7 (maker B): braced on A again, the view turned back over the right shoulder, Space alone hops to B
+  // behind (else a small jump off the wall).
+  if (CLIMB_TUNE.lookAway === 'reach') {
+    const h = grab(s, 'onA', 'stand', fps);
+    run.grab.push(h.rec);
+    if (h.rec.ok) run.hops.push(lookHop(s, h.b, fps, 'B', -LOOK_BACK_DEG));
+    fold(run, s, h.b, h.w, trace);
+  }
   return run;
+}
+
+/** How far the look-away's script turns the view from the wall, degrees (back over a shoulder, past the threshold). */
+export const LOOK_BACK_DEG = 160;
+
+/**
+ * Climbing II, item 7: the view turned `deg` from the way the hang faces (positive to the figure's left), held while the
+ * look eases in (0.3 s), then Space alone; run until hanging again or 3 s. The camera is put back after. Reached where it
+ * hangs from a lip of `to`'s chain.
+ */
+export function lookHop(s: Stood, b: TestBody, fps: number, to: string, deg: number): Hop {
+  fill(b);
+  const L = b.ledge;
+  const from = L.holding ? lipNow(s, b).name : '';
+  const words0 = b.ledgeWords.length;
+  const fx = b.forward.x;
+  const fz = b.forward.z;
+  const v = b.heading + (deg * Math.PI) / 180;
+  b.forward.set(Math.sin(v), 0, Math.cos(v));
+  b.right.set(-Math.cos(v), 0, Math.sin(v));
+  b.run(fps, 0.3);
+  tap(b, 'Space', fps);
+  let left = false;
+  const t = runUntil(b, fps, 3, () => {
+    if (L.phase !== LEDGE_HANG) left = true;
+    return left && hangs(b);
+  });
+  b.forward.set(fx, 0, fz);
+  b.right.set(-fz, 0, fx);
+  const now = hangs(b) ? lipNow(s, b) : null;
+  const words = b.ledgeWords.slice(words0).join(' ');
+  return { key: 'look+Space', from, to: now ? now.name : '', reached: !!now && now.chain === to.replace(/\d+$/, '') && now.name !== from, words, t: Number.isFinite(t) ? r3(t) : Infinity };
 }
 
 /** A wall: W held into it until the top is reached and climbed out onto, or the time runs out. */
@@ -594,6 +672,8 @@ async function wallScript(p: CoursePiece, fps: number, trace: Hash): Promise<Pie
   const H = p.numbers.height as number;
   fill(b);
   b.key('KeyW', true);
+  // Climbing II: on the use key the climb starts as the face comes into reach (W walks the body there and climbs).
+  if (useGrab()) b.key('KeyE', true);
   w.holdOn = true;
   const t0 = runUntil(b, fps, 2, () => b.wall.holding);
   run.stages.push(Number.isFinite(t0) ? `on the wall ${r3(t0)} s` : 'never on the wall');
@@ -607,6 +687,7 @@ async function wallScript(p: CoursePiece, fps: number, trace: Hash): Promise<Pie
   }
   w.holdOn = false;
   b.key('KeyW', false);
+  if (useGrab()) b.key('KeyE', false);
   fold(run, s, b, w, trace);
   return run;
 }
@@ -620,8 +701,11 @@ async function pitScript(p: CoursePiece, fps: number, trace: Hash): Promise<Piec
   b.key('KeyW', true);
   runUntil(b, fps, 3, () => here(s, b).z >= 4.5);
   tap(b, 'Space', fps);
+  // Climbing II: on the use key, held from the frame after the jump.
+  if (useGrab()) b.key('KeyE', true);
   runUntil(b, fps, 3, () => hangs(b));
   b.key('KeyW', false);
+  if (useGrab()) b.key('KeyE', false);
   const c = here(s, b);
   const lip = worldToCourse(s.frame, s.piece, b.ledge.lip.ex, b.ledge.lip.ey, b.ledge.lip.ez, { x: 0, y: 0, z: 0 });
   run.stages.push(hangs(b) ? `hung from a lip at y ${r3(lip.y)}, z ${r3(lip.z)} (${b.ledge.braced ? 'braced' : 'free'})` : 'caught nothing');
@@ -637,6 +721,7 @@ async function poleScript(p: CoursePiece, fps: number, trace: Hash): Promise<Pie
   const { b, w } = bodyAt(s, 'stand', fps);
   fill(b);
   b.key('KeyW', true);
+  if (useGrab()) b.key('KeyE', true);
   let climbed = '';
   runUntil(b, fps, 4, () => {
     if (b.wall.holding) climbed = 'the wall climb took it';
@@ -644,6 +729,7 @@ async function poleScript(p: CoursePiece, fps: number, trace: Hash): Promise<Pie
     return false;
   });
   b.key('KeyW', false);
+  if (useGrab()) b.key('KeyE', false);
   const c = here(s, b);
   run.stages.push(climbed || `nothing took it (stopped at z ${r3(c.z)})`);
   fold(run, s, b, w, trace);
@@ -719,7 +805,10 @@ async function freeRunScript(p: CoursePiece, fps: number, trace: Hash): Promise<
   face(s, b, 0, 1);
   fill(b);
   b.key('KeyW', true);
+  // Climbing II: on the use key the climb starts as C comes into reach.
+  if (useGrab()) b.key('KeyE', true);
   const t0 = runUntil(b, fps, 4, () => b.wall.holding);
+  if (useGrab()) b.key('KeyE', false);
   if (!Number.isFinite(t0)) {
     b.key('KeyW', false);
     st.push(`never on C (at x ${r3(here(s, b).x)}, z ${r3(here(s, b).z)})`);

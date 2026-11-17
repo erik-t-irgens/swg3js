@@ -12,9 +12,14 @@
 import assert from 'node:assert/strict';
 import { box, ground, makePhysics, type Physics } from './grappleBody.ts';
 import { BRACE_NONE, BRACE_PERSON, BRACE_SPACE, BRACE_TIGHT, BRACE_WALL, BraceIn, Crowd, HandBrace, WALL_LOOK } from '../../../src/player/brace.ts';
-import { CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, resetClimbTune, tuneClimb, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { PALM_OFF } from '../../../src/anim/wallClips.ts';
 import { Group, RAPIER, groups } from '../../../src/core/physics.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -57,6 +62,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 // ---- a wall at the left shoulder, run into at a slant ----------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   // The wall's face looks toward -x at x = 0.6 (the body's left is +x as it faces +z).
   const p = await world((q) => box(q, [0.6, 0, -10], [1.6, 3, 10]));
   const curves: number[][] = [];
@@ -113,6 +119,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 // ---- head on, a tight passage, standing still ------------------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   // The face 0.4 m ahead: the capsule (0.35) against it, its skin and a hand's width.
   const p = await world((q) => box(q, [-3, 0, 0.4], [3, 3, 1.4]));
   const B = new HandBrace(makeRay);
@@ -125,6 +132,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 }
 {
   resetClimbTune();
+  climbTwoBefore();
   // A passage 1.1 m wide along z: faces at x = +0.55 and -0.55.
   const p = await world((q) => {
     box(q, [0.55, 0, -10], [1.55, 3, 10]);
@@ -143,11 +151,13 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
   for (let k = 0; k < 30; k++) C.step(p.world, frame(1 / 60, 0, k * 0.03, 0, 2, 0, 1), null);
   ok(C.src[0] !== BRACE_TIGHT && C.w[0] === 0, 'a passage wider than brace.tight is no tight spot');
   resetClimbTune();
+  climbTwoBefore();
 }
 
 // ---- the crowd -------------------------------------------------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   const p = await world(() => {});
   const crowd = new Crowd();
   const B = new HandBrace(makeRay);
@@ -166,11 +176,13 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
   for (let k = 0; k < 30; k++) C.step(p.world, frame(1 / 60, 0, 0, 0, 3, 0, 1), crowd);
   ok(C.w[1] === 0, 'with brace.people off, no hand on anybody');
   resetClimbTune();
+  climbTwoBefore();
 }
 
 // ---- held hands, busy, the change of what a hand rests on ------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   const p = await world((q) => box(q, [-3, 0, 0.4], [3, 3, 1.4]));
   const B = new HandBrace(makeRay);
   for (let k = 0; k < 30; k++) {
@@ -195,6 +207,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 }
 {
   resetClimbTune();
+  climbTwoBefore();
   // A wall at the left, then a body at the left instead: the hand lets go of the wall before it takes the body.
   const p = await world((q) => box(q, [0.6, 0, -2], [1.6, 3, 0.2]));
   const crowd = new Crowd();
@@ -215,6 +228,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 // ---- space: hand over hand along a surface -----------------------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   // A hull's side 0.6 m off the body's left (its face at x 0.6), the body drifting along +z beside it, upright, far over the ground.
   const p = await world(() => {});
   const plate = p.world.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 10, 50).setTranslation(1.1, 50, 0));
@@ -284,6 +298,7 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 // ---- the fix round: a walk in the open looks for a face only now and then, one near is felt every frame -----------------
 {
   resetClimbTune();
+  climbTwoBefore();
   const open = await world(() => {});
   const near = await world((q) => box(q, [0.6, 0, -10], [1.6, 3, 10]));
   for (const fps of FPS) {
@@ -312,11 +327,13 @@ function frame(dt: number, x: number, z: number, vx: number, vz: number, mx = 0,
 // ---- 'before' ----------------------------------------------------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   const p = await world((q) => box(q, [-3, 0, 0.4], [3, 3, 1.4]));
   tuneClimb({ brace: { rule: 'before' } });
   const B = new HandBrace(makeRay);
   for (let k = 0; k < 30; k++) B.step(p.world, frame(1 / 60, 0, 0, 0, 0, 0, 1), null);
   ok(B.w[0] === 0 && B.w[1] === 0 && B.casts === 0, "under brace.rule 'before' nothing is felt for (no ray) and no hand braces");
   resetClimbTune();
+  climbTwoBefore();
 }
 console.log(`braceRule: ${checks} checks passed`);

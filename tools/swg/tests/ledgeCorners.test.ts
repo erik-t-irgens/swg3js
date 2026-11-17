@@ -12,10 +12,15 @@
 //    last leg).
 import assert from 'node:assert/strict';
 import { TestBody, box, ground, makePhysics, trunk, CAPSULE_RADIUS, STAND_HALF_HEIGHT, CROUCH_HALF_HEIGHT, type Physics } from './grappleBody.ts';
-import { CLIMB_RANGES, CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_RANGES, CLIMB_TUNE, resetClimbTune, tuneClimb, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { RAPIER } from '../../../src/core/physics.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -331,6 +336,7 @@ for (const fps of FPS) {
     runUntil(b, fps, 4, () => settled(b) && b.pos.x > 4);
     ok(refused && words.length === 0 && settled(b) && b.pos.x > 5 && Math.abs(b.ledge.lip.ey - 2.8) < 1e-3, `${fps} fps: at the brief's 1.5 the wall 5 m off is out of reach, refused in words; at a reach of 6 the hop goes to it (lands at x ${n3(b.pos.x)})`);
     resetClimbTune();
+    climbTwoBefore();
   }
 }
 ok(CLIMB_RANGES.hopSide.max >= 6 && CLIMB_RANGES.hopUp.max >= 6 && CLIMB_RANGES.lipSlope.max >= 35, `the hop's sliders go to ${CLIMB_RANGES.hopSide.max} m sideways and ${CLIMB_RANGES.hopUp.max} m up, past the brief's 6`);

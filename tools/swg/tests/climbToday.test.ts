@@ -6,15 +6,19 @@
 //  - every piece at every rate, and the digest of all of it, and of their one-line summaries;
 //  - today's jump reaches, each rate's, on the layout's own braced lip on its floor slab (they differ by frame rate today:
 //    held as they are; on the terrain with no slab under the body each running reach at 30 and 144 is a centimetre higher);
-//  - day one, last: no file of the climbing, the movement or their harnesses has changed since `c88f890` (so every climbing,
-//    ledge, wall and stairs suite runs what it ran then; asked of git, a note where git cannot answer). Phase 1's proof: phase
-//    2, which must change those files, makes this a note in the same edit that sets its switches to 'before' here.
+//  - day one, last: which files of the climbing, the movement or their harnesses have changed since `c88f890`, a note now.
+//    Phase 1 held them unchanged; phase 2 must change them, and holds today's climbing instead by the digests above with
+//    every one of its switches at its 'before' setting (`climbTwoBefore`), set here before anything runs.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { climbCourse, TODAY_REACH } from '../../../src/anim/climbCourse.ts';
+import { climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { RATES, reachAt, runCourse, summarize } from './climbCourseBody.ts';
 import { createHash } from 'node:crypto';
 import { REPO } from './oldModules.ts';
+
+// Climbing II, phase 2: every switch it adds at its 'before' setting, so the course is today's climbing.
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -82,7 +86,8 @@ const TODAY = {
   } catch (e) {
     note(`git could not say what changed since ${BASE} (${(e as Error).message.split('\n')[0]}): day one not asked`);
   }
-  if (changed) ok(changed.length === 0, `day one: no file of the climbing, the movement, their harnesses or the climbing, ledge, wall and stairs suites has changed since ${BASE}${changed.length ? ` (${changed.join(', ')})` : ''}`);
+  // Phase 2 changes these files on purpose: what changed is said, and today's climbing is held by the digests above.
+  if (changed) note(`day one: ${changed.length ? `changed since ${BASE}: ${changed.join(', ')}` : `nothing changed since ${BASE}`} (phase 2 holds today's climbing by the digests above, every switch at 'before')`);
 }
 
 console.log(`climbToday: ${checks} checks passed`);

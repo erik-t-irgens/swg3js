@@ -24,11 +24,16 @@ import { PeerWall } from '../../../src/player/peerWall.ts';
 import { PeerHangIn } from '../../../src/player/peerHang.ts';
 import { BALL_OFF, LimbPlace } from '../../../src/player/limbPlace.ts';
 import { BraceIn, HandBrace } from '../../../src/player/brace.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, resetClimbTune, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { Group, RAPIER, groups } from '../../../src/core/physics.ts';
 import { glbSkeleton, speciesBodies, targetSkeleton } from './animFixtures.ts';
 import { REPO } from './oldModules.ts';
 import { wedge } from './wallScenes.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -151,6 +156,7 @@ function faceDistance(p: Physics, at: THREE.Vector3, n: THREE.Vector3): number {
 for (const angle of [90, 70]) {
   for (const fps of FPS) {
     resetClimbTune();
+    climbTwoBefore();
     emu.stop();
     const p = await (async () => {
       const q = await makePhysics();
@@ -246,6 +252,7 @@ for (const angle of [90, 70]) {
 // ---- bracing: running past a wall at the left shoulder ---------------------------------------------------------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   emu.stop();
   const p = await makePhysics();
   ground(p, 0);
@@ -334,10 +341,12 @@ for (const angle of [90, 70]) {
   group.updateMatrixWorld(true);
   ok(!B.busy && P('lWrist').equals(was) && B.casts === 0, "under brace.rule 'before' nothing is felt for and the arms are the clip's to the bit");
   resetClimbTune();
+  climbTwoBefore();
 }
 // ---- another player on a wall: their figure's hands on the face this side finds, every offset taken back off ------------------
 {
   resetClimbTune();
+  climbTwoBefore();
   emu.stop();
   const p = await makePhysics();
   ground(p, 0);
@@ -384,5 +393,6 @@ for (const angle of [90, 70]) {
   ok(frames > 60 && worst < 0.01, `another player's figure on a wall: every frame a hand is wholly placed (${frames}) its grip is a palm off the face this side finds within a centimetre (worst ${(worst * 1000).toFixed(2)} mm)`);
   ok(lifted > 0 && back && rest, `and every offset it puts on their figure's root, the hands' anchor lift too (up to ${(lifted * 1000).toFixed(1)} mm), is taken back off before the next frame writes it`);
   resetClimbTune();
+  climbTwoBefore();
 }
 console.log(`wallHands: ${checks} checks passed`);

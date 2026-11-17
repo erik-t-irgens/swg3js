@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as Today from './grappleBody.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, resetClimbTune, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { LEDGE_IDS } from '../../../src/anim/ledgeClips.ts';
 import { STAIR_IDS, moreClips } from '../../../src/anim/locoTable.ts';
@@ -20,6 +20,11 @@ import { MixamoPack } from '../../../src/anim/mixamoPack.ts';
 import { Group, RAPIER, TRIMESH_FLAGS, cleanTrimesh, groups } from '../../../src/core/physics.ts';
 import { loadOldMany } from './oldModules.ts';
 import { glbSkeleton, repoRoot, speciesBodies, targetSkeleton } from './animFixtures.ts';
+
+// Climbing II, phase 2: these scenes hold today's climbing (a lip grabbed by moving at it, a wall climbed by W pressed
+// into it, the hang's keys as they were): every phase 2 switch at its 'before' setting, here and after every reset (the new
+// controls are climbControls.test.ts's).
+climbTwoBefore();
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -148,6 +153,7 @@ async function trace(H: Harness): Promise<string[]> {
   const before = await trace(Today);
   LOCO_TUNE.step.rule = 'mended';
   resetClimbTune();
+  climbTwoBefore();
   const on = await trace(Today);
   const digest = createHash('sha1').update(before.join('\n')).digest('hex').slice(0, 16);
   const first = on.findIndex((r, i) => r !== before[i]);

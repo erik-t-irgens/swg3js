@@ -15,6 +15,7 @@ import { TwoBoneAsk, TwoBoneOut, solveTwoBone } from '../anim/twoBone.ts';
 import { TurnAsk, setBoneWorld, turnBetweenIn, turnBone } from './limbIk.ts';
 import { STILL_FLAGS } from './stairSense.ts';
 import { WALL_PLANT } from '../anim/wallClips.ts';
+import type { ClimbHolds } from './climbHolds.ts';
 
 /** The little of a rig this asks: its root, its bones by name, and the hook its update calls before the mixer. */
 export interface LimbRig {
@@ -81,6 +82,11 @@ class WallLeg {
 const SAME_PLACE = 0.005;
 /** How far the foot's ball stands off the face once placed, metres on the human male (the shoe's toe past the ball). */
 export const BALL_OFF = 0.04;
+/**
+ * A foot's hold is out of the leg's reach past this share of the thigh's and shin's length from the hip (Climbing II's
+ * fixer): a mechanic, not feel, a touch short of straight so the knee's solve never meets a leg locked out.
+ */
+export const HOLD_REACH = 0.98;
 
 // Scratch: kept, written in place.
 const m4 = new THREE.Matrix4();
@@ -137,6 +143,12 @@ export class LimbPlace {
    * frame's seconds over `climb.ease`; 1 at once). Written by the caller; maker B's climb (`footFade`) never reads it.
    */
   footStep = 0.5;
+  /**
+   * Climbing II, item 6 (`climb.wallLimbs` 'held'): the wall climb's holds, the feet's half of them (limbs 2 and 3): each foot
+   * the clip plants is put on its hold until its next reach (src/player/climbHolds.ts). Written by the wall climb each frame
+   * (null under 'before', and by everything else); read only with `footFade`.
+   */
+  holds: ClimbHolds | null = null;
   /**
    * Maker B's bracing: each hand's palm turned flat against a face (its outward normal, left 0..2, right 3..5, in the
    * physics frame) by this much (0 to 1), the wrist moved so the grip still lands on its target. Nought: the clip's own
@@ -392,7 +404,10 @@ export class LimbPlace {
     TA.tz = nz;
     turnBetweenIn(qX, TA);
     if (!fade) qX.slerp(qI.set(0, 0, 0, 1), 1 - w);
-    for (const l of legs) {
+    // Climbing II, item 6: the wall climb's holds (the feet are limbs 2 and 3), only with the wall's own fade.
+    const holds = fade ? this.holds : null;
+    for (let li = 0; li < 2; li++) {
+      const l = legs[li];
       l.thighQ.copy(l.thigh.quaternion);
       l.shinQ.copy(l.shin.quaternion);
       l.ankleQ.copy(l.ankle.quaternion);
@@ -416,10 +431,42 @@ export class LimbPlace {
         if (d === d) l.last = d;
         else d = l.last;
         if (!(l.w > 0) || !(d === d)) continue;
-      } else if (!(d === d)) continue;
+      } else if (!(d === d)) {
+        // No face under the foot: its hold (item 6) let go of at once.
+        if (holds) {
+          holds.px = pT.x;
+          holds.py = pT.y;
+          holds.pz = pT.z;
+          holds.drop(2 + li);
+        }
+        continue;
+      }
       // Each foot by how near the clip has it to the face, where the climb asks (a foot lifted for its next hold is the clip's).
       const off = d - BALL_OFF;
-      const wf = fade ? w * (off <= WALL_PLANT.near ? 1 : off >= WALL_PLANT.far ? 0 : 1 - (off - WALL_PLANT.near) / (WALL_PLANT.far - WALL_PLANT.near)) : w * l.w;
+      let wf = fade ? w * (off <= WALL_PLANT.near ? 1 : off >= WALL_PLANT.far ? 0 : 1 - (off - WALL_PLANT.near) / (WALL_PLANT.far - WALL_PLANT.near)) : w * l.w;
+      // Item 6: on its hold until its next reach (its ball's place on the face as the clip has it handed over, and the target and
+      // weight the hold answers taken in its place).
+      if (holds) {
+        holds.px = pT.x - nx * off;
+        holds.py = pT.y - ny * off;
+        holds.pz = pT.z - nz * off;
+        holds.plant = w > 0 ? wf / w : 0;
+        // The leg's reach (the fixer): a hold past the thigh's and shin's length from the hip, the hip moved by the ball's
+        // offset from the ankle, is let go of, so no leg is stretched past its length to stand on it.
+        const ux = pB.x - pA.x;
+        const uy = pB.y - pA.y;
+        const uz = pB.z - pA.z;
+        const vx = pC.x - pB.x;
+        const vy = pC.y - pB.y;
+        const vz = pC.z - pB.z;
+        holds.reach = (Math.sqrt(ux * ux + uy * uy + uz * uz) + Math.sqrt(vx * vx + vy * vy + vz * vz)) * HOLD_REACH;
+        holds.rx = pA.x + pT.x - pC.x;
+        holds.ry = pA.y + pT.y - pC.y;
+        holds.rz = pA.z + pT.z - pC.z;
+        holds.step(2 + li);
+        holds.reach = 0;
+        wf = w * holds.w;
+      }
       if (!(wf > 0)) continue;
       this.feetOn++;
       const move = off * wf;
@@ -433,9 +480,16 @@ export class LimbPlace {
       q.cx = pC.x;
       q.cy = pC.y;
       q.cz = pC.z;
-      q.tx = pC.x - nx * move;
-      q.ty = pC.y - ny * move;
-      q.tz = pC.z - nz * move;
+      if (holds) {
+        // The ankle moved by the ball's way to its target (on the face: its hold, or where the clip has it), by its weight.
+        q.tx = pC.x + (holds.tx - pT.x) * wf;
+        q.ty = pC.y + (holds.ty - pT.y) * wf;
+        q.tz = pC.z + (holds.tz - pT.z) * wf;
+      } else {
+        q.tx = pC.x - nx * move;
+        q.ty = pC.y - ny * move;
+        q.tz = pC.z - nz * move;
+      }
       // A straight leg's knee: toward the wall.
       q.px = -nx;
       q.py = 0;
@@ -551,6 +605,7 @@ export class LimbPlace {
     this.palmW[0] = 0;
     this.palmW[1] = 0;
     this.footFade = false;
+    this.holds = null;
     if (this.legs) for (const l of this.legs) l.toi = Number.NaN, (l.rx = Number.NaN), (l.w = 0), (l.last = Number.NaN);
   }
 
