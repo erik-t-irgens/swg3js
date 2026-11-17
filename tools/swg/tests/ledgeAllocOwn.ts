@@ -173,6 +173,10 @@ async function measure(mode: number, way: number, window: number): Promise<{ byt
   let best = { bytes: Number.POSITIVE_INFINITY, casts: 0, frames: window, clean: false };
   for (let tries = 0; tries < 4; tries++) {
     run(240);
+    // Wall time for the optimising compiler, which works on a thread of its own: under a loaded machine its job had not
+    // landed after all four tries in one process of several dozen, and code not yet optimised boxes every fraction it
+    // reads (since Climbing II's `seenY` the standing path reads two). A path that allocates once optimised still fails.
+    await new Promise<void>((r) => setTimeout(r, 25));
     globalThis.gc!({ type: 'minor' } as never);
     await turn();
     await turn();
