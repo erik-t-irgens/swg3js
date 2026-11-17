@@ -47,6 +47,7 @@ import { acesInverseNode, toLinearNode } from './gpuCard.ts';
 import { diffuseBackNode } from './gpuSpec.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 import { GPU_LOOKS } from './looks.ts';
+import { drawsInline } from './inlineOutput.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -1111,14 +1112,34 @@ export function ringNode(u: RingUniforms, ground: GroundTileUniforms, opts: { tr
  * three's ACES fit (the leaf card's own inverse, `acesInverseNode`) and the sRGB curve first, and shows the same. The self
  * test's own draws (into targets nothing tone-maps after) carry nothing: `groundSelfTestGpu` holds `GROUND_VIEW_CARRY.on`
  * false round them. Read once a render.
+ *
+ * Carried only where three's own output pass tone-maps what is drawn (the frame-buffer target the canvas is drawn
+ * through, `isPostProcessingRenderTarget`), which is WebGL's picture with its effects off. Into the effects chain's scene
+ * target (step 6) nothing is carried: WebGL draws these programs into its own chain's target as they are, and its output
+ * pass tone-maps them once after, as three's output pass does here after the chain's last pass.
  */
 export const GROUND_VIEW_CARRY = { on: true };
-const viewAces = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (GROUND_VIEW_CARRY.on && f.renderer?.toneMapping === THREE.ACESFilmicToneMapping ? 1 : 0));
-const viewSrgb = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (GROUND_VIEW_CARRY.on && f.renderer?.outputColorSpace === THREE.SRGBColorSpace ? 1 : 0));
+/** Into three's frame-buffer target, which its output pass tone-maps after every material (the inline output off). */
+const shownAfterFB = (f: Any): boolean => GROUND_VIEW_CARRY.on && f.renderer?.getRenderTarget?.()?.isPostProcessingRenderTarget === true;
+/** And straight onto the canvas with the inline output on (step 6, `inlineOutput.ts`), which tone-maps the material's own output. */
+const shownAfter = (f: Any): boolean => shownAfterFB(f) || (GROUND_VIEW_CARRY.on && drawsInline(f));
+const viewAces = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (shownAfter(f) && f.renderer?.toneMapping === THREE.ACESFilmicToneMapping ? 1 : 0));
+const viewSrgb = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (shownAfter(f) && f.renderer?.outputColorSpace === THREE.SRGBColorSpace ? 1 : 0));
 const viewExposure = uniform(1).setGroup(renderGroup).onRenderUpdate((f: Any) => f.renderer?.toneMappingExposure ?? 1);
 export function asShown(view: Any): Any {
   const lin = select(viewSrgb.greaterThan(0.5), toLinearNode(clamp(view.rgb, 0, 1)), view.rgb);
   return vec4(select(viewAces.greaterThan(0.5), acesInverseNode(lin).div(max(viewExposure, 1e-4)), lin), view.a);
+}
+const fbAces = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (shownAfterFB(f) && f.renderer?.toneMapping === THREE.ACESFilmicToneMapping ? 1 : 0));
+const fbSrgb = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (shownAfterFB(f) && f.renderer?.outputColorSpace === THREE.SRGBColorSpace ? 1 : 0));
+/**
+ * A program WebGL writes wholly as the canvas's own value, with no chunk (the marks, the blades, the debug view; its material
+ * `swgRawOut`, which the inline output never touches): carried back only into three's frame-buffer target, the one place
+ * three tone-maps after it; straight onto the canvas under the inline output it is written as it is, as WebGL writes it.
+ */
+export function asShownFB(view: Any): Any {
+  const lin = select(fbSrgb.greaterThan(0.5), toLinearNode(clamp(view.rgb, 0, 1)), view.rgb);
+  return vec4(select(fbAces.greaterThan(0.5), acesInverseNode(lin).div(max(viewExposure, 1e-4)), lin), view.a);
 }
 /** The fog colour read while a scene has none (the fade then takes the horizon's own). */
 const FOG_NONE = new THREE.Color(0, 0, 0);

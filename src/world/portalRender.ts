@@ -481,7 +481,38 @@ export class PortalRenderer {
    * they are drawn, by the world's own sweep behind every loading screen (`World.compileEverything`).
    */
   ownDraws(): THREE.Object3D[] {
+    // On WebGPU (the GPU port's step 6, its fixer) a stand-in for each way a doorway is drawn there too (`gpuDoorwayStandIns`).
+    if (GPU.webgpu) return [this.portalStandIn, this.resetQuad, ...this.gpuDoorwayStandIns()];
     return [this.portalStandIn, this.resetQuad];
+  }
+
+  /** The two stand-ins `gpuDoorwayStandIns` makes once, on WebGPU alone. */
+  private gpuDoorways: THREE.Mesh[] | null = null;
+
+  /**
+   * On WebGPU alone (step 6's fixer): a doorway as `drawPortalsGpu` really draws it, depth tested and not, each on a material
+   * of its own fixed in the draw's stencil and depth state, never drawn. WebGPU keys a pipeline on that state, and the
+   * doorways' second material (`portalOpenNoDepth`) is made at its first draw, so neither the plain stand-in (the material
+   * as it was made) nor anything a sweep walked built the pipelines the doorways are drawn with; an Effects switch built
+   * the second's at its first draw after the change-over. These share the doorways' programs and state, so their pipelines
+   * are the very ones the draws find.
+   */
+  private gpuDoorwayStandIns(): THREE.Mesh[] {
+    if (this.gpuDoorways) return this.gpuDoorways;
+    this.gpuDoorways = [true, false].map((depthTest) => {
+      const m = this.portalMat.clone();
+      m.stencilFunc = THREE.EqualStencilFunc;
+      m.stencilZPass = THREE.IncrementStencilOp;
+      m.stencilFail = THREE.KeepStencilOp;
+      m.stencilZFail = THREE.KeepStencilOp;
+      m.stencilFuncMask = 0xff;
+      m.depthTest = depthTest;
+      const s = new THREE.Mesh(this.portalStandIn.geometry, m);
+      s.frustumCulled = false;
+      s.layers.enableAll();
+      return s;
+    });
+    return this.gpuDoorways;
   }
 
   /**

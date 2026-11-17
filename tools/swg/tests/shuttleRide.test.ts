@@ -1548,7 +1548,9 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
   // file (the renderer takes its renderer as a parameter property), so both are read.
   const portal = readFileSync(new URL('../../../src/world/portalRender.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const own = /\n  ownDraws\(\): THREE\.Object3D\[\] \{\n\s*return \[this\.portalStandIn, this\.resetQuad\];\n\s*\}/.test(portal);
+  // On WebGPU (the GPU port's step 6, its fixer) a stand-in for each way a doorway is drawn there as well, on a line of its
+  // own before the WebGL return, which stands as it was.
+  const own = /\n  ownDraws\(\): THREE\.Object3D\[\] \{\n(?:\s*\/\/[^\n]*\n)*\s*if \(GPU\.webgpu\) return \[this\.portalStandIn, this\.resetQuad, \.\.\.this\.gpuDoorwayStandIns\(\)\];\n\s*return \[this\.portalStandIn, this\.resetQuad\];\n\s*\}/.test(portal);
   const standIn = /this\.portalStandIn = new THREE\.Mesh\(\w+, this\.portalMat\);/.test(portal) && /new THREE\.Mesh\(g, this\.portalMat\)/.test(portal) && /this\.resetQuad = new THREE\.Mesh\(g, this\.resetMat\);/.test(portal);
   const sweep = world.slice(world.indexOf('private async compileEverything('), world.indexOf('/** Call once per frame after the camera has moved. */'));
   const compiled = /for \(const o of this\.portals\?\.ownDraws\(\) \?\? \[\]\) \{\n\s*this\.withTarget\(r, target, \(\) => r\.compile\(o, camera\)\);\n\s*this\.programs\.countLinks\(resolveLinks\(r, o\)\);\n\s*\}/.test(sweep);

@@ -2053,10 +2053,11 @@ class App {
     // session and nothing of the pass is ever made.
     this.applyVolumetrics();
     // The effects chain is built only now: the water reflections pass is handed the world's water
-    // bodies, so a chain made before the world exists throws on boot. Never on WebGPU this step (the effects are step 6):
-    // the scene draws straight to the canvas with three's own tone mapping at the game's exposure.
+    // bodies, so a chain made before the world exists throws on boot. On WebGPU from the port's step 6 the chain of the
+    // passes ported (the WebGPU side's, `GPU.rt.chain`), unless it was left out at load: then straight to the canvas.
     if (GPU.webgpu) this.forceGpuOff();
     else if (S.effects) this.postfx = this.makePostFX();
+    if (GPU.webgpu && S.effects && GPU.rt!.chain.atLoad) this.postfx = this.makePostFX();
     // The wardrobe and creator dolls take their lens from the same settings (a static, so no panel need exist yet).
     this.syncPreviewEffects();
     // Shaders are warmed for the target the frames are actually drawn into: with the effects on,
@@ -3422,13 +3423,13 @@ class App {
        * `{ carries: true }` checks what three's node copies carry of the scene's materials (step 4: the person keys, the
        * emissive splits, unlit, decals, flip-books and scrolls, the stencil reference), and `stays` says what is step 3's still.
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGL; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true) ? rt.tune({ ...o, scene: this.scene }) : undefined;
-        return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true || o.inline !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), effectsSwitch: { ...this.world.gpuSwitchLast, does: "an Effects switch in play lists for the new target what is made ready while it is under way, then walks the scene for what stood after its sweep until a walk finds nothing (step 6's fixer)" }, ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
       },
       /**
        * Every window's box, its minimum, what storage holds for it, whether it is wholly on the screen and
@@ -14420,7 +14421,8 @@ class App {
    */
   private volKnobState(key: string): { note?: string; off?: string } | null {
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
-    if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };
+    // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
+    if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };
     // The far rings are on WebGPU from the port's step 5, unless their part was left out at load (localStorage['swg.gpu.rings'] = '0').
     if (GPU.webgpu && key === 'farRings' && GPU.rt!.look({}).rings !== true) return { off: 'left out at load on WebGPU (swg.gpu.rings)' };
     // The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance.
@@ -24131,7 +24133,7 @@ class App {
    */
   private forceGpuOff(): void {
     const rt = GPU.rt!;
-    rt.forced('effects', 'the effects chain is not made on WebGPU this step (step 6): straight to the canvas, three\'s tone mapping at the game\'s exposure');
+    if (!rt.chain.atLoad) rt.forced('effects', "the effects chain is left out at load (localStorage['swg.gpu.chain'] = '0'): straight to the canvas, three's tone mapping at the game's exposure");
     rt.forced('volumetrics', 'the master is held off: its remake is the owner\'s');
     rt.forced('shadow hold', 'every cascade is drawn every frame');
     rt.forced('shadow batches', 'every caster draws itself');
@@ -24196,8 +24198,9 @@ class App {
    * when the programs are ready.
    */
   private async reconcileEffects(): Promise<void> {
-    // On WebGPU no effects chain is made this step: the Graphics page's rows say so; only the previews' lens is kept in step.
-    if (GPU.webgpu) {
+    // On WebGPU the chain of the passes ported (step 6) is switched here as on WebGL; with it left out at load
+    // (`localStorage['swg.gpu.chain'] = '0'`) none is made: the Graphics page's rows say so; only the previews' lens is kept in step.
+    if (GPU.webgpu && !GPU.rt!.chain.atLoad) {
       this.syncPreviewEffects();
       return;
     }
@@ -24224,6 +24227,8 @@ class App {
         }
         const want = S.effects;
         const next = want ? this.makePostFX() : null;
+        // On WebGPU (step 6's fixer) the world lists what is made ready meanwhile for this switch's target too (`World.gpuSwitch`).
+        if (GPU.webgpu) this.world.gpuSwitch = { target: next ? next.compileTarget : null, listed: new WeakSet() };
         const label = want ? 'Effects on' : 'Effects off';
         this.notice.set(`${label}: preparing shaders`);
         // The notice has to be on the screen before the compiling starts: the chain's own shaders
@@ -24245,6 +24250,9 @@ class App {
         // builds a program in a millisecond, and what it really costs on one that does not, since
         // this notice is the only thing on the screen while the switch takes its seconds.
         await this.world.compileAllAsync((done, total) => this.notice.set(`${label}: shaders for ${done} of ${total} objects${machineAside(compilerVerdict())}`), { target: next ? next.compileTarget : null, keepQueue: true });
+        // On WebGPU (step 6's fixer) what stood after the sweep walked the scene is listed for the new target too, until a
+        // walk finds nothing, which the change-over below follows in the same task.
+        if (GPU.webgpu) await this.world.gpuSwitchCatchUp((n) => this.notice.set(`${label}: shaders for ${n} more objects`));
         if (this.settings.effects !== want) {
           // It moved again while we compiled: throw this one away and look at the settings afresh.
           next?.dispose();
@@ -24257,6 +24265,7 @@ class App {
         old?.dispose();
       } while (this.fxAgain || this.settings.effects !== !!this.postfx);
     } finally {
+      if (GPU.webgpu) this.world.gpuSwitch = null;
       this.fxBusy = false;
       // Every volumetrics setting also passes through here (it is an effects setting); the master's own warm may have its
       // notice up meanwhile, which is not this switch's to take down.

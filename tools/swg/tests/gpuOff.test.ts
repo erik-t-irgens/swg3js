@@ -11,7 +11,9 @@
 //     or dynamically, but `main.ts`'s one dynamic import in `startGpu`, which the boot makes only with the switch at WebGPU;
 //  4. each guarded site: the line it had kept whole as the WebGL branch right after its WebGPU line, or the guard folded into
 //     the line itself (`if (!GPU.webgpu) ...`, `... && !GPU.webgpu)`); step 4's (the models' own looks: the registry's
-//     stand-in, the world's capture of our sky) the same way, and its modules reached only through `start.ts`.
+//     stand-in, the world's capture of our sky) the same way, and its modules reached only through `start.ts`; step 6's (the
+//     effects chain: the scene target's depth and the spine in `PostFX`'s constructor, the install, the boot's chain, the
+//     Effects switch in play, the Graphics page's rows) the same way, the WebGL lines of each block standing as `8d0c759` had them.
 //
 // Run: node tools/swg/tests/gpuOff.test.ts
 import assert from 'node:assert/strict';
@@ -195,6 +197,17 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ['src/main.ts', "if (GPU.webgpu) HORIZON_TUNE.ground = S.farRings && GPU.rt!.look({}).rings === true ? 'rings' : 'tiles';", "else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';"],
     ['src/main.ts', 'if (GPU.webgpu) perf.attach(null);', 'else perf.attach(this.renderer.getContext() as WebGL2RenderingContext);'],
     ['src/main.ts', 'if (GPU.webgpu) this.frameCalls = GPU.rt!.frameDraws();', 'else this.frameCalls = info.calls;'],
+    // Step 6: the effects chain's scene target takes its depth's type off three's WebGPU renderer, and its spine is the WebGPU side's.
+    ['src/core/postfx.ts', 'if (GPU.webgpu) depth = GPU.rt!.chain.sceneDepth(w, h);', 'else depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);'],
+    ['src/core/postfx.ts', 'if (GPU.webgpu) GPU.rt!.chain.spine(this, w, h, this.settings);', 'else {'],
+    // Step 6, item 4: an item that names its own target is warmed against it on WebGPU, through the camera it is drawn with
+    // (the fixer's: the runtime's `warmInto`); the WebGL lines in the branch after.
+    ['src/core/postfx.ts', 'if (GPU.webgpu && m.into) jobs.push(GPU.rt!.chain.warmInto(m.into, object, m.camera));', 'else {'],
+    ['src/core/postfx.ts', 'if (GPU.webgpu && it.into) jobs.push(GPU.rt!.chain.warmInto(it.into, object, it.camera));', 'else {'],
+    // Step 6's fixer: the portal renderer's own draws hand WebGPU a stand-in for each way a doorway is drawn there too.
+    ['src/world/portalRender.ts', 'if (GPU.webgpu) return [this.portalStandIn, this.resetQuad, ...this.gpuDoorwayStandIns()];', 'return [this.portalStandIn, this.resetQuad];'],
+    // And the sun the occlusion reads: on WebGPU the WebGPU sun's and its cascades, the WebGL branch the line it had.
+    ['src/world/world.ts', 'if (GPU.webgpu && csm && csm.lights.length && this.gpuSun && this.renderer && this.camera) this.gpuSun.fillFx(sky, csm, this.renderer, Math.min(this.camera.far, csm.maxFar) - this.camera.near);', 'else if (csm && csm.lights.length) {'],
   ];
   for (const [f, gpu, gl] of pairs) {
     const l = lines(f);
@@ -203,6 +216,45 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     let j = at[0] + 1;
     while (j < l.length && l[j] === '') j++;
     ok(l[j] === gl, `${f}: the WebGL branch keeps the line it had, right after its WebGPU line: ${gl}`);
+  }
+  // Step 6, item 4: the warm-up's two WebGL lines inside each `else {` after the WebGPU line, as 8d0c759 had them; and the
+  // world's WebGL sun lines after its `else if`, as they were.
+  {
+    const l = lines('src/core/postfx.ts');
+    for (const gpu of ['if (GPU.webgpu && m.into) jobs.push(GPU.rt!.chain.warmInto(m.into, object, m.camera));', 'if (GPU.webgpu && it.into) jobs.push(GPU.rt!.chain.warmInto(it.into, object, it.camera));']) {
+      const at = l.indexOf(gpu);
+      const body = l.slice(at + 2, at + 8).filter((x) => !x.startsWith('//'));
+      const want = gpu.includes('m.into') ? ["if (where !== 'screen') compileOn(this.bufferA, object);", "if (where !== 'target') compileOn(null, object);", '}'] : ["if (it.where !== 'screen') compileOn(this.bufferA, object);", "if (it.where !== 'target') compileOn(null, object);", '}'];
+      ok(at > 0 && want.every((x, i) => body[i] === x), `postfx.ts: the WebGL warm-up's two lines stand as 8d0c759 had them inside the else after: ${gpu}`);
+    }
+    const w = lines('src/world/world.ts');
+    const s = w.indexOf('else if (csm && csm.lights.length) {');
+    ok(s > 0 && w[s + 1] === '// The plain sun is hidden once the cascades exist; they carry its colour and intensity.' && w[s + 2] === 'const l = csm.lights[0];', "world.ts: fillFxLights's WebGL sun lines stand after the WebGPU line as they stood");
+  }
+  // Step 6's WebGL block after the spine's `else {`: every product and pass 8d0c759 registered, in its order, and nothing else.
+  {
+    const l = lines('src/core/postfx.ts');
+    const at = l.indexOf('if (GPU.webgpu) GPU.rt!.chain.spine(this, w, h, this.settings);');
+    const want = ['else {', 'this.registerProduct(new LinearDepthHalf());', 'this.registerProduct(new NormalsHalf());', 'this.registerProduct(new DebugMaskProduct(this));', 'this.registerPass(new SanitizePass());', 'this.registerPass(new GodRaysPass());', 'this.registerPass(new MotionBlurPass());', 'this.registerPass(new BloomPass(w, h, this.settings.bloomStrength));', 'this.registerPass(new OutputFxPass());', 'this.registerPass(new FxaaPass());', 'this.registerPass(new DebugViewPass());', '}', 'this.setSizeAll(w, h);'];
+    ok(at > 0 && want.every((x, i) => l[at + 1 + i] === x), "postfx.ts: the WebGL spine registers every product and pass 8d0c759 did, in its order, in the branch after the WebGPU line");
+    // The install: the WebGPU side's own line before the lines 8d0c759 had, which stand after it as they stood.
+    const inst = lines('src/core/fx/install.ts');
+    const i = inst.indexOf('if (GPU.webgpu) return GPU.rt!.chain.install(postfx, deps);');
+    ok(i > 0 && inst[i - 2] === 'export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {' && inst[i + 1] === "// Ambient occlusion reads the frame's lights from the context and makes its region target (sharing" && inst[i + 3] === 'postfx.registerPass(new SsaoPass(ssaoHostFor(postfx)));', 'install.ts: the WebGPU side installs what is ported before the WebGL lines 8d0c759 had, which stand after it');
+    // The boot: the chain on WebGPU on a line of its own after the pair that holds the WebGL boot's line.
+    const m = lines('src/main.ts');
+    const b = m.indexOf('if (GPU.webgpu && S.effects && GPU.rt!.chain.atLoad) this.postfx = this.makePostFX();');
+    ok(b > 0 && m[b - 1] === 'else if (S.effects) this.postfx = this.makePostFX();' && m[b - 2] === 'if (GPU.webgpu) this.forceGpuOff();', "main.ts: the boot makes WebGPU's chain on a line of its own after the WebGL boot's line, which stands as it was");
+    // The Effects switch in play: on WebGPU the WebGL path's own switch, unless the chain was left out at load.
+    const r = m.indexOf('if (GPU.webgpu && !GPU.rt!.chain.atLoad) {');
+    ok(r > 0 && m[r + 1] === 'this.syncPreviewEffects();' && m[r + 2] === 'return;' && m[r + 3] === '}' && m[r + 4] === 'if (this.fxBusy) {', 'main.ts: the Effects switch is held off on WebGPU only with the chain left out at load, the WebGL path after it as it was');
+    // Every chain held off in words only inside forceGpuOff, which runs on WebGPU alone.
+    const f = m.indexOf('private forceGpuOff(): void {');
+    const e = m.indexOf("if (!rt.chain.atLoad) rt.forced('effects', \"the effects chain is left out at load (localStorage['swg.gpu.chain'] = '0'): straight to the canvas, three's tone mapping at the game's exposure\");");
+    ok(f > 0 && e > f && e - f < 4, 'main.ts: the effects are said held off on WebGPU only inside forceGpuOff, and only with the chain left out at load');
+    for (const g6 of ['gpuChain.ts', 'gpuChainPasses.ts', 'gpuSsao.ts', 'gpuSsaoPass.ts', 'inlineOutput.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g6)), `step 6's ${g6} is under src/core/gpu/`);
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes('const chain = chainRuntime(renderer);') && startText.includes('chain: chain.report(),'), "start.ts: the runtime hands the game the chain, and gpu() says it");
   }
   // The WebGL block after `else {`: the questions of the WebGL context, asked as before.
   {
@@ -239,6 +291,22 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
     ok(at.length === 1, `${f}: the WebGPU line is there once: ${gpu}`);
     ok(l[at[0] + 1] === gl, `${f}: the line ce6b94c had there follows the WebGPU line: ${gl}`);
+  }
+  /**
+   * What step 6's fixer adds to the Effects switch in play (`World.gpuSwitch`, `gpuSwitchCatchUp`): a WebGPU line that adds
+   * and has no WebGL branch, there exactly once, with the line `8d0c759` had there right after it.
+   */
+  const switchAdded: [string, string, string][] = [
+    ['src/main.ts', 'if (GPU.webgpu) this.world.gpuSwitch = { target: next ? next.compileTarget : null, listed: new WeakSet() };', "const label = want ? 'Effects on' : 'Effects off';"],
+    ['src/main.ts', 'if (GPU.webgpu) await this.world.gpuSwitchCatchUp((n) => this.notice.set(`${label}: shaders for ${n} more objects`));', 'if (this.settings.effects !== want) {'],
+    ['src/main.ts', 'if (GPU.webgpu) this.world.gpuSwitch = null;', 'this.fxBusy = false;'],
+    ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSwitch && this.gpuSwitch.target === target) for (const o of objects) this.gpuSwitch.listed.add(o);', 'const before = r.info.programs?.length ?? 0;'],
+  ];
+  for (const [f, gpu, gl] of switchAdded) {
+    const l = lines(f);
+    const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
+    ok(at.length === 1, `${f}: the WebGPU line is there once: ${gpu}`);
+    ok(l[at[0] + 1] === gl, `${f}: the line 8d0c759 had there follows the WebGPU line: ${gl}`);
   }
   // The same line twice in the streamer: a folded row hidden or shown in place records its tier's bundle again, and a
   // level sweep or a caster switch pokes every bundle.
@@ -312,7 +380,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(startText.includes("import { carriesReport, STAYS } from './carries.ts';") && startText.includes('stays: { ...STAYS },'), 'start.ts: the report says what stays and the tune checks what the copies carry');
     const l = lines('src/main.ts');
     const back = l.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
-    const ask = l.findIndex((x) => x.includes('o.carries === true) ? rt.tune({ ...o, scene: this.scene })'));
+    // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries.
+    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined) ? rt.tune({ ...o, scene: this.scene })'));
     ok(back > 0 && ask > back && ask - back < 6, "main.ts: gpu() asks for the carries' check only after its WebGL return");
     const warm = readFileSync(join(SRC, 'core', 'gpu', 'patchWarm.ts'), 'utf8');
     ok(warm.includes("if (o.name === 'flora stand-in' && o.receiveShadow !== true) {"), 'patchWarm.ts: the flora stand-ins are told to receive as the batches do, inside the warm patch');
@@ -349,7 +418,7 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const f = l.indexOf('private forceGpuOff(): void {');
     const g = l.indexOf('if (rt.look({}).rings !== true) {');
     ok(f > 0 && g > f && g - f < 12 && l[g + 2] === "HORIZON_TUNE.ground = 'tiles';", 'main.ts: the far ground is held to the far tiles on WebGPU only inside forceGpuOff, and only with the rings left out at load');
-    ok(l.filter((x) => x === "if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };").length === 1, "main.ts: the Graphics page's far rings row is on WebGPU from step 5, the effects, the volumetrics and the far tree cards still not");
+    ok(l.filter((x) => x === "if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };").length === 1, "main.ts: the Graphics page's far rings row is on WebGPU from step 5, the Effects setting and the rows of the passes ported from step 6 (the chain's knobPorted), every other effect, the volumetrics and the far tree cards still not");
     for (const g5 of ['gpuGround.ts', 'gpuGroundSelfTest.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g5)), `step 5's ${g5} is under src/core/gpu/`);
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
     ok(startText.includes("groundSelfTest: () => groundSelfTestGpu(renderer),") && startText.includes('return horizonSelfTestGpu(renderer, o);'), "start.ts: the ground's and the horizon's self tests are the WebGPU side's own");

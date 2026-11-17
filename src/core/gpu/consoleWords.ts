@@ -18,17 +18,15 @@ const WORDS_ONLY: Record<string, string> = {
   links: "WebGL's link machinery: no program links on WebGPU",
   skinnedLoad: "WebGL's float joints and morph ladder: WebGPU builds what a skinned mesh needs itself",
   renderInfo: "WebGL's program list and memory: __debug.gpu() says WebGPU's draws and pipelines",
-  fxCheck: 'the effects chain is not made on WebGPU this step',
-  ssao: 'the effects chain is not made on WebGPU this step',
-  blackBox: "a readback of the effects' target: no effects chain on WebGPU this step",
-  flareProbe: 'the lens flare is an effect: no effects chain on WebGPU this step',
+  fxCheck: "WebGL's GL error checks after each step of the chain: WebGPU's errors are counted by __debug.gpu() (gpuErrors)",
+  blackBox: "a synchronous readback of the effects' target: WebGPU reads back only asynchronously (the sanitize pass zeroes such pixels on both)",
+  flareProbe: 'the lens flare is an effect pass, a design session of the owner\'s: not on WebGPU',
   cardsSelfTest: 'draws through the leaf cards\' WebGL programs (step 4)',
   // The leaf cards' other two (the client's light, the leaf skip) are the WebGPU side's own (`own`, step 4); `cardsSelfTest`
   // above (the card rule under three's own light, on its WebGL stage) is not.
   swaySelfTest: "draws through the sway's WebGL program (a remake of the owner's)",
   grassShadowSelfTest: "draws through the grass's WebGL program (a remake of the owner's, not ported)",
-  gradeSelfTest: 'the colour grade is an effect: no effects chain on WebGPU this step',
-  waterFx: "the water's effects: no effects chain on WebGPU this step",
+  waterFx: "the water's effects (its mask, its reflections pass): the water is a remake, not on WebGPU",
   passLog: "the WebGL portal renderer's per-pass counts: __debug.gpu() says the frame's draws",
 };
 

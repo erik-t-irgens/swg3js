@@ -49,6 +49,17 @@ export const LOOKS_AT_LOAD = {
   blades: atLoad('blades'),
   particles: atLoad('particles'),
   tunnel: atLoad('tunnel'),
+  // Step 6's effects chain (`gpuChainPasses.ts`): the chain whole (left out, the Effects setting is held off on WebGPU as
+  // step 5 drew, straight to the canvas), and the bloom and the colour grade each (left out, the pass is not on the
+  // chain and its Graphics rows say so). No live switch: the Effects setting and each pass's own toggle are the live ones.
+  chain: atLoad('chain'),
+  bloom: atLoad('bloom'),
+  grade: atLoad('grade'),
+  // The ambient occlusion (item 4; left out, its pass and its two depth products are not on the chain and its rows say so),
+  // and the Effects-off picture drawn the way WebGL draws it (item 5, `inlineOutput.ts`: left out, step 5's picture through
+  // three's frame-buffer target and output pass).
+  ssao: atLoad('ssao'),
+  inline: atLoad('inline'),
 };
 
 /**

@@ -37,6 +37,8 @@ import { programsReport } from './gpuPrograms.ts';
 import { makeGpuEnvironment } from './gpuEnv.ts';
 import { GROUND_GPU_STATS } from './gpuGround.ts';
 import { groundSelfTestGpu, horizonSelfTestGpu, type HorizonSelfTestInput } from './gpuGroundSelfTest.ts';
+import { chainRuntime } from './gpuChainPasses.ts';
+import { INLINE, inlineReport, installInline } from './inlineOutput.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -123,6 +125,9 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   // then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
   LOOK_PARTS.push(detailPart, specPart, cardPart);
   installLooks(renderer);
+  // The Effects-off picture drawn the way WebGL draws it (step 6, item 5): every material's output tone-mapped and encoded
+  // onto the canvas, before any material is built.
+  installInline(renderer, LOOKS_AT_LOAD.inline);
   // The four private patches (item 8), each only where three is the revision it was written for.
   applyPatches(renderer);
   const forcedOff = new Map<string, string>();
@@ -160,6 +165,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   RT_HOOKS.compile = (_r, scene, camera, target) => warm.compile(scene, camera, target);
   // Reflections (step 4): the black stand-in made here, at start, behind the first loading screen, with the dome's generator.
   const environment = makeGpuEnvironment(renderer);
+  // The effects chain (step 6): the ported passes, put on the WebGL path's own runner by its constructor and its install.
+  const chain = chainRuntime(renderer);
   const rt: GpuRuntime & {
     fallback: FallbackStats;
     adapter: AdapterInfo;
@@ -168,7 +175,22 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       return { ...tuneGpuLook(o as Partial<typeof GPU_LOOK>), ...setLooks(o) };
     },
     wrapConsole(debug: Record<string, unknown>) {
+      // The occlusion's console (step 6, item 4): the WebGL helper as it stands, its probe of the centre a WebGPU readback
+      // the answer waits for, and what the pass drew of the water.
+      const ssao0 = debug.ssao as ((o?: unknown) => unknown) | undefined;
       wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: renderer.backend?.trackTimestamp === true ? 'on' : "off (localStorage['swg.gpu.timestamps'] = '1' and a reload)" }), {
+        ...(ssao0
+          ? {
+              ssao: (o?: unknown) => {
+                const out = ssao0(o) as Record<string, unknown> | string;
+                if (!out || typeof out !== 'object') return out;
+                const water = { ...(out.water as object), webgpu: chain.ssaoWater() };
+                const c = out.centre as Promise<unknown> | null;
+                if (c && typeof (c as Promise<unknown>).then === 'function') return c.then((centre) => ({ ...out, water, centre }));
+                return { ...out, water };
+              },
+            }
+          : {}),
         // The client's highlight drawn through the lighting model of ours and held to its mirror (step 4).
         specSelfTest: () => specSelfTestGpu(renderer),
         // The leaf cards drawn through the parts of ours and held to their mirror (step 4).
@@ -184,6 +206,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     fallback,
     adapter,
     bundles,
+    chain,
     compiled: () => warm.compiled(),
     compileMark: () => warm.mark(),
     compiledSince: (mark: number) => warm.since(mark),
@@ -209,6 +232,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       if (w && typeof w === 'object') {
         for (const k of Object.keys(WARM_TUNE) as (keyof typeof WARM_TUNE)[]) if (typeof w[k] === 'number' && Number.isFinite(w[k] as number)) WARM_TUNE[k] = Math.max(0, w[k] as number);
         out.warm = { ...WARM_TUNE };
+      }
+      // The inline output (step 6, item 5) live: only where it was installed at load.
+      if (typeof o.inline === 'boolean') {
+        INLINE.on = o.inline && INLINE.applied;
+        out.inline = inlineReport();
       }
       if (typeof o.dynamicHint === 'boolean') out.dynamicHint = setUsageHint((o.scene as THREE.Object3D | undefined) ?? null, o.dynamicHint);
       // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
@@ -267,6 +295,10 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         ground: { tiles: LOOKS_AT_LOAD.ground ? 'the tile program, a node graph over the very uniforms the WebGL program reads (gpuGround.ts)' : "step 3's plain ground: the part is left out at load (localStorage['swg.gpu.ground'] = '0')", rings: LOOKS_AT_LOAD.rings ? 'the far rings, a node graph over the session ring uniforms and the tile program uniforms (gpuGround.ts); __debug.horizon({ ground }) and the Graphics page move them' : "left out at load (localStorage['swg.gpu.rings'] = '0'): the far ground is drawn as far tiles", graphs: { ...GROUND_GPU_STATS, builds: { ...GROUND_GPU_STATS.builds } }, live: "__debug.gpu({ look: { ground: false } }) draws step 3's plain look through the same graph (a uniform; nothing built)", diffuseBack: GPU_LOOK.groundDiffuseBack, selfTests: '__debug.groundSelfTest() and __debug.horizon({ selfTest: true }) run on WebGPU' },
         // Step 5's own programs (lava, the marks, the blades, the client's particles, the tunnel), and what is left for the remakes.
         programs: programsReport(),
+        // Step 6's effects chain: what is ported, whether it was taken in at load, what each graph binds, and what draws now.
+        chain: chain.report(),
+        // Step 6, item 5: the Effects-off picture drawn the way WebGL draws it (every material tone-mapped onto the canvas).
+        inline: inlineReport(),
         notPorted: { ...NOT_PORTED },
         sun: sunNow ? sunNow.describe() : 'no cascades yet (the first world makes them)',
         gpuErrors: { count: errors, last: lastError || null },

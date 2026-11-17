@@ -33,6 +33,7 @@
 // it) or one was asked for ahead, and whether a loading screen was up: `__debug.gpu()`'s pipelines made in play.
 
 import * as THREE from 'three';
+import { withTargetDepth } from './warmDepth.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -45,6 +46,9 @@ export const WARM_PATCH = { on: true, applied: false, why: '' as string };
  * for before it is counted lost.
  */
 export const WARM_TUNE = { sliceMs: 8, sliceInPlayMs: 3, inFlight: 32, landMs: 30000 };
+
+/** The walks made with the target's own depth and stencil (step 6), in a module of their own (`warmDepth.ts`). */
+export { WARM_DEPTH, withTargetDepth } from './warmDepth.ts';
 
 /** What it has done: items listed and built, duplicates skipped, pipelines asked for, its time, and what three made by itself. */
 export const WARM_STATS = {
@@ -100,6 +104,13 @@ interface Item {
   side: number;
   src: Any;
   scene: Any;
+  /**
+   * The target bound while the walk listed it (step 6's fixer): put back for its build, which runs later on the warm-up's
+   * own clock, as three's own precompile puts back the target each of its items was queued under. A pipeline for the canvas
+   * keys its sample count on the renderer's current target (`currentSamples`), so built under another target it was a
+   * pipeline no draw used.
+   */
+  rt: Any;
   job: Job | null;
 }
 
@@ -200,10 +211,19 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     const g = object.geometry;
     // Three keys a program on its morph targets' own attributes (`getGeometryCacheKey`), so a morphed geometry is its own.
     const morph = (g?.morphAttributes?.position?.length ?? 0) > 0 ? `m${g.id}` : '0';
-    const attrs = g ? Object.keys(g.attributes).join(',') : '';
+    // Each attribute's size and normalisation (three's `getGeometryCacheKey`) and the array it is read from (the pipeline's
+    // vertex layout, `getVertexBufferLayoutCacheKey`), as three keys them (step 6's fixer: by its names alone, two objects
+    // whose pipelines differ were taken for one and the second never built).
+    const attrs = g ? Object.keys(g.attributes).sort().map((n) => { const a = g.attributes[n]; return `${n}${a.itemSize}${a.normalized ? 'n' : ''}${a.isInterleavedBufferAttribute ? 'i' : ''}${a.array?.constructor?.name ?? ''}`; }).join(',') : '';
     const kind = `${object.isInstancedMesh ? 'I' : ''}${object.isSkinnedMesh ? 'S' : ''}${object.isBatchedMesh ? 'B' : ''}${object.isPoints ? 'P' : ''}${object.isLine ? 'L' : ''}${object.isSprite ? 'Sp' : ''}`;
+    // And the rest of what three keys a render object or a pipeline on beside its material: whether it receives shadows
+    // (`getMaterialCacheKey`, `getDynamicCacheKey`), its bones' count, a batch's or a counted mesh's own, and a mirrored
+    // mesh's winding (`getRenderCacheKey`'s `frontFaceCW`, read off its world matrix as the walk listed it).
+    const own = object.isBatchedMesh ? `b${object._matricesTexture?.uuid ?? ''}` : !object.isInstancedMesh && object.count > 1 ? `c${object.uuid}` : '';
+    const cw = object.isMesh && object.matrixWorld.determinantAffine() < 0 ? 'cw' : '';
+    const more = `${object.receiveShadow ? 'r' : ''}${cw}${object.skeleton ? `k${object.skeleton.bones.length}` : ''}${own}`;
     const tw = it.tweak ? `${it.tweak[0]}|${it.tweak[1]}|${it.tweak[2] ? 1 : 0}|${it.tweak[6] ? 1 : 0}|${it.tweak[7]?.id ?? '-'}|${it.tweak[9]?.id ?? '-'}` : '';
-    return `${it.ctx?.id}:${scene?.id ?? '-'}:${lightsNode?.id ?? '-'}:${material.id}:${it.src?.id ?? '-'}:${it.side}:${passId ?? ''}:${kind}:${morph}:${attrs}:${tw}`;
+    return `${it.ctx?.id}:${scene?.id ?? '-'}:${lightsNode?.id ?? '-'}:${material.id}:${it.src?.id ?? '-'}:${it.side}:${passId ?? ''}:${kind}:${morph}:${attrs}:${more}:${tw}`;
   };
 
   const settleIdle = (): void => {
@@ -266,6 +286,9 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     const source = r._currentSourceMaterial;
     const ctx = r._currentRenderContext;
     const sceneOverride = it.scene ? it.scene.overrideMaterial : null;
+    // The target the walk listed it under (step 6's fixer), as three's own precompile puts it back for each item.
+    const target = r._renderTarget;
+    r._renderTarget = it.rt;
     r._currentSourceMaterial = it.src ?? null;
     // Node builds take their shared bind groups from the current render context (three 0.187's precompile does the same).
     r._currentRenderContext = it.ctx;
@@ -283,6 +306,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       r._bindings.updateForRender(ro);
       r._pipelines.getForRender(ro, promises);
     } finally {
+      r._renderTarget = target;
       material.side = side;
       if (before) TWEAKS.forEach((k, i) => put(k, before[i]));
       r._currentSourceMaterial = source;
@@ -348,7 +372,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       // The shadow pass draws casters alone (three's own render object function for it).
       if (shadow && a[0]?.castShadow !== true) return;
       builtFor.add(a[0]);
-      out.push({ a, ctx: this._currentRenderContext, tweak: override ? TWEAKS.map((k) => a[1][k]) : null, side: a[1].side, src: this._currentSourceMaterial, scene: sceneRef, job: null });
+      out.push({ a, ctx: this._currentRenderContext, tweak: override ? TWEAKS.map((k) => a[1][k]) : null, side: a[1].side, src: this._currentSourceMaterial, scene: sceneRef, rt: this._renderTarget ?? null, job: null });
     };
     if (override && sceneRef) {
       sceneRef.overrideMaterial = override;
@@ -358,7 +382,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     try {
       // The synchronous half of three's own compile walks and lists; its own queue stays empty, so what it answers
       // settles with nothing more done.
-      p = nativeCompileAsync(root, camera, targetScene ?? null);
+      p = withTargetDepth(r, () => nativeCompileAsync(root, camera, targetScene ?? null));
     } finally {
       r._createObjectPipeline = prev.create;
       if (override && sceneRef) {
@@ -436,7 +460,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       // synchronous (its items keep their objects), so what was shown for it is put back at once.
       let p: Promise<unknown>;
       try {
-        p = nativeCompileAsync(walkRoot, camera, targetScene ?? null).catch(() => undefined) as Promise<unknown>;
+        p = withTargetDepth(r, () => nativeCompileAsync(walkRoot, camera, targetScene ?? null)).catch(() => undefined) as Promise<unknown>;
       } finally {
         if (!isScene) putBack();
         WARM_STATS.listMs += performance.now() - t0;

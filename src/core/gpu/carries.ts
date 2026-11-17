@@ -122,7 +122,7 @@ export const STAYS: Readonly<Record<string, string>> = {
   wetness: "the rain's wet look is an onBeforeCompile wrap (`wetness.ts`), which a node copy never runs: no surface wets on WebGPU (a remake of the owner's)",
   sway: "the flora sway is an onBeforeCompile wrap (`floraSway.ts`) with depth materials of its own: nothing sways on WebGPU, and a swaying mesh casts through three's own depth (a remake of the owner's)",
   shaderMaterials: "step 5 ported the programs of ours that stay (the ground, the far rings, lava, the marks, the blades, the client's particles, the tunnel); what is left is `notPorted`, each still listed by name and count under `unsupported` and never drawn, or drawn as step 3's stand-in where one is named under `standIns`",
-  effects: 'the effects chain is step 6 (ambient occlusion, bloom and the colour grade; every other effect a design session of the owner\'s): forced off (`forcedOff.effects`), straight to the canvas with three\'s tone mapping at the game\'s exposure',
+  effects: "the effects chain is step 6's (`chain`): the scene into the chain's half-float target, its values that are not numbers zeroed, the ambient occlusion, the bloom, the colour grade and the output; every other effect pass is a design session of the owner's and is not made on WebGPU (`notPorted.effects`)",
 };
 
 /**
@@ -141,5 +141,5 @@ export const NOT_PORTED: Readonly<Record<string, string>> = {
   vehicleDust: 'the vehicles\' dust (`vehicles/dust.ts`): not drawn',
   roomAir: "the rooms' motes and the daylight beams: not drawn",
   previewDof: "the previews' depth of field: not drawn",
-  effects: 'every effect pass: step 6 ports ambient occlusion, bloom and the colour grade; the rest are design sessions with the owner',
+  effects: "every effect pass but the three step 6 ports (ambient occlusion, bloom, the colour grade): each a design session with the owner, not made on WebGPU and its Graphics row saying so -- the blade glow and its shadows (the lit lightsabers' light on what is round them, its walls cutting it: `bladeGlow`, `bladeGlowShadows`), the god rays, depth of field, motion blur, the water's reflections, the heat haze, the lens flare, the rooms' daylight beams and lamp glow, the vignette, the film grain, and edge smoothing (FXAA: with the effects on nothing smooths the edges on WebGPU, stepped as the scene target is not multisampled; multisampling it is the cheap option for the session)",
 };

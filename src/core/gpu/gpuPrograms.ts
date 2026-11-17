@@ -23,7 +23,8 @@
 // (`tonemapping_fragment`, `colorspace_fragment`): written as it is, three's output pass does the same after every
 // material. The marks and the blades write the canvas's own value with no tone mapping (`toneMapped: false`, no chunk): on
 // WebGPU three tone-maps everything after, so each is carried back through three's ACES fit and the sRGB curve first
-// (`asShown`, the ground's views' own), and shows the same where it is drawn alone; where it blends over the scene WebGL
+// (`asShown`, the ground's views' own: only into three's frame-buffer target, the Effects-off path; into the effects
+// chain's scene target, step 6's, nothing is carried, as WebGL draws them into its own), and shows the same where it is drawn alone; where it blends over the scene WebGL
 // blends the shown values and WebGPU the scene's, so a half-clear mark or a blade's add over a lit wall differs a little
 // (measured by the picture pairs). Every number is the GLSL text's own, gathered per graph in `PROGRAM_NUMBERS` and held to
 // the WebGL text by `gpuPrograms.test.ts`.
@@ -31,7 +32,7 @@
 import * as THREE from 'three';
 import { NodeMaterial, NodeUpdateType, Texture3DNode, TextureNode } from 'three/webgpu';
 import * as TSL from 'three/tsl';
-import { asShown } from './gpuGround.ts';
+import { asShownFB } from './gpuGround.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -379,7 +380,9 @@ export function marksNode(): NodeMaterial {
   const saber = vKind.lessThan(k.saberKind);
   const col = select(saber, sCol, cCol);
   const alpha = select(saber, sAlpha, cAlpha);
-  finish(m, asShown(vec4(col, alpha)), vBorn.lessThan(k.unborn).or(age.lessThan(0)).or(age.greaterThan(vLife)).or(alpha.lessThanEqual(0)));
+  // WebGL writes the canvas's own value (no chunk): written as it is under the inline output (swgRawOut), carried back only into three's frame-buffer target.
+  m.swgRawOut = true;
+  finish(m, asShownFB(vec4(col, alpha)), vBorn.lessThan(k.unborn).or(age.lessThan(0)).or(age.greaterThan(vLife)).or(alpha.lessThanEqual(0)));
   return m as NodeMaterial;
 }
 
@@ -403,7 +406,9 @@ export function bladeNode(): NodeMaterial {
   const across0 = select(soft.greaterThanEqual(1), float(1), float(1).sub(smoothstep(soft, 1, x)));
   const across = across0.mul(across0);
   const along = smoothstep(k.tipFrom, k.tipIn, vUv.y).mul(float(1).sub(smoothstep(k.endFrom, k.endTo, vUv.y)));
-  finish(m, asShown(vec4(colour.mul(across.mul(along).mul(vFade).mul(bright)), 1)), null);
+  // WebGL writes the canvas's own value (no chunk): written as it is under the inline output (swgRawOut), carried back only into three's frame-buffer target.
+  m.swgRawOut = true;
+  finish(m, asShownFB(vec4(colour.mul(across.mul(along).mul(vFade).mul(bright)), 1)), null);
   return m as NodeMaterial;
 }
 

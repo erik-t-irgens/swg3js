@@ -36,6 +36,7 @@ import { DebugMaskProduct } from './fx/geometry';
 import { BloomPass, DebugViewPass, FxaaPass, GodRaysPass, MotionBlurPass, OutputFxPass, SanitizePass } from './fx/passes';
 import { FxTimer, type FxTimingReport } from './fx/timer';
 import { resolveLinks } from './programQueue.ts';
+import { GPU } from './gpuSwitch.ts';
 
 export type { SunInfo, FxFrameInput, FxFrameContext, FxSun } from './fx/context';
 
@@ -165,7 +166,10 @@ export class PostFX {
     // are smoothed at the end instead.
     // Reversed depth spreads its precision evenly only in a floating-point buffer; in 24-bit fixed point
     // it gains a little. Three keeps the stencil the portals need either way (DEPTH32F_STENCIL8).
-    const depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);
+    // On WebGPU (the GPU port's step 6) the same choice, read off three's WebGPU renderer (it has no `capabilities`).
+    let depth: THREE.DepthTexture;
+    if (GPU.webgpu) depth = GPU.rt!.chain.sceneDepth(w, h);
+    else depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);
     depth.format = THREE.DepthStencilFormat;
     this.sceneTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth });
     this.sceneTarget.texture.name = 'fx.scene';
@@ -175,16 +179,21 @@ export class PostFX {
     this.bufferB.texture.name = 'fx.b';
     this.ctx = createContext(renderer, this.settings, this.sceneTarget);
     this.timer = new FxTimer(renderer);
-    this.registerProduct(new LinearDepthHalf());
-    this.registerProduct(new NormalsHalf());
-    this.registerProduct(new DebugMaskProduct(this));
-    this.registerPass(new SanitizePass());
-    this.registerPass(new GodRaysPass());
-    this.registerPass(new MotionBlurPass());
-    this.registerPass(new BloomPass(w, h, this.settings.bloomStrength));
-    this.registerPass(new OutputFxPass());
-    this.registerPass(new FxaaPass());
-    this.registerPass(new DebugViewPass());
+    // On WebGPU (the GPU port's step 6) the spine is the WebGPU side's: the sanitize, the bloom and the output, each the
+    // WebGL pass with its draw on a node graph of its own; every other pass and product here is not made there.
+    if (GPU.webgpu) GPU.rt!.chain.spine(this, w, h, this.settings);
+    else {
+      this.registerProduct(new LinearDepthHalf());
+      this.registerProduct(new NormalsHalf());
+      this.registerProduct(new DebugMaskProduct(this));
+      this.registerPass(new SanitizePass());
+      this.registerPass(new GodRaysPass());
+      this.registerPass(new MotionBlurPass());
+      this.registerPass(new BloomPass(w, h, this.settings.bloomStrength));
+      this.registerPass(new OutputFxPass());
+      this.registerPass(new FxaaPass());
+      this.registerPass(new DebugViewPass());
+    }
     this.setSizeAll(w, h);
   }
 
@@ -347,8 +356,13 @@ export class PostFX {
         const where = m.where ?? (this.defs[i].canBeLast ? 'both' : 'target');
         const object = m.object ?? fullscreenMesh(m.material);
         compiled.push(object);
-        if (where !== 'screen') compileOn(this.bufferA, object);
-        if (where !== 'target') compileOn(null, object);
+        // On WebGPU (the GPU port's step 6) an item that names its own target is compiled against it, as it draws, through
+        // the camera it is drawn with.
+        if (GPU.webgpu && m.into) jobs.push(GPU.rt!.chain.warmInto(m.into, object, m.camera));
+        else {
+          if (where !== 'screen') compileOn(this.bufferA, object);
+          if (where !== 'target') compileOn(null, object);
+        }
       }
     }
     await Promise.all(jobs);
@@ -506,10 +520,15 @@ export class PostFX {
     for (const it of items) {
       const object = it.object ?? fullscreenMesh(it.material);
       compiled.push(object);
-      // Any target at all gives the program key a real draw into the scene target would have; the
-      // canvas gives the other one, because it is the only place tone mapping is applied.
-      if (it.where !== 'screen') compileOn(this.bufferA, object);
-      if (it.where !== 'target') compileOn(null, object);
+      // On WebGPU (the GPU port's step 6) an item that names its own target is compiled against it, as it draws: WebGPU
+      // keys a pipeline on its target's colour format and its depth and stencil, and a render context on the camera's kind.
+      if (GPU.webgpu && it.into) jobs.push(GPU.rt!.chain.warmInto(it.into, object, it.camera));
+      else {
+        // Any target at all gives the program key a real draw into the scene target would have; the
+        // canvas gives the other one, because it is the only place tone mapping is applied.
+        if (it.where !== 'screen') compileOn(this.bufferA, object);
+        if (it.where !== 'target') compileOn(null, object);
+      }
     }
     await Promise.all(jobs);
     // `compileAsync` waits for the links and never asks a program for its uniforms, so each program's first draw asked

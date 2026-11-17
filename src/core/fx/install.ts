@@ -21,6 +21,7 @@ import { DofGlowProduct, type DofGlowCollector } from './dofGlow';
 import { VelocityProduct, type FxMoverList } from './velocity';
 import type { MotionBlurPass } from './motionBlur';
 import type { FxPass } from './pass';
+import { GPU } from '../gpuSwitch.ts';
 
 export interface FxInstallDeps {
   /** The water bodies whose mask and reflections the effects draw (`World.waterBodies`). */
@@ -53,6 +54,8 @@ export interface FxInstallDeps {
 }
 
 export function installEffects(postfx: PostFX, deps: FxInstallDeps = {}): void {
+  // On WebGPU (the GPU port's step 6) what is ported is put on the chain by the WebGPU side; every other effect waits for its design session.
+  if (GPU.webgpu) return GPU.rt!.chain.install(postfx, deps);
   // Ambient occlusion reads the frame's lights from the context and makes its region target (sharing
   // the scene's depth-stencil) from the chain: nothing from the game.
   postfx.registerPass(new SsaoPass(ssaoHostFor(postfx)));

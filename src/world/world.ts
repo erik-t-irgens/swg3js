@@ -7919,6 +7919,65 @@ export class World {
    */
   compileTarget: () => THREE.WebGLRenderTarget | null = () => null;
 
+  /**
+   * On WebGPU alone (the GPU port's step 6, its fixer): an Effects switch under way in play, the target it changes over to
+   * (null: the canvas) and every drawable listed for that target since it began; null while none is. Set and cleared by the
+   * game's switch (`App.reconcileEffects`). WebGPU keys a pipeline on the render context, and a person's material on its
+   * bones' count, so nothing made ready for the target drawn now serves the other, and the person keys' stand-ins, which
+   * cover WebGL's people for the other target, cover no WebGPU body: everything made ready while the switch is under way is
+   * listed for both targets (`gpuReady`), and whatever stood in the scene after the switch's sweep listed it (a clone of a
+   * look made ready before the switch, a tier shown) is listed by its catch-up (`gpuSwitchCatchUp`) before it changes over.
+   */
+  gpuSwitch: { target: THREE.WebGLRenderTarget | null; listed: WeakSet<THREE.Object3D> } | null = null;
+
+  /**
+   * On WebGPU alone (step 6's fixer): before an Effects switch changes over, every drawable in the scene its sweep did not
+   * list for the new target listed for it now, waited for, and the scene walked again, until a walk finds nothing new (at
+   * most `rounds`): the last walk finds nothing and the switch changes over in the same task, so no frame stands anything
+   * between them. Answers how many drawables it listed.
+   */
+  async gpuSwitchCatchUp(onFound?: (listed: number) => void, rounds = 6): Promise<number> {
+    const sw = this.gpuSwitch;
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!GPU.webgpu || !sw || !r || !camera) return 0;
+    const t0 = performance.now();
+    const last = this.gpuSwitchLast;
+    last.listed = 0;
+    last.rounds = 0;
+    last.settled = false;
+    try {
+      for (let round = 0; round < rounds; round++) {
+        last.rounds = round + 1;
+        const fresh: THREE.Object3D[] = [];
+        this.scene.traverse((o) => {
+          const m = o as THREE.Mesh;
+          if (!(m.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !m.material || sw.listed.has(o)) return;
+          sw.listed.add(o);
+          fresh.push(o);
+        });
+        if (!fresh.length) {
+          last.settled = true;
+          return last.listed;
+        }
+        last.listed += fresh.length;
+        onFound?.(last.listed);
+        const mark = GPU.rt!.compileMark();
+        this.compileFor(r, camera, fresh, sw.target, false);
+        await GPU.rt!.compiledSince(mark);
+      }
+      return last.listed;
+    } finally {
+      last.ms = Math.round(performance.now() - t0);
+    }
+  }
+
+  /**
+   * What the last Effects switch's catch-up did on WebGPU (`__debug.gpu().effectsSwitch`): the drawables it listed, its
+   * walks, whether its last walk found nothing (else the switch changed over after `rounds` with some still listing), its time.
+   */
+  readonly gpuSwitchLast = { listed: 0, rounds: 0, settled: false, ms: 0 };
+
   private withTarget<T>(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, fn: () => T): T {
     const prev = r.getRenderTarget();
     if (prev === target) return fn();
@@ -8187,11 +8246,27 @@ export class World {
   private async gpuReady(objects: THREE.Object3D[], own: OwnJob | null): Promise<void> {
     const rt = GPU.rt!;
     const mark = rt.compileMark();
-    for (const o of objects) {
-      for (let guard = 0; guard < 8; guard++) {
-        const step = own ? own.compile(o, Number.POSITIVE_INFINITY, false) : this.compileOne(o, Number.POSITIVE_INFINITY, false);
-        if (step.done) break;
+    const listAll = (): void => {
+      for (const o of objects) {
+        for (let guard = 0; guard < 8; guard++) {
+          const step = own ? own.compile(o, Number.POSITIVE_INFINITY, false) : this.compileOne(o, Number.POSITIVE_INFINITY, false);
+          if (step.done) break;
+        }
       }
+    };
+    listAll();
+    // An Effects switch under way (step 6's fixer, `gpuSwitch`): listed for the target it changes over to as well, each turn
+    // reading the target through `compileTarget` as it always does, so it is pointed there for the second walk.
+    const sw = this.gpuSwitch;
+    if (sw && sw.target !== this.compileTarget()) {
+      const drawn = this.compileTarget;
+      this.compileTarget = () => sw.target;
+      try {
+        listAll();
+      } finally {
+        this.compileTarget = drawn;
+      }
+      for (const o of objects) sw.listed.add(o);
     }
     // These objects' own compiles alone: what else is being built meanwhile (a tier streaming in elsewhere) is not waited for.
     await rt.compiledSince(mark);
@@ -8635,6 +8710,9 @@ export class World {
       this.adoptMaterials(o);
       objects.push(o);
     }
+    // On WebGPU, the Effects switch's own sweep (step 6's fixer): what it lists for the target it changes over to, so its
+    // catch-up lists only what stood after this walk.
+    if (GPU.webgpu && this.gpuSwitch && this.gpuSwitch.target === target) for (const o of objects) this.gpuSwitch.listed.add(o);
     const before = r.info.programs?.length ?? 0;
     const placedFrom = objects.length - placed.length;
     let placedPrograms = 0;
@@ -12071,7 +12149,10 @@ export class World {
     sky.hemiGroundLuminance = luminanceOf(this.hemi.groundColor, this.hemi.intensity);
     setDirectional(sky.fill, this.fill);
     const csm = this.csm;
-    if (csm && csm.lights.length) {
+    // On WebGPU (the GPU port's step 6) the classic cascades are hidden and never drawn: the sun and its cascades are the
+    // WebGPU sun's and three's node's, so the occlusion reads the shadows the frame was really lit by.
+    if (GPU.webgpu && csm && csm.lights.length && this.gpuSun && this.renderer && this.camera) this.gpuSun.fillFx(sky, csm, this.renderer, Math.min(this.camera.far, csm.maxFar) - this.camera.near);
+    else if (csm && csm.lights.length) {
       // The plain sun is hidden once the cascades exist; they carry its colour and intensity.
       const l = csm.lights[0];
       const on = l.visible && l.intensity > 0;

@@ -42,6 +42,17 @@ export interface FxWarmItem {
   object?: THREE.Object3D;
   /** Where it draws: into a target, onto the canvas, or either, for a pass that can be last. */
   where?: 'target' | 'screen' | 'both';
+  /**
+   * On WebGPU alone (the GPU port's step 6): the very target it draws into, which WebGPU keys a pipeline on (its colour
+   * format, its depth and stencil); the WebGL warm-up never reads it.
+   */
+  into?: THREE.RenderTarget;
+  /**
+   * On WebGPU alone, with `into` (step 6's fixer): the camera it is drawn with, where that is not the chain's own
+   * orthographic one: WebGPU keys a render context on the kind of camera, so a graph drawn through a perspective camera
+   * (the occlusion's water coverage) and warmed through the orthographic one was built again at its first draw.
+   */
+  camera?: THREE.Camera;
 }
 
 /** A working texture a pass will show on request: `__debug.fxView('ssao.ao')`. */

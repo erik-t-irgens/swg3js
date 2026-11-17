@@ -18,6 +18,7 @@ import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { reference, renderGroup } from 'three/tsl';
 import { leafBiasNode } from './gpuCard.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
+import { fillCascades, luminanceOf } from '../fx/lights.ts';
 import type { GpuSun, GpuSunOptions } from '../gpuSwitch.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -89,6 +90,15 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
     },
     frustums() {
       if (node.camera) node.updateFrustums();
+    },
+    fillFx(sky, cascades, r, range) {
+      // The classic cascades are hidden on WebGPU (`visible` false) and their maps never drawn: the sun the effects read is
+      // this light, synced from them, and its cascades three's node's own, over that node's own splits.
+      const on = light.visible && light.intensity > 0;
+      sky.sun.direction.copy(cascades.lightDirection).negate().normalize();
+      sky.sun.color.copy(light.color).multiplyScalar(on ? light.intensity : 0);
+      sky.sun.luminance = on ? luminanceOf(light.color, light.intensity) : 0;
+      if (light.castShadow) fillCascades(sky.cascades, r, node.lights as THREE.DirectionalLight[], node.breaks as number[], range, cascades.fade);
     },
     describe() {
       const own = (node.lights ?? []) as { position: THREE.Vector3; shadow: THREE.DirectionalLightShadow }[];

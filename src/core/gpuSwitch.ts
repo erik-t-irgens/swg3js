@@ -16,6 +16,9 @@ import type { DomeCapture } from '../world/envmap.ts';
 import type { GroundTileUniforms } from '../world/terrainTextures.ts';
 import type { RingUniforms } from '../world/horizon/horizonRings.ts';
 import type { BakeGrid } from '../world/horizon/horizonMath.ts';
+import type { PostFX } from './postfx.ts';
+import type { FxSettings } from './fxRegistry.ts';
+import type { FxInstallDeps } from './fx/install.ts';
 
 /** How the switch was read. */
 export type RendererChoice = 'webgl' | 'webgpu';
@@ -101,10 +104,41 @@ export interface GpuEnvironment {
   report(): Record<string, unknown>;
 }
 
+/**
+ * The effects chain on WebGPU (`src/core/gpu/gpuChainPasses.ts`, the port's step 6): the passes ported (the sanitize, the
+ * bloom, the colour grade, the output) put on the WebGL path's own runner (`PostFX`) in place of the WebGL ones, each its
+ * WebGL pass with its draw on a node graph over that pass's own uniforms. Every other effect pass is not made on WebGPU.
+ */
+export interface GpuChain {
+  /** Taken in at load: `localStorage['swg.gpu.chain'] = '0'` and a reload holds the Effects setting off on WebGPU, as step 5 drew. */
+  readonly atLoad: boolean;
+  /** The scene target's depth and stencil, its type read off three's WebGPU renderer as the WebGL path reads its own. */
+  sceneDepth(width: number, height: number): THREE.DepthTexture;
+  /** A new chain's spine (`PostFX`'s constructor): the sanitize, the bloom and the output, in the registry's places. */
+  spine(fx: PostFX, width: number, height: number, settings: FxSettings): void;
+  /** Every ported effect beyond the spine (`installEffects`): the colour grade. */
+  install(fx: PostFX, deps: FxInstallDeps): void;
+  /** Whether a Graphics page row moves the picture on WebGPU: the Effects setting and each ported pass's own rows. */
+  knobPorted(key: string): boolean;
+  /** What a row says where its pass, or the chain, was left out at load; null where it is simply not on WebGPU yet. */
+  knobWhy(key: string): string | null;
+  /**
+   * One warm-up item that names its own target compiled against it (`PostFX.warmUp`, `warmPasses`), through the camera it
+   * is drawn with (the chain's orthographic one where it names none): the render context is keyed on the camera's kind.
+   */
+  warmInto(into: THREE.RenderTarget, object: THREE.Object3D, camera?: THREE.Camera): Promise<unknown>;
+  /** What the occlusion drew of the water on WebGPU (`__debug.ssao().water.webgpu`). */
+  ssaoWater(): Record<string, unknown>;
+  /** What `__debug.gpu()` says of the chain. */
+  report(): Record<string, unknown>;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** The region tiers' bundles (item 7). */
   readonly bundles: GpuBundles;
+  /** The effects chain (step 6). */
+  readonly chain: GpuChain;
   /** Reflections (step 4, item 2). */
   readonly environment: GpuEnvironment;
   /** Answers once everything the warm-up has been handed is built and every pipeline asked for has landed (item 9). */
@@ -172,6 +206,11 @@ export interface GpuSun {
   describe(): Record<string, unknown>;
   /** Three's `CSMShadowNode`, for the console's own looks. */
   readonly node: unknown;
+  /**
+   * The sun and its cascades as the effects read them (`World.fillFxLights`, the GPU port's step 6): this light's colour and
+   * intensity and the cascades three's node draws on WebGPU (their maps, matrices, biases), the classic cascades' direction.
+   */
+  fillFx(sky: import('./fx/lights.ts').FxSkyLights, cascades: { lightDirection: THREE.Vector3; fade: boolean }, renderer: { shadowMap: { enabled: boolean } }, range: number): void;
   dispose(): void;
 }
 
