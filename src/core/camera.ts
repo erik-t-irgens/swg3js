@@ -50,6 +50,15 @@ const AIM_SHOULDER = 0.6;
 const AIM_RAISE = 0.15;
 const shoulder = new THREE.Vector3();
 const chaseOffset = new THREE.Vector3();
+/**
+ * First person on foot: how far short of whatever stands between the body's own axis and its eyes the view is held,
+ * in metres. A clip that leans carries the eyes outside the body's capsule (a sprint's by half a metre and more),
+ * so a body pressed to a wall had its view through the wall's face; this is the camera's near plane and a margin.
+ */
+const FIRST_PERSON_CLEAR = 0.1;
+const eyeAxis = new THREE.Vector3();
+const eyeReach = new THREE.Vector3();
+const eyeEnd = new THREE.Vector3();
 /** Seconds for the follow camera to catch up with the ship's frame. */
 const CHASE_LAG = 0.28;
 const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
@@ -284,6 +293,22 @@ export class ThirdPersonCamera {
   private eyeHeight = EYE_HEIGHT;
 
   /**
+   * The first-person view, already placed, pulled back along the line from the body's axis (at the eyes' own height
+   * over `target`) to itself wherever something stands on that line or within `FIRST_PERSON_CLEAR` past it. With
+   * nothing there the view is left exactly where it was put.
+   */
+  private holdEye(target: THREE.Vector3, eyes: THREE.Vector3, blocked: CameraBlocker): void {
+    const rise = eyeAxis.copy(eyes).sub(target).dot(this.up);
+    eyeAxis.copy(target).addScaledVector(this.up, rise);
+    eyeReach.copy(this.camera.position).sub(eyeAxis);
+    const len = eyeReach.length();
+    if (len < 1e-4) return;
+    eyeEnd.copy(this.camera.position).addScaledVector(eyeReach, FIRST_PERSON_CLEAR / len);
+    const hit = blocked(eyeAxis, eyeEnd);
+    if (hit !== null) this.camera.position.copy(eyeAxis).addScaledVector(eyeReach, Math.max(0, hit - FIRST_PERSON_CLEAR) / len);
+  }
+
+  /**
    * @param blocked  physics query for what the camera would cut through; null skips collision (noclip)
    * @param eyes     where the character's eyes are this frame, for the first-person view; the standing eye height over `target` otherwise
    * @param scale    the orbit's distance over the wheel's, for orbiting something larger than a figure (a ship)
@@ -331,6 +356,9 @@ export class ThirdPersonCamera {
       // forward of the head's joint so the neck is not in the picture.
       if (eyes) this.focus.copy(eyes);
       this.camera.position.copy(this.focus).addScaledVector(this.dir, -eyeAhead);
+      // A figure's own eyes (never a cockpit's, which passes no reach ahead): held this side of whatever stands
+      // between the body's axis at the eyes' height and the view, since a lean carries the eyes out of the capsule.
+      if (blocked && eyes && eyeAhead > 0) this.holdEye(target, eyes, blocked);
       this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
       this.orbitDistance = 0;
       // The race view's widening, here too, and the base written back once it has gone: with none ever (anything but

@@ -198,11 +198,11 @@ export function markShows(kind: MarkKind, reach: { readonly dist: number; readon
 
 /**
  * What the hook mutes for the frame, by action, into a kept list: nothing while it is not out; while it
- * is, the walk, the crouch and the torch (whose keys the reels and the haul borrow), the two postures and
+ * is, the speed-up, the crouch and the torch (whose keys the reels and the haul borrow), the two postures and
  * the emotes, and the jump only while swinging (Space is the boost then; on the ground it jumps, and in
  * water it swims up). On a loose prop (`holding`, wave 3) the reels do nothing and the body is on its feet
  * as ever, so only the torch (F is the yank) and the emotes (refused while the rope is out) are muted: the
- * walk, the crouch and its landing roll, and the postures are the player's. Answers how many it wrote.
+ * speed-up, the crouch and its landing roll, and the postures are the player's. Answers how many it wrote.
  */
 export function grappleMutes(out: string[], isOut: boolean, swinging: boolean, holding = false): number {
   const list = !isOut ? null : holding ? HOLD_MUTES : OUT_MUTES;
@@ -220,13 +220,13 @@ export function grappleMutes(out: string[], isOut: boolean, swinging: boolean, h
 }
 
 /** What the hook mutes for as long as it is out on an anchor or in flight, whatever it is doing. */
-const OUT_MUTES: readonly string[] = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4'];
+const OUT_MUTES: readonly string[] = ['speedUp', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4'];
 
 /** What it mutes while the rope holds a loose prop: the torch, whose key is the yank, and the emotes, which the game refuses while the rope is out. */
 const HOLD_MUTES: readonly string[] = ['flashlight', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4'];
 
-/** What every let-go mutes until its keys are up: a held Space would hop on landing, a held F light the torch, a held Shift walk. Never the crouch, which is the landing roll. */
-export const GRAPPLE_RELEASE_MUTES: readonly string[] = ['jump', 'flashlight', 'walk'];
+/** What every let-go mutes until its keys are up: a held Space would hop on landing, a held F light the torch, a held Shift run. Never the crouch, which is the landing roll. */
+export const GRAPPLE_RELEASE_MUTES: readonly string[] = ['jump', 'flashlight', 'speedUp'];
 
 /**
  * What a let-go of a loose prop mutes until its keys are up: only the torch, whose key was the yank. The jump and the

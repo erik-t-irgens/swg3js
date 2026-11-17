@@ -1976,7 +1976,7 @@ export class Editor {
     a.fwd = typing ? 0 : (input.held('forward') ? 1 : 0) - (input.held('back') ? 1 : 0);
     a.side = typing ? 0 : (input.held('right') ? 1 : 0) - (input.held('left') ? 1 : 0);
     a.up = typing ? 0 : (input.held('editorUp') ? 1 : 0) - (input.held('editorDown') ? 1 : 0);
-    a.fast = input.held('walk');
+    a.fast = input.held('speedUp');
     // Alt is read before the mutes take it (the freeLook action is the editor's slow flight).
     a.slow = input.held('freeLook');
     // A hold, a drag of the gizmo or an orbit has the mouse: the camera holds still. So does a tool raising with F held,

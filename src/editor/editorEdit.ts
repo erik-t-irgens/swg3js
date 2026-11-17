@@ -534,7 +534,7 @@ export class EditorEdits {
     this.refreshKeys();
     const input = this.ed.input;
     const point = this.ed.point;
-    const shift = input.held('walk');
+    const shift = input.held('speedUp');
     // The hold: R turns (Shift+R tips while no move key is held, and never a building), F raises, C scales; R wins when
     // several are held.
     const moving = input.held('forward') || input.held('back') || input.held('left') || input.held('right');

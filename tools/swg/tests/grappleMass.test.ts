@@ -548,7 +548,7 @@ for (const fps of FPS) {
     tap(b, 'Mouse3', dt);
     const g = b.grapple;
     ok(yanking && g.state === 'off' && g.lastLetGo === 'fire' && bodyOf(prop).gravityScale() === 1, `${fps} fps: the fire key pressed in mid-yank lets go, the crate's weight given back`);
-    ok(b.input.muted('flashlight') && !b.input.muted('walk') && !b.input.muted('jump'), `${fps} fps: and with F and Shift still held, the torch alone waits for its key to come up; the walk is the player's as it was`);
+    ok(b.input.muted('flashlight') && !b.input.muted('speedUp') && !b.input.muted('walk') && !b.input.muted('jump'), `${fps} fps: and with F and Shift still held, the torch alone waits for its key to come up; the walk is the player's as it was`);
     b.key('ShiftLeft', false);
     b.key('KeyF', false);
     frame(b, dt);

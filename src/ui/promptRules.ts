@@ -226,6 +226,12 @@ export interface PromptState {
   near: PromptNear;
   /** The ship menu. 'altitude' is the moment the sky is high enough for space, which is worth saying. */
   shipMenu: PromptShipMenu;
+  /**
+   * Climbing II: the use key would grab a lip or start a wall climb (`climb.grab` 'use'). 'air' while falling, when the climb
+   * has the key before anything else (the owner's: what you can use comes first "unless actively falling"); 'ground'
+   * otherwise, when it has the key only where nothing else in reach takes it, so it is offered last.
+   */
+  climb: '' | 'air' | 'ground';
 }
 
 /** A state struct with nothing in it: the caller keeps one and fills it. */
@@ -255,6 +261,7 @@ export function newPromptState(): PromptState {
     eva: false,
     near: '',
     shipMenu: '',
+    climb: '',
   };
 }
 
@@ -283,6 +290,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.eva = false;
   s.near = '';
   s.shipMenu = '';
+  s.climb = '';
   const v = s.vehicle;
   v.kind = '';
   v.ship = false;
@@ -383,6 +391,8 @@ export const PROMPT_WORDS = Object.freeze({
   callBack: 'call it back',
   // A loose prop on the rope: F pulls it to you.
   yank: 'yank it',
+  // Climbing II: the use key grabs a lip in reach or starts a wall climb.
+  climb: 'climb',
   // Everywhere.
   shipMenu: 'ship menu',
   noclipOff: 'noclip off',
@@ -502,7 +512,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
       // A bike in racing mode: the boost, the slide on Space, and the way back to traversal; with an engine part
       // damaged the repair comes before the way back, which is the one the bar has no room left for.
       if (v.mode === 'racing') {
-        if (v.boost) n = push(out, n, 'walk', W.boost);
+        if (v.boost) n = push(out, n, 'speedUp', W.boost);
         n = push(out, n, 'jump', W.slide);
         if (v.repair) n = push(out, n, 'repair', W.repair);
         n = push(out, n, 'raceMode', W.traversalMode);
@@ -511,7 +521,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
       // Today's: the hop, the boost; a pod raced slides on Space instead (and repairs while a part is damaged); a bike
       // in traversal offers racing mode.
       if (v.hop && !v.slide) n = push(out, n, 'jump', W.hop);
-      if (v.boost) n = push(out, n, 'walk', W.boost);
+      if (v.boost) n = push(out, n, 'speedUp', W.boost);
       if (v.slide) n = push(out, n, 'jump', W.slide);
       if (v.slide && v.repair) n = push(out, n, 'repair', W.repair);
       if (v.mode === 'traversal') n = push(out, n, 'raceMode', W.racingMode);
@@ -546,6 +556,9 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     return n;
   }
 
+  // Climbing II: falling, the use key grabs a lip or a wall before anything else may take it (the game's dispatch gives
+  // the climb the press first then), so its cap comes first and the rest that want the key are dropped for sharing it.
+  if (s.climb === 'air') n = push(out, n, 'mount', W.climb);
   // On foot. A lift shaft, an elevator and a doorless building all want the same key, so the one
   // underfoot wins, exactly as it does today.
   if (s.lift) n = push(out, n, 'mount', W.lift);
@@ -593,6 +606,9 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   // case as well, in `zoneGates.ts`, so the key never does one thing and say another; offering it
   // here last is the same rule written where the bar can be driven and checked.
   if (s.gate) n = push(out, n, 'mount', s.gate === 'travel' ? W.gate : W.gateNowhere);
+  // Climbing II: standing or rising, the climb has the use key only where nothing else in reach took it (the dispatch's
+  // last), so it is offered last of all, and dropped for sharing the key with anything above.
+  if (s.climb === 'ground') n = push(out, n, 'mount', W.climb);
   if (s.shipMenu) n = push(out, n, 'ship', W.shipMenu);
   return n;
 }

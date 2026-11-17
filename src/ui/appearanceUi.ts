@@ -34,6 +34,8 @@ import { groupHtml, GroupState } from './catalogue.ts';
 import { giveCellHtml } from './giveModel.ts';
 import { DyePicker, allGarmentColours, countText, creatorPalettes, drawStrip, eyePalettes, garmentPalettes, pickKind, type PickerRow, type PickerSource, type PickerTab, type PickKind } from './dyePicker.ts';
 import { isRawColour } from '../player/texrender.ts';
+import type * as THREE from 'three';
+import { GaitWalk, gaitRowHtml } from './gaitRow.ts';
 
 /**
  * What the appearance page shapes and colours (its host, Map-maker II's thirteenth wave): the species' pack (`manifest`), its
@@ -133,6 +135,7 @@ export class AppearanceUi {
     parent.appendChild(this.root);
     this.body = this.root.querySelector<HTMLElement>('.wardrobe-body')!;
     this.preview = new CharacterPreview();
+    this.gaitWalk = new GaitWalk(this.preview);
     this.root.querySelector<HTMLElement>('.wardrobe-preview')!.prepend(this.preview.canvas);
     this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'appearance', (id) => this.onTab(id));
@@ -181,6 +184,16 @@ export class AppearanceUi {
    * what to say. Unset, the character puts it on at once, which is right only where no world draws it.
    */
   onHair: ((id: string | null) => Promise<string>) | null = null;
+
+  /**
+   * The character's gait (the animations' second wave): what the Walk row shows, what a pick writes (the game's own
+   * `setGait`: worn at once, on the record in play, waiting for the record in the creator), and the clip a gait walks
+   * in on the figure's own rig, which the doll then plays in place for a few seconds. Unset (the world editor's
+   * dresser) the page has no Walk row and is the page it was.
+   */
+  gait: { now(): string; set(gait: string): void; walkClip(gait: string): THREE.AnimationClip | null } | null = null;
+  /** The doll's walk after a pick (`GaitWalk`), for the console. */
+  readonly gaitWalk: GaitWalk;
 
   /** The species the pack offers, for the picker in the header; hidden when there is only the one. */
   setSpecies(list: SpeciesEntry[], current: string): void {
@@ -581,13 +594,15 @@ export class AppearanceUi {
     this.view = view;
     this.rowsByName.clear();
     this.root.querySelector<HTMLElement>('.count')!.textContent = c ? `${Object.keys(c.morphValues()).length} sliders · ${(c.manifest.variables ?? []).length} variables` : '';
+    // The Walk row first, where the page has a gait to show (the player's, never the dresser's).
+    const walk = c && this.gait ? gaitRowHtml(this.gait.now()) : '';
     if (!view) {
       // No table (or no live recipes): every slider the pack has, then every colour, as it always was.
       const shape = this.shapeRows();
       const colours = this.colourRows();
       const hair = this.hairSection(this.hairGridHtml());
-      this.body.innerHTML = shape || colours || hair ? `${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
-    } else this.body.innerHTML = this.tableRows(view);
+      this.body.innerHTML = shape || colours || hair ? `${walk}${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
+    } else this.body.innerHTML = `${walk}${this.tableRows(view)}`;
     if (c) this.preview.refresh(c);
     this.wireShape();
     this.hairGroups.wire(this.body);
@@ -600,6 +615,25 @@ export class AppearanceUi {
       ch.setHeight(Number(height.value));
       height.nextElementSibling!.textContent = Number(height.value).toFixed(2);
       this.onChange();
+    });
+    // The Walk row: the gait written through the game, and its walk played in place on the doll for a few seconds.
+    const gait = this.body.querySelector<HTMLSelectElement>('select.gait');
+    gait?.addEventListener('change', () => this.pickGait(gait.value));
+  }
+
+  /** A gait picked on the Walk row (or by the console): written through the game's hook, then its walk on the doll. */
+  pickGait(gait: string): void {
+    const g = this.gait;
+    if (!g) return;
+    g.set(gait);
+    const clip = g.walkClip(gait);
+    if (!clip) {
+      this.gaitWalk.stop(false);
+      return;
+    }
+    // Done, a fresh copy of the figure: the doll stands as the figure does again.
+    this.gaitWalk.start(clip, () => {
+      if (this.character) this.preview.refresh(this.character);
     });
   }
 
@@ -849,6 +883,8 @@ export class AppearanceUi {
     this.root.classList.add('hidden');
     this.preview.stop();
     this.closePicker();
+    // A walk still playing on the doll goes with the page (nothing of the figure was moved by it).
+    if (this.gaitWalk.playing) this.gaitWalk.stop(false);
   }
 
   toggle(): boolean {

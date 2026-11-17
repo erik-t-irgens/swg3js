@@ -75,6 +75,68 @@ for (const [what, inPlayer, inHarness] of both) ok(update.includes(inPlayer) && 
 ok(inOrder(update, ['grapple.afterMove(', 'grapple.look(']).ok && inOrder(frame, ['g.afterMove(', 'g.look(']).ok, 'the look comes after the step after the move, in both');
 const sync = update.slice(update.indexOf('if (this.grapple.attached || this.grapple.released) {\n      // On the rope'));
 ok(inOrder(sync, ['this.grapple.syncCollider(this.gview);', 'moveX += gc.x;', 'moveY += gc.y;', 'moveZ += gc.z;', 'computeColliderMovement(']).ok, "inside that guard the collider is synced and the rope's correction added to the move, before the controller");
+// Stairs II (A): the step-up's mend, its lines in the player's update and beside them in the harness, in the order they run
+// (the review of Stairs II took both of the player's calls out with every behaviour test still passing: the tests run the
+// harness). The body's place and the rule's reach are written before the sync; the sync is the third branch after the rope's
+// and the crease's; the move asked is written after the controller's move and before the step; the step comes before the
+// rope's clip; and the body stands where the step says, after the controller's word.
+const stepPlayer = [
+  'const su = this.stepUp.at;',
+  'su.x = this.pos.x;',
+  'su.y = this.pos.y;',
+  'su.z = this.pos.z;',
+  'su.localY = this.colliderOffsetY;',
+  'su.half = this.colliderOffsetY - CAPSULE_RADIUS;',
+  'su.ruled = this.grounded && !this.swimming && !this.grapple.attached && !this.grapple.released && !this.slope.sliding;',
+  'su.supported = this.slope.supported;',
+  'su.filter = filter;',
+  'this.stepUp.reach(this.physics.world, this.body, this.collider, this.walkPast);',
+  '} else if (this.slope.settling) this.syncCrease();',
+  'else this.stepUp.sync(this.collider);',
+  'this.controller.computeColliderMovement(this.collider,',
+  'const mv = this.controller.computedMovement();',
+  'su.ax = moveX;',
+  'su.ay = moveY;',
+  'su.az = moveZ;',
+  'su.filter = filter;',
+  'su.climb = LOCO_TUNE.slope.climb;',
+  'this.stepUp.after(this.physics.world, this.controller, mv, this.body, this.collider, this.walkPast);',
+  'if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview, mv);',
+  'this.grounded = this.controller.computedGrounded();',
+  'if (this.stepUp.stands) this.grounded = true;',
+];
+const stepHarness = [
+  'const su = this.stepUp.at;',
+  'su.x = this.pos.x;',
+  'su.y = this.pos.y;',
+  'su.z = this.pos.z;',
+  'su.localY = this.colliderOffsetY;',
+  'su.half = this.colliderOffsetY - CAPSULE_RADIUS;',
+  'su.ruled = this.grounded && !this.swimming && !(this.hooks && (g.attached || g.released)) && !this.slope.sliding;',
+  'su.supported = this.slope.supported;',
+  'su.filter = this.filter;',
+  'this.stepUp.reach(this.physics.world, this.body, this.collider, this.walkPast);',
+  '} else if (this.slope.settling) this.collider.setTranslation(',
+  'else this.stepUp.sync(this.collider);',
+  'this.controller.computeColliderMovement(this.collider,',
+  'const mv = this.controller.computedMovement();',
+  'su.ax = moveX;',
+  'su.ay = moveY;',
+  'su.az = moveZ;',
+  'su.filter = this.filter;',
+  'su.climb = LOCO_TUNE.slope.climb;',
+  'this.stepUp.after(this.physics.world, this.controller, mv, this.body, this.collider, this.walkPast);',
+  'if (this.hooks && (g.attached || g.released)) g.clip(this, mv);',
+  'this.grounded = this.controller.computedGrounded();',
+  'if (this.stepUp.stands) this.grounded = true;',
+];
+ok(inOrder(update, stepPlayer).ok, `the step-up's mend in the player's update, in order: ${stepPlayer.length} lines`);
+ok(inOrder(frame, stepHarness).ok, "and its very lines in the harness's frame, in the same order");
+ok(
+  /this\.stepUp\.at\.r = CAPSULE_RADIUS;\s*this\.stepUp\.at\.off = 0\.04;/.test(player) && /this\.stepUp\.at\.r = CAPSULE_RADIUS;\s*this\.stepUp\.at\.off = 0\.04;/.test(harness),
+  "the step's capsule radius and the controller's offset are handed over where the body is made, in both",
+);
+ok(/readonly stepUp = new StepUp\(\(h, r\) => new RAPIER\.Capsule\(h, r\)\);/.test(player) && /readonly stepUp = new StepUp\(\(h, r\) => new RAPIER\.Capsule\(h, r\)\);/.test(harness), 'both make the step-up with the engine\'s own capsule');
 const command = method(grapple, '  command(c: { fmove: number; smove: number; jump: boolean; jumpPressed: boolean }, grounded: boolean): boolean {');
 ok(/if \(this\.state !== 'attached'\) return grounded;/.test(command) && /if \(m\.swinging\) \{\s*c\.fmove = 0;\s*c\.smove = 0;\s*c\.jump = false;\s*c\.jumpPressed = false;\s*\}/.test(command) && /return m\.sliding \? false : grounded;/.test(command), "the hook's command hands nothing on unless attached, takes the keys and the jump while swinging and the ground while sliding");
 
@@ -201,7 +263,8 @@ ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toAr
 const remotes = read('../../../src/net/remotePlayers.ts');
 ok(/import \{ glidePeerTurn(, \w+)* \} from '\.\/peerTurn\.ts';/.test(remotes) && remotes.includes('glidePeerTurn(r.group, r.targetQ, r.heading, k, r);') && !/r\.group\.rotation\.set\(0, r\.group\.rotation\.y/.test(remotes), "a peer's turn is glided by peerTurn.ts, never by the Euler yaw a whole turn leaves behind");
 // The camera's pull and the shake: the camera's own arguments and register, nothing new in it.
-ok(main.includes('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
+// Animation wave 3: the place the camera follows is the drawn body's (`player.followAt`: the capsule's own under `stairs.camera` 'capsule').
+ok(main.includes('this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
 const feel = method(main, '  private stepGrappleFeel(): void {');
 ok(feel.includes('this.hurtFrom(this.grappleSlamAt.set(s.x, s.y, s.z));') && feel.includes('setViewShake(g.shakeNow);') && feel.includes('setViewShake(g.joltNow);'), "a slam raises the flash and the arc at its contact, and the shake and the jolt go through the camera's register");
 ok((main.match(/this\.stepGrappleFeel\(\);/g) ?? []).length === 2, 'the feel is handed over by the frame and by advance alike');

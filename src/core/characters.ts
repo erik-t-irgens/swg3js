@@ -36,6 +36,12 @@ export interface SavedCharacter {
    */
   mood?: string;
   /**
+   * How the character walks (`GAITS` in src/anim/locoTable.ts): the walk class's clips in its gait, chosen on the
+   * creator's and the appearance page. Absent means the standard walk, which is every record from before there was a
+   * choice; the standard is never written.
+   */
+  gait?: string;
+  /**
    * What the character has to spend. A number and not a thing in the backpack, which is the
    * owner's own call and is also what the game did -- nothing in the archives gives credits an
    * object template. Absent on every record from before there were any, which reads as the

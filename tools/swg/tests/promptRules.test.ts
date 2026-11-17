@@ -310,10 +310,21 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   // another. It is one line in the frame loop, read out of the source: what is underfoot (the lift, an
   // elevator, a doorway), then a dungeon copy's things (`instances.ts`), then a port's own things, then
   // a thing a story stands, then the companion lying down, then somebody to talk to, then a gate, then a
-  // vehicle or a hull, which is `handleMount`'s. A reordering there fails here.
+  // vehicle or a hull, which is `handleMount`'s. A reordering there fails here. Climbing II: falling with
+  // something to climb in reach, the climb takes the key before all of them (`player.climbFalls`, the owner's
+  // "unless actively falling", and `climbReach`, the very test the bar's 'air' is gathered by, so a falling
+  // press beside a speeder with nothing to climb mounts as the bar says), and otherwise only a press none of
+  // them took (`handleMount` answers whether it did anything).
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
-  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleStoryUse\(\) && !this\.handleRevive\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
-  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a story\'s thing, the companion down, a person, a gate, a vehicle');
+  const line = /if \(player\.climbFalls && player\.climbReach\(\)\) player\.climbAsk\.press\(\);\r?\n\s+else if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleStoryUse\(\) && !this\.handleRevive\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\) && !this\.handleMount\(\)\) player\.climbAsk\.press\(\);/.exec(main);
+  ok(!!line, 'the use key is dispatched in the bar\'s own order: falling with something to climb in reach, the climb first; else underfoot, a dungeon copy, a port, a story\'s thing, the companion down, a person, a gate, a vehicle, and the climb only where none took it');
+  ok(/\} else this\.pressJumpE\(\);\r?\n\s+\}\r?\n(\s+\/\/[^\n]*\r?\n)*\s+player\.climbAsk\.hold\(input\.held\('mount'\)\);/.test(main), 'and the press the climb was handed holds while the key does, read straight after the dispatch');
+  {
+    const mount = main.slice(main.indexOf('  private handleMount(): boolean {'), main.indexOf('  /** A note the boots left'));
+    const returns = [...mount.matchAll(/return( true| false)?;/g)].map((m) => m[0]);
+    ok(mount.length > 0 && returns.filter((r) => r === 'return;').length === 0 && returns.filter((r) => r === 'return false;').length === 1 && /bootsTake\(null\);\r?\n\s+return true;\r?\n\s+\}\r?\n\s+return false;\r?\n\s+\}/.test(mount), `handleMount answers true wherever it did something and false only at its end, where nothing was in reach (${returns.length} returns)`);
+  }
+  ok(/s\.climb = p\.climbReach\(\) \? \(p\.climbFalls \? 'air' : 'ground'\) : '';/.test(main), "the bar is told where the use key would climb: first while falling, else last");
   ok([...main.matchAll(/this\.handleTalk\(\)/g)].length === 1, 'and talking is reached from that one place');
   ok([...main.matchAll(/this\.handleStoryUse\(\)/g)].length === 1, "and a story's thing from that one place too");
   ok([...main.matchAll(/this\.handleRevive\(\)/g)].length === 1, 'and getting the companion up from that one place too');
@@ -386,6 +397,21 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(n === 1 && words(n)[0] === PROMPT_WORDS.gate, 'standing at a gate between two of a world zones: through it');
   const nowhere = fill(at({ gate: 'nowhere' }));
   ok(nowhere === 1 && words(nowhere)[0] === PROMPT_WORDS.gateNowhere, 'a gate the pack names nowhere for: the bar says so rather than saying nothing');
+}
+
+{
+  // Climbing II: the use key grabs a lip or starts a wall climb (`climb.grab` 'use'). Standing, it has the key only where nothing
+  // else in reach took it, so its cap comes last and stands aside for a lift, a terminal, a person, a vehicle and a gate; falling,
+  // it has the key before all of them (the owner's: what you can use comes first "unless actively falling").
+  const alone = fill(at({ climb: 'ground' }));
+  ok(alone === 1 && words(alone)[0] === PROMPT_WORDS.climb && keys(alone)[0] === 'mount', `a lip or a wall in reach, nothing else: climb, on the use key (${show(alone).join(', ')})`);
+  for (const [what, fields] of [['a lift', { lift: true }], ['a terminal', { travel: 'terminal' }], ['somebody to talk to', { talk: true }], ['a vehicle', { near: 'mount' }], ['a gate', { gate: 'travel' }]] as [string, Partial<ReturnType<typeof newPromptState>>][]) {
+    const n = fill(at({ ...fields, climb: 'ground' }));
+    ok(!words(n).includes(PROMPT_WORDS.climb) && keys(n).filter((k) => k === 'mount').length === 1, `standing at ${what} with a wall in reach too: the key is ${what}'s, and the bar says so alone (${show(n).join(', ')})`);
+    const f = fill(at({ ...fields, climb: 'air' }));
+    ok(words(f)[0] === PROMPT_WORDS.climb && keys(f).filter((k) => k === 'mount').length === 1, `falling past ${what} with a lip in reach: the key grabs the lip first (${show(f).join(', ')})`);
+  }
+  ok(PROMPT_WORDS.climb.length <= PROMPT.maxLabel, `"${PROMPT_WORDS.climb}" fits the bar`);
 }
 
 {

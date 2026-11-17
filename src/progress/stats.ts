@@ -98,8 +98,9 @@ export const STATS = [
   { id: 'saber.stances', label: 'Stance access', unit: 'styles', category: 'melee', min: 0, max: 0, base: null, reads: '', status: A, why: 'the five styles are all open; Progression II’s Forms' },
   // ---- movement, not built ----
   { id: 'move.jump', label: 'Jump height', unit: 'm', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'Jedi Academy’s jump and the Force’s levels; Athletics and the Force pass' },
-  { id: 'move.sprint', label: 'Sprint speed', unit: 'm/s', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is one run; Athletics, later' },
-  { id: 'move.stamina', label: 'Stamina pool and regen', unit: 'points', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no stamina' },
+  // The speed classes' two: each base is `LOCO_TUNE`'s own number, which the read site hands in, so the tune stays live.
+  { id: 'move.sprint', label: 'Sprint speed', unit: 'm/s', category: 'movement', min: 1, max: 20, base: 7, reads: 'src/player/player.ts', status: 'route' },
+  { id: 'move.stamina', label: 'Stamina pool', unit: 'points', category: 'movement', min: 10, max: 1000, base: 100, reads: 'src/player/player.ts', status: 'route' },
   { id: 'move.mantle', label: 'Mantle height', unit: 'm', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no mantle; Athletics, later' },
   { id: 'move.wallRun', label: 'Wall-run duration', unit: 's', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'Jedi Academy’s wall runs belong to Force jump 3; the Force pass' },
   // ---- the grapple: each base is `GRAPPLE_TUNE`'s own number, which the read site hands in, so the tune stays live ----

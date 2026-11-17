@@ -463,7 +463,8 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   const startBuilding = /private async startPlacingBuilding\([\s\S]*?\n  \}\r?\n/.exec(main)?.[0] ?? '';
   ok(/yaw: turnTo\(this\.viewHeading\(\)\)/.test(startBuilding), 'a building taken in hand starts facing the way the view looks');
   // The on-foot camera, handed the grapple's own scale in place of its 1 (Grapple wave 2): the literal 1 whenever the rope is not out.
-  const camAt = main.indexOf('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);');
+  // Animation wave 3: the camera follows the drawn body (`player.followAt`).
+  const camAt = main.indexOf('this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);');
   const ghostAt = main.search(/if \(this\.placing\) this\.stepPlacing\(\);\s*else if \(this\.propPlacing\) this\.stepPlacingProp\(\);/);
   const wheelAt = main.indexOf('this.wheelPlacing(-input.wheel);');
   ok(camAt > 0 && ghostAt > camAt && wheelAt > 0 && wheelAt < camAt, 'the ghost is placed after the camera, reading this frame\'s view, and the wheel is taken before the camera zooms with it');

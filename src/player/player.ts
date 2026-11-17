@@ -6,7 +6,7 @@ import { Group, groups, PLAYER_SOLVER, RAPIER, type Physics } from '../core/phys
 import { markActor } from '../world/portalRender';
 import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
-import { roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
+import { isSurfaceRoom, roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
 import type { World } from '../world/world';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
@@ -28,7 +28,31 @@ import { RopeRibbon, dartMesh } from './grappleDraw.ts';
 import { makeHullController, type PeerHulls } from './grappleFrames.ts';
 import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
+import { ANIM_TUNE } from '../anim/animTune.ts';
+import { MX } from '../anim/animRules.ts';
+import { BodyAnim } from '../anim/bodyAnim.ts';
+import { BodyLoco, CARRY_FULL, FadeOpts, LegOpts, fightKeysDown, gunClassIndex, newLocoIn } from '../anim/bodyLoco.ts';
+import { SlopeRule } from './slopeRule.ts';
+import { StepUp } from './stepUp.ts';
+import { SwimSink } from '../anim/swimSink.ts';
+import { LOCO_TUNE } from '../anim/locoTune.ts';
+import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
+import { FootIk, stairFeetOf } from './footIk.ts';
+import { StairSense } from './stairSense.ts';
+import { ClimbAsk, LedgeHang, LedgeIn, climbTakesUseFirst, type LedgeWorld } from './ledge.ts';
+import { LimbPlace } from './limbPlace.ts';
+import { CLIMB_TUNE } from '../anim/climbTune.ts';
+import { MOVE_TUNE, shapeRulesOn } from '../anim/moveTune.ts';
+import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { ledgeClipName } from '../anim/ledgeClips.ts';
+import { figureScaleOf } from './peerHang.ts';
+import { WallClimb } from './wallClimb.ts';
+import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
+import { BraceIn, Crowd, HandBrace } from './brace.ts';
+import { hostileSides } from '../combat/targets.ts';
+import { PLAYER_KEY } from '../combat/kit.ts';
+import { DrawnHeight, DrawnIn } from '../anim/drawnHeight.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -104,6 +128,8 @@ const grappleDartDir = new THREE.Vector3();
 /** The grapple's look (wave 2): the lean as a turn, the rope point's lift it turns, and the arm's turn and way in the figure's own frame. */
 const grappleLeanQ = new THREE.Quaternion();
 const grappleLift = new THREE.Vector3();
+/** Wave 4: the grapple's pivot, read for the ledges' hand-over (`ledgeFromHaul`). */
+const ledgePivot = new THREE.Vector3();
 const grappleArmTurn = new THREE.Quaternion();
 const grappleArmDir = new THREE.Vector3();
 const grappleArmLocal = { x: 0, y: 0, z: 0 };
@@ -405,6 +431,142 @@ export class Player {
   jkaMode = false;
   /** Which way the current jump was made, for its air and landing clips (PMF_BACKWARDS_JUMP and kin). */
   private jumpDir: Dir = 'F';
+  /**
+   * What the body remembers for the imported clips (src/anim/bodyAnim.ts): what the air has been since the feet left
+   * the ground, the thrown fall and its impact's hold on the keys, the landing playing and how long. Every moment of
+   * those is one call on it below, and nothing else here decides any of it.
+   */
+  private readonly anim = new BodyAnim(ANIM_TUNE, UNIT);
+  /**
+   * How far the treading figure is drawn under where its body floats (src/anim/swimSink.ts): the rig's root lowered by
+   * it, so only what is drawn moves (the capsule, the swim, the wading and the camera's place are as ever).
+   */
+  readonly swimSink = new SwimSink();
+
+  /** Whether the thrown fall's impact still holds the keys: the game mutes them before anything reads one. */
+  get impactLocked(): boolean {
+    return this.anim.impactLocked;
+  }
+
+  /** Under the owner's air rule, a plain jump is in its float (`BodyAnim.jumpFloat`): the console's. */
+  get jumpFloat(): boolean {
+    return this.anim.jumpFloat;
+  }
+
+  /** How deep the feet are under the water's surface, metres (-Infinity with none): the console's. */
+  get waterDepthNow(): number {
+    return this.waterDepth;
+  }
+
+  /** Thrown from a wreck and not yet down (`fling`). */
+  get flung(): boolean {
+    return this.anim.flung;
+  }
+
+  /**
+   * The speed classes (src/anim/bodyLoco.ts): the class Shift and the walk key ask for, the stamina that pays, the
+   * imported clip for the way the keys go, what the class moves the body at and how far its clip turns the body from
+   * the view. Every moment of those is one call on it below, and nothing else here decides any of it; with the classes
+   * off, or on a rig without the imported clips, each call answers "as before".
+   */
+  readonly loco = new BodyLoco(LOCO_TUNE);
+  /** The frame as the classes need it: one kept record, written before `loco.plan`. */
+  private readonly locoIn = newLocoIn();
+  /** The rate and the fade the classes hand the rig with a state: one kept record; and the fade alone, for a state whose clip keeps its own rate. */
+  private readonly legOpts = new LegOpts();
+  /** The crouched states were last asked for one of the classes' clips (wave 2b): what lets them go when a blaster takes the legs back. */
+  private crouchPreferred = false;
+  private readonly fadeOpts = new FadeOpts();
+  /**
+   * The slope limit (wave 2b, `src/player/slopeRule.ts`): the controller's numbers before the move, its "grounded"
+   * judged after it (a face too steep to stand on is never ground), and the slide down such a face. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly slope = new SlopeRule();
+  /**
+   * Stairs II (A, `src/player/stepUp.ts`): the collider put where the body is before every move, and the step taken where the
+   * controller fell short at a riser up to the step-up's height, a riser taller a wall, at every frame rate. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly stepUp = new StepUp((h, r) => new RAPIER.Capsule(h, r));
+  /** The fade the falling loop comes in with as a slide begins: one kept record (`LOCO_TUNE.slope.fade`). */
+  private readonly slideFade = { fade: 0.18 };
+  /**
+   * Wave 3: the feet placed on what is under them (`src/player/footIk.ts`), once the figure is posed and placed at the end
+   * of the update; the stairs the ground ahead and behind makes (`src/player/stairSense.ts`), read after the move for the
+   * next frame's legs; and the drawn body's height eased over a step's pop (`src/anim/drawnHeight.ts`).
+   */
+  readonly feet = new FootIk(LOCO_TUNE.ik, () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }));
+  readonly stairSense = new StairSense();
+  readonly drawn = new DrawnHeight();
+  /** The stairs wave: how far the moves since the legs last read it took the body along the stairs' travel, metres (stairLoco's and BodyLoco.legs'). */
+  private stairMoved = 0.5;
+  private readonly drawnIn = new DrawnIn();
+  /**
+   * Wave 4: the ledges (`src/player/ledge.ts`): a lip grabbed in the air after the move (`sense`), and while it holds the
+   * body the hang's own frame in place of the movement (`hangFrame`); and the hands put on the lip and the feet on the
+   * wall after the figure is placed (`src/player/limbPlace.ts`, which maker B's bracing asks through `setHand`). The
+   * grapple's harness steps the very same calls in the same places.
+   */
+  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  private readonly ledgeIn = new LedgeIn();
+  /**
+   * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
+   * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
+   */
+  readonly climbAsk = new ClimbAsk();
+  /**
+   * Climbing II's feedback round, items 3 and 4 (`src/player/bodyShape.ts`, under `MOVE_TUNE`): the capsule lying along a
+   * prone body, and ducked under what stands over the body and ahead along its travel. With both switches at their other
+   * setting it never writes the collider and today's `setCrouchCollider` does. The grapple's harness steps the very same
+   * calls in the same places.
+   */
+  readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
+  private readonly shapeIn = new ShapeIn();
+  /** The placing hand holds something (a building or a prop being put down): the game sets it; the duck waits while it does. */
+  handPlacing: (() => boolean) | null = null;
+  readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
+  /** The rig's root was put off the body's place by the hang (its x and z): what `placeVisual` puts back. */
+  private ledgeRooted = false;
+  /**
+   * Wave 4, item B: the wall climb (`src/player/wallClimb.ts`): onto a face after the move (`sense`, beside the ledges'),
+   * and while it holds the body its own frame in place of the movement (`wallFrame`); and the hands' bracing
+   * (`src/player/brace.ts`) after the feet are placed, through the very limbs' solve the ledges hand their lip to (a rig has
+   * one hook). The grapple's harness steps the climb's calls in the same places.
+   */
+  readonly wall = new WallClimb({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  readonly brace = new HandBrace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
+  private readonly braceIn = new BraceIn();
+  /** The bodies near enough to brace on, refilled a frame while it is asked (kept). */
+  readonly crowd = new Crowd();
+  /** The rig's root was put off the body's place and leant by the climb: what `placeVisual` puts back. */
+  private wallRooted = false;
+  /** The frame's move was cut short across the ground by something in its way (the climb's start reads it). */
+  private wallBlocked = false;
+  /** The world into a ship's rooms' frame (aboard), for the feet's rays; and the chase camera's point (`followAt`). */
+  private readonly roomInverse = new THREE.Matrix4();
+  private readonly followPoint = new THREE.Vector3();
+  /** The blaster's own relaxed carry (its standing loop), found once a rig and a kind of gun: what rides the upper body over the classes' legs. */
+  private readonly carryFor: { rig: CharacterRig | null; gun: string; clip: string | null } = { rig: null, gun: '', clip: null };
+  /**
+   * Under a block or a swing with the classes ruling: the speed from which Jedi Academy's run has the legs rather than
+   * its walk, forward and backing up, found once a rig and a saber style (the geometric mean of the two clips' own
+   * speeds: where each is equally far from its own rate). Times the tune's `fight.walkUnder` where it is read.
+   */
+  private readonly saberRunFrom: { rig: CharacterRig | null; style: string; forward: number; back: number } = { rig: null, style: '', forward: 0.5, back: 0.5 };
+
+  /** Sprinting: the game mutes the fight's keys before anything reads one. */
+  get sprinting(): boolean {
+    return this.loco.sprinting;
+  }
+
+  /** The stamina pool's size as the stats have it (the tune's own until something is earned). */
+  get staminaPool(): number {
+    return this.stats.apply('move.stamina', LOCO_TUNE.stamina.pool);
+  }
+
+  /** Jedi Academy's animations are in charge by what the player is doing (the block held, a fight's move), written each frame beside `jkaMode`. */
+  private jkaActing = false;
   /** The walk key is held: the walk clips rather than the runs, whatever the speed. */
   private walkKey = false;
   /** The blaster in hand: a pistol is carried at the side like a hilt, a rifle across the chest. */
@@ -558,7 +720,8 @@ export class Player {
   private readonly cmd: MoveCommand = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
   /** Ducking (Ctrl on land): half speed, crouch clips, and the crouched attacks. */
   crouching = false;
-  private colliderCrouched = false;
+  /** What today's crouch rule last wrote onto the collider; null once the body's shape (`shape`) wrote it, so the next write is never skipped. */
+  private colliderCrouched: boolean | null = false;
   /** Fly mode for exploring and bug hunting: no gravity, no collision. */
   noclip = false;
   /** Noclip flying speed in m/s (Shift multiplies it); adjusted from the keyboard. */
@@ -640,6 +803,9 @@ export class Player {
     this.collider = made.collider;
     this.controller = made.controller;
     this.hullController = makeHullController(physics.world);
+    // Stairs II (A): the capsule's radius and the controller's offset, for the step's casts.
+    this.stepUp.at.r = CAPSULE_RADIUS;
+    this.stepUp.at.off = 0.04;
     // The grappling hook, its rope and its dart: built now on their one material, hidden and marked as actors,
     // so every warm-up compiles them for the world's pass and the rooms' and the first fire builds nothing.
     this.grapple = new Grapple(RAPIER, physics);
@@ -702,6 +868,7 @@ export class Player {
     };
     this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);
     this.ropeDrawn = new Float64Array(3 * this.grapple.rope.capacity);
+    this.stairMoved = 0;
     scene.add(this.ropeRibbon.mesh);
     markActor(this.ropeRibbon.mesh);
     this.dartView = dartMesh();
@@ -738,6 +905,8 @@ export class Player {
     s.special = this.jka.inSpecialJump;
     s.swgProfile = this.moveProfile === 'swg';
     s.stepped = this.physics.steps > this.stepsAtReset;
+    // Wave 4: hanging from a ledge or climbing a wall, the hands are full.
+    s.climbing = this.climbHolds;
     return s;
   }
 
@@ -881,6 +1050,50 @@ export class Player {
     return this.aboard ? this.group.position : this.pos;
   }
 
+  /** Wave 3's crease (`SlopeRule.settling`): the capsule's collider put where the body is before the move, as the grappling rope does. */
+  private syncCrease(): void {
+    const s = this.creaseAt;
+    s.x = this.pos.x;
+    s.y = this.pos.y + this.colliderOffsetY;
+    s.z = this.pos.z;
+    this.collider.setTranslation(s);
+  }
+  private readonly creaseAt = { x: 0.5, y: 0.5, z: 0.5 };
+
+  /** Wave 3: the feet's placement, the stairs held and the drawn body's lag let go of (the body stood somewhere new). */
+  private resetFeet(): void {
+    this.feet.reset();
+    this.stairSense.reset();
+    this.drawn.reset();
+    // Wave 4: stood somewhere new, nothing holds a lip any more, and nothing is placed on one.
+    this.ledge.reset('stood elsewhere');
+    this.wall.reset('stood elsewhere');
+    this.brace.reset();
+    this.limbs.reset();
+  }
+
+  /**
+   * Wave 3: where the chase camera follows. Under `stairs.camera` 'smooth' the drawn body's height (its place lifted by
+   * the step's lag, along the figure's own up), else `worldPos` itself (the capsule's, its pop at each step and all).
+   */
+  get followAt(): THREE.Vector3 {
+    const lag = this.drawn.offset;
+    if (LOCO_TUNE.stairs.camera !== 'smooth' || lag === 0) return this.worldPos;
+    const out = this.followPoint.copy(this.worldPos);
+    if (this.aboard) out.add(this.followLift.set(0, lag, 0).applyQuaternion(roomTurn(this.aboard)));
+    else out.y += lag;
+    return out;
+  }
+  private readonly followLift = new THREE.Vector3();
+
+  /**
+   * Wave 3: how far the first-person eye is put back up after the feet's placement lowered the pelvis (`ik.eye` 'steady',
+   * the start: the view does not bob on a slope or stairs), along the figure's up; nought under 'follow'.
+   */
+  get eyeLift(): number {
+    return LOCO_TUNE.ik.eye === 'steady' ? this.feet.drop : 0;
+  }
+
   /** Put the figure where it is: in the world at `pos`, or, aboard, where the hull's transform carries `pos`. */
   placeVisual(): void {
     const room = this.aboard;
@@ -901,6 +1114,74 @@ export class Player {
       this.group.rotation.set(0, this.heading, 0);
       if (this.grapple.leaning) this.group.quaternion.premultiply(this.leanTurn(grappleLeanQ));
     }
+    // Treading water, the drawn figure under where the body floats (`swimSink`, stepped by the update): the rig's root
+    // alone, so the capsule, the camera's place and everything hung on the group stay where the swim has them.
+    const rig = this.rig;
+    if (rig) rig.root.position.y = this.swimming && !room && !this.eva && this.swimSink.now > 0 ? -this.swimSink.now : 0;
+    if (rig) this.rootBase = rig.root.position.y;
+    // Wave 3: the drawn body's lag over a step's pop, on the rig's root alone as the sink is (nought under 'before').
+    if (rig && this.drawn.offset !== 0) rig.root.position.y += this.drawn.offset;
+    // Wave 4: hanging, the figure drawn where its clip's hands are on the lip (each clip authored at a height of its own),
+    // and after a let-go eased back onto the body; then the root's level offset put back (never under 'before').
+    if (rig && (this.ledgeRooted || this.ledge.offset)) {
+      if (this.ledge.offset) this.applyLedgeRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.ledgeRooted = false;
+      }
+    }
+    // Wave 4, item B: on a wall, the figure drawn leant into the face with its clip's own wall on it, and after a let-go
+    // eased back upright onto the body (on top of the hang's offset in the frame the climb hands its body to a lip).
+    if (rig && (this.wallRooted || this.wall.drawn)) {
+      if (!this.ledge.offset) {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+      }
+      if (this.wall.drawn) this.applyWallRoot();
+      else {
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.wallRooted = false;
+      }
+    }
+  }
+
+  /** The rig's root put where the climb draws the figure against the body (its offset, the world's frame, into the group's) and leant into the face about its own left. */
+  private applyWallRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const W = this.wall;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x += W.offX * c - W.offZ * s;
+    rig.root.position.y += W.offY;
+    rig.root.position.z += W.offX * s + W.offZ * c;
+    rig.root.quaternion.setFromAxisAngle(AXIS_X, W.lean);
+    this.wallRooted = true;
+  }
+
+  /** What `placeVisual` last stood the rig's root at before wave 3's lag and drop: what a branch off the feet puts back (`feetOff`). */
+  private rootBase = 0;
+
+  /**
+   * Wave 3: a frame off the feet (riding, flying, adrift, dead, the editor's flight): the placement and the drawn lag let
+   * go of, and the rig's root put back where `placeVisual` last stood it without them (those branches never place the
+   * figure through it). Under every switch at 'before' the root is already there and nothing is written.
+   */
+  private feetOff(): void {
+    this.feet.reset();
+    this.drawn.reset();
+    // Wave 4: a frame off the feet for any other reason than the ledge's own (riding, flying, adrift, dead, the editor's
+    // flight) lets go of the ledge outright. (The hang's own frame lets go of the feet and the lag itself.)
+    if (this.ledge.holding) this.ledge.reset('off the feet');
+    if (this.wall.holding) this.wall.reset('off the feet');
+    if (this.brace.busy) {
+      this.brace.reset();
+      this.limbs.reset();
+    }
+    const rig = this.rig;
+    if (rig && rig.root.position.y !== this.rootBase) rig.root.position.y = this.rootBase;
   }
 
   /** The grapple's lean (§3.12) as a turn in the world's frame, into `out`. */
@@ -1004,9 +1285,13 @@ export class Player {
     this.pos.copy(p);
     this.vel.set(0, 0, 0);
     this.grounded = true;
+    this.anim.drop();
+    this.slope.reset();
+    this.resetFeet();
     // Stood somewhere means stood on your feet: a body put down here is not in whatever flow it was
     // last drawn into, and `placeVisual` below would otherwise draw it a waist under the new ground.
     this.dropLavaSink();
+    this.swimSink.drop();
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.placeVisual();
@@ -1042,7 +1327,13 @@ export class Player {
     this.swimming = false;
     this.submerged = false;
     this.swing = -1;
+    this.slope.reset();
+    this.resetFeet();
     this.jka.reset();
+    this.anim.drop();
+    // Whole means rested too: the stamina is full at a respawn and at an arrival.
+    this.loco.refill(this.staminaPool);
+    this.swimSink.drop();
     this.saber.holster();
     this.rig?.stopOverride(0);
     this.mounted = null;
@@ -1050,6 +1341,15 @@ export class Player {
     this.body.setEnabled(true);
     this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
     this.group.position.copy(p);
+    // The feedback round, items 3 and 4: stood up fresh on its feet, standing (under 'lying' a prone body gets up, since its
+    // lying capsule was never asked for room here; with both switches off the shape never wrote the collider).
+    if (shapeRulesOn()) {
+      if (MOVE_TUNE.proneShape === 'lying') this.prone = false;
+      if (this.shape.kind === LYING || this.shape.tall !== STAND_TALL) this.shape.writeUpright(this.collider, p.x, p.y, p.z, STAND_TALL);
+      this.shape.reset();
+      this.colliderOffsetY = this.shape.offsetY;
+      this.colliderCrouched = null;
+    }
   }
 
   /** Launch the player into the air (used by Force Jump). */
@@ -1060,6 +1360,8 @@ export class Player {
     this.vel.z += fwd.z * forwardBoost;
     this.grounded = false;
     this.pos.y += 0.05;
+    // A Force user's air, as a held jump's is.
+    this.anim.forceMove();
   }
 
   setClass(id: ClassId): void {
@@ -1302,7 +1604,11 @@ export class Player {
   get postureEye(): number {
     if (this.mounted || this.aboard || this.eva || this.swimming) return 1.5;
     // A roll is a crouch that moves: the view stays down through it, as the game's does.
-    return this.prone ? 0.45 : this.kneeling ? 1.0 : this.crouching || this.jka.rolling ? 1.05 : 1.5;
+    if (this.prone) return 0.45;
+    if (this.kneeling) return 1.0;
+    const posture = this.crouching || this.jka.rolling ? 1.05 : 1.5;
+    // The feedback round, item 4: ducked under something, the view comes down with the capsule (first person reads the head).
+    return MOVE_TUNE.duck === 'on' ? this.shape.eyeFor(posture) : posture;
   }
 
   /**
@@ -2167,7 +2473,8 @@ export class Player {
     // meaningful while `swimming` is, so the two go together wherever either is put down.
     this.swimming = false;
     this.submerged = false;
-    this.flung = false;
+    // And off whatever the imported clips were holding, a thrown fall with them.
+    this.anim.drop();
     // The rider starts straight: no twist toward the view or aim carried over from on foot (nor back onto the ground after).
     this.torsoTwist = 0;
     this.aimTwist = 0;
@@ -2177,16 +2484,14 @@ export class Player {
 
   /**
    * Thrown from a vehicle that has just blown up under the rider: off it with its speed and a
-   * kick upward, flailing through the air, and down on the ground prone.
+   * kick upward, flailing through the air, and down on the ground prone. (`flung` says so until then.)
    */
-  flung = false;
-
   fling(from: THREE.Vector3, velocity: THREE.Vector3): void {
     this.dismount(from);
     this.vel.copy(velocity);
     this.vel.y += FLING_UP;
     this.grounded = false;
-    this.flung = true;
+    this.anim.fling();
     this.prone = false;
     this.kneeling = false;
   }
@@ -2264,10 +2569,14 @@ export class Player {
     this.heading = Math.atan2(evaFwd.x, evaFwd.z);
     this.group.position.copy(this.pos);
     this.group.quaternion.copy(q);
-    // Weightless: the treading-water pose, until there is a pose of its own.
+    // Weightless: the imported adrift loop when the rig has it (a preference the rig steps over without it), else the
+    // still-water pose the state's own list gives.
+    this.rig?.prefer('float', MX.adrift);
     this.rig?.setState('float');
     this.rig?.update(dt);
     this.group.updateMatrixWorld(true);
+    // Wave 4, item B: drifting near a surface, the hands reach to it and step along it (visual only: the drift is the drift).
+    this.placeBrace(dt, null, true);
   }
 
   dismount(to: THREE.Vector3): void {
@@ -2352,6 +2661,11 @@ export class Player {
     this.grappleVehicles = world.vehicles;
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
+      // (The speed classes are put down, as on every branch below that returns before they are planned: a sprint
+      // must not outlive the feet it was run on. The pool waits for the respawn, which fills it.)
+      this.loco.idle(0, this.staminaPool);
+      this.slope.reset();
+      this.feetOff();
       this.ragdollStep();
       return;
     }
@@ -2360,6 +2674,10 @@ export class Player {
     // of everything, noclip's branch included, which never reaches it.
     if (this.editorFlight) {
       if (this.grapple.out) this.grapple.letGo('editor');
+      this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
+      this.feetOff();
       this.editorFlight.step(dt, input, this.pos);
       this.vel.set(0, 0, 0);
       this.grounded = false;
@@ -2388,15 +2706,26 @@ export class Player {
       this.swing += dt / SWING_TIME;
       if (this.swing >= 1) this.swing = -1;
     }
+    // The thrown fall's impact holds the keys until it has played out (the game mutes them from `impactLocked`).
+    this.anim.tick(dt);
     this.blocking = this.classId === 'jedi' && this.saberOn && input.held('block') && !this.mounted && !this.noclip && !this.fists;
     this.aiming = this.classId === 'bounty_hunter' && input.held('altAttack') && !this.mounted && !this.noclip && !this.swimming && !this.fists;
     this.sinceShot += dt;
     cam.aim = this.aiming;
     const fighting = this.swing >= 0 || this.saber.busy || this.thrown.inFlight || this.jka.inSpecialJump || this.jka.rolling || this.fistsBusy;
     this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overridingJka);
+    // Blocking or fighting, and not merely one of that game's one-offs still playing out: what keeps its jump, its
+    // in-air pose and its landing over the imported ones (the owner's rule: its legs stay only while blocking or attacking).
+    this.jkaActing = this.hasJkaClips && (this.blocking || fighting);
 
     if (this.mounted) {
       if (this.grapple.out) this.grapple.letGo('mount');
+      // Seated, the speed classes are put down (`BodyLoco.idle`): nothing sprints, so the fight's keys are not left
+      // muted for the ride by a sprint the body sat down out of, and the stamina regains as it does standing.
+      this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
+      this.feetOff();
       this.rig?.stopOverride();
       this.thrown.cancel();
       this.updateBlades();
@@ -2407,6 +2736,10 @@ export class Player {
 
     if (this.noclip) {
       if (this.grapple.out) this.grapple.letGo('noclip');
+      this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
+      this.feetOff();
       this.rig?.stopOverride();
       this.saber.holster();
       this.thrown.cancel();
@@ -2418,10 +2751,27 @@ export class Player {
     // On foot in space, outside any ship's rooms: adrift. The zero-g tether waits, so the rope lets go.
     if (world.planet.space && !this.aboard) {
       if (this.grapple.out) this.grapple.letGo('eva');
+      this.loco.idle(dt, this.staminaPool);
+      // And the slope's slide with them: what the feet were sliding on is not under them when they come back.
+      this.slope.reset();
+      this.feetOff();
       this.evaUpdate(dt, input, cam);
       return;
     }
     this.eva = false;
+
+    // Wave 4: hanging from a ledge, or carried through one of its one-offs (`LedgeHang`): the ledge has the body in place
+    // of the movement. Never under `climb.ledges` 'before', where nothing ever holds.
+    if (this.ledge.holding) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // Wave 4, item B: on a wall (`WallClimb`), the climb has the body in place of the movement. Never under `climb.wall`
+    // 'before', where nothing ever climbs.
+    if (this.wall.holding) {
+      this.wallFrame(dt, input, cam, world);
+      return;
+    }
 
     const g = world.planet.gravity;
     const terrain = world.terrain;
@@ -2445,16 +2795,22 @@ export class Player {
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
 
-    const walking = input.held('walk');
+    // The speed keys (src/anim/bodyLoco.ts): Shift raises the class and the walk key, held, is the slowest. What comes
+    // back is the walk by the rules the body always had: with the classes off either key held, as Shift walked. At a
+    // ship's controls neither is the body's: Shift is the ship's boost there and Alt its free look.
+    const walking = this.loco.keys(dt, !atControls && input.held('speedUp'), !atControls && input.pressedAction('speedUp'), !atControls && input.held('walk'), this.rig);
     this.walkKey = walking;
     // Postures: Z toggles prone and V kneeling, on the ground; jumping, swimming or a saber swing brings the
     // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
     const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching };
     const onGround = !this.mounted && !this.noclip && !this.swimming;
-    if (input.pressedAction('prone') && onGround) this.prone = !this.prone;
+    // The feedback round, item 3 (`proneShape` 'lying'): going prone asks for room for the lying capsule and getting up for
+    // room to stand (`proneAsk`); with the switch at 'crouch' both are today's toggles.
+    const lyingRule = MOVE_TUNE.proneShape === 'lying';
+    if (input.pressedAction('prone') && onGround) this.prone = lyingRule ? this.proneAsk(!this.prone, input) : !this.prone;
     if (input.pressedAction('kneel') && onGround) {
       this.kneeling = !this.kneeling;
-      if (this.kneeling) this.prone = false;
+      if (this.kneeling) this.prone = lyingRule ? this.proneAsk(false, input) : false;
     }
     if (this.prone) this.kneeling = false;
     // Getting up on the jump key is only that: the jump itself waits for the key to be let go and pressed again.
@@ -2462,10 +2818,15 @@ export class Player {
     if (!input.held('jump')) this.jumpLatched = false;
     const wasProne = this.jumpLatched;
     const getsUp = this.swimming || input.pressedAction('jump') || (this.classId === 'jedi' && (input.pressedAction('attack') || input.pressedAction('block')));
-    if (this.prone && getsUp) this.prone = false;
+    // Lying, the water over the feet deeper than the body lies is water to stand up in, as the swim already stands it.
+    const lyingDrowns = lyingRule && this.prone && this.waterDepth > 2 * MOVE_TUNE.lyingRadius;
+    if (this.prone && (getsUp || lyingDrowns)) this.prone = lyingRule && !this.swimming ? this.proneAsk(false, input) : false;
     if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
-    this.crouching = !this.swimming && !this.prone && !this.kneeling && input.held('crouch');
-    this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
+    this.crouching = !this.swimming && !this.prone && !this.kneeling && (input.held('crouch') || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.moveFilter())));
+    // The feedback round, items 3 and 4: either switch on, the body's shape decides the capsule (`stepShape`); both off,
+    // today's crouch rule, to the line.
+    if (shapeRulesOn()) this.stepShape(dt, moving, move);
+    else this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
     // own rather than a write to `speedMultiplier`, which Force Speed rewrites from scratch each
@@ -2507,6 +2868,45 @@ export class Player {
     this.swimming = !this.inside && depth > (this.swimming ? SWIM_DEPTH - 0.3 : SWIM_DEPTH);
     this.submerged = this.swimming && depth > DIVE_DEPTH;
     this.waterDepth = depth;
+    // The speed classes: the frame's class, its clip and its speed, and the stamina's step (`BodyLoco.plan`). Where
+    // the class rules the body (on its feet, out of the water) its speed is the body's, under whatever multiplies it;
+    // crouched, prone, kneeling and swimming keep the speeds they always had, and so does everything with the classes off.
+    // Wave 3: the stairs the rule held under the body last frame (read after the move, `stairSense`).
+    this.locoIn.stairs = this.stairSense.way;
+    // The stairs wave: and their measure (the tread and riser one step a stair is planned by).
+    this.stairLoco();
+    const lo = this.locoIn;
+    lo.dt = dt;
+    lo.mz = mz;
+    lo.mx = mx;
+    lo.standing = !this.crouching && !this.prone && !this.kneeling;
+    lo.grounded = this.grounded;
+    lo.swimming = this.swimming;
+    // Blocking or fighting, and not merely one of Jedi Academy's one-offs playing out (a Force jump's flip): a jump
+    // out of a sprint is still the sprint.
+    lo.fighting = this.blocking || fighting;
+    lo.aiming = this.aiming;
+    // One of the fight's keys pressed or held (the attack, the other attack, a gun's other trigger, the throw, the
+    // block): under the tune's 'ends' it ends a sprint this frame, before the kit reads the press.
+    lo.fightKeys = !atControls && fightKeysDown(input);
+    lo.gunUp = this.classId === 'bounty_hunter' && !this.fists && (this.aiming || this.gunReady);
+    // The kind of gun in hand, where the body carries one it has the game's clips for: what a pace plays with none up.
+    lo.gunClass = this.classId === 'bounty_hunter' && this.hasGunClips && !this.fists ? gunClassIndex(this.gunClass) : -1;
+    lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
+    lo.pool = this.staminaPool;
+    lo.boost = this.speedMultiplier;
+    // Wave 2b: crouched and prone under the classes, the injured walk by the health's share, and the figure's scale a
+    // game clip's measured stride is scaled by.
+    lo.crouched = this.crouching;
+    lo.prone = this.prone;
+    lo.hpShare = this.hp / this.maxHp;
+    lo.scale = this.rig ? this.rig.root.scale.y : 1;
+    const classes = this.loco.plan(lo);
+    if (classes) {
+      speed = this.loco.speed * this.speedMultiplier * this.lavaPaceNow;
+      // The walk clips are the walk class's (Jedi Academy's saber walk too), whatever key gave it.
+      this.walkKey = this.loco.cls <= 1;
+    }
     // The rope's words for this frame, from the body as the swim has just left it (`ropeModes`, the one place
     // they are decided), and the move keys' direction as the sway: read below and by the grapple's steps.
     if (this.grapple.out) {
@@ -2520,6 +2920,9 @@ export class Player {
       // movement profile: the water keeps its own rules.) The arithmetic is `swimStep`'s, the block moved out
       // unchanged so the grapple's tests run the game's own swim; what is not arithmetic stays here.
       this.rig?.stopOverride();
+      // Water ends a thrown fall and a Force user's air, and what the movement reports on the first step out is the
+      // plunge's and no landing (`BodyAnim.swim`).
+      this.anim.swim();
       this.saber.holster();
       const sw = this.swimIn;
       sw.vel = this.vel;
@@ -2576,14 +2979,21 @@ export class Player {
       c.right.copy(rgt);
       c.fmove = mz;
       c.smove = mx;
-      c.walk = walking;
+      // With a speed class ruling the body the class's speed is the whole of it (on `speedScale`, below): no halving.
+      // (A leaping saber move keeps the walk key's halving with the pace it is paired with there, as it always had.)
+      c.walk = classes && !script ? false : walking;
       c.crouch = this.crouching;
       // A crouch tap on the move rolls, as the game's does, unless a swing is in its cutting part (its wind-up and return may be rolled out of).
       c.roll = input.pressedAction('crouch') && moving && !this.saber.attacking;
       c.jump = jump;
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');
-      c.speedScale = this.speedMultiplier * this.lavaPaceNow * this.paceScale(walking, mz, mx);
+      // The class's speed as a share of Jedi Academy's own run, so its acceleration, friction and air are unchanged; a
+      // leaping saber move, and everything without a class, keeps the pace it always had, and so does a body with no
+      // way asked (`loco.moves`: the scale also sets how hard the friction stops it, which is as it always was).
+      // Crouched under the classes the movement halves the speed on the ground (Jedi Academy's duck), which the share
+      // takes back, so the class's speed is the body's.
+      c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (this.loco.posture === CROUCH && this.grounded ? JKA.speed * UNIT * JKA.duckScale : JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
       // What progress makes of a fall and the air, each today's number until something is earned.
       const st = this.stats;
       c.fallSafeExtra = st.fallSafeExtra / UNIT;
@@ -2595,13 +3005,23 @@ export class Player {
       // are the rope's words, rewritten in the hook's own `command`, which the node harness calls too; while the
       // hook is not attached nothing here changes.
       const stepGrounded = this.grapple.command(c, this.grounded);
+      // A jump off a face too steep to stand on (wave 2b's slope limit): under `LOCO_TUNE.slopeJump` 'allowed' the plain
+      // jump, as from the ground; refused by default, when the movement (which jumps only off the ground) never sees one.
+      const slopeJumped = this.slope.jumpOff(this.vel, c.jumpPressed);
+      if (slopeJumped) this.jka.markJumpStart(this.pos.y);
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, stepGrounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
+      if (slopeJumped) ev.jumped = true;
+      const rig = this.rig;
+      // The imported clips' memory of the air (src/anim/bodyAnim.ts): a step in the air is a fall begun here.
+      this.anim.stepped(stepGrounded);
       if (ev.jumped) {
         this.grounded = false;
         // The jump for the direction pushed (PM_JumpForDir); with the body turned the way it runs, that is always forward.
         this.jumpDir = this.jkaMode ? (mz > 0 ? 'F' : mz < 0 ? 'B' : mx > 0 ? 'R' : mx < 0 ? 'L' : 'F') : 'F';
-        this.playOnce(this.jumpClip('JUMP', false), 0.05);
+        // A plain jump is the imported one for every class; with Jedi Academy's animations in charge, or without the
+        // imported clips, that game's own.
+        if (!this.anim.jump(rig, this.jkaActing)) this.playOnce(this.jumpClip('JUMP', false), 0.05);
       }
       if (ev.special) {
         this.grounded = false;
@@ -2609,14 +3029,25 @@ export class Player {
       }
       if (ev.flip) this.playOnce(`BOTH_FLIP_${ev.flip}`, 0.08);
       else if (ev.forceJumpStarted) this.playOnce(this.jumpClip('JUMP', true), 0.08);
+      // A flip, a Force jump or a wall move: the air is a Force user's from here until the feet touch down.
+      if (ev.special || ev.flip || ev.forceJumpStarted) this.anim.forceMove();
       this.lockedHeading = ev.heading;
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
-      if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
+      if (ev.landed !== null) {
+        // The landing: the imported one by how fast and how hard it was, none for a gentle one, and "before" for the
+        // game's own by its own rule. A thrown fall's landing, reported here a frame after its impact began, is the impact's.
+        const how = this.anim.land(rig, ev.landed, ev.damage, ev.forceLanded, ev.rolled !== null, this.saber.busy || this.jkaActing);
+        if (how === 'before' && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
+      }
+      // An imported landing gives way to the keys once it has shown its start.
+      this.anim.cut(rig, dt, moving);
       if (ev.damage > 0) this.takeDamage(ev.damage, false, 'fall');
       // A landing roll that kept some of a fall's harm off: what Acrobatics is paid for, outside a fight as well.
       if (ev.rollSaved > 0) this.onRolled?.(ev.fell, ev.rollSaved);
     } else if (this.grounded) {
+      // This profile reports no landing: on the ground, the air's memory is simply put down.
+      this.anim.onGround();
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;
       if (input.held('jump') && !this.prone && !wasProne && !atControls) {
@@ -2633,17 +3064,41 @@ export class Player {
     if (!this.swimming && this.moveProfile !== 'jka') this.vel.y -= g * dt;
     // Falling into deep water: the plunge slows quickly.
     if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
+    // Sliding down a face too steep to stand on (wave 2b's slope limit): gravity's share along it, before the move.
+    if (this.slope.sliding) this.slope.share(this.vel, dt, this.moveProfile === 'jka' ? this.jka.gravity : g);
     // The grapple's step before the move: the dart's flight, and attached, the reel or the haul, the sway, the
     // drags, the constraint and its correction, and the fall's memory held while the rope is taut.
     if (this.grapple.out) this.grapple.beforeMove(this.gview, dt);
 
-    // The snap to the ground is off while swinging on the rope as well as rising and swimming.
-    if (this.vel.y > 0.5 || this.swimming || (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();
+    // The snap to the ground is off while swinging on the rope as well as rising and swimming, and while the body slides
+    // down a face too steep to stand on (wave 2b), whose controller is told so before the move (`SlopeRule.controllerFor`).
+    if (this.vel.y > 0.5 || this.swimming || this.slope.sliding || (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
+    this.slope.controllerFor(this.controller);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
+    // Stairs II (A): where the body stands before the move, for the collider's sync and the step (`StepUp`).
+    const su = this.stepUp.at;
+    su.x = this.pos.x;
+    su.y = this.pos.y;
+    su.z = this.pos.z;
+    su.localY = this.colliderOffsetY;
+    su.half = this.colliderOffsetY - CAPSULE_RADIUS;
+    // On real ground only: the slope rule's last verdict found something under the body (a body pressed against a sheer wall
+    // in the air is called grounded by the controller, and is no step's: its Jedi wall moves stay as they were).
+    su.ruled = this.grounded && !this.swimming && !this.grapple.attached && !this.grapple.released && !this.slope.sliding;
+    // The feedback round, item 3: a lying capsule is no upright one the step casts for (the controller's own autostep has it),
+    // but where the step would reach the body its collider is still put where the body is before the move (`syncLying`).
+    const lyingSync = this.shape.kind === LYING && su.ruled;
+    if (this.shape.kind === LYING) su.ruled = false;
+    // Where the slope rule found nothing under the body to stand on, the step is the body's only with a floor within the
+    // step's height under it (`StepUp.reach`: a capsule wedged on a nosing over the tread below, yes; a body pressed against
+    // a sheer wall in the air, no).
+    su.supported = this.slope.supported;
+    su.filter = filter;
+    this.stepUp.reach(this.physics.world, this.body, this.collider, this.walkPast);
     if (this.grapple.attached || this.grapple.released) {
       // On the rope, or in the fast flight after letting go of it: the capsule's collider put where the body is (the
       // controller starts from the collider, which runs up to two frames behind at 144 fps), and the rope's correction
@@ -2653,13 +3108,29 @@ export class Player {
       moveX += gc.x;
       moveY += gc.y;
       moveZ += gc.z;
-    }
+    } else if (this.slope.settling) this.syncCrease();
+    // Stairs II (A): and on its feet on the ground, the collider put where the body is before every move (Rapier moves it only
+    // at its own 60 Hz step, and the controller works the move out from it: at 144 frames a second two moves in three began a
+    // frame or two back, and the body stalled at a riser), in the engine's own sums so a collider already there moves by no bit.
+    else this.stepUp.sync(this.collider);
+    if (lyingSync) this.shape.syncLying(this.collider, su);
+    // Wave 3's crease: how fast a frame that began in the air falls into its move, and the frame's seconds.
+    this.slope.at.fall = !this.grounded && this.vel.y < 0 ? -this.vel.y : 0;
+    this.slope.at.dt = dt;
     // The dead are walked through: a corpse is no wall. So is another player: their body comes off
     // the wire and teleports between messages, and one walked into must never climb, shove or trap
     // you. Their collision groups already keep them out of a filtered query like this one; the
     // predicate is what keeps it true if that filter is ever widened.
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
+    // Stairs II (A): where the controller met a riser in the way and fell short, the step (up to the step-up's 0.5 m, at
+    // every frame rate); a riser taller than that is a wall, its own lift onto one undone (`StepUp.after`).
+    su.ax = moveX;
+    su.ay = moveY;
+    su.az = moveZ;
+    su.filter = filter;
+    su.climb = LOCO_TUNE.slope.climb;
+    this.stepUp.after(this.physics.world, this.controller, mv, this.body, this.collider, this.walkPast);
     // On the rope and in the flight after it, what each surface refused is taken off the velocity, measured against
     // what was touched, and a wall struck hard enough is a slam (§3.11); a hull the rope rides and that moves is met in
     // its own frame there, its move written over the controller's (§3.18).
@@ -2673,14 +3144,87 @@ export class Player {
     this.pos.z += mv.z;
     const wasGrounded = this.grounded;
     this.grounded = this.controller.computedGrounded();
+    if (this.stepUp.stands) this.grounded = true;
+    // The slope limit (wave 2b): the controller calls any face whose normal points up at all ground; one too steep to
+    // stand on is not, and the body slides down it (the velocity clipped onto it, gravity's share along it kept, the
+    // fall's memory held at what the speed down into the ground is worth). Not on the rope, nor in the water.
+    // (The place goes over in the rule's own record, never as numbers, which a call not built in would box every frame.)
+    const slopeAt = this.slope.at;
+    slopeAt.x = this.pos.x;
+    slopeAt.y = this.pos.y;
+    slopeAt.z = this.pos.z;
+    slopeAt.offsetY = this.colliderOffsetY;
+    // The feedback round, item 3: lying, the rule's sphere is the lying capsule's middle ball (its radius at its middle).
+    slopeAt.r = CAPSULE_RADIUS;
+    if (this.shape.kind === LYING) slopeAt.r = this.shape.radius;
+    slopeAt.filter = filter;
+    this.grounded = this.slope.judge(this.physics.world, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released, this.body, this.walkPast);
+    if (this.slope.sliding) this.jka.holdApex(this.slope.slide(this.vel, this.pos.y, this.moveProfile === 'jka' ? this.jka.gravity : g));
+    // A slide is no step off a ledge (no hop) and its air is the falling loop (`BodyAnim.slide`).
+    this.anim.slide = this.slope.sliding;
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    // Wave 4: a lip grabbed in the air, or lowered into off a lip crouched (`LedgeHang.sense`, after the move and the slope's
+    // verdict); and the clocks of a let-go (a drop's clip cut, the jump off's turn). From a grab the frame is the hang's.
+    this.ledgeClocks(dt);
+    // Wave 4, item B: whether the move was cut short across the ground by what is in its way (only a body pressed into a
+    // face feels for one to climb, so walking free casts nothing), worked out in place (no number crosses a call).
+    const askH = moveX * moveX + moveZ * moveZ;
+    this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
+    if (this.senseLedge(dt, input, move, wasGrounded, atControls)) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // Wave 4, item B: onto a wall after the move: W held into a climbable face it is pressed against (`WallClimb.sense`).
+    if (this.senseWall(dt, input, move, wasGrounded, atControls)) {
+      this.wallFrame(dt, input, cam, world);
+      return;
+    }
+    // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
+    // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
+    // after the move for the next frame's legs (`StairSense`). Neither touches the body.
+    const rope = this.grapple.attached || this.grapple.released;
+    const di = this.drawnIn;
+    di.dt = dt;
+    di.dx = mv.x;
+    di.dy = mv.y;
+    di.dz = mv.z;
+    di.askedY = moveY;
+    di.nx = this.slope.planeNx;
+    di.ny = this.slope.planeNy;
+    di.nz = this.slope.planeNz;
+    di.grounded = wasGrounded && !this.swimming && !rope;
+    this.drawn.step(di, LOCO_TUNE.stairs);
+    const sa = this.stairSense.at;
+    sa.x = this.pos.x;
+    sa.y = this.pos.y;
+    sa.z = this.pos.z;
+    sa.vx = this.vel.x;
+    sa.vz = this.vel.z;
+    sa.dt = dt;
+    sa.filter = filter;
+    sa.reads = this.grounded && !this.swimming && !rope && !this.crouching && !this.prone && !this.kneeling && moving;
+    sa.measure = LOCO_TUNE.ik.hips === 'steady' || LOCO_TUNE.stairs.stepRule === 'stairs';
+    this.stairSense.step(this.physics.world, LOCO_TUNE.stairs);
+    // The stairs wave: how far the move took the body along the stairs' travel, for the legs' clip's phase.
+    this.stairMoved += mv.x * this.stairSense.ux + mv.z * this.stairSense.uz;
+    // Off the ground with no jump this frame (a jump puts the feet down as `grounded` false before the move): a step off
+    // a ledge or a drop. Under the owner's air rule, judged once now by one ray down from the feet (the game's own
+    // ground query, which passes over other players): the hop over a drop of `fall.hopDrop` or more (`BodyAnim.leftGround`).
+    if (wasGrounded && !this.grounded && !this.swimming && !this.flung && !this.grapple.attached && this.anim.judgesLedges) {
+      const reach = ANIM_TUNE.fall.hopDrop;
+      const d = this.physics.groundDistance(this.pos.x, this.pos.y + 0.1, this.pos.z, reach + 0.1, this.body, filter);
+      this.anim.dropBelow = d === null ? -1 : Math.max(0, d - 0.1);
+      this.anim.leftGround(this.rig, this.jkaActing);
+    }
     // Down from a wreck: flat on the ground where the fall ends.
     if (this.flung && this.grounded) {
-      this.flung = false;
       this.prone = true;
       this.vel.x = 0;
       this.vel.z = 0;
+      // The imported impact, from its trim, and the keys held while it plays (`impactLocked`); the body is already
+      // lying as far as the game goes, so the prone idle is what the clip gives way to. Without the clip, as before.
+      this.anim.hitGround(this.rig);
     }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
@@ -2691,6 +3235,11 @@ export class Player {
     // And the rest of its frame while anything of it is still easing: the stagger, the jolt, the camera's pull, the
     // lean and the arm. It moves no body, and for a player who never fires it never runs.
     if (this.grapple.lively) this.grapple.look(this.gview, dt);
+    // Wave 4: the haul ended under a lip it could not go over (too steep a top, or no room): a braced hang there.
+    if (this.grapple.haulStuck && this.ledgeFromHaul()) {
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
     // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
     // lowest landing, a dungeon under a mountain) go far below the terrain's floor. And under the ground right below
     // too (`fellOut`): a sinkhole sculpted deeper than the world's floor is ground, not out of the world.
@@ -2791,18 +3340,35 @@ export class Player {
     // Swinging on the rope the body faces the way the view looks, as it does in the air in a fight (§3.12).
     const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson || (this.grapple.attached && this.grapple.modes.swinging);
     const camYaw = Math.atan2(fwd.x, fwd.z);
+    // The speed classes face the body by the clip that has the legs: the way the view looks, turned by how far the
+    // travel lies from the clip's own heading (`BodyLoco.faces`, `turn`). Backing up and strafing no longer turn it
+    // round; a strafe used for a diagonal turns it 45 degrees, which the torso and the head then take back.
+    const locoFaces = moving && !this.swimming && this.loco.faces(this.jkaMode);
+    const locoTurn = locoFaces ? this.loco.turn : 0;
+    // The turn eased (`BodyLoco.face`): where it has got to, which first person takes as it stands, and this frame's
+    // share of the way left, which the third-person body's heading is turned by.
+    this.loco.face(locoFaces);
+    this.aimBodyNow = 0;
     let legsOffset = 0;
     if (this.lockedHeading) {
       this.heading = Math.atan2(this.lockedHeading.x, this.lockedHeading.z);
     } else if (cam.firstPerson) {
       // Seen from the eyes, the body turns with the view at once: a lag would show the shoulders
-      // swinging round, and turning the view alone would look back down into the neck.
-      this.heading = camYaw;
+      // swinging round, and turning the view alone would look back down into the neck. (A clip's own turn is eased.)
+      this.heading = camYaw + this.loco.turnNow;
     } else if (faceCamera) {
       // With a blaster up, the body also turns by what the aim's correction left over from the spine.
-      let diff = camYaw + this.aimBodyTurn - this.heading;
+      let diff = camYaw + locoTurn + this.aimBodyTurn - this.heading;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       this.heading += diff * Math.min(1, dt * 16);
+      // How far the body stands turned for the aim just now (it comes round to `aimBodyTurn` over a few frames): what
+      // the spine takes the rest of under the speed classes, so the barrel holds while the two change shares.
+      const stands = this.heading - camYaw - locoTurn;
+      this.aimBodyNow = Math.atan2(Math.sin(stands), Math.cos(stands));
+    } else if (locoFaces) {
+      let diff = camYaw + locoTurn - this.heading;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      this.heading += diff * this.loco.turnStep;
     } else if (moving && directional) {
       // Forward 0, diagonals 22.5, sideways 45 (the sign turns the legs towards the side moved);
       // backing up keeps the legs forward and the back diagonals turn them the other way.
@@ -2830,6 +3396,14 @@ export class Player {
     // the legs at the movement offset, the torso at a quarter of it), so a strafe leans the shoulders a little.
     const torsoWants = camYaw + legsOffset * 0.25;
     this.torsoTwist = directional && this.grounded && !faceCamera && !this.lockedHeading ? Math.atan2(Math.sin(torsoWants - this.heading), Math.cos(torsoWants - this.heading)) : 0;
+    // Under the speed classes the torso takes back a share of whatever the clip turned the body by (the head's look
+    // takes what it can of the rest), measured from where the body really stands just now.
+    if (locoFaces && !this.lockedHeading) {
+      const back = camYaw + this.aimBodyNow - this.heading;
+      this.torsoTwist = Math.atan2(Math.sin(back), Math.cos(back)) * LOCO_TUNE.turn.torso;
+    }
+    // The feedback round, item 3: lying, the heading just decided turns the lying capsule, or is slid or refused by it.
+    if (this.shape.kind === LYING) this.turnLying();
 
     this.moveAmount += ((moving ? Math.min(1, speed / RUN_SPEED) : 0) - this.moveAmount) * Math.min(1, dt * 10);
     this.phase += dt * speed * (moving ? 1.9 : 0);
@@ -2838,9 +3412,524 @@ export class Player {
     this.animate(dt);
     cam.camera.getWorldDirection(this.lookDir);
     this.animateRig(dt, this.groundSpeed, moving, mz, mx);
+    // The treading figure's sink (`SwimSink`): on while the body treads in the water (still, which under the owner's
+    // rule is under the water too), never in first person, whose eye is the head itself (lowered with the figure it
+    // would sit 0.15 m over the water on a human and go under on the swell), and only at the surface.
+    const ss = this.swimSink;
+    ss.dt = dt;
+    ss.depth = this.waterDepth;
+    ss.scale = this.rig ? this.rig.root.scale.y : 1;
+    ss.floatDepth = SWIM_DEPTH;
+    ss.step(this.swimming && !moving && !cam.firstPerson, ANIM_TUNE);
 
     this.placeVisual();
+    this.placeFeet(dt);
+    // Wave 4, item B: the hands bracing on a wall, in a passage or on a body near (after the feet: the last to turn a joint).
+    this.placeBrace(dt, world, false);
+  }
+
+  /**
+   * Wave 3: the feet placed on what is under them (`FootIk`), the figure posed and placed: standing on its feet on the
+   * ground (idle, every class, crouched, kneeling, Jedi Academy's legs, a gun's carry); never in the air, swimming, prone,
+   * on the rope or in its flight, dead, thrown, standing in a flow, on the gravity boots' surface (whose up is not the
+   * world's), sliding, or in a whole-body special move (a flip, a kata, a roll, the landing roll: Jedi Academy's own
+   * one-offs on the whole body that are no plain swing). Aboard a ship's rooms its rays are cast in the rooms' own physics.
+   */
+  private placeFeet(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const fi = this.feet.in;
+    const special = (this.saber.busy && this.saber.current.kind === 'special') || this.jka.rolling || this.jka.inSpecialJump || (rig.overridingJka && !rig.overridingUpperOnly && !this.saber.busy);
+    fi.on = this.grounded && !this.swimming && !this.prone && !this.grapple.attached && !this.grapple.released && !this.flung && this.hp > 0 && this.drawnSink <= 0 && !(this.aboard && isSurfaceRoom(this.aboard)) && !this.slope.sliding && !special;
+    fi.landing = this.anim.landing !== null;
+    fi.dt = dt;
+    fi.stairClip = this.loco.legsOn && isStairPick(this.loco.pick);
+    fi.px = this.pos.x;
+    fi.py = this.pos.y;
+    fi.pz = this.pos.z;
+    fi.heading = this.heading;
+    fi.filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    // The stairs wave: the stairs measured under the body (the hips' line), and one step a stair's stride and clearance.
+    const stepping = this.loco.legsOn && this.loco.stepFacts !== null;
+    // Stairs II: the pin held through each foot's first stance under the regular clip after the stairs gave way too (`StairEnd.pins`).
+    fi.stride = stepping ? this.loco.step.stride : 1;
+    fi.clear = stepping ? LOCO_TUNE.stairs.clear : 0;
+    fi.pin = (stepping || this.loco.stairEnd.pins) && LOCO_TUNE.stairs.pin === 'sole';
+    stairFeetOf(this.stairSense, fi);
+    fi.pivotL = stepping ? this.loco.step.pivotL : 0;
+    fi.pivotR = stepping ? this.loco.step.pivotR : 0;
+    // Nothing to place and nothing eased in: under 'before' (and off the feet) the frame asks nothing more, the figure's
+    // matrices left for the draw to work out as ever.
+    if (!(fi.on && LOCO_TUNE.ik.rule === 'placed') && this.feet.weight === 0 && this.feet.drop === 0) return;
     this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    this.feet.step(rig, this.physics.world, room ? this.roomInverse.copy(roomFrame(room)).invert() : null);
+  }
+
+  /** The stairs wave: the speed classes' record of the stairs' measure (`StairSense`: the tread and riser, the next riser), field by field. */
+  private stairLoco(): void {
+    const s = this.stairSense;
+    const lo = this.locoIn;
+    lo.stairKnown = s.known;
+    lo.stairTread = s.tread;
+    lo.stairRiser = s.riser;
+    lo.stairNext = s.next;
+    lo.stairPrev = s.prev;
+    lo.stairLead = this.feet.leadSide;
+    lo.stairLeadAt = this.feet.leadAt;
+    // Stairs II: the hold ending (no riser of the way ahead within the longest tread): walked off once a foot is planted on the
+    // floor beyond the last riser of the way, which stands this far behind the body's middle.
+    lo.stairEnding = s.ending;
+    lo.stairAhead = s.way > 0 ? s.ahead.up : s.way < 0 ? s.ahead.down : Number.POSITIVE_INFINITY;
+    lo.stairGap = s.way > 0 ? s.ahead.upGap : s.way < 0 ? s.ahead.downGap : Number.POSITIVE_INFINITY;
+    lo.stairBehind = s.way > 0 ? s.ahead.upBehind : s.way < 0 ? s.ahead.downBehind : Number.POSITIVE_INFINITY;
+  }
+
+  // ---- wave 4: the ledges ------------------------------------------------------------------------------------------------
+
+  /** Said on the message line by the ledges (a refusal in words): the game sets it. */
+  onLedgeWords: ((words: string) => void) | null = null;
+
+  /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
+  get climbHolds(): boolean {
+    return this.ledge.holding || this.wall.holding;
+  }
+
+  /** The move's own collision groups (as the frame's `filter`). */
+  private moveFilter(): number {
+    return this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+  }
+
+  /** The figure's size against the human male's (its hips' rest height over his 1.002 m, times its own scale), found once a rig. */
+  private ledgeScale(): number {
+    return this.rig ? figureScaleOf(this.rig) : 1;
+  }
+
+  /** The ledges' frame record: the keys and the body (fields, so nothing crosses a call). */
+  private fillLedgeIn(dt: number, input: Input | null, move: THREE.Vector3 | null, wasGrounded: boolean): LedgeIn {
+    const li = this.ledgeIn;
+    li.dt = dt;
+    li.heading = this.heading;
+    li.grounded = this.grounded;
+    li.wasGrounded = wasGrounded;
+    li.jumped = this.vel.y > 0.5;
+    li.crouchHeld = !!input && input.held('crouch');
+    li.crouchPressed = !!input && input.pressedAction('crouch');
+    li.jumpPressed = !!input && input.pressedAction('jump');
+    li.forwardHeld = !!input && input.held('forward');
+    li.forwardPressed = !!input && input.pressedAction('forward');
+    li.backHeld = !!input && input.held('back');
+    li.leftHeld = !!input && input.held('left');
+    li.rightHeld = !!input && input.held('right');
+    li.moveX = move ? move.x : 0;
+    li.moveZ = move ? move.z : 0;
+    li.scale = this.ledgeScale();
+    li.filter = this.moveFilter();
+    li.pool = this.staminaPool;
+    li.blocked = this.wallBlocked;
+    li.airWallMove = false;
+    li.use = this.climbAsk.on;
+    return li;
+  }
+
+  /**
+   * Climbing II, item 1: on foot and falling, where the use key goes to the climb before anything else may take it
+   * (`climbTakesUseFirst`, the game's dispatch asks it).
+   */
+  get climbFalls(): boolean {
+    return climbTakesUseFirst(CLIMB_TUNE.grab, !this.mounted && !this.piloting && !this.aboard && !this.noclip && !this.swimming, this.grounded, this.vel.y);
+  }
+
+  /**
+   * Climbing II, item 1: whether the use key would grab a lip or start a wall climb here (the action bar's "climb", gathered a
+   * few times a second): on foot, nothing else holding the body, a lip in the hands' reach or a climbable face ahead.
+   */
+  climbReach(): boolean {
+    if (CLIMB_TUNE.grab !== 'use' || this.mounted || this.piloting || this.aboard || this.noclip || this.swimming || this.climbHolds || this.grapple.out || this.eva || this.hp <= 0) return false;
+    const li = this.fillLedgeIn(0, null, null, false);
+    li.busy = false;
+    const w = this.physics.world as unknown as LedgeWorld;
+    return this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li);
+  }
+
+  /**
+   * After the move (`LedgeHang.sense`): a lip grabbed, or one lowered into off a lip crouched. Not swimming, on the rope or in
+   * its flight, thrown, dead, at a ship's controls, in a wall move or a Force jump's rise. True where the ledge took the body.
+   */
+  private senseLedge(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    if (!this.ledge.sense(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina)) return false;
+    this.takenByLedge();
+    return true;
+  }
+
+  /** The grapple's haul ended under a lip it could not go over: a braced hang there (`LedgeHang.fromHaul`), the rope let go. */
+  private ledgeFromHaul(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const piv = this.grapple.pivot(ledgePivot);
+    const li = this.fillLedgeIn(0, null, null, false);
+    if (!this.ledge.fromHaul(this.physics.world as unknown as LedgeWorld, this, li, piv.x - this.pos.x, piv.z - this.pos.z)) return false;
+    this.grapple.letGo('ledge');
+    this.takenByLedge();
+    return true;
+  }
+
+  /** A grab: the fall ends with no harm, the air's and the slope's memories are put down, the feet let go. */
+  private takenByLedge(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    // (Wave 4, item B: the hands' bracing lets go; the hang has them.)
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.ledge.heading;
+    // (Climbing II, item 7: no look-away pose carried over from a hang before.)
+    this.posePlaying = '';
+  }
+
+  /** Off the ledge: a let-go's clocks (`LedgeHang.tick`): the drop's clip handed to the falling loop, the jump off's turn round. */
+  private ledgeClocks(dt: number): void {
+    if (this.ledge.tick(dt)) this.heading = this.ledge.turnNow;
+    if (this.ledge.cutNow) this.rig?.yieldOverride(CLIMB_TUNE.ease);
+    // Wave 4, item B: and the wall's (its drawn lean and offset eased out after a let-go, the jump off's turn round).
+    if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
+  }
+
+  /**
+   * A frame of the hang (`LedgeHang.step`) in place of the movement: the speed classes put down with no regain (the hang
+   * drains the pool itself), what is in the hands kept as swimming keeps it (the blade put away, nothing aimed or blocked),
+   * the hang's clips, the figure placed, and its hands on the lip and its feet on the wall.
+   */
+  private hangFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    // Climbing II, item 7: where the view looks, for the braced look-away (none aboard a ship's rooms, whose frame is the hull's).
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
+    this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
+    // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
+    this.setCrouchCollider(this.ledge.crouchedNow);
+    if (this.ledge.said) {
+      this.onLedgeWords?.(this.ledge.said);
+      this.ledge.said = '';
+    }
+    // The fall's memory held where the body is: a let-go falls from here, and nothing of the climb hurts.
+    this.jka.holdApex(this.pos.y);
+    if (this.ledge.holding) {
+      this.grounded = false;
+      this.heading = this.ledge.heading;
+    } else this.grounded = this.ledge.stood;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    // Wave 4, item B: a hang a wall climb handed over eases the climb's lean out (the hang never runs the clocks after it).
+    this.wall.tick(dt);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animateHang(dt);
+    this.placeVisual();
+    this.placeHangLimbs();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** The kept fade a hang's loop comes in with (`climb.ease`). */
+  private readonly hangFade = { fade: 0.15 };
+
+  /** The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself. */
+  private animateHang(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const L = this.ledge;
+    this.hangFade.fade = CLIMB_TUNE.ease;
+    if (L.startClip) rig.play(ledgeClipName(L.startClip), { from: L.startFrom, fadeIn: L.startFade, hold: L.holding });
+    else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
+    // Climbing II, item 7: the reach-back pose held from the leading side's hop clip while looking away, and let go of.
+    else if (L.poseClip !== this.posePlaying) {
+      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0 });
+      else rig.stopOverride(CLIMB_TUNE.ease);
+      this.posePlaying = L.poseClip;
+    }
+    // A one-off begun or ended takes the held pose's place: it is held again from the next frame where still looking away.
+    if (L.startClip || L.ended) this.posePlaying = '';
+    if (L.rigState) {
+      rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
+      rig.setState(L.rigState as RigState, 0, null, this.hangFade);
+    } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
+    rig.update(dt);
+    this.group.updateMatrixWorld(true);
+    // Climbing II, item 7: the spine turned toward the view while looking away (nought otherwise, every hang frame, so with
+    // no look-away this is phase 1's own call to the letter: it eases the steady share and puts the clean pose back).
+    rig.twistTorso(L.lookTwistNow, 0);
+  }
+
+  /** The hop clip held as the look-away's pose on the rig now ('' for none). */
+  private posePlaying = '';
+
+  /** The rig's root put where the ledge draws the figure against the body (its offset, the world's frame, into the group's). */
+  private applyLedgeRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const L = this.ledge;
+    const h = this.heading;
+    const c = Math.cos(h);
+    const s = Math.sin(h);
+    rig.root.position.x = L.offX * c - L.offZ * s;
+    rig.root.position.y += L.offY;
+    rig.root.position.z = L.offX * s + L.offZ * c;
+    // Turned with a sloping lip about its own front, on its hands (the fix round's: `climb.lipTilt`); upright otherwise.
+    if (L.tilt !== 0) L.applyTilt(rig.root);
+    else rig.root.quaternion.set(0, 0, 0, 1);
+    this.ledgeRooted = true;
+  }
+
+  /** The hands on the lip and the feet on the wall (`LimbPlace`, through the ledge's line): while the ledge places them. */
+  private placeHangLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const lp = this.limbs;
+    if (!this.ledge.holding && !lp.busy) return;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    this.ledge.limbsFor(lp, rig, toPhys);
+    lp.filter = this.moveFilter();
+    lp.place(rig, this.physics.world, toPhys);
+  }
+
+  // ---- wave 4, item B: the wall climb and the hands' bracing -----------------------------------------------------------------
+
+  /**
+   * After the move (`WallClimb.sense`): onto a wall. Not swimming, on the rope or in its flight, thrown, dead, at a ship's
+   * controls, prone or kneeling, in a wall move or a Force jump's rise, nor on the gravity boots' surface. True where the
+   * climb took the body.
+   */
+  private senseWall(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.wall !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.kneeling || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    li.airWallMove = !this.grounded && this.jka.airWallMoveOpen(this.pos, this.vel);
+    if (!this.wall.sense(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina)) return false;
+    this.takenByWall();
+    return true;
+  }
+
+  /** Onto a wall: a fall ends with no harm, the air's and the slope's memories put down, the feet and the hands let go. */
+  private takenByWall(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.wall.heading;
+  }
+
+  /**
+   * A frame on the wall (`WallClimb.step`) in place of the movement: the speed classes put down with no regain (the climb
+   * drains the pool itself), what is in the hands kept as swimming keeps it, the climb's clips, the figure placed leant
+   * into the face, and its hands and feet on it. The frame the climb hands the body to a lip is the hang's.
+   */
+  private wallFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    this.setCrouchCollider(false);
+    const li = this.fillLedgeIn(dt, input, null, false);
+    const W = this.wall;
+    W.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina, this.ledge);
+    if (W.said) {
+      this.onLedgeWords?.(W.said);
+      W.said = '';
+    }
+    // The fall's memory held where the body is: a let-go falls from here, and nothing of the climb hurts.
+    this.jka.holdApex(this.pos.y);
+    if (W.holding) {
+      this.grounded = false;
+      this.heading = W.heading;
+    } else if (this.ledge.holding) {
+      this.grounded = false;
+      this.heading = this.ledge.heading;
+    } else this.grounded = W.stood;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    if (this.ledge.holding) {
+      this.animateHang(dt);
+      this.placeVisual();
+      this.placeHangLimbs();
+    } else {
+      this.animateWall(dt);
+      this.placeVisual();
+      this.placeWallLimbs();
+    }
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** The climb's rate and fade handed to the rig (kept). */
+  private readonly wallRate = { rate: 0.5, fade: 0.15 };
+
+  /** The climb's clips on the rig: the jump off's one-off begun, the climb's loop at its rate (held still, the clip that played stops where it is). */
+  private animateWall(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const W = this.wall;
+    if (W.startClip) rig.play(ledgeClipName(W.startClip), { from: W.startFrom, fadeIn: W.startFade, hold: false });
+    if (W.rigState) {
+      if (W.rigState === 'wallStill') rig.prefer('wallStill', wallClipName(W.rigClip));
+      // Climbing II, item 6: sideways the clip the climb says (the braced shimmy of that way under `climb.wallSide` 'shimmy').
+      else if (W.rigState === 'wallLeft' || W.rigState === 'wallRight') rig.prefer(W.rigState, WALL_CLIP_NAMES[W.rigClip] ?? wallClipName(W.rigClip));
+      this.wallRate.rate = W.rate;
+      this.wallRate.fade = CLIMB_TUNE.ease;
+      rig.setState(W.rigState as RigState, 0, null, this.wallRate);
+    } else rig.setState(W.stood ? 'idle' : 'air', 0, null, this.hangFade);
+    rig.update(dt);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /** The hands and the feet on the face (`LimbPlace`, through the climb's own face) while on the wall; let go of when off it. */
+  private placeWallLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const lp = this.limbs;
+    if (!this.wall.holding) {
+      if (lp.busy) lp.reset();
+      return;
+    }
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    lp.filter = this.moveFilter();
+    this.wall.limbsFor(lp, rig, this.physics.world as unknown as LedgeWorld, toPhys);
+    lp.place(rig, this.physics.world, toPhys);
+  }
+
+  /** The player's own key, kept (the crowd's `fights` asks with it: no closure a frame). */
+  private readonly isPlayerKey = (k: number): boolean => k === PLAYER_KEY;
+  private readonly crowdAt = new THREE.Vector3();
+
+  /**
+   * The bodies near enough to brace on (`Crowd`), refilled from the world's living a frame while asked: every other
+   * player, person and creature on this world but one fighting the player (one that would pick a fight on sight, or is
+   * fighting or holds a grudge against the player now). Nothing aboard a ship's rooms (their frame is the hull's).
+   */
+  private gatherCrowd(world: World | null): void {
+    const c = this.crowd;
+    c.count = 0;
+    if (!world || this.aboard || CLIMB_TUNE.brace.people !== 'on') return;
+    const list = world.targets();
+    const me = world.playerTarget;
+    const s = this.ledgeScale();
+    const reach = (CLIMB_TUNE.brace.reach + 0.6) * s + 1;
+    const at = this.crowdAt;
+    at.x = this.pos.x;
+    at.y = this.pos.y + CLIMB_TUNE.brace.height * s;
+    at.z = this.pos.z;
+    for (let k = 0; k < list.length; k++) {
+      const t = list[k];
+      if (t === me || t.dead || t.key === PLAYER_KEY) continue;
+      const dx = t.pos.x - at.x;
+      const dz = t.pos.z - at.z;
+      if (dx * dx + dz * dz > reach * reach) continue;
+      if (hostileSides(t, me) || (t as { fights?(ours: (key: number) => boolean): boolean }).fights?.(this.isPlayerKey)) continue;
+      c.add(at.x, at.z, t.pos.x, t.pos.z, t.pos.y, t.pos.y + 2 * t.halfHeight, t.radiusToward(at), reach);
+    }
+  }
+
+  /**
+   * Wave 4, item B: the hands bracing (`HandBrace`), after the figure is placed and its feet put down: on foot (a wall, a
+   * passage, the crowd), or drifting in space (`space`: a surface near, stepped along). Asks nothing at all under
+   * `brace.rule` 'before' (the wave 3 commit's arms) or while nothing is to be done.
+   */
+  private placeBrace(dt: number, world: World | null, space: boolean): void {
+    const B = this.brace;
+    if (CLIMB_TUNE.brace.rule !== 'on' && !B.busy) return;
+    const rig = this.rig;
+    if (!rig) return;
+    const bi = this.braceIn;
+    bi.dt = dt;
+    bi.x = this.pos.x;
+    bi.y = this.pos.y;
+    bi.z = this.pos.z;
+    bi.heading = this.heading;
+    bi.scale = this.ledgeScale();
+    bi.filter = this.moveFilter();
+    bi.vx = this.vel.x;
+    bi.vy = this.vel.y;
+    bi.vz = this.vel.z;
+    bi.moveX = space ? 0 : move.x;
+    bi.moveZ = space ? 0 : move.z;
+    // A hand holding something never braces; a gun held in both hands takes the left as well, and the rope the left.
+    const twoHanded = !!this.held.right && this.classId === 'bounty_hunter' && !this.fists && this.gunClass !== 'pistol';
+    bi.freeR = !this.held.right;
+    bi.freeL = !this.held.left && !twoHanded && !this.grapple.out;
+    bi.busy = this.climbHolds || this.saber.busy || this.blocking || this.aiming || this.fists || this.thrown.inFlight || rig.overriding || this.prone || this.kneeling || this.swimming || !!this.mounted || this.hp <= 0 || this.flung || this.drawnSink > 0 || this.grapple.attached || this.grapple.released;
+    bi.onFeet = !space && this.grounded;
+    bi.space = space;
+    bi.blocked = !space && this.wallBlocked;
+    if (space) {
+      evaUp.set(0, 1, 0).applyQuaternion(this.evaFrame);
+      evaFwd.set(0, 0, 1).applyQuaternion(this.evaFrame);
+      bi.ux = evaUp.x;
+      bi.uy = evaUp.y;
+      bi.uz = evaUp.z;
+      bi.fx = evaFwd.x;
+      bi.fy = evaFwd.y;
+      bi.fz = evaFwd.z;
+    }
+    const moving = bi.vx * bi.vx + bi.vz * bi.vz > CLIMB_TUNE.brace.moving * CLIMB_TUNE.brace.moving;
+    if (!space && moving && !bi.busy) this.gatherCrowd(world);
+    else this.crowd.count = 0;
+    B.step(this.physics.world, bi, this.crowd);
+    const lp = this.limbs;
+    if (!B.busy) {
+      if (lp.busy) lp.reset();
+      return;
+    }
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    B.apply(lp);
+    lp.filter = bi.filter;
+    lp.place(rig, this.physics.world, toPhys);
   }
 
   /**
@@ -2867,12 +3956,26 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     // The walk key picks the walk clips; the speed only sets how fast a clip plays.
-    const running = !this.walkKey;
+    let running = !this.walkKey;
     const style = this.saber.style;
     const stance = STANCE_ANIM[style];
     // The saber run and walk are the staff's, the dual sabers' or the single saber's (the three single styles share them).
     rig.prefer('runSaber', style === 'staff' ? 'BOTH_RUN_STAFF' : style === 'dual' ? 'BOTH_RUN_DUAL' : 'BOTH_RUN2');
     rig.prefer('walkSaber', style === 'staff' ? 'BOTH_WALK_STAFF' : style === 'dual' ? 'BOTH_WALK_DUAL' : 'BOTH_WALK2');
+    // Under the speed classes with Jedi Academy's legs (a block, a swing under way) the body keeps the class's speed,
+    // and the legs are that game's saber walk where the speed is nearer the walk's own than the run's, its run from
+    // there up (`LOCO_TUNE.fight.walkUnder` of the point where the two are equally far from their own rates): the run
+    // at the jog's pace would play under the half rate a clip is held above, its feet sliding.
+    if (this.jkaMode && this.loco.rules && this.loco.moves) {
+      const from = this.saberRunFrom;
+      if (from.rig !== rig || from.style !== style) {
+        from.rig = rig;
+        from.style = style;
+        from.forward = Math.sqrt((rig.naturalSpeed('walkSaber') ?? 0) * (rig.naturalSpeed('runSaber') ?? 0));
+        from.back = Math.sqrt((rig.naturalSpeed('walkBack') ?? 0) * (rig.naturalSpeed('runBack') ?? 0));
+      }
+      running = this.loco.cls > 1 && this.loco.speed >= (this.directional && mz < 0 ? from.back : from.forward) * LOCO_TUNE.fight.walkUnder;
+    }
     // The kind of blaster picks its carries: the pistol's stand at the side, the rifle's across the chest.
     const gun = this.gunKind;
     const armed = this.classId === 'bounty_hunter' && this.hasGunClips && !this.fists;
@@ -2933,48 +4036,129 @@ export class Player {
     // that game plays its torso and legs apart; standing still, the swing has the whole body.
     // The specials (katas, kicks, lunges, the jump attacks) move the legs themselves and keep the whole body.
     if (rig.overridingJka && this.saber.busy && this.saber.current.kind !== 'special' && !this.jka.rolling && !this.jka.inSpecialJump && (moving || !this.grounded) && !this.mounted && !this.swimming) rig.overrideUpperOnly();
+    // The speed classes' legs (`BodyLoco.legs`): the imported clip for the way the keys go and the class, on a body
+    // moving on its feet with Jedi Academy's animations not in charge, and the rate that keeps its feet on the ground.
+    // Null leaves every state below the clip it always had. While the classes are in force a change of the legs' clip
+    // fades by the tune: between two of their clips (in step), to and from standing, and into and out of Jedi Academy's legs.
+    // Crouched or prone under the classes (wave 2b, `loco.posture`) the legs are the classes' too.
+    // The stairs wave: the stairs as measured after this frame's move, how far it took the body along them, and the legs'
+    // clip's time, for one step a stair (`BodyLoco.legs`).
+    this.stairLoco();
+    this.locoIn.stairMoved = this.stairMoved;
+    this.stairMoved = 0;
+    const stepPick = this.loco.pick;
+    this.locoIn.legTime = stepPick !== null && rig.readTime(stepPick.clip) ? rig.timeOut : Number.NaN;
+    const onFeet = moving && this.grounded && !this.mounted && !this.swimming && !this.kneeling && (this.loco.posture !== STAND || (!this.prone && !this.crouching));
+    this.locoIn.ground = speed;
+    const legs = this.loco.legs(onFeet ? rig : null, this.locoIn, this.jkaMode);
+    // How long this frame's change of the legs' clip fades (`BodyLoco.fadeFor`), handed on with the state.
+    this.loco.fadeFor(legs !== null, this.jkaMode, moving);
+    this.legOpts.rate = this.loco.rate;
+    this.legOpts.fade = this.loco.fadeNow;
+    this.fadeOpts.fade = this.loco.fadeNow;
+    const fo = this.loco.on ? this.fadeOpts : undefined;
+    // The state the classes' clip is asked for keeps it only while they have the legs (`BodyLoco.prefers`): let go
+    // of, the state picks its own clip again, there and then (the classes switched off on the move). A blaster's
+    // states are asked for their own carries afresh every frame, above, and need no letting go.
+    const dropped = this.loco.prefers(legs && !armed ? legs.state : null);
+    if (dropped) rig.prefer(dropped as RigState, null, true);
+    // The hold that keeps a pose on the upper body steady over moving legs comes on and goes over the legs' own
+    // fade to and from standing (a strafe's hips stand turned, and taken off the torso in one frame the turn swung an
+    // aimed barrel off the crosshair at every start and stop); at once, as it always was, without the classes.
+    rig.steadyEase = this.loco.on ? LOCO_TUNE.fade.idle : 0;
     if (this.mounted) {
       // Seated the way the game seats a rider on this vehicle: its rider pose's branch of the
       // riding loop (a speeder bike's crouch, a landspeeder's seat, the hover chair, the pilot's chair), else the default saddle.
       rig.prefer('seated', this.seatedClip());
       rig.setState('seated');
     }
-    // Swimming with the block held: the stance on the torso and arms over the swimming legs.
-    else if (this.swimming) rig.setState(moving || this.submerged ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
-    // Thrown from a wreck: flailing (the swimming stroke) all the way down.
-    else if (this.flung && !this.grounded) rig.setState('swim', 3);
+    // Swimming with the block held: the stance on the torso and arms over the swimming legs. Still in the water, the
+    // imported tread when the rig has it (said outright, since adrift in space prefers another loop for the same state).
+    else if (this.swimming) {
+      rig.prefer('float', MX.tread);
+      // Still under the water the tread too, under the owner's rule (`ANIM_TUNE.swim.rule`); the swimming stroke before.
+      rig.setState(moving || (this.submerged && ANIM_TUNE.swim.rule !== 'owner') ? 'swim' : 'float', speed, this.blocking && this.hasJkaClips ? stance : null);
+    }
     else if (!this.grounded) {
-      rig.prefer('air', this.jumpClip('INAIR', this.jka.isForceJumping));
-      rig.setState('air');
+      // In the air. Thrown from a wreck: the imported long fall, else flailing (the swimming stroke) all the way down.
+      // Otherwise the imported falling loop, or the float after a flip or a Force jump, and Jedi Academy's own in-air
+      // pose with its animations in charge or without the imported clips.
+      // On the rope (attached, the feet off the ground) and how fast the body falls: what the owner's air rule reads.
+      this.anim.rope = this.grapple.attached;
+      this.anim.vy = this.vel.y;
+      const loop = this.anim.air(rig, this.jkaActing);
+      if (this.flung && !loop) rig.setState('swim', 3);
+      else {
+        rig.prefer('air', loop ?? this.jumpClip('INAIR', this.jka.isForceJumping));
+        // Sliding down a face too steep to stand on, the falling loop comes in over the slope's own fade (wave 2b).
+        this.slideFade.fade = LOCO_TUNE.slope.fade;
+        rig.setState('air', 0, null, this.slope.sliding ? this.slideFade : undefined);
+      }
     }
     else if (this.prone) {
-      // Lying down: a blaster has its own prone carries, else the game's crawl.
+      // Lying down: a blaster has its own prone carries, else the game's crawl; under the classes (wave 2b) the class's
+      // crawl at the rate that keeps it on the ground (`legs`, none with a blaster in hand).
       if (armed) rig.setState(`${this.aiming ? 'gunProneAim' : this.gunReady ? 'gunProneReady' : 'gunProne'}${moving ? 'Move' : 'Idle'}` as RigState, speed);
-      else rig.setState(moving ? 'proneMove' : 'prone', speed);
+      else if (legs) {
+        rig.prefer(legs.state, legs.clip);
+        rig.setState(legs.state, speed, null, this.legOpts);
+      } else rig.setState(moving ? 'proneMove' : 'prone', speed);
     } else if (this.kneeling) rig.setState('kneel', 0, gunUpper);
     else if (this.crouching) {
       // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
+      // The classes' crouched clips were preferred last frame and are not now (a blaster in hand, whose states the
+      // classes' let-go does not reach): each state picks its own again there and then (only ever true under the classes).
+      if (this.crouchPreferred && !legs) {
+        rig.prefer('crouchWalk', null, true);
+        rig.prefer('crouchWalkBack', null, true);
+        this.crouchPreferred = false;
+      }
       rig.prefer('crouch', swg ? /^loop_crouched:speed0/ : null);
       rig.prefer('crouchWalk', swg ? /^loop_crouched:speed1/ : null);
       rig.prefer('crouchWalkBack', swg ? /^loop_crouched:speed1/ : null);
-      rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed, gunUpper);
+      if (legs) {
+        // Under the classes (wave 2b): the class's crouched clip for the way, at the rate that keeps its feet down.
+        rig.prefer(legs.state, legs.clip);
+        rig.setState(legs.state, speed, gunUpper, this.legOpts);
+        this.crouchPreferred = true;
+      } else rig.setState(moving ? (this.directional && mz < 0 ? 'crouchWalkBack' : 'crouchWalk') : 'crouch', speed, gunUpper);
     }
     else if (moving && this.directional && mz < 0) {
       // Backing up with the legs facing forward: the back-pedal clip.
-      rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed);
+      rig.setState(running && rig.hasState('runBack') ? 'runBack' : rig.hasState('walkBack') ? 'walkBack' : 'runBack', speed, null, fo);
     } else if (!moving && this.hasJkaClips && (this.blocking || this.thrown.inFlight)) {
       // Standing with the block held: the style's stance; the arm out while the saber flies.
       rig.prefer('stance', this.thrown.inFlight ? 'BOTH_SABERPULL' : stance);
-      rig.setState('stance');
+      rig.setState('stance', 0, null, fo);
     } else if (armed) {
       // The blaster carries: relaxed, combat after a shot, or aimed (the combat legs under the held aimed pose); each with its idle, walk and run.
       const carry = this.aiming ? 'gunAim' : this.gunReady ? 'gunReady' : 'gun';
-      rig.setState(`${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState, speed, gunUpper);
-    } else if (!moving) rig.setState('idle');
+      const state = `${carry}${!moving ? 'Idle' : running ? 'Run' : 'Walk'}` as RigState;
+      if (legs) {
+        // Under the speed classes the legs are the classes' clip, and the upper body the gun's own: its ready or aimed
+        // pose as ever, else its relaxed carry (the standing one, held steady over the legs as those poses are), or with
+        // the tune's 'full' for this kind of gun none, the clip having the whole body (`BodyLoco.carry`). Its 'original'
+        // hands no legs (`legs` null) and takes the line below, the state's own carry walk or run.
+        rig.prefer(state, legs.clip);
+        rig.setState(state, speed, gunUpper ?? (this.loco.carry === CARRY_FULL ? null : this.gunCarry(rig, gun)), this.legOpts);
+      } else rig.setState(state, speed, gunUpper, fo);
+    } else if (!moving) rig.setState('idle', 0, null, fo);
     // Moving with the block held: Jedi Academy's saber run and walk; otherwise the game's own, saber lit or not.
-    else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed);
-    else rig.setState(running ? 'run' : 'walk', speed);
+    else if (this.jkaMode) rig.setState(running ? 'runSaber' : 'walkSaber', speed, null, fo);
+    else if (legs) {
+      // The speed classes: the imported clip for the way and the class, at the rate that matches the ground.
+      rig.prefer(legs.state, legs.clip);
+      rig.setState(legs.state, speed, null, this.legOpts);
+    } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
+    // The feedback round, item 4: ducked under something, the crouch's share of the pose, laid on by the mixer (`stepDuck`).
+    const ducks = MOVE_TUNE.duck === 'on' && this.shape.kind !== LYING;
+    if (ducks && this.shape.share > 0) {
+      rig.duckWant = this.shape.share;
+      rig.duckMoving = moving;
+    }
+    // The stairs wave: a stair cycle just taken on starts where its next footfall lands on a tread (`StairStep`'s snap).
+    if (legs && this.loco.snap === this.loco.snap) rig.setTime(legs.clip, this.loco.snap);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
     // Always called: with no twist it puts the spine's clip pose back.
@@ -2993,11 +4177,27 @@ export class Player {
     const wholeJka = rig.overridingJka && !rig.overridingUpperOnly;
     // The measured correction: the spine takes the first part of it, the body's heading the rest (a kneeling
     // shooter's pose is authored with the hips turned from the target, which a spine twist cannot give).
-    const spineFix = THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+    // Under the speed classes' legs the spine takes more of it (`aimSpineMax`), so the body stays where its legs' clip
+    // needs it: the legs then carry it the way it really goes, and the heading other players are sent is the legs' own.
+    const wideSpine = Math.max(AIM_SPINE_MAX, (LOCO_TUNE.turn.aimSpine * Math.PI) / 180);
+    this.aimSpineMax = legs ? wideSpine : AIM_SPINE_MAX;
+    // The spine's share changes the moment the classes' legs come or go, and the body comes round to its new share
+    // over a few frames. With the classes in force the spine takes whatever of the correction the body does not
+    // stand turned by just now (`aimBodyNow`), up to its wider limit, so the two always add up to the correction and
+    // the barrel holds through every start and stop; without them the spine's share is the game's own, as before.
+    const spineFix = this.loco.on && gunUp ? THREE.MathUtils.clamp(this.aimFix.yaw - this.aimBodyNow, -wideSpine, wideSpine) : THREE.MathUtils.clamp(this.aimFix.yaw, -this.aimSpineMax, this.aimSpineMax);
     // Seated, the spine keeps the clip's own pose: no view-following twist or aim tilt carried over from on foot.
     const straight = wholeJka || !!this.mounted;
-    rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, straight ? 0 : this.torsoPitch + this.aimFix.pitch);
-    this.correctAim(dt, gunUp);
+    // The feedback round, item 4: past the crouch's own height the spine bends forward (`duckBend` at the deepest duck) and
+    // the neck with it (`duckNeck`), laid after the mixer, put back before its next update; the first-person eye reads the head.
+    const duckBend = ducks && !straight ? this.shape.bend : 0;
+    let pitch = straight ? 0 : this.torsoPitch + this.aimFix.pitch;
+    if (duckBend > 0) pitch += (duckBend * MOVE_TUNE.duckBend * Math.PI) / 180;
+    rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, pitch);
+    if (duckBend > 0) rig.bendNeck((duckBend * MOVE_TUNE.duckNeck * Math.PI) / 180);
+    // An imported clip posing the arms (the jump's start, a loop of the air, a landing) holds the gun wherever the clip
+    // has it, so the barrel says nothing of the aim while it plays.
+    this.correctAim(dt, gunUp, rig.armSource().startsWith('mx_'));
     // The hilt turns in the hand to whichever convention poses the arms: the game's own clips
     // hold it their way, Jedi Academy's the way its swings were made for.
     // The hilt's axis: the solved one through Jedi Academy's one-off clips (its swings, katas, throws),
@@ -3046,7 +4246,7 @@ export class Player {
    * camera looks, and fold the difference into the torso's turn and tilt for the next frame. Off, the
    * correction eases away. A shot's recoil is not chased.
    */
-  private correctAim(dt: number, gunUp: boolean): void {
+  private correctAim(dt: number, gunUp: boolean, importedArms = false): void {
     const fix = this.aimFix;
     if (!gunUp || this.mounted || !fix.on) {
       fix.yaw += (0 - fix.yaw) * Math.min(1, dt * 8);
@@ -3054,6 +4254,10 @@ export class Player {
       return;
     }
     if (this.sinceShot < 0.35) return;
+    // Held where it stands, as through a shot, while an imported clip has the arms: measured against a barrel the
+    // clip is swinging, the correction wound up and turned the whole body up to a right angle off the view through a
+    // hop's landing.
+    if (importedArms) return;
     const right = this.reach.right;
     if (right && this.held.right) {
       right.near.getWorldPosition(barrelA);
@@ -3077,12 +4281,131 @@ export class Player {
 
   /** The part of the aim's correction the spine cannot take, turned into the whole body's facing. */
   private get aimBodyTurn(): number {
-    return this.aimFix.yaw - THREE.MathUtils.clamp(this.aimFix.yaw, -AIM_SPINE_MAX, AIM_SPINE_MAX);
+    return this.aimFix.yaw - THREE.MathUtils.clamp(this.aimFix.yaw, -this.aimSpineMax, this.aimSpineMax);
+  }
+
+  /**
+   * How far the spine turns for the aim before the rest goes on the body's facing, radians, this frame: the game's own
+   * limit, and under the speed classes' legs the tune's wider one. An imported clip keeps the hips square to the way
+   * the body faces, where the game's own gun carries stand side-on; the aimed pose on the upper body was made for
+   * those, so over the imported legs it needs about twice the turn, and a body turned for it would cross its own legs.
+   */
+  private aimSpineMax = AIM_SPINE_MAX;
+  /**
+   * How far the body stands turned from the view for the aim just now, radians: its heading less the view's and the
+   * clip's own turn, written each frame the body faces the view with a blaster up and nought otherwise. (Declared as
+   * a fraction: it holds one.)
+   */
+  private aimBodyNow = 1e-9;
+
+  /**
+   * The feedback round, item 3 (`proneShape` 'lying'): whether the body lies prone after a press that asked `want`. Lying down
+   * is refused in words with the grappling rope out (its collider sync stands the capsule upright), in water deeper than the
+   * body lies, and where the lying capsule does not fit; getting up, where the upright capsule it gets up into (the crouch's
+   * with the duck on, the crouch held or a kneel asked, else standing) does not, and it stays down.
+   */
+  private proneAsk(want: boolean, input: Input): boolean {
+    const w = this.physics.world as unknown as ShapeWorld;
+    const S = this.shape;
+    if (want === this.prone) return want;
+    if (want) {
+      if (this.grapple.out || this.grapple.released) S.said = S.last = 'Not with the grappling rope out.';
+      else if (this.waterDepth > 2 * MOVE_TUNE.lyingRadius) S.said = S.last = 'Too deep to lie down here.';
+      else if (S.mayLie(w, this.pos.x, this.pos.y, this.pos.z, this.heading, this.ledgeScale(), this.moveFilter())) return true;
+      if (S.said) this.onLedgeWords?.(S.said);
+      S.said = '';
+      return false;
+    }
+    const tall = MOVE_TUNE.duck === 'on' || input.held('crouch') || this.kneeling ? CROUCH_TALL : STAND_TALL;
+    if (S.mayRise(w, this.pos.x, this.pos.y, this.pos.z, tall, this.moveFilter())) return false;
+    if (S.said) this.onLedgeWords?.(S.said);
+    S.said = '';
+    return true;
+  }
+
+  /**
+   * The feedback round, items 3 and 4: the capsule as the body's shape decides it this frame (`src/player/bodyShape.ts`):
+   * lying along the heading while prone under 'lying', else upright, ducked under what stands over the body and ahead along
+   * its travel (on its feet with the duck on), crouched by the key, kneeling and (under 'crouch') prone on the ground, or
+   * standing. Written onto the collider, and its middle kept for everything that reads the worn capsule.
+   */
+  private stepShape(dt: number, moving: boolean, move: THREE.Vector3): void {
+    const S = this.shape;
+    const w = this.physics.world as unknown as ShapeWorld;
+    const lying = this.prone && MOVE_TUNE.proneShape === 'lying';
+    const f = this.shapeIn;
+    f.dt = dt;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    this.groundPlaneInto(f);
+    if (lying) S.holdLying(f, this.collider);
+    else {
+      f.vx = this.vel.x;
+      f.vz = this.vel.z;
+      f.moveX = moving ? move.x : 0;
+      f.moveZ = moving ? move.z : 0;
+      // On its feet on the ground: never in the air, swimming, prone or kneeling, riding, at the controls, on the rope,
+      // aboard the boots' surface, sliding down a face, nor with the placing hand holding something.
+      f.feet = this.grounded && !this.swimming && !this.prone && !this.kneeling && !this.mounted && !this.piloting && !this.noclip && !this.grapple.attached && !this.grapple.released && !this.slope.sliding && !(this.aboard !== null && isSurfaceRoom(this.aboard)) && !(this.handPlacing?.() ?? false);
+      f.crouch = (this.crouching || this.prone || this.kneeling) && this.grounded;
+      f.lying = false;
+      // The slope under the feet (the slope rule's plane, last judged): how far the floor rises under the capsule's rim.
+      const pny = this.slope.planeNy;
+      const pt = pny > 0.1 ? Math.sqrt(this.slope.planeNx * this.slope.planeNx + this.slope.planeNz * this.slope.planeNz) / pny : 0;
+      f.rise = pt > 0 ? (pt < 1 ? pt : 1) * 0.35 : 0;
+      S.stepUpright(w, f, this.collider);
+    }
+    this.colliderOffsetY = S.offsetY;
+    this.colliderCrouched = null;
+  }
+
+  /**
+   * After the heading is decided, a lying body's turn (item 3): the capsule turned with it where it fits, slid out of what it
+   * met where that clears it, else the turn refused for this frame. Nothing while the heading holds still.
+   */
+  private turnLying(): void {
+    const S = this.shape;
+    if (S.kind !== LYING || !this.prone) return;
+    const w = this.physics.world as unknown as ShapeWorld;
+    const f = this.shapeIn;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    this.groundPlaneInto(f);
+    S.turnLyingIn(w, f, this.collider);
+    if (S.slideX !== 0 || S.slideZ !== 0) {
+      this.pos.x += S.slideX;
+      this.pos.z += S.slideZ;
+      this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    }
+    this.heading = S.lyingYaw;
+  }
+
+  /** The ground's plane under the feet as the slope rule last judged it, into the shape's frame (a lying capsule lies along it). */
+  private groundPlaneInto(f: ShapeIn): void {
+    f.nx = this.slope.planeNx;
+    f.ny = this.slope.planeNy;
+    f.nz = this.slope.planeNz;
+  }
+
+  /** How far the body reaches toward a point across the ground (`PlayerTarget.radiusToward`): the lying capsule's along its length. */
+  reachToward(at: THREE.Vector3): number {
+    return this.shape.reachToward(at.x, at.z, this.worldPos.x, this.worldPos.z);
   }
 
   /** The capsule shrinks to the crouch height while ducking (its feet stay where they are). */
   private setCrouchCollider(crouched: boolean): void {
     if (crouched === this.colliderCrouched) return;
+    // The body's shape left it lying (item 3): upright again before today's rule writes it.
+    if (this.shape.kind === LYING) this.shape.writeUpright(this.collider, this.pos.x, this.pos.y, this.pos.z, STAND_TALL);
+    this.shape.followCrouch(crouched);
     this.colliderCrouched = crouched;
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);
@@ -3142,6 +4465,17 @@ export class Player {
     if (this.rig?.has(clip)) this.rig.play(clip, { fadeIn });
   }
 
+  /** A kind of blaster's relaxed standing carry on a rig, looked for once a rig and a kind (a search of every clip's name). */
+  private gunCarry(rig: CharacterRig, gun: 'pistol' | 'rifle'): string | null {
+    const c = this.carryFor;
+    if (c.rig !== rig || c.gun !== gun) {
+      c.rig = rig;
+      c.gun = gun;
+      c.clip = rig.clipMatching(gun === 'pistol' ? /^loop_pistol_standing:speed0/ : /^loop_rifle:speed0/) ?? null;
+    }
+    return c.clip;
+  }
+
   /** Fly the thrown saber, steer it where the camera looks, and take it back into the hand. */
   private updateThrown(dt: number, input: Input, cam: ThirdPersonCamera): void {
     if (!this.thrown.inFlight) return;
@@ -3183,7 +4517,7 @@ export class Player {
     if (input.held('noclipDown')) move.y -= 1;
     const moving = move.lengthSq() > 0;
     if (moving) move.normalize();
-    const speed = this.noclipSpeed * (input.held('walk') ? 3.5 : 1) * this.speedMultiplier;
+    const speed = this.noclipSpeed * (input.held('speedUp') ? 3.5 : 1) * this.speedMultiplier;
     this.pos.addScaledVector(move, speed * dt);
     this.vel.set(0, 0, 0);
     this.grounded = false;

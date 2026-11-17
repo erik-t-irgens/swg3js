@@ -454,6 +454,25 @@
   height: calc(8px * var(--hud-scale));
 }
 
+/* Stamina, the third bar, under health and the class pool (the speed classes). Its width is the other bars' so they
+   line up, and it is the thinnest of them (`staminaBarW`, `staminaBarH`). It wears the `good` band at rest and the
+   display puts `warn` on it while the body is tired, both from the palette, so this file names no colour for it.
+   While the speed classes are in force the row keeps its place when it is down (`off` hides it and never takes it out
+   of the block): a row that came and went under the two bars above would move both each time a sprint began. With
+   the classes off it is not in the block at all (`gone`), and the bars stand where they stood before the classes.
+   The row is held shorter than its number's line (`staminaRowH`), which overhangs into the gaps either side of it, so
+   that with the breath row up as well the block still clears the action bar at the smallest scale. */
+.hud-brow.stamina-row {
+  height: calc(8px * var(--hud-scale));
+}
+.hud-brow .hud-bar.stamina {
+  flex: none;
+  width: calc(160px * var(--hud-scale));
+  height: calc(4px * var(--hud-scale));
+}
+.hud-brow.off { visibility: hidden; }
+.hud-brow.gone { display: none; }
+
 /* The number row and the hands, side by side under the bars. */
 .hud-kit {
   display: flex;

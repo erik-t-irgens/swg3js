@@ -8,6 +8,7 @@ import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKin
 import { CARD_ROWS, readCardRows, type CardSkyRows, type RampRead } from './cardLight.ts';
 import { DOME_COLOUR_GLSL } from './domeColour.ts';
 import { GPU } from '../core/gpuSwitch.ts';
+import { makeSkyBody, turnSkyBody, type SkyBody } from './skyBodies.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -315,10 +316,11 @@ const PROCEDURAL_DISC = 0.06;
 const PROCEDURAL_GLOW = 0.2;
 
 /**
- * A drawn piece of a sky body: a THREE.Sprite over a planet, where the body rides the light's
- * direction and a sprite's upright-on-screen habit is what the client did too; a fixed quad in
- * space, where a sprite rolled the star's spikes with the camera while the sky stayed put. Both
- * carry a material with an opacity, which is all the lens flare reads.
+ * A drawn piece of a sky body: over a planet a quad riding the light's direction, turned each frame
+ * to face the camera upright to the horizon (skyBodies.ts; it was a THREE.Sprite, which spun against
+ * the sky as the view turned); in space a quad turned once, where a sprite rolled the star's spikes
+ * with the camera while the sky stayed put. Both carry a material with an opacity, which is all the
+ * lens flare reads.
  */
 type SkyPiece = THREE.Object3D & { readonly material: { opacity: number } };
 /** A space zone's star, drawn as a quad turned once to face the camera. */
@@ -352,11 +354,11 @@ export class SwgSky {
   readonly domeScene = new THREE.Scene();
   private readonly dome: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
   private readonly skybox: THREE.Object3D | null = null;
-  private readonly sun: THREE.Sprite[] = [];
-  private readonly supplementalSun: THREE.Sprite[] = [];
-  private readonly moon: THREE.Sprite[] = [];
-  private readonly supplementalMoon: THREE.Sprite[] = [];
-  private readonly celestials: { sprites: THREE.Sprite[]; data: Celestial }[] = [];
+  private readonly sun: SkyBody[] = [];
+  private readonly supplementalSun: SkyBody[] = [];
+  private readonly moon: SkyBody[] = [];
+  private readonly supplementalMoon: SkyBody[] = [];
+  private readonly celestials: { sprites: SkyBody[]; data: Celestial }[] = [];
   /** What the lens flare follows: at most MAX_FLARE_SOURCES, index = flare slot, fixed for the life of the sky. */
   private readonly flareBodies: FlareBody[] = [];
   private readonly stars: THREE.Points | null = null;
@@ -643,22 +645,20 @@ export class SwgSky {
       this.group.add(box);
     }
 
-    // A planet's own sky bodies: sprites, as the client drew them, riding the light's direction.
-    // (A space zone's stars are quads instead: they never move, and a sprite rolled them with the camera.)
-    const sprite = (image: CelestialImage | null, size: number, additive: boolean): THREE.Sprite | null => {
+    // A planet's own sky bodies, riding the light's direction: quads facing the camera and upright to
+    // the horizon (skyBodies.ts), where they were sprites, which spun against the sky as the view turned.
+    // (A space zone's stars are quads too, turned once: they never move.)
+    const sprite = (image: CelestialImage | null, size: number, additive: boolean): SkyBody | null => {
       const tex = image ? textures.get(image.file) : null;
       if (!tex || size <= 0) return null;
-      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });
-      const s = new THREE.Sprite(mat);
-      const width = (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE;
-      s.scale.set(width, width, 1);
+      const s = makeSkyBody(tex, (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE, additive);
       s.renderOrder = -5;
       this.group.add(s);
       return s;
     };
-    const body = (c: Celestial | null): THREE.Sprite[] => {
+    const body = (c: Celestial | null): SkyBody[] => {
       if (!c) return [];
-      const out: THREE.Sprite[] = [];
+      const out: SkyBody[] = [];
       // The glow sits behind the body, blended additively; the body itself keeps its own alpha.
       const glow = sprite(c.glowImage, c.glowSize, true);
       if (glow) out.push(glow);
@@ -688,7 +688,7 @@ export class SwgSky {
     // both loaded (not Yavin 4's gas giant, not a moon; Mustafar's moon slot is a second sun), the
     // heaviest glow first, each in a slot it keeps for the life of the sky.
     if (!data.space) {
-      const slots: [Celestial | null, THREE.Sprite[], boolean][] = [
+      const slots: [Celestial | null, SkyBody[], boolean][] = [
         [data.sun, this.sun, false],
         [data.supplementalSun, this.supplementalSun, false],
         [data.moon, this.moon, true],
@@ -1140,13 +1140,14 @@ export class SwgSky {
     return s;
   }
 
-  /** Place a sky body's sprites along a direction from the camera. */
-  private place(sprites: THREE.Sprite[], dir: THREE.Vector3, alpha: number): void {
+  /** Place a sky body's quads along a direction from the camera, facing it and upright to the horizon. */
+  private place(sprites: SkyBody[], dir: THREE.Vector3, alpha: number): void {
     for (const s of sprites) {
       s.position.copy(dir).multiplyScalar(SKY_RADIUS);
       s.material.opacity = alpha;
       // Below the horizon a body is behind the ground; in space there is no ground to be behind.
       s.visible = alpha > 0.002 && (dir.y > -0.3 || !!this.data.space);
+      if (s.visible) turnSkyBody(dir, s.quaternion);
     }
   }
 
@@ -1714,7 +1715,7 @@ export class SwgSky {
     if (toggle === 'stars' && this.stars) this.stars.visible = !this.stars.visible;
     if (toggle === 'dust' && this.dust) this.dust.points.visible = !this.dust.points.visible;
     if (toggle === 'sprites') {
-      for (const s of this.group.children) if (s instanceof THREE.Sprite) s.visible = !s.visible;
+      for (const s of sprites) s.visible = !s.visible;
       for (const s of this.starQuads) s.quad.visible = !s.quad.visible;
     }
     const faces = this.skybox ? this.skybox.children.map((m) => {
@@ -1741,7 +1742,7 @@ export class SwgSky {
       skybox: this.skybox ? `${faces.length} faces: ${faces.join(', ')}${this.skybox.visible ? '' : ' (hidden)'}` : 'none',
       stars: this.stars ? `${(this.stars.geometry.getAttribute('position') as THREE.BufferAttribute).count}${this.stars.visible ? '' : ' hidden'}` : 'none',
       dust: this.dust ? `${(this.dust.points.geometry.getAttribute('position') as THREE.BufferAttribute).count} within ${this.dust.radius} m${this.dust.points.visible ? '' : ' hidden'}` : 'none',
-      sprites: `${sprites.length}, ${this.group.children.filter((s) => s instanceof THREE.Sprite && s.visible).length} visible`,
+      sprites: `${sprites.length}, ${sprites.filter((s) => s.visible).length} visible (quads upright to the horizon, never turning with the camera)`,
       starQuads: this.starQuads.length ? `${this.starQuads.length}, ${this.starQuads.filter((s) => s.quad.visible).length} visible (fixed in the sky, never rolling with the camera)` : 'none',
       // The ground sky every space zone's environment file carries, which nothing here builds.
       envBodiesLeftOut: this.envBodiesLeftOut,

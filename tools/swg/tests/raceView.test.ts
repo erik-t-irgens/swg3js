@@ -279,9 +279,13 @@ for (const fps of RATES) {
     const a = Old ? new Old(16 / 9) : null;
     const b = new ThirdPersonCamera(16 / 9);
     // A blocker that cuts the line on some frames and not others (the trace's own place decides), so its path is run.
+    // The first-person eye's own question (from the body's axis to its eyes, a fifth of a metre: the hold that keeps
+    // the view this side of a wall, which came after this pass and is eyeHold.test.ts's) is answered clear, so first
+    // person here is the camera at the pass's start, which asked nothing there; the orbit's line is never under 0.5 m.
     let cuts = 0;
     const blocker = blocked
       ? (from: THREE.Vector3, to: THREE.Vector3) => {
+          if (from.distanceTo(to) < 0.5) return null;
           if (Math.sin(to.z / 7) <= 0.3) return null;
           cuts++;
           return from.distanceTo(to) * 0.6;
@@ -435,7 +439,9 @@ for (const fps of RATES) {
   ok(eased(1 / 144) < 1.03 && eased(0.5) > 1.25, `8: four frames at 144 fps pull the view out to ${r2(eased(1 / 144))} with the frame's step, and to ${r2(eased(0.5))} with the record's half second`);
   // The cascades are fitted after the camera has written this frame's field of view (they read it as they fit).
   const place = /private placeRaceView\(.*\): void \{\s*\n\s*if \(this\.placeRaceCamera\(v, blocked, dt, eyes\)\) this\.world\.onCameraResized\(\);/.test(main);
-  const orbit = /this\.cam\.update\(input, player\.worldPos, blocked, dt, eyes, player\.grapple\.camScaleNow, player\.eyeHeight\);\s*\n\s*\/\/ Fitted to the frustum the update has just given the camera, never to last frame's\.\s*\n\s*if \(refit\) this\.world\.onCameraResized\(\);/.test(main);
+  // Animation wave 3: the camera follows the drawn body (`player.followAt`), and the console's side view (`__debug.loco({ side })`) swings it
+  // round the figure before the refit, so the cascades are fitted to where it looks.
+  const orbit = /this\.cam\.update\(input, player\.followAt, blocked, dt, eyes, player\.grapple\.camScaleNow, player\.eyeHeight\);\s*\n\s*\/\/ Wave 3's console side view[^\n]*\n\s*if \(this\.sideView !== 0 && !this\.cam\.firstPerson\) this\.swingSideView\(player\.followAt, player\.eyeHeight\);\s*\n\s*\/\/ Fitted to the frustum the update has just given the camera, never to last frame's\.\s*\n\s*if \(refit\) this\.world\.onCameraResized\(\);/.test(main);
   ok(place && orbit, '8: (main.ts: the cascades are refitted after the camera writes the field of view, in the race view and as it eases out)');
 }
 

@@ -349,7 +349,7 @@ const sameTurn = (a: THREE.Quaternion, b: THREE.Quaternion) => Math.abs(Math.abs
   // Shift+R tips and rolls a prop and never a building; a plain click goes back to Fly only with nothing picked.
   const h = makeHarness({ rows: [propRow('p', 0, 0), { id: 'house', kind: 'building', pack: 'gallery', model: 'house_a', x: 50, y: 0, z: 0, q: [1, 0, 0, 0], at: 1_700_000_000_000 }] });
   h.input.heldActs.add('placeTurn');
-  h.input.heldActs.add('walk');
+  h.input.heldActs.add('speedUp');
   h.e.sel.pick(['p'], 'set');
   h.step();
   ok((h.e.report().under as { label: string } | null)?.label === 'tip', 'Shift+R with no move key held tips a prop');

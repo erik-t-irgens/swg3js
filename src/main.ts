@@ -23,7 +23,7 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
 import { recordHarmKind } from './player/harmRule.ts';
-import { GRAPPLE_TUNE, NO_RIG_WORDS, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
+import { CLIMBING_WORDS, GRAPPLE_TUNE, NO_RIG_WORDS, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
 import { underWater } from './player/grappleMath.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
@@ -133,7 +133,23 @@ const SCENE_SHIP_REACH = 250;
  * and the object reach does nothing at all here, since a scene has no streamer to reach with.
  */
 const SCENE_REACH = { objects: 0, terrain: 3, far: 6, waitMs: 40000 };
-import { loadPlayerRig } from './player/rig';
+import { IMPORTED_CLIPS, loadPlayerRig } from './player/rig';
+import { browserIo, mixamoPack } from './anim/mixamoPack.ts';
+import { ANIM_TUNE, tuneAnim } from './anim/animTune.ts';
+import { rebasedCount } from './anim/jkaSpine.ts';
+import { IMPACT_MUTES } from './anim/animRules.ts';
+import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climbTune.ts';
+import { climbDialsFor } from './anim/climbDials.ts';
+import { moveDialsFor } from './anim/moveDials.ts';
+import { MOVE_TUNE, moveBefore, resetMoveTune, tuneMove } from './anim/moveTune.ts';
+import { climbCourse, courseIds, extraIds, type ClimbCourse } from './anim/climbCourse.ts';
+import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
+import { animDialsFor } from './anim/animDials.ts';
+import { locoDialsFor } from './anim/locoDials.ts';
+import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
+import { REFUSED_WORDS, aheadReport } from './anim/stairsRule.ts';
+import { GAITS, PLAIN, gaitOf, locoPick, type LocoGait } from './anim/locoTable.ts';
+import { clipName } from './anim/mxaFile.ts';
 import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi, type PoisFile } from './ui/galaxyMap';
@@ -540,11 +556,71 @@ import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
-import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, fetchPublicBytes, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
 // The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
 // null on the dev server, which asks for every such file and answers it from the disk as the editors need.
 import shippedPublic from 'virtual:shipped-public';
 setShippedPublic(shippedPublic);
+// The imported animations (`public/anims/mixamo/`, src/anim/): the game's one pack, asked for as every shipped public
+// file is (only where the build's own list carries it, and kept for `__debug.files()`), begun now so the first rig
+// seldom waits for it, and handed to the rigs' loader through its own record. `localStorage['swg.mixamo'] = '0'` at
+// load fetches nothing and no rig gains a clip.
+const MIXAMO = mixamoPack(browserIo({ text: (path, init) => fetchPublic(path, init, import.meta.env.BASE_URL), bytes: (path, query) => fetchPublicBytes(path, query, import.meta.env.BASE_URL) }))!;
+// With each walking or running clip, its stride: what the rig keeps its feet on the ground and in step by.
+IMPORTED_CLIPS.strides = (clip) => MIXAMO.strideOf(clip);
+IMPORTED_CLIPS.provider = (skeleton, label) => MIXAMO.clipsFor(skeleton, label);
+void MIXAMO.load();
+// The speed classes (walk, jog, run and sprint on foot: src/anim/bodyLoco.ts) are on unless `localStorage['swg.loco']`
+// is '0' at load, which is the movement before them; `__debug.loco({ on })` flips them live.
+LOCO_TUNE.on = locoSwitchOn(() => localStorage.getItem(LOCO_SWITCH));
+
+/**
+ * What `__debug.climb` takes (wave 4: the ledges, the wall climb and the hands' bracing): the ledges' switch (`on`), the
+ * wall climb's (`wall`), the bracing's (`brace`), the tune by group, back as shipped, and a let-go of a lip or a wall.
+ */
+interface ClimbDebugOptions {
+  on?: boolean;
+  wall?: boolean;
+  brace?: boolean;
+  tune?: unknown;
+  reset?: boolean;
+  letGo?: boolean;
+  /** The feedback round: answer the last climb up's room tests in full (`LedgeHang.roomReport`) instead of the rest. */
+  room?: boolean;
+}
+
+/** What `__debug.loco` takes. */
+interface LocoDebugOptions {
+  /** The speed classes on or off, live. */
+  on?: boolean;
+  /** Numbers of `LOCO_TUNE` to move, as a nested object. */
+  tune?: unknown;
+  /** Put the stamina at a number of points (the console's, for seeing the tired jog without a long sprint). */
+  stamina?: number;
+  /** The character's gait (`GAITS`: 'standard', 'masculine', 'feminine', 'heavy', 'game'): worn now, saved on the record and sent in the hello. */
+  gait?: string;
+  /** Put the player's health at this share of its pool (0 to 1): the console's way to see the injured walk. */
+  health?: number;
+  /**
+   * Wave 3: the chase camera swung this many degrees round the figure (90 its right side, -90 its left, 0 back behind it),
+   * after everything else has placed it, looking at the figure's middle: the keys still move the body by the view's own
+   * forward, so a walk up stairs can be watched side-on. The console's, for screenshots; nought (the start) is the camera
+   * as ever.
+   */
+  side?: number;
+}
+
+/** What `__debug.anim` takes beside a clip's name. */
+interface AnimDebugOptions {
+  /** An imported clip's id (or a word one holds) to play on the player. */
+  play?: string;
+  loop?: boolean;
+  /** Where a played clip starts: seconds, or 'trim' for the clip's own trim. */
+  from?: number | 'trim';
+  stop?: boolean;
+  align?: { torso?: boolean; feet?: boolean; clavicles?: boolean };
+  tune?: unknown;
+}
 import { census as programFamilies, playKindOf } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
@@ -1964,6 +2040,9 @@ class App {
     // land nothing has feet, which is what a game with no sound pack does anyway.
     this.feet = new BodySounds(this.audio, import.meta.env.BASE_URL);
     this.feet.load();
+    // The imported animations' foot marks, under each clip's own name, whether or not the sounds pack's own marks
+    // ever land: a step in one of those clips then sounds by the path every other step does.
+    void MIXAMO.load().then(() => this.feet.index.addClips(MIXAMO.footEvents()));
     // The guns. Every place a bolt is fired reaches this through the module it lives in, so a shot
     // deep in a creature's brain or a turret's aim needs no mixer of its own to be heard.
     combatSounds.attach(this.audio, import.meta.env.BASE_URL);
@@ -2638,6 +2717,12 @@ class App {
     // blow a roll dodged, which is the fight's Acrobatics; and a landing roll that kept some of a fall off,
     // which pays Acrobatics whether or not anything was being fought.
     this.player.onHarm = (lost, kind) => this.encounters.hurt(lost, kind);
+    // Wave 4: what a ledge says (too tired to hold on, no room to climb up, a hop refused) goes to the message line.
+    this.player.onLedgeWords = (words) => this.messages.system(words);
+    // Climbing II, the feedback round: a refused climb up names what it met (`climbColliderName`).
+    this.player.ledge.namer = (c) => this.climbColliderName(c.handle);
+    // The feedback round, item 4: the duck waits while the placing hand holds a building or a prop.
+    this.player.handPlacing = () => this.placing !== null || this.propPlacing !== null;
     this.player.onDodge = (source) => this.encounters.dodged(source as Living | null);
     this.player.onRolled = (fell, saved) => {
       const at = sharedClock.now();
@@ -3203,6 +3288,18 @@ class App {
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     // A hairstyle goes on the way every worn piece does: loaded hidden, coloured, compiled, then shown.
     this.appearanceUi.onHair = (id) => this.wearHairPrepared(id);
+    // The Walk row (wave 2b): the gait in force, a pick worn and kept (`setGait`), and the gait's forward walk on the
+    // figure's own rig for the doll to play in place (the game's own walk for 'game', the standard's where the rig has
+    // not got a gait's clip).
+    this.appearanceUi.gait = {
+      now: () => this.gaitNow(),
+      set: (g) => this.setGait(gaitOf(g)),
+      walkClip: (g) => {
+        const rig = this.player.rig;
+        const pick = locoPick(0, 1, false, PLAIN, gaitOf(g));
+        return (rig && pick && rig.clipObject(pick.clip)) || (rig ? rig.clipObject(locoPick(0, 1)!.clip) : null);
+      },
+    };
     // A garment's colour is the worn copy's own, saved on the thing and told to the server: the part it
     // is worn under is read back as the item, and the copy worn is the one coloured. In the creator there
     // is no record yet, and the colour stays on the meshes until the character is made.
@@ -6821,6 +6918,119 @@ class App {
         const p = this.player.pos;
         return c ? { x: Number((c.x - p.x).toFixed(1)), z: Number((c.z + p.z).toFixed(1)), y: Number(p.y.toFixed(2)), ground: Number(this.world.terrain.heightAt(p.x, p.z).toFixed(2)) } : null;
       },
+      /**
+       * A line of test flights in front of the player (the owner's 2026-11-16): the game's own `stair_tatooine_large_style_01`
+       * (out of the props pack: 76 steps of riser 0.211 m and tread 0.315 m, 4 m wide, 16 m up over 24 m) at sizes along its
+       * own axes ([x, y, z]: y scales the riser, z the tread), side by side to the right, each one's foot `ahead` metres along
+       * the way the body faces and climbing away from it. The start line: the base; the riser at 1.5x, 2x (the tallest step
+       * the owner's rule allows) and 2.2x (past it: a ledge); the tread at 1.75x, 2.5x (the longest stair tread) and 3x (past
+       * it: plain walking); and both at their most. Nothing saved: they stand until `{ clear: true }`, a travel or a reload.
+       */
+      stairsTest: async (o: { clear?: boolean; scales?: [number, number, number][]; ahead?: number; gap?: number; model?: string } = {}) => {
+        const old = this.stairTestKeys;
+        this.stairTestKeys = [];
+        const cleared = old.length ? this.world.unplaceMany(old) : 0;
+        if (o.clear) return { cleared };
+        const pack = this.props.pack;
+        const def = this.props.find(o.model ?? 'stair_tatooine_large_style_01');
+        if (!pack || !def) return { error: !pack ? `the props pack is not here (${this.props.note || 'not minted for this world'})` : `no prop ${o.model ?? 'stair_tatooine_large_style_01'} in the props pack` };
+        const B = def.bounds as { min: number[]; max: number[] } | undefined;
+        const width = B ? B.max[0] - B.min[0] : 4;
+        const foot = B ? B.max[2] : 12; // the flight's foot stands at its +z end (it climbs toward -z)
+        const RISER = 0.2108;
+        const TREAD = 0.315;
+        const scales: [number, number, number][] = o.scales ?? [[1, 1, 1], [1, 1.5, 1], [1, 2, 1], [1, 2.2, 1], [1, 1, 1.75], [1, 1, 2.5], [1, 1, 3], [1, 2, 2.5]];
+        const ahead = o.ahead ?? 3;
+        const gap = o.gap ?? 2;
+        const p = this.player.pos;
+        const h = this.player.heading;
+        const fx = Math.sin(h);
+        const fz = Math.cos(h);
+        const rx = Math.cos(h);
+        const rz = -Math.sin(h);
+        const out: { scale: number[]; riserM: number; treadM: number; stood: boolean; at: number[] }[] = [];
+        let side = 0;
+        for (let i = 0; i < scales.length; i++) {
+          const s = scales[i];
+          const w = width * s[0];
+          const lat = side + w / 2;
+          side += w + gap;
+          const bx = p.x + fx * ahead + rx * lat;
+          const bz = p.z + fz * ahead + rz * lat;
+          const y = this.world.terrain.heightAt(bx, bz);
+          const cx = bx + fx * foot * s[2];
+          const cz = bz + fz * foot * s[2];
+          const key = `stairtest:${i}`;
+          const stood = await this.world.placeProp(def.model, { key, at: { x: cx, y, z: cz }, yaw: h + Math.PI, pack, solid: true, template: def.template ?? undefined, scale: s });
+          if (stood) this.stairTestKeys.push(key);
+          out.push({ scale: s, riserM: Number((RISER * s[1]).toFixed(3)), treadM: Number((TREAD * s[2]).toFixed(3)), stood, at: [Number(bx.toFixed(1)), Number(y.toFixed(2)), Number(bz.toFixed(1))] });
+        }
+        return { cleared, flights: out, note: 'each flight\'s foot is `at` (the game\'s frame); walk up from there. `__debug.stairsTest({ clear: true })` takes them down.' };
+      },
+      /**
+       * Climbing II, phase 1 (the owner's 2026-11-16: "spawn edges (both hanging and braced) in a gauntlet of various turns
+       * and heights and jumps to test out distances"): the test course of `src/anim/climbCourse.ts` stood in front of the
+       * player, one family a row across the view, each piece on a level slab of its own 0.05 m over the highest ground under
+       * it, `ahead` (4) m along the way the body faces; plain boxes in one material and fixed colliders the ledges and the
+       * wall climb read as the world's own still geometry, stood behind a short curtain so nothing is built in play.
+       * `pieces` stands only those ids; `{ clear: true }` takes it down (so do a travel, the select screen and a reload).
+       */
+      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean } = {}) => {
+        const cleared = this.dropClimbTest('cleared');
+        if (o.clear) return { cleared };
+        if (!this.inWorld || this.traveling) return { cleared, error: 'not now: enter the world first' };
+        if (this.world.planet.space) return { cleared, error: 'a space zone has no ground to stand a course on' };
+        // The owner's extra rows (the ladders and the vertical pieces) stand too unless `extras: false`.
+        const extras = o.extras ?? true;
+        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras });
+        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : []) };
+        const h = this.player.heading;
+        const ahead = o.ahead ?? 4;
+        const p = this.player.worldPos;
+        const ox = p.x + Math.sin(h) * ahead;
+        const oz = p.z + Math.cos(h) * ahead;
+        // Each piece's slab: its top 0.05 m over the highest ground under it (sampled every 2 m and at its corners), and every
+        // slab as deep as the most the ground falls under any of them, so no slab's edge stands over the ground.
+        const flat: CourseFrame = { ox, oz, h, ref: () => 0 };
+        const refs = new Map<string, number>();
+        let deep = 1;
+        const w = { x: 0, y: 0, z: 0 };
+        for (const piece of plan.pieces) {
+          const b = piece.bounds;
+          const nx = Math.ceil((b.x1 - b.x0) / 2);
+          const nz = Math.ceil((b.z1 - b.z0) / 2);
+          let hi = -Infinity;
+          let lo = Infinity;
+          for (let i = 0; i <= nx; i++) {
+            for (let j = 0; j <= nz; j++) {
+              courseToWorld(flat, piece, b.x0 + ((b.x1 - b.x0) * i) / nx, 0, b.z0 + ((b.z1 - b.z0) * j) / nz, w);
+              const g = this.world.terrain.heightAt(w.x, w.z);
+              hi = Math.max(hi, g);
+              lo = Math.min(lo, g);
+            }
+          }
+          refs.set(piece.id, hi + 0.05);
+          deep = Math.max(deep, hi - lo + 0.55);
+        }
+        const floor = Math.ceil(deep * 10) / 10;
+        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras });
+        const frame: CourseFrame = { ox, oz, h, ref: (q) => refs.get(q.id) ?? 0 };
+        await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');
+        const out = course.pieces.map((piece) => {
+          const st = piece.starts[0];
+          courseToWorld(frame, piece, st.at[0], st.at[1], st.at[2], w);
+          const f = courseWayToWorld(frame, st.face[0], st.face[1], { x: 0, z: 0 });
+          return { id: piece.id, kind: piece.kind, numbers: piece.numbers, start: [Number(w.x.toFixed(2)), Number(w.y.toFixed(2)), Number(w.z.toFixed(2))], heading: Number(Math.atan2(f.x, f.z).toFixed(3)), starts: piece.starts.map((s) => s.name) };
+        });
+        return {
+          cleared,
+          stood: this.climbTestStood ? course.pieces.length : 0,
+          unknown: plan.unknown,
+          floor,
+          pieces: out,
+          note: "each piece's `start` is where a body starts on it (its first start, the game's frame) facing `heading`; `__debug.teleport(x, z)` there and walk, run or jump at it. The numbers are what it was made to test. `__debug.climbTest({ clear: true })` takes it down; `__debug.shaders().builtInPlay` should name nothing of it.",
+        };
+      },
       // Show a converted model (path under assets-private/) in front of the player, playing a clip.
       show: async (file: string, clip?: string) => {
         let gltf;
@@ -7474,6 +7684,10 @@ class App {
             // A building or a prop in hand takes its keys, the click and a held key's mouse first, and mutes
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
+            // A thrown fall's impact holds the keys, as the frame loop has it.
+            this.stepLedgeKeys();
+            this.stepSprintKeys();
+            this.stepImpactKeys();
             // And the grapple's, beside them as the frame loop has them: its mutes, the fire, the boost, the held reels.
             if (!this.placing && !this.propPlacing) this.stepGrappleKeys();
             this.stepEmoteKeys();
@@ -7964,24 +8178,31 @@ class App {
           admin: this.net.session.isAdmin,
         };
       },
-      /** Play any clip the player's rig has, looping (or once), to see it on the player: `__debug.anim('BOTH_A2_SPECIAL')`; no name stops it. */
-      anim: (name?: string, loop = true) => {
-        const rig = this.player.rig;
-        if (!rig) return 'no rig';
-        if (!name) {
-          rig.stopOverride();
-          return 'stopped';
-        }
-        const clips = rig.clipsMatching(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
-        const exact = rig.has(name) ? name : clips[0];
-        if (!exact) return `no clip matches ${name}`;
-        if (/^add_/.test(exact)) {
-          rig.playUpper(exact);
-          return { playing: exact, note: 'an additive clip: played once as a delta over the current pose', matches: clips.slice(0, 20) };
-        }
-        rig.play(exact, { loop, hold: !loop });
-        return { playing: exact, matches: clips.slice(0, 20) };
-      },
+      /**
+       * The imported animations (src/anim/, `public/anims/mixamo/`), and any clip of the rig. `anim()`: the pack's state,
+       * what was fitted for which skeleton with each fit's report (joints mapped and missing, the facing, the scale, where
+       * the standing rest leaves the feet and the hips), the tune, and what the player's rig has and is playing.
+       * `anim({ play: 'walking', loop })` plays any imported clip on the player, fetching and fitting it if need be (`from:
+       * 'trim'` or seconds starts it there; a word that is no id plays the first id holding it); `anim({ stop: true })`
+       * stops it; `anim({ align: { torso, feet, clavicles } })` lines those rest poses up or not and fits every clip again
+       * in place (`torso: true` is the old rule that tipped the hips back); `anim({ tune: { land: { soft: 8 } } })` moves
+       * `ANIM_TUNE` (the debug menu has every number as a slider; nothing is saved). `anim('BOTH_A2_SPECIAL')` still plays
+       * any clip the rig has by name, looping unless the second argument is false.
+       */
+      anim: (arg?: string | AnimDebugOptions, loop = true) => this.animDebug(arg, loop),
+      /**
+       * The speed classes on foot (src/anim/bodyLoco.ts): walk, jog, run and sprint, Shift and the walk key, stamina,
+       * and the imported clip for each way the keys go. `loco()`: whether they are in force, the class asked and the
+       * class given with why one was refused, the way moved, the clip and the rate it plays at, the ground speed, how
+       * far the clip turns the body from the view, the stamina, and what the legs' clip is doing (its stride's phase,
+       * and both clips' while two fade). `loco({ on: false })` is the movement before the classes, live (one run, Shift
+       * walks, the body turns the way it runs; `localStorage['swg.loco'] = '0'` does it at load); `loco({ tune: { speed:
+       * { forward: { run: 5.2 } } } })` moves `LOCO_TUNE` (the debug menu has every number as a slider; nothing is
+       * saved); `loco({ stamina: 5 })` sets the pool.
+       */
+      loco: (o: LocoDebugOptions = {}) => this.locoDebug(o),
+      climb: (o: ClimbDebugOptions = {}) => this.climbDebug(o),
+      move: (o: { tune?: unknown; reset?: boolean; before?: boolean } = {}) => this.moveDebug(o),
       /** Mount the nearest vehicle, or dismount, as E does. */
       mount: () => {
         this.handleMount();
@@ -8437,7 +8658,8 @@ class App {
           // On foot: the glyphs the sheet holds, the keys the number slots are showing (which is how
           // a rebind is checked from a tab nobody can see), what is in each hand, and whether the
           // crosshair is drawn for the class in play.
-          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops },
+          // (`stamina`: '' while the row is not in the block, the speed classes off; 'down' while it keeps its place unseen.)
+          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops, stamina: foot.stamina },
           // The plate over a head, and the line in the corner it replaced.
           plates: { shown: plate.shown, label: plate.label, writes: plate.writes, enabled: plate.enabled, tune: { ...PLATE_TUNE } },
           nearby: { name: this.nearbyName, hz: HUD_WIRING.nearbyHz },
@@ -9495,7 +9717,7 @@ class App {
         const n3 = (v: number) => Number(v.toFixed(3));
         const roped = g.attached || g.holding;
         const piv = roped ? g.pivot(new THREE.Vector3()) : null;
-        const watched = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
+        const watched = ['speedUp', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
         // A loose prop under the mark (when the rope holds none): what it weighs and who the mass rule would move.
         const markProp = !g.holding && mk.kind === 'prop' && mk.collider ? (g.propAt?.(mk.collider.handle) ?? null) : null;
         const held = g.thing;
@@ -11184,6 +11406,12 @@ class App {
     this.remotes.prepareVehicle = (roots) => this.world.vehiclePrepare(roots);
     // A peer's painted ship owns copies of its materials: out of the world's sets when they go (read at call time).
     this.remotes.forget = (m) => this.world.forgetMaterials(m);
+    // A treading peer's depth, under the water this world draws where they float (the very surface the player's own swim
+    // reads: the lava-filtered column and the sea's swell over it), for how much of the treading sink they take.
+    this.remotes.surfaceAt = (x, z) => {
+      const flat = this.world.waterColumnAt(x, z);
+      return flat + this.world.seaSwellOverFlat(x, z, flat);
+    };
     // The moving air's sixth wave: other players' rides stir it from where this screen draws them, and a stood shuttle's
     // engines while a flame its clip lights is in its window. Nothing of anybody's is sent for either.
     this.world.airPeerRides = (out) => {
@@ -12311,7 +12539,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -14917,6 +15145,8 @@ class App {
     s.near = near ? (near.interior ? 'board' : near.upsideDown ? 'flip' : 'mount') : peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ? 'board' : '';
     s.eva = p.eva;
     this.gatherGate(s);
+    // Climbing II: the use key would grab a lip or start a wall climb (`climb.grab` 'use'): first while falling, else last.
+    s.climb = p.climbReach() ? (p.climbFalls ? 'air' : 'ground') : '';
     return s;
   }
 
@@ -15155,6 +15385,8 @@ class App {
       // Which way the body faces, which the sound has no use for and a print does: it points the
       // way the walker was going.
       p.heading = player.heading;
+      // And the rig, which hands a print the landing foot's own ankle and toe (`footprints.ts`).
+      p.body = rig;
       p.species = this.characterId;
       this.feet.playerTemplate = rig.character?.manifest.template ?? null;
       lists.player = p;
@@ -15790,7 +16022,7 @@ class App {
     const rig = this.player.rig?.character;
     const keep = rig ? lookKeep(rig.wornMeshes()) : undefined;
     const drawn = c && rig ? { ...c.appearance, values: rig.variableValues() } : c?.appearance;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined, gait: c?.gait && c.gait !== 'standard' ? c.gait : undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(this.marked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -17738,6 +17970,13 @@ class App {
     peerBodies().stampHulls(frameAt);
     // The peers' ropes glide and their arms ease by this frame's step, read as the peers are moved (`peerMoved`).
     remoteRopes.tick(dt);
+    // Wave 3: the world the other players' feet stand on and their stairs are read in, and where the camera stood (their
+    // feet are placed within `ik.peerReach` of it).
+    this.remotes.feetWorld = this.physics.world;
+    this.remotes.cameraAt.copy(this.cam.camera.position);
+    // Wave 4, item B: and where this player stands on foot, for another figure's hands to brace on as it passes.
+    this.remotes.playerKnown = !this.player.mounted && !this.player.aboard && !this.player.eva;
+    if (this.remotes.playerKnown) this.remotes.playerAt.copy(this.player.pos);
     this.remotes.update(dt);
     if (!this.net.online) return;
     const now = performance.now();
@@ -17937,8 +18176,9 @@ class App {
    */
   private playEmote(clip: string | null): void {
     const rig = this.player.rig;
-    // No emote or dance while the grapple is out: the rope holds the arm and the body.
-    if (!clip || !rig || this.player.mounted || this.player.grapple.out) return;
+    // No emote or dance while the grapple is out: the rope holds the arm and the body. Nor hanging from a ledge or climbing
+    // a wall (the animations' wave 4): the hands are full and the hang's own pose is the body's.
+    if (!clip || !rig || this.player.mounted || this.player.grapple.out || this.player.climbHolds) return;
     if (rig.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) }) === null) {
       this.messages.system(`the rig has no clip ${clip}`);
       return;
@@ -18046,6 +18286,9 @@ class App {
     this.select.hide();
     this.creating = true;
     this.current = null;
+    // A new character walks the standard gait until one is chosen on the appearance page (wave 2b).
+    this.creatorGait = 'standard';
+    this.player.loco.setGait('standard');
     // Nobody's progress is held while a character is made: the new one's is read when it is played.
     this.progress.use(null);
     // Nobody's hairstyle still loading lands on the new character, whose rig may be the same one.
@@ -18191,6 +18434,8 @@ class App {
       inv: 1,
       named: 1,
       tints: 1,
+      // The gait chosen on the appearance page (wave 2b); none for the standard.
+      ...(this.creatorGait !== 'standard' ? { gait: this.creatorGait } : {}),
     };
     if (!upsertCharacter(record)) {
       this.creatorBar.note('No room for another character: delete one first.');
@@ -18249,6 +18494,8 @@ class App {
     // has one, and the name goes out in the hello either way. A record from before the moods has none,
     // which takes nothing off nothing.
     this.player.rig?.setMood(c.mood ?? null);
+    // How the character walks (wave 2b): the walk class's clips in its gait; a record from before walks the standard.
+    this.player.loco.setGait(c.gait);
     // The weapons in hand at logout, back in the same hands, blade unlit; behind the loading screen,
     // where arriving compiles the whole scene, the held models included.
     await this.equipment.restoreHeld();
@@ -20515,7 +20762,9 @@ class App {
       this.cam.speedFov = this.raceView.fov;
       // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
       // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
-      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      // Wave 3's console side view (`__debug.loco({ side })`): the chase camera swung round the figure after it is placed.
+      if (this.sideView !== 0 && !this.cam.firstPerson) this.swingSideView(player.followAt, player.eyeHeight);
       // Fitted to the frustum the update has just given the camera, never to last frame's.
       if (refit) this.world.onCameraResized();
     }
@@ -20644,7 +20893,7 @@ class App {
       if (this.raceView.on) releaseRaceView(this.raceView);
       const widened = widenRaceView(this.raceView, ri, RACE_TUNE);
       this.cam.speedFov = this.raceView.fov;
-      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
       return widened;
     }
     const out = frameRaceView(this.raceView, ri, RACE_TUNE, this.raceOut);
@@ -20806,8 +21055,10 @@ class App {
     const head = rig?.boneFor('head');
     if (!rig || !head) return null;
     head.getWorldPosition(this.eyePoint);
-    // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame.
-    this.eyePoint.add(tmp.set(0, 0.12, 0.09).applyQuaternion(this.player.group.quaternion));
+    // The joint sits at the skull's base; the eyes are a hand up and ahead in the head's own frame. Wave 3: under
+    // `ik.eye` 'steady' the feet's placement's drop of the pelvis is put back, so the view does not bob on a slope or
+    // stairs (the drawn body's lag over a step's pop stays: it is what keeps the view from popping with the capsule).
+    this.eyePoint.add(tmp.set(0, 0.12 + this.player.eyeLift, 0.09).applyQuaternion(this.player.group.quaternion));
     return this.eyePoint;
   }
 
@@ -20970,7 +21221,7 @@ class App {
         strafe: hovering ? keys : 0,
         heading: free ? null : this.cockpitYaw ?? this.cam.yaw + Math.PI,
         // A ship with a fight boosts on its booster's energy.
-        boost: input.held('walk') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),
+        boost: input.held('speedUp') && (pilot.combat ? pilot.combat.boostLeft > 0 : true),
         hop: input.pressedAction('jump'),
         up: input.held('jump'),
         down: input.held('crouch'),
@@ -21500,6 +21751,10 @@ class App {
   /** The dev server's editor: the track in hand, whether it differs from the file, the files saved to this session, and an ask waiting for its second. */
   private trackHeld: TrackDef | null = null;
   private trackHeldUnsaved = false;
+  /** The test flights `__debug.stairsTest` stood (by the keys they are filed under), taken down by `{ clear: true }`. */
+  private stairTestKeys: string[] = [];
+  /** The test course `__debug.climbTest` stood (its one mesh and material, its colliders, how many pieces), taken down by `dropClimbTest`. */
+  private climbTestStood: { mesh: THREE.Mesh; material: THREE.Material; colliders: CourseCollider[]; pieces: number } | null = null;
   private readonly trackFilesSaved = new Set<string>();
   private trackArm: { what: string; until: number } | null = null;
   /** The editor's list in the debug menu, made the first time the menu asks for it. */
@@ -21719,6 +21974,8 @@ class App {
 
   /** Leaving a world (an arrival, the select screen): the run ends, the track in hand is put down, and nothing of either is shown. */
   private leaveTracks(why: string): void {
+    // The climbing test course is the world's too (in the same task as the unload: no collider of it outlives the world).
+    this.dropClimbTest(why);
     if (this.raceRun) this.endRun(why);
     this.clearRun();
     if (this.trackHeld && this.trackHeldUnsaved) console.info(`tracks: ${this.trackHeld.id} was put down unsaved (${why})`);
@@ -21730,6 +21987,44 @@ class App {
     this.gateShapesFor = null;
     this.gateShapeCount = 0;
     this.raceHud.hideBlock();
+  }
+
+  /**
+   * The climbing test course stood (inside `__debug.climbTest`'s curtain, whose sweep builds its one program): its solids as
+   * one mesh of the builder's triangles in one plain material, casting and taking shadows, and as the builder's fixed
+   * colliders with no body in the exterior group.
+   */
+  private standClimbCourse(course: ClimbCourse, frame: CourseFrame): void {
+    const tri = courseTriangles(course, frame);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(tri.positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(tri.normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(tri.colors, 3));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
+    material.name = 'climbTest';
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'climbTest';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.world.scene.add(mesh);
+    const colliders = buildCourseColliders(this.physics.world, course, frame);
+    this.climbTestStood = { mesh, material, colliders, pieces: course.pieces.length };
+  }
+
+  /** The climbing test course taken down: its colliders out of the physics, its mesh out of the scene, its material out of the world's sets, all disposed. How many pieces it held. */
+  private dropClimbTest(why: string): number {
+    const s = this.climbTestStood;
+    if (!s) return 0;
+    this.climbTestStood = null;
+    for (const c of s.colliders) this.physics.removeCollider(c.collider);
+    s.mesh.removeFromParent();
+    this.world.forgetMaterials([s.material]);
+    s.mesh.geometry.dispose();
+    s.material.dispose();
+    console.info(`climbTest: the course came down (${why})`);
+    return s.pieces;
   }
 
   /** A track of this world's file by its id, or null. */
@@ -28508,6 +28803,308 @@ class App {
    * go, and Space boosts off the line, a let-go made here muting at once; and the held reels and the haul are
    * handed to the hook for the frame's steps.
    */
+  /**
+   * The thrown fall's impact (src/anim/): while it plays the body can do nothing else, so moving, jumping, the
+   * postures and the fight are muted by action for the rest of the frame, before anything reads a key. The frame loop
+   * and `__debug.advance` both call it, in the same place.
+   */
+  private stepImpactKeys(): void {
+    if (this.player.impactLocked) this.input.mute(IMPACT_MUTES as readonly Action[]);
+  }
+
+  /**
+   * Wave 4: hanging from a ledge (src/player/ledge.ts), the fight, the postures, the saber's switch and the use key are
+   * muted by action for the rest of the frame (`LEDGE_MUTES`), before anything reads a key: the hands are full. The frame
+   * loop and `__debug.advance` both call it, straight before the sprint's.
+   */
+  private stepLedgeKeys(): void {
+    if (this.player.climbHolds) this.input.mute(LEDGE_MUTES as readonly Action[]);
+  }
+
+  /**
+   * The sprint (src/anim/bodyLoco.ts): under the tune's 'muted' (the rule before) the attack, a gun's other trigger and
+   * the saber's throw do nothing while it lasts (`SPRINT_MUTES`), muted by action for the rest of the frame before
+   * anything reads a key; under 'ends' (the default) nothing is muted, and a fight's key ends the sprint in the body's
+   * own plan instead, before the kit reads the press. The frame loop and `__debug.advance` both call it, straight before
+   * the impact's.
+   */
+  private stepSprintKeys(): void {
+    const mutes = this.player.loco.mutes();
+    if (mutes) this.input.mute(mutes as readonly Action[]);
+  }
+
+  /** The gait chosen in the creator, for the record it makes (`finishCreation`); 'standard' at every new body. */
+  private creatorGait: LocoGait = 'standard';
+
+  /**
+   * The character's gait (wave 2b): the body walks in it from the next frame; in play it is written on the record (none
+   * for the standard, so a record from before is as it was) and goes out in the next hello; in the creator it waits for
+   * the record the creator makes.
+   */
+  private setGait(gait: LocoGait): void {
+    this.player.loco.setGait(gait);
+    if (this.creating) {
+      this.creatorGait = gait;
+      return;
+    }
+    const c = this.current;
+    if (!c) return;
+    if (gait === 'standard') delete c.gait;
+    else c.gait = gait;
+    upsertCharacter(c);
+    this.queueHello();
+  }
+
+  /** The gait in force: the creator's choice there, else the record's. */
+  private gaitNow(): LocoGait {
+    return this.creating ? this.creatorGait : gaitOf(this.current?.gait);
+  }
+
+  /** Wave 3's console side view, degrees round the figure (nought: the camera as ever). */
+  private sideView = 0;
+  private readonly sideAt = new THREE.Vector3();
+
+  /** The chase camera swung `sideView` degrees round the figure's middle, still looking at it (`__debug.loco({ side })`). */
+  private swingSideView(at: THREE.Vector3, eyeHeight: number): void {
+    const camera = this.cam.camera;
+    const mid = this.sideAt.set(at.x, at.y + eyeHeight * 0.55, at.z);
+    const a = (this.sideView * Math.PI) / 180;
+    const dx = camera.position.x - mid.x;
+    const dz = camera.position.z - mid.z;
+    camera.position.x = mid.x + dx * Math.cos(a) + dz * Math.sin(a);
+    camera.position.z = mid.z - dx * Math.sin(a) + dz * Math.cos(a);
+    camera.lookAt(mid);
+    camera.updateMatrixWorld();
+  }
+
+  /**
+   * Climbing II, the feedback round: what a collider a refused climb up met is, in words (an event, never a frame): the test
+   * course's solid (`__debug.climbTest`), a placed thing's template, the ground or a planting, else null (the ledges then
+   * name it by its kind).
+   */
+  private climbColliderName(handle: number): string | null {
+    const k = this.climbTestStood?.colliders.find((q) => q.collider.handle === handle);
+    if (k) return `the course's ${k.role} (${k.piece})`;
+    return this.world.colliderNameOf(handle);
+  }
+
+  /** `__debug.climb`: see its row in the README. */
+  private climbDebug(o: ClimbDebugOptions): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (o.reset) resetClimbTune();
+    if (typeof o.on === 'boolean') words.push(...tuneClimb({ ledges: o.on ? 'on' : 'before' }));
+    if (typeof o.wall === 'boolean') words.push(...tuneClimb({ wall: o.wall ? 'on' : 'before' }));
+    if (typeof o.brace === 'boolean') words.push(...tuneClimb({ brace: { rule: o.brace ? 'on' : 'before' } }));
+    if (o.tune !== undefined) words.push(...tuneClimb(o.tune));
+    if (o.letGo && p.ledge.holding) p.ledge.letGo(p as never, 'console', 0, 0, 0);
+    if (o.letGo && p.wall.holding) p.wall.letGo(p as never, 'console', 0, 0, 0);
+    // The feedback round: the last climb up's room tests in full (which test, where, what it met and how far into it, and
+    // what the rule made of it), and nothing else.
+    if (o.room) return { room: p.ledge.roomReport(), roomRule: CLIMB_TUNE.roomRule, roomSay: CLIMB_TUNE.roomSay, grabFree: CLIMB_TUNE.grabFree, grabsFreed: p.ledge.grabsFreed };
+    return {
+      ...(words.length ? { words } : {}),
+      ledges: CLIMB_TUNE.ledges,
+      holding: p.climbHolds,
+      ...p.ledge.report(),
+      wall: p.wall.report(),
+      brace: p.brace.report(),
+      limbs: p.limbs.report(),
+      tune: JSON.parse(JSON.stringify(CLIMB_TUNE)) as unknown,
+    };
+  }
+
+  /**
+   * `__debug.move`: the body's shape on foot (Climbing II's feedback round, items 3 and 4): the capsule worn now (upright or
+   * lying, its height, its middle), the room the duck last measured over the feet and what it allows, the crouch's share
+   * and the bend in the pose, the lying heading, the last refusal in words, and the table. `tune` moves it; `reset` puts it
+   * back as shipped; `before` puts both switches to their other setting (today's capsule).
+   */
+  private moveDebug(o: { tune?: unknown; reset?: boolean; before?: boolean } = {}): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (o.reset) resetMoveTune();
+    if (o.before) moveBefore();
+    if (o.tune !== undefined) words.push(...tuneMove(o.tune));
+    const S = p.shape;
+    const n = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(3)) : v);
+    return {
+      ...(words.length ? { words } : {}),
+      proneShape: MOVE_TUNE.proneShape,
+      duck: MOVE_TUNE.duck,
+      prone: p.prone,
+      crouching: p.crouching,
+      shape: S.kind === 1 ? 'lying' : S.ducked ? 'ducked' : 'upright',
+      tall: n(S.tall),
+      middle: n(p.colliderOffsetY),
+      radius: n(S.radius),
+      room: n(S.room),
+      allows: n(S.want),
+      share: n(S.share),
+      bend: n(S.bend),
+      poseShare: n(p.rig?.duckShare ?? 0),
+      lyingYaw: n((S.lyingYaw * 180) / Math.PI),
+      lyingTiltDeg: n((S.lyingTilt * 180) / Math.PI),
+      lyingSynced: S.synced,
+      eye: n(p.eyeHeight),
+      asks: S.asks,
+      pathBox: { asked: S.boxAsked, kept: S.boxKept },
+      last: S.last || null,
+      tune: { ...MOVE_TUNE },
+    };
+  }
+
+  /** `__debug.loco`: see its row in the README. */
+  private locoDebug(o: LocoDebugOptions): unknown {
+    const words: string[] = [];
+    const p = this.player;
+    if (typeof o.on === 'boolean') words.push(...tuneLoco({ on: o.on }));
+    if (o.tune !== undefined) words.push(...tuneLoco(o.tune));
+    const pool = p.staminaPool;
+    if (typeof o.stamina === 'number' && Number.isFinite(o.stamina)) {
+      p.loco.stamina.value = Math.min(pool, Math.max(0, o.stamina));
+      if (p.loco.stamina.value <= 0) p.loco.stamina.tired = true;
+    }
+    // The gait (wave 2b): worn now, written on the record and sent, as a pick on the appearance page does.
+    if (o.gait !== undefined) {
+      if (typeof o.gait !== 'string' || !(GAITS as readonly string[]).includes(o.gait)) words.push(`gait takes ${GAITS.map((g) => `'${g}'`).join(', ')}`);
+      else this.setGait(o.gait as LocoGait);
+    }
+    if (typeof o.health === 'number' && Number.isFinite(o.health)) p.hp = Math.max(1, Math.min(p.maxHp, Math.round(o.health * p.maxHp)));
+    if (typeof o.side === 'number' && Number.isFinite(o.side)) this.sideView = o.side;
+    const rig = p.rig;
+    const n2 = (v: number) => Number(v.toFixed(2));
+    const n3 = (v: number) => Number(v.toFixed(3));
+    // Wave 3: each planted sole's height over its ground (the heel, the ball and the toe's tip, metres), measured off the bones as they stand.
+    // The figure's matrices worked out first: a console call between frames reads the bones as the feet left them, not as the last draw had them.
+    if (rig) p.group.updateMatrixWorld(true);
+    const soles = rig ? [0, 1].map((side) => {
+      const h = p.feet.solePoint(side, 0, null, new THREE.Vector3());
+      const b = p.feet.solePoint(side, 1, null, new THREE.Vector3());
+      const tp = p.feet.solePoint(side, 2, null, new THREE.Vector3());
+      if (!h || !b || p.aboard) return null;
+      const gh = this.physics.groundDistance(h.x, h.y + 0.5, h.z, 2, p.body);
+      const gb = this.physics.groundDistance(b.x, b.y + 0.5, b.z, 2, p.body);
+      const gt = tp ? this.physics.groundDistance(tp.x, tp.y + 0.5, tp.z, 2, p.body) : null;
+      // The ray starts half a metre over the point: what it travels past that is the point's height over the ground.
+      return { heelOverGround: gh === null ? null : n3(gh - 0.5), ballOverGround: gb === null ? null : n3(gb - 0.5), toeTipOverGround: gt === null ? null : n3(gt - 0.5) };
+    }) : null;
+    return {
+      ...(words.length ? { words } : {}),
+      switch: LOCO_TUNE.on,
+      has: rig ? p.loco.enabled(rig) : false,
+      ...p.loco.report(pool),
+      groundSpeed: n2(Math.hypot(p.vel.x, p.vel.z)),
+      headingDeg: n2((p.heading * 180) / Math.PI),
+      viewDeg: n2((wrapAngle(this.cam.yaw + Math.PI) * 180) / Math.PI),
+      rig: rig ? { ...rig.describe(), stride: rig.strideNow(), ankles: rig.anklesNow() } : 'no rig',
+      // The slope limit (wave 2b): the rule, and the feet's last verdict (sliding down a face too steep to stand on, the
+      // faces met, the floor ray's face's upward share, and how many of the controller's "grounded" the rule overturned).
+      slope: { rule: LOCO_TUNE.slopeRule, jump: LOCO_TUNE.slopeJump, ...LOCO_TUNE.slope, sliding: p.slope.sliding, faces: p.slope.count, floorUp: Number.isNaN(p.slope.rayNy) ? null : n2(p.slope.rayNy), overturned: p.slope.overturned, casts: p.slope.casts, kept: p.slope.kept, edges: p.slope.edges },
+      // Stairs II (A): the step-up's rule, and its counts (moves synced, risers measured, steps taken, lifts onto a wall
+      // undone, casts), the last riser it measured and why the last look took no step.
+      stepUp: { rule: LOCO_TUNE.step.rule, synced: p.stepUp.synced, looks: p.stepUp.looks, steps: p.stepUp.steps, walls: p.stepUp.walls, casts: p.stepUp.casts, lastRiserM: Number.isNaN(p.stepUp.riser) ? null : n3(p.stepUp.riser), lastWhy: p.stepUp.why || null },
+      // Wave 3: the feet's placement (each leg's planted share, its lift and pull, the foot's turn and the toe's bend, the
+      // pelvis's drop, the rays cast), each planted sole's height over its ground, the stairs held, and the drawn body's
+      // lag over a step (the crease's settling and how many creases were met beside it).
+      feet: { ...p.feet.report(), soles, eyeLiftM: n3(p.eyeLift) },
+      stairs: { rule: LOCO_TUNE.stairs.rule, ways: LOCO_TUNE.stairs.ways, camera: LOCO_TUNE.stairs.camera, hold: LOCO_TUNE.stairs.hold, held: p.stairSense.way > 0 ? 'up' : p.stairSense.way < 0 ? 'down' : null, ending: p.stairSense.ending, aheadM: aheadReport(p.stairSense.ahead), refused: p.stairSense.found.refused ? `${REFUSED_WORDS[p.stairSense.found.refused]} (${n3(p.stairSense.found.refusedBy)} m)` : null, risers: p.stairSense.found.risers, measured: p.stairSense.known ? { treadM: n3(p.stairSense.tread), riserM: n3(p.stairSense.riser), nextM: Number.isNaN(p.stairSense.next) ? null : n3(p.stairSense.next) } : null, casts: p.stairSense.casts, reused: p.stairSense.reused, drawnLagM: n3(p.drawn.offset), lastPopM: n3(p.drawn.popped) },
+      crease: { rule: LOCO_TUNE.slopeCrease, settling: p.slope.settling, creases: p.slope.creases },
+      sideViewDeg: this.sideView,
+      // The other players here: what each one's game sent and the clip their legs play on this screen.
+      peers: this.remotes.legs(),
+      tune: JSON.parse(JSON.stringify(LOCO_TUNE)) as unknown,
+    };
+  }
+
+  /** `__debug.anim`: see its row in the README. A clip's name plays any clip the rig has, as it always did. */
+  private animDebug(arg: string | AnimDebugOptions | undefined, loop: boolean): unknown {
+    const rig = this.player.rig;
+    if (typeof arg === 'string') {
+      if (!rig) return 'no rig';
+      const clips = rig.clipsMatching(new RegExp(arg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+      const exact = rig.has(arg) ? arg : clips[0];
+      if (!exact) return `no clip matches ${arg}`;
+      if (/^add_/.test(exact)) {
+        rig.playUpper(exact);
+        return { playing: exact, note: 'an additive clip: played once as a delta over the current pose', matches: clips.slice(0, 20) };
+      }
+      rig.play(exact, { loop, hold: !loop });
+      return { playing: exact, matches: clips.slice(0, 20) };
+    }
+    const o = arg ?? {};
+    const words: string[] = [];
+    if (o.tune !== undefined) words.push(...tuneAnim(o.tune));
+    if (o.align) {
+      const n = MIXAMO.setAlign(o.align, words);
+      words.push(n ? `${n} fitted clips written again in place` : 'the alignment stands as it did (or nothing is fitted yet)');
+    }
+    if (o.stop) {
+      rig?.stopOverride();
+      words.push('stopped');
+    }
+    if (typeof o.play === 'string') return this.playImported(o.play, o.loop, o.from, words);
+    return this.animReport(words);
+  }
+
+  /** The imported animations' account, with what the player's own rig has of them and is doing. */
+  private animReport(words: string[]): Record<string, unknown> {
+    const rig = this.player.rig;
+    return {
+      ...(words.length ? { words } : {}),
+      ...MIXAMO.report(),
+      tune: JSON.parse(JSON.stringify(ANIM_TUNE)) as unknown,
+      // The owner's rules of 2026-11-15 as they stand on the player now: the air's float, the treading sink and the Jedi
+      // Academy spine's rebase (how many clips carry it).
+      air: { rule: ANIM_TUNE.airRule, jumpFloat: this.player.jumpFloat, rope: this.player.grapple.attached },
+      swim: { rule: ANIM_TUNE.swim.rule, sinkNow: Number(this.player.swimSink.now.toFixed(3)), share: Number(this.player.swimSink.share.toFixed(3)), depth: Number(this.player.waterDepthNow.toFixed(3)), rootY: rig ? Number(rig.root.position.y.toFixed(3)) : null },
+      jkaSpine: { rule: ANIM_TUNE.jkaSpine, clipsRebased: rebasedCount() },
+      // Wave 2b: a Jedi Academy swing on the upper body alone (on the move) stands on its own pelvis ('mended') or the legs' ('before').
+      swingPelvis: ANIM_TUNE.swingPelvis,
+      player: rig ? { has: rig.clipNames.filter((n) => n.startsWith('mx_')), ...rig.describe(), impactLocked: this.player.impactLocked, pose: rig.poseAgainstRest() } : 'no rig',
+    };
+  }
+
+  /** Play an imported clip on the player, fetched and fitted first if this rig has not got it. */
+  private async playImported(word: string, loop: boolean | undefined, from: number | 'trim' | undefined, words: string[]): Promise<unknown> {
+    const rig = this.player.rig;
+    if (!rig) return 'no rig';
+    await MIXAMO.load();
+    // No pack at all (the switch, a build without it) is said as that, never as a clip that does not match.
+    const none = MIXAMO.unavailable();
+    if (none) return { ...(words.length ? { words } : {}), error: none, state: MIXAMO.state };
+    const ids = MIXAMO.matching(word);
+    const id = ids[0];
+    const row = id ? MIXAMO.row(id) : null;
+    if (!id || !row) return { ...(words.length ? { words } : {}), error: `no imported clip matches ${word} (anim() lists the ones the game uses; the pack's index lists all)`, state: MIXAMO.state };
+    const name = clipName(id);
+    if (!rig.has(name)) {
+      const clip = await MIXAMO.clipFor(id, rig.restSkeleton(), rig.character?.manifest.id ?? 'player');
+      if (typeof clip === 'string') return { ...(words.length ? { words } : {}), error: clip };
+      // The rig may have been swapped for another while the clip was fetched: the one playing now takes it.
+      this.player.rig?.addClips([clip], IMPORTED_CLIPS.strides);
+      this.feet.index.addClips(MIXAMO.footEvents());
+    }
+    const now = this.player.rig;
+    if (!now?.has(name)) return { ...(words.length ? { words } : {}), error: 'the rig changed while the clip was fetched' };
+    const looping = loop ?? row.loop;
+    const tuned = (ANIM_TUNE.trim as Record<string, number | undefined>)[id];
+    const start = from === 'trim' ? (tuned ?? row.trimStart) : typeof from === 'number' && from > 0 ? from : 0;
+    const seconds = now.play(name, { loop: looping, hold: !looping, from: start });
+    const p = this.player;
+    const note = p.mounted || p.swimming || p.eva ? 'riding, swimming and adrift stop a played clip every frame: stand on the ground to see it' : undefined;
+    return {
+      ...(words.length ? { words } : {}),
+      playing: name,
+      loop: looping,
+      from: start,
+      seconds: seconds === null ? null : Number(seconds.toFixed(3)),
+      clip: { duration: row.duration, frames: row.frames, loops: row.loop, speed: row.speed, heading: row.heading, feet: row.feet, trimStart: row.trimStart, travelNet: row.travelNet, ...(row.mirrorOf ? { mirrorOf: row.mirrorOf } : {}) },
+      ...(ids.length > 1 ? { alsoMatches: ids.slice(1, 12) } : {}),
+      ...(note ? { note } : {}),
+    };
+  }
+
   private stepGrappleKeys(): void {
     const input = this.input;
     // Somebody else's choice took the grapple's only key: said once a session, and never to a player who cleared it on purpose.
@@ -28547,6 +29144,11 @@ class App {
       if (why === 'no rig') {
         this.messages.system(NO_RIG_WORDS);
         return NO_RIG_WORDS;
+      }
+      // Wave 4: and hanging from a ledge, the hands are full (`CLIMBING_WORDS`).
+      if (why === 'climbing') {
+        this.messages.system(CLIMBING_WORDS);
+        return CLIMBING_WORDS;
       }
       return why || (mk.kind === 'none' ? 'nothing in reach' : `the mark is on ${mk.kind}`);
     }
@@ -30799,7 +31401,7 @@ class App {
    * needs, the queue flushed), so the ring program, the bake's decode and upload, or the far tiles' builds are never a
    * frame's work.
    */
-  private async groundCurtain(what: string, work: () => Promise<void> | void): Promise<void> {
+  private async groundCurtain(what: string, work: () => Promise<void> | void, title = 'the far ground'): Promise<void> {
     let held = false;
     await runCurtain(
       {
@@ -30827,7 +31429,7 @@ class App {
         now: () => performance.now(),
         wait: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
       },
-      'the far ground',
+      title,
       what,
       async () => {
         await work();
@@ -34417,7 +35019,11 @@ class App {
     if (!p.aboard) this.physics.stepOnce();
   }
 
-  private handleMount(): void {
+  /**
+   * The use key's last owner in the dispatch: a vehicle, a hull or the boots. True where it did something (Climbing II: a
+   * press it leaves is the climb's).
+   */
+  private handleMount(): boolean {
     const p = this.player;
     if (isSurfaceRoom(p.aboard)) {
       // Standing on a surface: E climbs into a ship within arm's reach, and takes the boots off otherwise.
@@ -34429,7 +35035,7 @@ class App {
         if (near.spec.ship && near.def) this.lastShipDef = near.def;
         this.cam.distance = Math.max(this.cam.distance, 9.5);
       }
-      return;
+      return true;
     }
     if (p.aboard) {
       const room = p.aboard;
@@ -34438,7 +35044,7 @@ class App {
         // Letting go of the controls, in flight too: the ship carries on as it was (there is no
         // landing place in space), and the room stays a still room around whoever is aboard.
         p.piloting = null;
-        return;
+        return true;
       }
       // Which hull this is: one of this world's, or one another player flies. Read before the
       // controls, because you do not fly somebody else's ship -- aboard theirs there is no spot to
@@ -34449,7 +35055,7 @@ class App {
         p.piloting = v;
         this.cam.zoomTarget = Math.max(this.cam.zoomTarget, 6);
         this.messages.note(`at the controls of the ${v.spec.label}`);
-        return;
+        return true;
       }
       // The two hulls are clamped together and this walker stands at the room's own way in: E crosses
       // into the other ship's rooms rather than stepping out of a door that opens onto the hull it
@@ -34458,14 +35064,14 @@ class App {
       const across = side && this.docking.clamp.crossing(side, p.pos);
       if (across) {
         void this.crossTo(room, across);
-        return;
+        return true;
       }
       this.leaveShip(false);
-      return;
+      return true;
     }
     if (p.mounted) {
       this.dismountBeside(p.mounted);
-      return;
+      return true;
     }
     let best = null;
     let bestD = MOUNT_RANGE;
@@ -34478,19 +35084,19 @@ class App {
     }
     if (best?.interior) {
       this.boardShip(best);
-      return;
+      return true;
     }
     if (best?.upsideDown) {
       // On its back: E turns it over rather than climbing on.
       best.rightSelf();
       this.physics.stepOnce();
-      return;
+      return true;
     }
     if (best) {
       p.mount(best);
       if (best.spec.ship && best.def) this.lastShipDef = best.def;
       this.cam.distance = Math.max(this.cam.distance, 9.5);
-      return;
+      return true;
     }
     // Nothing of this world's within reach, but a hull another player flies may be: E boards it, which
     // builds their rooms here the first time. A hull of our own always wins, so nothing about walking
@@ -34499,10 +35105,14 @@ class App {
     const near = peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) ?? 0;
     if (near) {
       void this.boardPeerShip(near);
-      return;
+      return true;
     }
     // Nothing to climb into, and out in space: the gravity boots take hold of whatever is within reach.
-    if (this.world.planet.space && p.eva) this.bootsTake(null);
+    if (this.world.planet.space && p.eva) {
+      this.bootsTake(null);
+      return true;
+    }
+    return false;
   }
 
   /** A note the boots left (why they would not take hold), shown in the prompt for a moment. */
@@ -35116,6 +35726,8 @@ class App {
       // boxes in the player's update, before that, so the pose it rides and the picture are worked out to one moment.
       const reckonAt = this.remotes.count > 0 && sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN;
       this.remotes.reckonAt = reckonAt;
+      // Whether a floating peer is adrift (a space zone has no water to tread): their imported loop follows this player's own.
+      this.remotes.adrift = !!this.world.planet.space;
       peerBodies().stampReckon(reckonAt);
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
@@ -35194,6 +35806,11 @@ class App {
         // behind it; and never at a ship's controls, where O is the ultra cruise's own key and every run
         // would also say there is nothing of yours near enough to pick up.
         if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
+        // A thrown fall's impact holds the keys while it plays, before the grapple, the kit or the body reads one.
+        // Hanging from a ledge, the hands are full: the fight and the postures muted as the impact's are.
+        this.stepLedgeKeys();
+        this.stepSprintKeys();
+        this.stepImpactKeys();
         // The grapple's keys, under the same guard as the rest of the block (never with the map, a panel or the
         // placing hand up): its mutes first, so the torch, the walk and a swinging jump are already muted below.
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) this.stepGrappleKeys();
@@ -35208,10 +35825,16 @@ class App {
             else if (!this.hyperspace.locksControls) {
               // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
               // what is underfoot, a port's own things, a story's thing, the companion lying down beside you,
-              // somebody you are looking at, a gate, and a vehicle.
-              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleRevive() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
+              // somebody you are looking at, a gate, and a vehicle. Climbing II: falling with a lip or a face in
+              // reach, the climb has the key first (`climb.grab` 'use': a lip or a wall grabbed while it is held),
+              // as the bar offers it ('air'); otherwise it has whatever press nothing else in reach took, falling
+              // too, so a key held past a lip still grabs it (under 'auto' nothing reads it and the chain is today's).
+              if (player.climbFalls && player.climbReach()) player.climbAsk.press();
+              else if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleRevive() && !this.handleTalk() && !this.handleZoneGate() && !this.handleMount()) player.climbAsk.press();
             } else this.pressJumpE();
           }
+          // The press handed to the climb holds while the key does (let go while the hands hold something: the key is muted).
+          player.climbAsk.hold(input.held('mount'));
           // The key still held beside the companion lying down: the hold that gets them up goes on.
           this.stepRevive(dt);
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -35530,6 +36153,8 @@ class App {
         // room for where it goes, and this is the one place the name is written every frame rather
         // than said once.
         else if (S8.gate) prompt = S8.gate === 'travel' ? `<b>E</b> go to ${this.promptGate}` : '<b>E</b> this gate leads nowhere the pack names';
+        // Climbing II: the use key grabs a lip in reach or starts a wall climb.
+        else if (S8.climb) prompt = '<b>E</b> climb';
       }
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(S8.lift) ?? prompt;
@@ -35682,6 +36307,10 @@ class App {
       const locZ = locSpace ? locAt.z : gameToRawZ(locC ? locC.z : 0, locAt.z);
       // The breath goes last: it is null on dry land and with a full lungful, and the row is not on
       // the page at all while it is, so an ordinary frame writes nothing for it.
+      // The stamina's row (the speed classes), up while the pool is not full and for a moment after: nothing is written
+      // while it is down, and with the classes not in force for the body the row is not in the block at all.
+      const staminaPool = player.staminaPool;
+      this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);
       this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
       this.stepMinimap();

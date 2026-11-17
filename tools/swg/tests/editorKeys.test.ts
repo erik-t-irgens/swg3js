@@ -34,7 +34,7 @@ const holders = (code: string): Action[] => (Object.keys(DEFAULT_BINDINGS) as Ac
   ok(!editorDefaultCodes().some((c) => c === 'ControlLeft' || c === 'ControlRight'), 'no editor default holds Ctrl');
   ok(EDITOR_MUTES.length === 43, `the editor mutes 43 actions (${EDITOR_MUTES.length})`);
   ok(EDITOR_MUTES.every((a) => Object.hasOwn(DEFAULT_BINDINGS, a)) && EDITOR_READS.every((a) => Object.hasOwn(DEFAULT_BINDINGS, a)), 'every action it mutes or reads is one the game has');
-  ok(!EDITOR_MUTES.some((a) => ['map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward', 'forward', 'back', 'left', 'right', 'walk', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer'].includes(a)), 'the panels, the day\'s fast-forward, the move keys and the hand\'s own keys are kept');
+  ok(!EDITOR_MUTES.some((a) => ['map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward', 'forward', 'back', 'left', 'right', 'walk', 'speedUp', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer'].includes(a)), 'the panels, the day\'s fast-forward, the move keys and the hand\'s own keys are kept');
 }
 
 {

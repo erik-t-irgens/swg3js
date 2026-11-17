@@ -8,7 +8,10 @@ export type Action =
   | 'crouch'
   | 'prone'
   | 'kneel'
+  // The walk key, held: on foot, the slowest class of whatever the body is doing.
   | 'walk'
+  // Faster: on foot the run, and the sprint on a second quick press; a ship's boost; the noclip and editor cameras' fast.
+  | 'speedUp'
   | 'attack'
   | 'altAttack'
   | 'altFire'
@@ -147,7 +150,12 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   crouch: ['ControlLeft', 'ControlRight', 'KeyX'],
   prone: ['KeyZ'],
   kneel: ['KeyV'],
-  walk: ['ShiftLeft', 'ShiftRight'],
+  // The walk left Shift for the speed classes (src/anim/): Shift speeds up, and the walk is a key of its own, held,
+  // which forces the slowest class. Alt, the owner's choice ("alt to walk when not driving"): it shares its keys with
+  // the free look on purpose, since the walk is read only on foot on the ground and the free look only riding, driving,
+  // piloting and adrift, where nobody walks.
+  walk: ['AltLeft', 'AltRight'],
+  speedUp: ['ShiftLeft', 'ShiftRight'],
   attack: ['Mouse0'],
   altAttack: ['Mouse2'],
   // A gun's other trigger (the charge, the rapid trigger, the mines, the homing rocket); Q on the ground, the brake adrift.
@@ -172,7 +180,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   noclipDown: ['KeyX'],
   flashlight: ['KeyF'],
   // The grappling hook. Fire is the side button nearest the thumb ("Mouse 4", the browser's button 3), the
-  // owner's choice; the other four share their keys with walk, crouch, jump and the torch on purpose, as the
+  // owner's choice; the other four share their keys with the speed-up, crouch, jump and the torch on purpose, as the
   // placing keys borrow R and F, and are read only while the hook is out, when those four are muted. Reel-out
   // is X alone and never Ctrl: pumping holds W with it, and Ctrl+W closes the tab past anything a page can do.
   grappleFire: ['Mouse3'],
@@ -370,9 +378,16 @@ const MOVE_ACTIONS: readonly Action[] = ['forward', 'back', 'left', 'right'];
  * locked: Ctrl+S, Ctrl+D and Ctrl+A would otherwise save the page, bookmark it or select everything in the
  * middle of a crouch-walk and break the lock. Narrow on purpose: nothing else with Ctrl is touched, so the
  * developer's tools still open, and Ctrl+W, which no page can stop, is the browser's whatever this says.
+ *
+ * And any key at all with Alt held, while the pointer is locked: Alt is the walk on foot and the free look on
+ * anything ridden, held down with every other key of the game, and the browser's own Alt shortcuts would take a
+ * walk's strafe for the address bar (Alt+D), its use key for the browser's menu (Alt+E, Alt+F) and an emote's
+ * arrow for a page back. With the cursor free (a panel, the map) Alt's shortcuts are the browser's as ever.
  */
-export function cancelsKey(code: string, ctrl: boolean, locked: boolean, bindings: Readonly<Record<string, readonly string[]>>): boolean {
-  if (!ctrl || !locked) return false;
+export function cancelsKey(code: string, ctrl: boolean, locked: boolean, bindings: Readonly<Record<string, readonly string[]>>, alt = false): boolean {
+  if (!locked) return false;
+  if (alt) return true;
+  if (!ctrl) return false;
   for (const a of MOVE_ACTIONS) if (bindings[a]?.includes(code)) return true;
   return false;
 }
@@ -405,7 +420,7 @@ export function chosenBindings(saved: unknown): Partial<Record<Action, string[]>
  * always wins over a default that later moved onto it, so one press never answers twice. Such an action may
  * be left with no key at all, and the Controls page shows it blank; it is not a choice and is never kept as
  * one, so it has its key back the moment nobody's choice holds it. Keys two defaults share on purpose (the
- * placing keys borrow R and F, and right mouse is both the other attack and the block) are left as
+ * placing keys borrow R and F, right mouse is both the other attack and the block, Alt both the walk and the free look) are left as
  * they are, because the chosen action held that key by default too.
  *
  * `saved` is read through `chosenBindings`, so anything in it that is not an action with a list of key
@@ -484,8 +499,9 @@ export class Input {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (['Space', 'Tab', 'KeyM', 'AltLeft', 'AltRight'].includes(e.code)) e.preventDefault();
-      // Ctrl with a move key, while the pointer is locked: the browser's save, bookmark and select-all kept out of a crouch-walk.
-      if (cancelsKey(e.code, e.ctrlKey, this.locked, this.bindings)) e.preventDefault();
+      // Ctrl with a move key, or anything with Alt, while the pointer is locked: the browser's save, bookmark and
+      // select-all kept out of a crouch-walk, and its Alt shortcuts out of a walk.
+      if (cancelsKey(e.code, e.ctrlKey, this.locked, this.bindings, e.altKey)) e.preventDefault();
       if (e.repeat) return;
       this.down.add(e.code);
       this.pressed.add(e.code);

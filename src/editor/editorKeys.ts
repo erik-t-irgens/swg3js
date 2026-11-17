@@ -92,7 +92,7 @@ export const CHORD_CODES: readonly string[] = ['KeyD', 'KeyC', 'KeyX', 'KeyZ'];
  * the hand, O, Delete and L, and the panels a developer still wants (the map, the backpack, the waypoints, the journal,
  * the group, the debug menu) and the day's fast-forward, useful for judging light.
  */
-export const EDITOR_READS: readonly Action[] = ['forward', 'back', 'left', 'right', 'walk', 'freeLook', 'noclipFaster', 'noclipSlower', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer', 'attack', 'altFire', 'map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward'];
+export const EDITOR_READS: readonly Action[] = ['forward', 'back', 'left', 'right', 'speedUp', 'freeLook', 'noclipFaster', 'noclipSlower', 'placeTurn', 'placeLift', 'takeProp', 'putAway', 'placeLayer', 'attack', 'altFire', 'map', 'inventory', 'waypoints', 'journal', 'group', 'debugMenu', 'fastForward'];
 
 /**
  * What the editor mutes while it is on, for the whole frame after its block has read what it borrows (research5 §5.3,

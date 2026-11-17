@@ -579,7 +579,7 @@ class PlayerTarget implements Living {
    * the standing one, or the crouch shell that crouching, kneeling and lying prone all wear, as
    * `Player.setCrouchCollider` writes it -- and it is read here, never copied.
    */
-  capsule: { readonly colliderOffsetY: number } | null = null;
+  capsule: { readonly colliderOffsetY: number; reachToward?(at: THREE.Vector3): number } | null = null;
   /**
    * Where everything that shoots at the player aims, and measures a line to, over the feet: the middle
    * of the capsule the player is really wearing (the AI handoff's step 2). It was a constant 0.9 m
@@ -647,8 +647,14 @@ class PlayerTarget implements Living {
    * by the game when the stats move): exactly 1 until something is earned.
    */
   burnScale = 1;
-  radiusToward(): number {
-    return 0.35;
+  /**
+   * How far the player's body reaches toward a point across the ground: the capsule's radius, and lying prone under the
+   * feedback round's 'lying' (`Player.reachToward`), along the body's length as well, so a blow at the feet of a lying body
+   * reaches it. With no capsule handed over, the 0.35 it always was.
+   */
+  radiusToward(at?: THREE.Vector3): number {
+    const c = this.capsule;
+    return c && c.reachToward && at ? c.reachToward(at) : 0.35;
   }
   /**
    * `from` is where whatever struck was standing. It is a parameter of the contract every striker
@@ -7301,7 +7307,7 @@ export class World {
    * Filed under `key`, which is a name of its own, so a removal is one lookup and can never reach
    * something the snapshot placed.
    */
-  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string; unlessStanding?: boolean }): Promise<boolean> {
+  async placeProp(model: string, o: { key: string; at: { x: number; y: number; z: number }; yaw: number; turn?: readonly number[]; pack?: AssetPack | null; inside?: boolean; solid?: boolean; template?: string; unlessStanding?: boolean; scale?: readonly [number, number, number] }): Promise<boolean> {
     const stream = this.layoutStream;
     const from = o.pack ?? this.pack;
     if (!stream || !from) return false;
@@ -7333,7 +7339,10 @@ export class World {
     const q = o.turn && o.turn.length === 4 ? new THREE.Quaternion(o.turn[0], o.turn[1], o.turn[2], o.turn[3]) : new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), o.yaw);
     // Filed under its own key so a removal finds exactly it; the object template, where there is one,
     // is what its client data hangs on it (a brazier's fire, a torch's flame) is looked up by.
-    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius, inside: o.inside, solid: o.solid, ...(o.template ? { effectsOf: o.template } : {}) });
+    // At a size of its own along its own axes where one is given (`__debug.stairsTest`'s flights): drawn as far as its largest axis takes it.
+    const s = o.scale;
+    const big = s ? Math.max(Math.abs(s[0]), Math.abs(s[1]), Math.abs(s[2])) : 1;
+    await stream.place({ model, template: o.key, x: o.at.x, y: o.at.y, z: o.at.z, q, radius: loaded.radius * big, inside: o.inside, solid: o.solid, ...(o.template ? { effectsOf: o.template } : {}), ...(s ? { scale: new THREE.Vector3(s[0], s[1], s[2]) } : {}) });
     return true;
   }
 
@@ -10260,6 +10269,22 @@ export class World {
   /** The object template a collider was made for, or null (the ground, a body, a building's own shell): the console's. */
   templateOfCollider(handle: number): string | null {
     return this.layoutStream?.templateOfCollider(handle) ?? null;
+  }
+
+  /**
+   * Climbing II, the feedback round: what a collider is, in words, for a refused climb up's message (an event, never a
+   * frame): a placed thing's template, else the ground's heightfield or a planting of a chunk standing, else null (the
+   * caller names it by its kind).
+   */
+  colliderNameOf(handle: number): string | null {
+    const t = this.templateOfCollider(handle);
+    if (t) return t;
+    for (const c of this.chunks.values()) {
+      const cols = c.physics;
+      if (!cols) continue;
+      for (let i = 0; i < cols.length; i++) if (cols[i].handle === handle) return i === 0 ? 'the ground' : 'a planted tree or rock';
+    }
+    return null;
   }
 
   /**

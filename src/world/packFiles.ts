@@ -489,6 +489,29 @@ export async function fetchPublic(path: string, init?: RequestInit, base = siteB
   }
 }
 
+/**
+ * A public binary file asked for (an imported animation's clip), as `fetchPublic` asks a text one: null with no request
+ * where the build does not ship it, and the ask kept for `__debug.files()` under the file's own address. `query` (the
+ * file's content hash, so no cache serves an old one) goes on the request alone, and one file is one row whatever it
+ * was asked with. Its answer is "ok" for anything that came back and is not a page.
+ */
+export async function fetchPublicBytes(path: string, query = '', base = siteBase()): Promise<FileAnswer | null> {
+  const url = `${base}${publicPath(path)}`;
+  if (!shippedAsk(path)) {
+    skip(url, 'not in the build');
+    return null;
+  }
+  try {
+    const res = await PACK_FILES.fetch(query ? `${url}?${query}` : url);
+    const type = res.headers.get('content-type') ?? '';
+    publicAsked.set(url, { answer: res.ok && !type.includes('html') ? 'ok' : res.status === 404 ? 'missing' : 'page', times: (publicAsked.get(url)?.times ?? 0) + 1 });
+    return res;
+  } catch (err) {
+    publicAsked.set(url, { answer: 'error', times: (publicAsked.get(url)?.times ?? 0) + 1 });
+    throw err;
+  }
+}
+
 // ---- The console ----
 
 type AnswerCounts = { asked: number; ok: number; missing: number; page: number; error: number };

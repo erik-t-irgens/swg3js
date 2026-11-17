@@ -396,8 +396,9 @@ try {
     // raster are listed.
     const list = shippedPublic(rootPath);
     if (spawnSync('git', ['rev-parse', '--git-dir'], { cwd: rootPath, encoding: 'utf8' }).status === 0) {
-      // `imports` the fourth folder since Map-maker II's tenth wave (the owner's own shipped models).
-      ok(list.includes('tracks/tatooine.json') && list.includes('dem/monument/base16.raw') && list.every((p) => /^(tracks|placements|dem|imports)\//.test(p)), `this checkout's list holds its committed track and raster, and nothing outside the four folders (${list.length})`);
+      // `imports` the fourth folder since Map-maker II's tenth wave (the owner's own shipped models), `anims` the fifth
+      // since Animations I (the imported clip pack).
+      ok(list.includes('tracks/tatooine.json') && list.includes('dem/monument/base16.raw') && list.every((p) => /^(tracks|placements|dem|imports|anims)\//.test(p)), `this checkout's list holds its committed track and raster, and nothing outside the five folders (${list.length})`);
     } else console.log('note this checkout is not a git checkout: the list of the repository itself is not checked');
     // The rule, in a scratch repository of our own, so nothing of this one is touched: a file committed and there is
     // listed; a file on disk and not committed is not (a placements file, a raster); a file committed and since taken

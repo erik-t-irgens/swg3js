@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { GRAPPLE_DEFAULTS, GRAPPLE_GRAVITY, GRAPPLE_TUNE, newFireState, tuneGrapple } from '../../../src/player/grapple.ts';
+import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
+import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { GrappleRope, bendOffsetDir } from '../../../src/player/grappleRope.ts';
 import { grappleMutes, joltFor, leanRate, slamHarm } from '../../../src/player/grappleMath.ts';
 import { GRAPPLE_SOUND, GRAPPLE_SOUND_IDS, GrappleSounds } from '../../../src/audio/grappleSounds.ts';
@@ -145,6 +147,11 @@ await section(1, 'day one', async () => {
     }
     return { trace, b };
   };
+  // Wave 4's ledges are a switch of their own with tests of their own: 'before' here, since this day crouch-walks off the
+  // 8 m top to roll its landing, where the ledges lower a crouched body into a hang on the lip.
+  CLIMB_TUNE.ledges = 'before';
+  // (And the wall climb's, item B: the day holds W into faces the climb would take.)
+  CLIMB_TUNE.wall = 'before';
   for (const fps of FPS) {
     const a = await run(fps, true);
     const z = await run(fps, false);
@@ -153,6 +160,8 @@ await section(1, 'day one', async () => {
     ok(a.b.jumped > 0 && a.b.fallDamage > 0 && a.b.rolled && a.b.rollSaved > 0 && a.b.swimToggles > 0, `${fps} fps: the day walks, runs, jumps, falls ${a.b.fallDamage} harm from 8 m, rolls a landing (${a.b.rollSaved} saved) and swims`);
     ok(same, `${fps} fps: with the hook's steps called (never fired) and not called, every place, velocity and fall's harm is the same by Object.is over 20 s (${a.trace.length / 7} frames)`);
   }
+  CLIMB_TUNE.ledges = 'on';
+  CLIMB_TUNE.wall = 'on';
 });
 
 // =============================================================================================================
@@ -440,6 +449,17 @@ await section(8, 'the thin post', async () => {
 
 // =============================================================================================================
 await section(9, 'the cliff', async () => {
+  // Stairs II: under the step-up's mend (`step.rule` 'mended') a body standing on the cliff's top stands at 20.04 m at every
+  // frame rate, as it always did at 30 and 60; under 'before' the collider a frame or two behind the body sank it 1 to 3 cm
+  // at 90 frames a second and over (20.02 at 144). The scene as it was written runs exactly along z 0, which is one of the
+  // heightfield's own cell lines (its chunk starts at z -32, its cells 2 m), and there the rope's padded ray from the anchor
+  // to the hand misses the plateau's edge (the ray rides the seam between two cells' triangles), so no bend is made at the
+  // ridge and the fall-back bends crawl down the face: from the true height at 144 the rope wraps 15 to 53 times. Measured
+  // over 60 runs a rate, that is the line's and the rope's (the review of Stairs II), never the step's: the same scene a
+  // third of a metre off the line makes its one bend at the ridge at every rate under either rule. Left for the grapple. The
+  // scene as it was written is held under 'before'; under 'mended' it is run off the line.
+  for (const [rule, z] of [['before', 0], ['mended', 0.37]] as const) {
+  LOCO_TUNE.step.rule = rule;
   for (const fps of FPS) {
     const { physics, b } = await scene((p) => {
       const h = (x: number) => (x <= -2 ? 20 : 0);
@@ -447,10 +467,10 @@ await section(9, 'the cliff', async () => {
     });
     b.forward.set(1, 0, 0);
     b.right.set(0, 0, 1);
-    b.place(-2.7, 20.05, 0);
+    b.place(-2.7, 20.05, z);
     physics.stepOnce();
     b.run(fps, 0.3);
-    b.hook(-6, 20, 0, 0, 1, 0, null, 12);
+    b.hook(-6, 20, z, 0, 1, 0, null, 12);
     const r = b.grapple.rope;
     let blockedFrames = 0;
     let shape = true;
@@ -460,8 +480,10 @@ await section(9, 'the cliff', async () => {
       if (b.grapple.blocked(b) > 0) blockedFrames++;
       shape &&= shapeOk(r);
     });
-    ok(r.n === 1 && r.groundBends === 1 && blockedFrames === 0 && shape, `${fps} fps: over a heightfield cliff, ${r.n} bend at the ridge (counted on the ground: ${r.groundBends}), ${blockedFrames} frames blocked, feet at ${r2(b.pos.y)} m`);
+    ok(r.n === 1 && r.groundBends === 1 && blockedFrames === 0 && shape, `${fps} fps, step.rule '${rule}', z ${z}: over a heightfield cliff, ${r.n} bend at the ridge (counted on the ground: ${r.groundBends}), ${blockedFrames} frames blocked, feet at ${r2(b.pos.y)} m`);
   }
+  }
+  LOCO_TUNE.step.rule = 'mended';
 });
 
 // =============================================================================================================

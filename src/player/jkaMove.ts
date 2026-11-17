@@ -204,6 +204,20 @@ export class JkaMovement {
     return this.special !== null;
   }
 
+  /**
+   * Whether a body in the air could take the air's own wall move now (PM_GrabWallForJump's guard less the wall, the keys
+   * and the press: Force Jump at level 3, no special move under way but a flip back, not falling past its speed, not too far
+   * over where the jump began), read off the body's place and velocity: the animations' wave 4 wall climb leaves such a body
+   * to it in the air (a Jedi Academy wall move keeps its own triggers).
+   */
+  airWallMoveOpen(pos: { readonly y: number }, vel: { readonly y: number }): boolean {
+    if (Math.max(0, Math.min(3, this.forceLevel)) <= 2) return false;
+    if (this.special !== null && this.special !== 'BOTH_FLIP_BACK1') return false;
+    if (!(vel.y / UNIT > -1200)) return false;
+    const rising = Number.isFinite(this.jumpStartY) ? (pos.y - this.jumpStartY) / UNIT : 0;
+    return rising < JKA.forceJumpHeightMax[3] - JKA.wallJumpStrength / 2;
+  }
+
   get specialJump(): string | null {
     return this.special;
   }

@@ -101,6 +101,14 @@ export const HUD_SIZES = {
    */
   breathBarW: 160,
   breathBarH: 8,
+  /**
+   * The stamina row (the speed classes), under the other two: as wide as they are, and the thinnest of the block,
+   * since it is the one of the three that empties without killing anybody. Both numbers are ours.
+   */
+  staminaBarW: 160,
+  staminaBarH: 4,
+  /** The row's own height: under its number's line box, which overhangs it, so the block grows by this and a gap and no more. */
+  staminaRowH: 8,
   targetBarW: 64,
   targetBarH: 5,
   plateBarW: 44,
