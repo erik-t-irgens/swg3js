@@ -15103,6 +15103,8 @@ class App {
       // Which way the body faces, which the sound has no use for and a print does: it points the
       // way the walker was going.
       p.heading = player.heading;
+      // And the rig, which hands a print the landing foot's own ankle and toe (`footprints.ts`).
+      p.body = rig;
       p.species = this.characterId;
       this.feet.playerTemplate = rig.character?.manifest.template ?? null;
       lists.player = p;

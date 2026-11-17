@@ -660,7 +660,43 @@ else {
     ["c.slot === 0 ? 'bottom'", "c.altitude === CLOUD_ALTITUDES[0] ? 'bottom'"],
   ];
   ok(SHEETS.every(([p]) => nowSk.split(p).length === 2), "the cloud sheets' lines in sky.ts are there exactly once each");
-  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), nowSk);
+  // The planet's sun, moons and pictures as quads upright to the horizon (2026-11-16, `skyBodies.ts`), where they were
+  // sprites that spun against the sky as the view turned: no program's text either, so each line is taken back to the
+  // sprite's it replaced, every one found exactly once, and the rest must still be PRE_PASS's.
+  const BODIES: [string, string][] = [
+    ["import { makeSkyBody, turnSkyBody, type SkyBody } from './skyBodies.ts';\n", ''],
+    [
+      " * A drawn piece of a sky body: over a planet a quad riding the light's direction, turned each frame\n * to face the camera upright to the horizon (skyBodies.ts; it was a THREE.Sprite, which spun against\n * the sky as the view turned); in space a quad turned once, where a sprite rolled the star's spikes\n * with the camera while the sky stayed put. Both carry a material with an opacity, which is all the\n * lens flare reads.\n",
+      " * A drawn piece of a sky body: a THREE.Sprite over a planet, where the body rides the light's\n * direction and a sprite's upright-on-screen habit is what the client did too; a fixed quad in\n * space, where a sprite rolled the star's spikes with the camera while the sky stayed put. Both\n * carry a material with an opacity, which is all the lens flare reads.\n",
+    ],
+    [
+      '  private readonly sun: SkyBody[] = [];\n  private readonly supplementalSun: SkyBody[] = [];\n  private readonly moon: SkyBody[] = [];\n  private readonly supplementalMoon: SkyBody[] = [];\n  private readonly celestials: { sprites: SkyBody[]; data: Celestial }[] = [];\n',
+      '  private readonly sun: THREE.Sprite[] = [];\n  private readonly supplementalSun: THREE.Sprite[] = [];\n  private readonly moon: THREE.Sprite[] = [];\n  private readonly supplementalMoon: THREE.Sprite[] = [];\n  private readonly celestials: { sprites: THREE.Sprite[]; data: Celestial }[] = [];\n',
+    ],
+    [
+      "    // A planet's own sky bodies, riding the light's direction: quads facing the camera and upright to\n    // the horizon (skyBodies.ts), where they were sprites, which spun against the sky as the view turned.\n    // (A space zone's stars are quads too, turned once: they never move.)\n    const sprite = (image: CelestialImage | null, size: number, additive: boolean): SkyBody | null => {\n",
+      "    // A planet's own sky bodies: sprites, as the client drew them, riding the light's direction.\n    // (A space zone's stars are quads instead: they never move, and a sprite rolled them with the camera.)\n    const sprite = (image: CelestialImage | null, size: number, additive: boolean): THREE.Sprite | null => {\n",
+    ],
+    [
+      '      const s = makeSkyBody(tex, (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE, additive);\n',
+      '      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending });\n      const s = new THREE.Sprite(mat);\n      const width = (2 * size * SKY_RADIUS) / CELESTIAL_DISTANCE;\n      s.scale.set(width, width, 1);\n',
+    ],
+    ['    const body = (c: Celestial | null): SkyBody[] => {', '    const body = (c: Celestial | null): THREE.Sprite[] => {'],
+    ['      const out: SkyBody[] = [];', '      const out: THREE.Sprite[] = [];'],
+    ['      const slots: [Celestial | null, SkyBody[], boolean][] = [', '      const slots: [Celestial | null, THREE.Sprite[], boolean][] = ['],
+    [
+      "  /** Place a sky body's quads along a direction from the camera, facing it and upright to the horizon. */\n  private place(sprites: SkyBody[], dir: THREE.Vector3, alpha: number): void {\n",
+      "  /** Place a sky body's sprites along a direction from the camera. */\n  private place(sprites: THREE.Sprite[], dir: THREE.Vector3, alpha: number): void {\n",
+    ],
+    ['      if (s.visible) turnSkyBody(dir, s.quaternion);\n', ''],
+    ['      for (const s of sprites) s.visible = !s.visible;', '      for (const s of this.group.children) if (s instanceof THREE.Sprite) s.visible = !s.visible;'],
+    [
+      '      sprites: `${sprites.length}, ${sprites.filter((s) => s.visible).length} visible (quads upright to the horizon, never turning with the camera)`,',
+      '      sprites: `${sprites.length}, ${this.group.children.filter((s) => s instanceof THREE.Sprite && s.visible).length} visible`,',
+    ],
+  ];
+  ok(BODIES.every(([p]) => nowSk.split(p).length === 2), "the sky bodies' lines in sky.ts are there exactly once each");
+  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), BODIES.reduce((s, [p, q]) => s.replace(p, () => q), nowSk));
   const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
   let at = 0;
   while (at < back.length && back[at] === sk[at]) at++;

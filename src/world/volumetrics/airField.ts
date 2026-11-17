@@ -40,12 +40,15 @@ import { RainPool, type RainHull } from './airRain.ts';
 import { KICK_KIND, KICK_KINDS, KICK_LOOK, leafyClass, OwedTable, packColour, SpawnTable, WHITE_PACKED } from './airSpawn.ts';
 import { srgbDecode, tintGamma } from '../groundMath.ts';
 import { WEATHER_UNIFORMS } from '../wetness.ts';
-import { PRINT_TUNE } from '../footprints.ts';
+import { FootAt, footAt, PRINT_TUNE } from '../footprints.ts';
 import type { FootStep } from '../../audio/footsteps.ts';
 import { liquidTileCells, type VolTune } from './volSettings.ts';
 import { crustPhaseIn, liquidOff, newCrustPhase, RippleCarryPass, type LiquidUniforms } from './airLiquid.ts';
 import { WIND_FRAME, WIND_LOCAL_DEVIL, WIND_STATE, WIND_TUNE, wind7Uniforms, windPattern } from '../wind.ts';
 import { DEVIL_W, gustFlat, newGustAt } from '../windMath.ts';
+
+/** The landing foot a dent reads (`footAt`), kept: a step allocates nothing. */
+const AIR_FOOT = new FootAt();
 
 /**
  * Everything the volume reads of the air, by reference (§2.8): the kept uniform objects whose `value` is each field's
@@ -3234,20 +3237,30 @@ export class AirField implements AirSource {
       c.tooSoon++;
       return true;
     }
-    const left = !feet.left;
-    // `facingOf`'s, `sideOf`'s and `stanceOffset`'s own lines (`footprints.ts`): the way the body faces, its side, and
-    // half a stance to the foot's own side. Written out here because the heading handed to them is a number across a
-    // call, which the moving frames boxed once a step (`airDents.test.ts` holds the two to each other).
-    const h = step.heading;
-    const sinH = Math.sin(h);
-    const cosH = Math.cos(h);
-    const off = PRINT_TUNE.stance * scale * (left ? -1 : 1);
-    q[0] = sx + cosH * off;
-    q[1] = sz - sinH * off;
+    let left = !feet.left;
+    // Under the landing foot itself, pointing along it, as a decal print is (`footAt`, `PRINT_TUNE.rule` 'foot'); a body
+    // with no ankle joints to read, or `rule` 'body', keeps the lines below.
+    if (PRINT_TUNE.rule === 'foot' && footAt(step, left, AIR_FOOT)) {
+      left = AIR_FOOT.left;
+      q[0] = AIR_FOOT.x;
+      q[1] = AIR_FOOT.z;
+      q[4] = AIR_FOOT.fx;
+      q[5] = AIR_FOOT.fz;
+    } else {
+      // `facingOf`'s, `sideOf`'s and `stanceOffset`'s own lines (`footprints.ts`): the way the body faces, its side, and
+      // half a stance to the foot's own side. Written out here because the heading handed to them is a number across a
+      // call, which the moving frames boxed once a step (`airDents.test.ts` holds the two to each other).
+      const h = step.heading;
+      const sinH = Math.sin(h);
+      const cosH = Math.cos(h);
+      const off = PRINT_TUNE.stance * scale * (left ? -1 : 1);
+      q[0] = sx + cosH * off;
+      q[1] = sz - sinH * off;
+      q[4] = sinH;
+      q[5] = cosH;
+    }
     q[2] = (P.footAlong * scale) / 2;
     q[3] = (P.footAcross * scale) / 2;
-    q[4] = sinH;
-    q[5] = cosH;
     q[6] = P.footDepth * scale;
     q[7] = DENT_KIND.foot;
     if (!d.oneShotArgs()) {

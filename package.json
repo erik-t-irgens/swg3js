@@ -35,7 +35,7 @@
     "test:clash": "node tools/swg/tests/clash.test.ts",
     "test:marks": "node tools/swg/tests/marks.test.ts",
     "test:scars": "node tools/swg/tests/scars.test.ts",
-    "test:footprints": "node tools/swg/tests/footprints.test.ts",
+    "test:footprints": "node tools/swg/tests/footprints.test.ts && node tools/swg/tests/skyFeet.test.ts",
     "test:look": "node tools/swg/tests/lookAt.test.ts",
     "test:ragdoll": "node tools/swg/tests/ragdollFall.test.ts",
     "test:physics": "node tools/swg/tests/physicsStep.test.ts && node tools/swg/tests/hoverRide.test.ts && node tools/swg/tests/shipCruise.test.ts",
