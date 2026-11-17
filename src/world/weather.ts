@@ -51,6 +51,7 @@ import { FLORA_WIND } from './floraSway.ts';
 import { sharedClock, sharedNote } from './sharedClock.ts';
 import { WIND_FRAME, WIND_HOLD, WIND_STATE, WIND_TUNE, attachWind, detachWind, resetWindPattern, stepWind7, stepWindAloft } from './wind.ts';
 import { PlaceSky } from './places.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /**
  * What the places of ours say of the sky at a point (Map-maker II's ninth wave): the game hands its places' index
@@ -548,6 +549,9 @@ export class Weather {
       // arrives in play finds its batches, textures and (after the warm-up) programs ready.
       const fx = new ParticleEffects(this.scene, pack.url(''), { actorLayer: false, shader: WEATHER_PARTICLE_SHADER });
       fx.heightAt = this.heightAtFn;
+      // On WebGPU (the GPU port's step 5) the warm-up builds both of the pass's stencils (none outdoors, the exits' indoors),
+      // which WebGPU keys a pipeline on, through hidden twins of the set's own warm batches (`gpuWarmTwins`).
+      if (GPU.webgpu) for (const portalView of [false, true]) fx.gpuWarmTwins((m) => passStencil(m, portalView));
       this.fxEffects = fx;
       const files = new Set<string>();
       for (const b of data.blocks) if (b.cameraEffect?.file) files.add(b.cameraEffect.file);
@@ -1446,8 +1450,18 @@ export class Weather {
   /** Compile the falling effects' programs against their own scene (never the world's: its lights and fog are in the key). */
   compile(renderer: THREE.WebGLRenderer, camera: THREE.Camera, waitReady: boolean): Promise<void> | void {
     if (!this.scene.children.length) return;
+    // On WebGPU (the GPU port's step 5) a scene handed whole is walked as it stands, which steps over the batches still
+    // hidden for want of quads: handed as a root of its drawables, the warm-up lists every one (`patchWarm.ts`).
+    if (GPU.webgpu) return renderer.compileAsync(this.gpuRoot, camera, this.scene).then(() => undefined, () => undefined);
     if (waitReady) return renderer.compileAsync(this.scene, camera, this.scene).then(() => undefined, () => undefined);
     renderer.compile(this.scene, camera, this.scene);
+  }
+
+  /** The weather scene's drawables as a root of their own, hidden ones too: for the warm-up on WebGPU alone (`compile`). */
+  private get gpuRoot(): THREE.Object3D {
+    const root = new THREE.Object3D();
+    root.traverse = (cb: (o: THREE.Object3D) => void) => this.scene.traverse(cb);
+    return root;
   }
 
   /** The weather pass: after the portal renderer, into whatever it drew into. From inside a building, only through its exits (stencil 2). */

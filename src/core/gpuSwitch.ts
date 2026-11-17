@@ -13,6 +13,9 @@
 
 import type * as THREE from 'three';
 import type { DomeCapture } from '../world/envmap.ts';
+import type { GroundTileUniforms } from '../world/terrainTextures.ts';
+import type { RingUniforms } from '../world/horizon/horizonRings.ts';
+import type { BakeGrid } from '../world/horizon/horizonMath.ts';
 
 /** How the switch was read. */
 export type RendererChoice = 'webgl' | 'webgpu';
@@ -29,12 +32,32 @@ export interface LiveColour {
 export interface GpuStandIns {
   /** The sky dome: its horizon and zenith colours as a plain gradient by the view's elevation, live. */
   sky(horizon: LiveColour, zenith: LiveColour): THREE.Material;
-  /** Lava: its ramp's middle colour, unlit. */
+  /**
+   * Lava: the client's own (step 5, `gpu/gpuPrograms.ts`), its uniforms read off each lava material as it is drawn; its
+   * ramp's middle colour, unlit (step 3's), where the part is left out at load (`localStorage['swg.gpu.lava'] = '0'`).
+   */
   lava(colour: LiveColour): THREE.Material;
+  /** The marks (step 5): one graph for both sheets, each sheet's uniforms read as it is drawn. */
+  marks(): THREE.Material;
+  /** A lightsaber blade's ribbon (step 5): one graph for every ribbon, each one's colour, brightness and edge read as it is drawn. */
+  blade(): THREE.Material;
+  /** A particle batch (step 5), or the weather's variant of one (`weather`): one graph a kind, each batch's uniforms read as it is drawn. */
+  particles(weather: boolean): THREE.Material;
+  /** The hyperspace tunnel (step 5). */
+  tunnel(): THREE.Material;
   /** The ground's tile program: the chunk's own colour-map colour where it carries one ('tint' the tile chunks', 'color' vertex colours), else a mid grey, lit. */
   ground(source: 'tint' | 'color' | 'grey'): THREE.Material;
   /** The portal renderer's depth reset behind the doorways: writes the far depth where its stencil passes, no colour. */
   depthReset(reversed: boolean): THREE.Material;
+  /**
+   * The ground's tile program over its uniforms (step 5, `gpu/gpuGround.ts`); step 3's plain ground ('tint') where the
+   * ground's part is left out at load (`localStorage['swg.gpu.ground'] = '0'`).
+   */
+  groundTiles(u: GroundTileUniforms): THREE.Material;
+  /** The version-3 ground program over a world's pictures and lookups (step 5); step 3's plain ground ('color') where left out. */
+  groundFamilies(p: { texture: THREE.Texture; layerOf: Float32Array; sizeOf: Float32Array; normals: THREE.DataArrayTexture | null; normalScale: { value: number }; glossScale: { value: number } }): THREE.Material;
+  /** The far rings over the session's uniforms and the tile program's (step 5). */
+  ring(u: RingUniforms, ground: GroundTileUniforms): THREE.Material;
 }
 
 /**
@@ -120,6 +143,11 @@ export interface GpuRuntime {
   wrapConsole(debug: Record<string, unknown>): void;
   /** A thing forced off on WebGPU, named for the report (once each). */
   forced(name: string, why: string): void;
+  /**
+   * `__debug.horizon({ selfTest: true })` on WebGPU (step 5, `gpu/gpuGroundSelfTest.ts`): the layer means against the card's
+   * top mip, the ring program's textures off its own WGSL, and the ring's arithmetic on the GPU against `horizonMath.ts`.
+   */
+  horizonSelfTest(o: { ground: { colour: Uint8Array; size: number; depth: number } | null; groundArray: THREE.Texture | null; patch: THREE.Mesh; scene: THREE.Scene; camera: THREE.Camera; uniforms?: RingUniforms; fine?: BakeGrid | null; coarse?: BakeGrid | null; shape?: { placed: boolean; gi0: number; gj0: number; side: number; step: number; ringHeight(rx: number, rz: number, bake: number, fade: number): number } | null }): Promise<Record<string, unknown>>;
   /**
    * Compiles what a pass would draw of a root as the WebGL warm-up would, and every sun cascade's shadow of it where the
    * pass sees the sun (`src/core/gpu/patchWarm.ts`): listed at once, built on its own clock; answers when it is built.

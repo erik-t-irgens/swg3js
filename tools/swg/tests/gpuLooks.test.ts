@@ -28,7 +28,7 @@ import { BAND_POWER, BAND_TIGHTEN, GATE_NL, MODE_BAND_ABOVE, MODE_NONE_BELOW, SP
 import { applyDetail } from '../../../src/world/detailMap.ts';
 import { surfaces } from '../../../src/world/surfaces.ts';
 import { currentEnvironment, registerReflective, setEnvironment, setEnvironmentStandIn } from '../../../src/world/envmap.ts';
-import { GPU_LOOKS, LOOK_STATS, installLooks, type LookPart } from '../../../src/core/gpu/looks.ts';
+import { GPU_LOOKS, LOOKS_AT_LOAD, LOOK_STATS, installLooks, type LookPart } from '../../../src/core/gpu/looks.ts';
 import { ClientLightingModel, SPEC_GRAPH_NUMBERS, clientSpecularNode, diffuseBackNode, filmNode, maskFor, specKnobs, specPart, specPerMaterial, specSelfTestRefusal } from '../../../src/core/gpu/gpuSpec.ts';
 import { DetailTextureNode, detailPart, detailSwitch, detailTextureOf } from '../../../src/core/gpu/gpuDetail.ts';
 import { makeStandIns } from '../../../src/core/gpu/standIns.ts';
@@ -284,7 +284,14 @@ function wrapped(spec = { mode: 'phong', color: [0.5, 0.25, 0.125], power: 20 },
   const zenith = new THREE.Color(0.4, 0.5, 0.6);
   const lava = new THREE.Color(1, 0.3, 0);
   const s = makeStandIns();
-  const reads = [...uniformsOf(s.sky(horizon, zenith).colorNode), ...uniformsOf(s.lava(lava).colorNode), ...uniformsOf(s.ground('grey').colorNode)];
+  // Since step 5 the lava's stand-in is drawn only where the lava's own part was left out at load (`swg.gpu.lava`), the
+  // client's lava graph standing in for it otherwise: held here as it is drawn then.
+  const lavaPart = LOOKS_AT_LOAD.lava;
+  ok(lavaPart === false || !s.lava(lava).colorNode, "with the lava's own part in, the lava is step 5's graph and not step 3's colour");
+  LOOKS_AT_LOAD.lava = false;
+  const lavaStandIn = s.lava(lava);
+  LOOKS_AT_LOAD.lava = lavaPart;
+  const reads = [...uniformsOf(s.sky(horizon, zenith).colorNode), ...uniformsOf(lavaStandIn.colorNode), ...uniformsOf(s.ground('grey').colorNode)];
   ok(reads.length >= 5 && reads.every((u) => u.groupNode?.name === 'render'), `every colour and dial the sky, lava and ground stand-ins read is a uniform of the shared render group (${reads.length})`);
   ok(reads.some((u) => u.value === horizon) && reads.some((u) => u.value === zenith) && reads.some((u) => u.value === lava), "the colours are the WebGL path's own objects, by reference");
 }

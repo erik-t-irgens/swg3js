@@ -26,8 +26,7 @@ const WORDS_ONLY: Record<string, string> = {
   // The leaf cards' other two (the client's light, the leaf skip) are the WebGPU side's own (`own`, step 4); `cardsSelfTest`
   // above (the card rule under three's own light, on its WebGL stage) is not.
   swaySelfTest: "draws through the sway's WebGL program (a remake of the owner's)",
-  grassShadowSelfTest: "draws through the grass's WebGL program (step 5)",
-  groundSelfTest: "draws through the ground's WebGL tile program (step 5)",
+  grassShadowSelfTest: "draws through the grass's WebGL program (a remake of the owner's, not ported)",
   gradeSelfTest: 'the colour grade is an effect: no effects chain on WebGPU this step',
   waterFx: "the water's effects: no effects chain on WebGPU this step",
   passLog: "the WebGL portal renderer's per-pass counts: __debug.gpu() says the frame's draws",
@@ -37,7 +36,6 @@ const WORDS_ONLY: Record<string, string> = {
 const WORDS_WHEN: Record<string, (arg: Any) => boolean> = {
   personKeys: (a) => !!a && a.selfTest !== undefined,
   wind: (a) => !!a && a.selfTest !== undefined,
-  horizon: (a) => !!a && a.selfTest !== undefined,
   crowd: (a) => !!a && a.compare !== undefined,
   shadowPass: (a) => !!a && a.compare !== undefined,
 };

@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { sabers } from '../audio/saberSounds.ts';
 import { recoilAfter, recoilFor, recoilReach, tipSpeedOf } from './clash.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /** What a saber's blade file gives: its length and width in metres, and the seconds to ignite and retract. */
 export interface BladeSpec {
@@ -195,6 +196,8 @@ export class SaberBlade {
       m.visible = false;
       this.group.add(m);
     }
+    // On WebGPU (the GPU port's step 5) the ribbons' program is a node graph of its own, one for every ribbon of every blade.
+    if (GPU.webgpu) for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.material.userData.gpuStandIn = () => GPU.rt!.standIns.blade();
     for (let i = 0; i < HISTORY; i++) this.history.push({ a: new THREE.Vector3(), b: new THREE.Vector3(), age: Infinity });
   }
 

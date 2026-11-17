@@ -30,6 +30,7 @@ import { GROUND_CLOUD_GLSL, GROUND_DECODE_GLSL, GROUND_MASK_GLSL, GROUND_TINT_GL
 import { injectWetness } from '../wetness.ts';
 import { ALBEDO_SCALE } from './horizonDecode.ts';
 import { PATCH } from './horizonMath.ts';
+import { GPU } from '../../core/gpuSwitch.ts';
 
 /**
  * The most texture units the ring program may take, the cascades' shadow maps included: Direct3D 11's sixteen under ANGLE
@@ -104,6 +105,18 @@ function tex1(format: THREE.PixelFormat, type: THREE.TextureDataType, data: Arra
   return t;
 }
 
+/**
+ * The composition window's picture made RGBA32UI in place, before it is uploaded (WebGPU alone, the GPU port's step 5): its
+ * numbers widened, its type unsigned 32-bit and no WebGL format name. Answers the texture.
+ */
+export function widenWindowTex(t: THREE.DataTexture): THREE.DataTexture {
+  const img = t.image as { data: ArrayBufferView | null; width: number; height: number };
+  if (img.data && !(img.data instanceof Uint32Array)) img.data = Uint32Array.from(img.data as Uint16Array);
+  t.type = THREE.UnsignedIntType;
+  t.internalFormat = null;
+  return t;
+}
+
 /** A fresh set, holding stand-ins (a real texture each: an empty sampler binds nothing) until a world hands it its own. */
 export function makeRingUniforms(): RingUniforms {
   const h = tex1(THREE.RedFormat, THREE.FloatType, new Float32Array([0]));
@@ -113,6 +126,9 @@ export function makeRingUniforms(): RingUniforms {
   // A window of one tile holding nothing (count nought): every fragment reads the far albedo.
   const w = tex1(THREE.RGBAIntegerFormat, THREE.UnsignedShortType, new Uint16Array(4));
   w.internalFormat = 'RGBA16UI';
+  // On WebGPU (the GPU port's step 5) RGBA32UI, as the field's own window is there: three 0.187 binds a 16-bit integer
+  // picture as a float one, and takes `internalFormat` for WebGPU's own format name.
+  if (GPU.webgpu) widenWindowTex(w);
   const tn = tex1(THREE.RGBAFormat, THREE.UnsignedByteType, new Uint8Array([255, 255, 255, 255]));
   return {
     uHorizonEye: { value: new THREE.Vector4(0, 0, 0, 1) },
@@ -752,6 +768,8 @@ export function ringMaterial(u: RingUniforms, ground: GroundTileUniforms, csm: C
   };
   mat.userData.wetBuiltIn = true;
   mat.customProgramCacheKey = () => HORIZON_RING_KEY;
+  // On WebGPU (the GPU port's step 5) the ring program is a node material of its own over the very same uniforms.
+  if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.ring(u, ground);
   return mat;
 }
 

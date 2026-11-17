@@ -19,7 +19,8 @@ import { PlainColours, plainAlbedoRect, type MadeGroundSpec, type PlainGround } 
 import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
 import { HORIZON_TILE, HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { PAINT_TILE, paintTileOf } from '../../swg/terrain/groundPaint.ts';
-import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, type RingUniforms } from './horizonRings.ts';
+import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, widenWindowTex, type RingUniforms } from './horizonRings.ts';
+import { GPU } from '../../core/gpuSwitch.ts';
 import { SHAPE_BLOCK, SHAPE_EMPTY, SHAPE_SIDE, ShapeWindow, type ShapeSource } from './shapeWindow.ts';
 import { keepUploadRange, type UploadRange } from '../uploadRange.ts';
 
@@ -218,6 +219,8 @@ function windowTex(data: Uint16Array, S: number): THREE.DataTexture {
   t.minFilter = t.magFilter = THREE.NearestFilter;
   t.generateMipmaps = false;
   t.needsUpdate = true;
+  // On WebGPU (the GPU port's step 5) RGBA32UI, its numbers the same (`widenWindowTex`).
+  if (GPU.webgpu) widenWindowTex(t);
   return t;
 }
 
@@ -1305,6 +1308,7 @@ export class HorizonField {
     if (this.winTex && this.tintTex && this.place.S === p.S && this.place.T === p.T) {
       this.winTex.image = { data: window, width: p.S, height: p.S } as never;
       this.winTex.needsUpdate = true;
+      if (GPU.webgpu) widenWindowTex(this.winTex);
       this.tintTex.image = { data: tint, width: p.T, height: p.T } as never;
       this.tintTex.needsUpdate = true;
       old.length = 0;
@@ -1331,6 +1335,8 @@ export class HorizonField {
   private uploadPieces(dst: THREE.DataTexture, r: IndexRect, data: ArrayBufferView, size: number, format: THREE.PixelFormat, type: THREE.TextureDataType): void {
     const ren = this.renderer;
     if (!ren || !r.w || !r.h) return;
+    // The composition window's strips on WebGPU (the GPU port's step 5): RGBA32UI, as the window is there.
+    if (GPU.webgpu && type === THREE.UnsignedShortType) [data, type] = [Uint32Array.from(data as Uint16Array), THREE.UnsignedIntType];
     const src = new THREE.DataTexture(data as never, r.w, r.h, format, type);
     src.unpackAlignment = 1;
     const box = new THREE.Box2();
@@ -1485,6 +1491,11 @@ export class HorizonField {
    * texel a layer, as sRGB bytes; and the ring program's active samplers as the driver counts them, against its units.
    * Builds one small program of its own (a self test's, never the game's).
    */
+  /** The ground's tables the field was handed (its arrays' own pixels), for the WebGPU self test's means (the port's step 5). */
+  get groundTables(): FieldGround | null {
+    return this.ground;
+  }
+
   selfTest(renderer: THREE.WebGLRenderer, ground: GroundTileUniforms, material: THREE.Material): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     const g = this.ground;

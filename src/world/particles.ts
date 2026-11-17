@@ -20,6 +20,8 @@ import { projectedBehind } from '../core/depthMode.ts';
 import { FOUNTAIN_SPRAY_TUNE, emitterKept, isFountainSpray, type DrawableEmitter } from './particleDraw.ts';
 import { SWOOSH_TUNE, SwooshTrail, stripQuads, writeStrip, type SwooshDef } from './swooshTrail.ts';
 import { keepUploadRange, type UploadRange } from './uploadRange.ts';
+import { GPU } from '../core/gpuSwitch.ts';
+import { shareRef } from './stencilRef.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -1132,6 +1134,9 @@ export class ParticleEffects {
   ) {
     this.actorLayer = options.actorLayer ?? true;
     this.shader = options.shader ?? null;
+    // On WebGPU (the GPU port's step 5) one batch of each blending, empty and hidden, for the warm-up to build what each
+    // blending draws with behind the loading screen: WebGPU keys a pipeline on its blending, WebGL's program never on it.
+    if (GPU.webgpu) for (const blend of ['alpha', 'add', 'modulate'] as const) this.batch('@gpu-warm', blend, this.white);
   }
 
   /** Quads queued in the last update. */
@@ -1508,6 +1513,9 @@ export class ParticleEffects {
   /** A 1-texel white texture: the flat-colour batch's map, so its quads draw in their own colour on the shared program. */
   private readonly white = (() => {
     const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    // On WebGPU (the GPU port's step 5) filtered linearly, as every picture the batches share one graph with: three writes
+    // a texture filtered nearest both ways as a fetch with no sampler, so a graph built while it was bound fetched them all.
+    if (GPU.webgpu) t.minFilter = t.magFilter = THREE.LinearFilter;
     t.needsUpdate = true;
     return t;
   })();
@@ -1535,6 +1543,17 @@ export class ParticleEffects {
       side: THREE.DoubleSide,
       blending: blend === 'add' ? THREE.AdditiveBlending : blend === 'modulate' ? THREE.MultiplyBlending : THREE.NormalBlending,
     });
+    // On WebGPU (the GPU port's step 5) a node graph of its own, one for every batch of a kind; a replacement shader is the
+    // weather's (`WEATHER_PARTICLE_SHADER`, the one there is), drawn by its own variant.
+    if (GPU.webgpu) material.userData.gpuStandIn = () => GPU.rt!.standIns.particles(shader !== null);
+    // Three 0.187 blends `MultiplyBlending` only premultiplied: WebGL says so and leaves the last blend standing, WebGPU says
+    // so and makes a pipeline with no blend at all (an opaque square). On WebGPU a modulate batch blends by the client's own
+    // rule instead (`particle.mjs`'s 'modulate': the colour under it times the texel's colour, its alpha kept).
+    if (GPU.webgpu && blend === 'modulate') Object.assign(material, { blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });
+    // WebGPU keys a pipeline on the stencil the portal renderer writes on every material it registers, which the world's
+    // scan does a quarter-second after a batch made in play is first drawn: on WebGPU a batch of the world's (every set but
+    // the weather's, whose pass writes its own at each draw) carries that stencil from the start, `registerMaterial`'s own.
+    if (GPU.webgpu && !shader) { Object.assign(material, { stencilWrite: true, stencilFunc: THREE.EqualStencilFunc, stencilFuncMask: 0xff, stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp }); shareRef(material); }
     const geometry = new THREE.BufferGeometry();
     const mesh = new THREE.Mesh(geometry, material);
     mesh.frustumCulled = false;
@@ -1550,6 +1569,29 @@ export class ParticleEffects {
     this.grow(b, 256);
     this.batches.set(key, b);
     return b;
+  }
+
+  /**
+   * On WebGPU (the GPU port's step 5): a hidden twin of each of the warm-up's own batches, its material passed through
+   * `stencil` and kept out of `batchMaterials`, so a pass that writes its own stencil on the batches at every draw (the
+   * weather's: none outdoors, the exits' indoors) has each of its states built behind the loading screen, as WebGPU keys a
+   * pipeline on the stencil. The twins share their batch's geometry and are never drawn.
+   */
+  gpuWarmTwins(stencil: (m: THREE.Material) => void): void {
+    for (const b of [...this.batches.values()]) {
+      if (!b.key.startsWith('@gpu-warm|')) continue;
+      const m = b.material.clone();
+      m.userData.gpuStandIn = b.material.userData.gpuStandIn;
+      stencil(m);
+      const twin = new THREE.Mesh(b.mesh.geometry, m);
+      twin.frustumCulled = false;
+      twin.matrixAutoUpdate = false;
+      twin.renderOrder = b.mesh.renderOrder;
+      twin.layers.mask = b.mesh.layers.mask;
+      twin.visible = false;
+      twin.userData.gpuWarmTwin = true;
+      this.scene.add(twin);
+    }
   }
 
   private grow(b: Batch, quads: number): void {
@@ -1980,6 +2022,8 @@ export class ParticleEffects {
 
   dispose(): void {
     this.disposed = true;
+    // On WebGPU the warm-up's twins (`gpuWarmTwins`): this set's own, found by the geometry they share with its batches.
+    if (GPU.webgpu) { const own = new Set([...this.batches.values()].map((b) => b.mesh.geometry)); for (const o of [...this.scene.children]) if (o.userData.gpuWarmTwin === true && own.has((o as THREE.Mesh).geometry)) { this.scene.remove(o); ((o as THREE.Mesh).material as THREE.Material).dispose(); } }
     for (const b of this.batches.values()) {
       this.scene.remove(b.mesh);
       b.mesh.geometry.dispose();

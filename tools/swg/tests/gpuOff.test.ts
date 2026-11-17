@@ -191,7 +191,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ['src/main.ts', "if (GPU.webgpu) this.backend = 'unknown';", 'else {'],
     ['src/main.ts', 'if (GPU.webgpu) World.anisotropy = Math.min(8, (this.renderer as unknown as { getMaxAnisotropy(): number }).getMaxAnisotropy());', 'else World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());'],
     ['src/main.ts', 'if (GPU.webgpu) this.forceGpuOff();', 'else if (S.effects) this.postfx = this.makePostFX();'],
-    ['src/main.ts', "if (GPU.webgpu) HORIZON_TUNE.ground = 'tiles';", "else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';"],
+    // Step 5: the far rings drawn on WebGPU as on WebGL where the Graphics page asks, unless their part is left out at load.
+    ['src/main.ts', "if (GPU.webgpu) HORIZON_TUNE.ground = S.farRings && GPU.rt!.look({}).rings === true ? 'rings' : 'tiles';", "else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';"],
     ['src/main.ts', 'if (GPU.webgpu) perf.attach(null);', 'else perf.attach(this.renderer.getContext() as WebGL2RenderingContext);'],
     ['src/main.ts', 'if (GPU.webgpu) this.frameCalls = GPU.rt!.frameDraws();', 'else this.frameCalls = info.calls;'],
   ];
@@ -318,6 +319,97 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(warm.includes("if (o.name === 'flora stand-in' && o.castShadow !== true) {"), "patchWarm.ts: and told to cast, so the sun's cascades list their shadow pipelines, inside the warm patch");
     const flora = readFileSync(join(SRC, 'world', 'flora.ts'), 'utf8');
     ok(!/receiveShadow|castShadow/.test(flora.slice(flora.indexOf('standIns(): THREE.InstancedMesh[] {'), flora.indexOf('materials(out: Set<THREE.Material>'))), 'flora.ts: the stand-ins are made as 1446f2a made them');
+  }
+  // Step 5 (the ground's tile program, the version-3 ground and the far rings on WebGPU): each site registers a node material
+  // of its own as its stand-in on a WebGPU line of its own, the WebGL lines it had standing round it as they stood; the
+  // composition window's picture is made RGBA32UI on WebGPU alone; the horizon's self test hands WebGPU its own half before
+  // the WebGL line; and the rings are held to the far tiles only with their part left out at load.
+  {
+    const step5: [string, string, string, string][] = [
+      // [file, WebGPU line, the line before it, the line after it]
+      ['src/world/terrainTextures.ts', 'if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.groundTiles(u);', '// stand-in, each chunk in its colour map\'s colour, where that part is left out at load).', 'return mat;'],
+      ['src/world/terrainTextures.ts', "if (GPU.webgpu) [mat.userData.gpuStandIn, mat.customProgramCacheKey] = [() => GPU.rt!.standIns.groundFamilies({ texture, layerOf, sizeOf, normals, normalScale, glossScale }), () => `swg-ground-wet-${mat.uuid}`];", "// material: three keeps one built graph a key, and two worlds of one count would draw each other's.", 'this.material = mat;'],
+      ['src/world/horizon/horizonRings.ts', 'if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.ring(u, ground);', '// On WebGPU (the GPU port\'s step 5) the ring program is a node material of its own over the very same uniforms.', 'return mat;'],
+      ['src/world/horizon/horizonRings.ts', 'if (GPU.webgpu) widenWindowTex(w);', "// picture as a float one, and takes `internalFormat` for WebGPU's own format name.", 'const tn = tex1(THREE.RGBAFormat, THREE.UnsignedByteType, new Uint8Array([255, 255, 255, 255]));'],
+      ['src/world/horizon/horizonField.ts', 'if (GPU.webgpu) widenWindowTex(t);', "// On WebGPU (the GPU port's step 5) RGBA32UI, its numbers the same (`widenWindowTex`).", 'return t;'],
+      ['src/world/horizon/horizonField.ts', 'if (GPU.webgpu) widenWindowTex(this.winTex);', 'this.winTex.needsUpdate = true;', 'this.tintTex.image = { data: tint, width: p.T, height: p.T } as never;'],
+      ['src/world/horizon/horizonField.ts', 'if (GPU.webgpu && type === THREE.UnsignedShortType) [data, type] = [Uint32Array.from(data as Uint16Array), THREE.UnsignedIntType];', "// The composition window's strips on WebGPU (the GPU port's step 5): RGBA32UI, as the window is there.", 'const src = new THREE.DataTexture(data as never, r.w, r.h, format, type);'],
+      ['src/world/world.ts', 'if (GPU.webgpu) return GPU.rt!.horizonSelfTest({ ground: f.groundTables, groundArray: s.ground.uGround.value, patch: s.patch, scene: this.scene, camera: this.camera!, uniforms: s.uniforms, fine: f.surface.fine, coarse: f.surface.coarse, shape: f.shape });', "// On WebGPU (the GPU port's step 5) the means, the ring's textures off its WGSL and its arithmetic on the GPU.", 'return f.selfTest(this.renderer, s.ground, s.material);'],
+      ['src/main.ts', "if (GPU.webgpu && key === 'farRings' && GPU.rt!.look({}).rings !== true) return { off: 'left out at load on WebGPU (swg.gpu.rings)' };", "// The far rings are on WebGPU from the port's step 5, unless their part was left out at load (localStorage['swg.gpu.rings'] = '0').", "// The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance."],
+      ['src/main.ts', 'if (GPU.webgpu && g !== \'tiles\' && GPU.rt!.look({}).rings !== true) return "left out at load on WebGPU (localStorage[\'swg.gpu.rings\'] = \'0\'): the far ground is drawn as far tiles there";', "// The far rings are drawn on WebGPU from the port's step 5 (`gpuGround.ts`), unless their part was left out at load.", 'const was = HORIZON_TUNE.ground;'],
+    ];
+    for (const [f, gpu, before, afterLine] of step5) {
+      const l = lines(f);
+      const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
+      ok(at.length === 1, `${f}: step 5's WebGPU line is there once: ${gpu}`);
+      ok(l[at[0] - 1] === before && l[at[0] + 1] === afterLine, `${f}: step 5's WebGPU line stands between the lines 28fdb7c had there: ${afterLine}`);
+    }
+    // The guards folded into forceGpuOff (WebGPU alone): the rings held to the far tiles only with their part left out at load.
+    const l = lines('src/main.ts');
+    const f = l.indexOf('private forceGpuOff(): void {');
+    const g = l.indexOf('if (rt.look({}).rings !== true) {');
+    ok(f > 0 && g > f && g - f < 12 && l[g + 2] === "HORIZON_TUNE.ground = 'tiles';", 'main.ts: the far ground is held to the far tiles on WebGPU only inside forceGpuOff, and only with the rings left out at load');
+    ok(l.filter((x) => x === "if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };").length === 1, "main.ts: the Graphics page's far rings row is on WebGPU from step 5, the effects, the volumetrics and the far tree cards still not");
+    for (const g5 of ['gpuGround.ts', 'gpuGroundSelfTest.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g5)), `step 5's ${g5} is under src/core/gpu/`);
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes("groundSelfTest: () => groundSelfTestGpu(renderer),") && startText.includes('return horizonSelfTestGpu(renderer, o);'), "start.ts: the ground's and the horizon's self tests are the WebGPU side's own");
+    ok(/renderer\.copyTextureToTexture = \(src: Any, dst: Any, \.\.\.rest: Any\[\]\) => \{\s*if \(\(src\?\.isDataTexture === true \|\| src\?\.isDataArrayTexture === true\) && src\.image\?\.data\) src\.needsUpdate = true;/.test(startText), "start.ts: a data source is marked for upload at every copy on WebGPU, as WebGL's copy uploads its bytes");
+  }
+  // Step 5's own programs (items 3 to 6: the lava, the marks, the blades, the client's particles and the weather's variant,
+  // the tunnel): each site registers its node graph on a WebGPU line of its own, the WebGL lines it had standing round it as
+  // they stood (the lava's step 3 line is unchanged: the runtime's `lava` is the graph now); the marks, made with their module
+  // before the boot, are handed their graphs by the boot's own guarded line; the weather hands the warm-up its hidden batches
+  // on WebGPU before the WebGL lines, and twins of them in each of its pass's stencils; a batch of the world's carries the
+  // portal renderer's stencil from its making and a modulate batch the client's blend, on WebGPU alone; and the noise volume
+  // goes up with no chain on WebGPU alone.
+  {
+    const own: [string, string, string, string][] = [
+      // [file, WebGPU line, the line before it, the line after it]
+      ['src/combat/saberBlade.ts', 'if (GPU.webgpu) for (const m of [this.glow, this.core, this.smearGlow, this.smearCore]) m.material.userData.gpuStandIn = () => GPU.rt!.standIns.blade();', "// On WebGPU (the GPU port's step 5) the ribbons' program is a node graph of its own, one for every ribbon of every blade.", 'for (let i = 0; i < HISTORY; i++) this.history.push({ a: new THREE.Vector3(), b: new THREE.Vector3(), age: Infinity });'],
+      ['src/world/particles.ts', 'if (GPU.webgpu) material.userData.gpuStandIn = () => GPU.rt!.standIns.particles(shader !== null);', "// weather's (`WEATHER_PARTICLE_SHADER`, the one there is), drawn by its own variant.", '// Three 0.187 blends `MultiplyBlending` only premultiplied: WebGL says so and leaves the last blend standing, WebGPU says'],
+      ['src/world/particles.ts', "if (GPU.webgpu && blend === 'modulate') Object.assign(material, { blending: THREE.CustomBlending, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor });", "// rule instead (`particle.mjs`'s 'modulate': the colour under it times the texel's colour, its alpha kept).", "// WebGPU keys a pipeline on the stencil the portal renderer writes on every material it registers, which the world's"],
+      ['src/world/particles.ts', 'if (GPU.webgpu && !shader) { Object.assign(material, { stencilWrite: true, stencilFunc: THREE.EqualStencilFunc, stencilFuncMask: 0xff, stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp }); shareRef(material); }', "// the weather's, whose pass writes its own at each draw) carries that stencil from the start, `registerMaterial`'s own.", 'const geometry = new THREE.BufferGeometry();'],
+      ['src/world/particles.ts', 'if (GPU.webgpu) { const own = new Set([...this.batches.values()].map((b) => b.mesh.geometry)); for (const o of [...this.scene.children]) if (o.userData.gpuWarmTwin === true && own.has((o as THREE.Mesh).geometry)) { this.scene.remove(o); ((o as THREE.Mesh).material as THREE.Material).dispose(); } }', "// On WebGPU the warm-up's twins (`gpuWarmTwins`): this set's own, found by the geometry they share with its batches.", 'for (const b of this.batches.values()) {'],
+      ['src/world/particles.ts', 'if (GPU.webgpu) t.minFilter = t.magFilter = THREE.LinearFilter;', '// a texture filtered nearest both ways as a fetch with no sampler, so a graph built while it was bound fetched them all.', 't.needsUpdate = true;'],
+      ['src/world/marks.ts', 'this.standIn.minFilter = this.standIn.magFilter = THREE.LinearFilter;', '// filtered nearest both ways as a fetch with no sampler, so the graph built while it was bound would fetch the sheet.', 'this.blended.useGpu();'],
+      ['src/world/weather.ts', 'if (GPU.webgpu) for (const portalView of [false, true]) fx.gpuWarmTwins((m) => passStencil(m, portalView));', "// which WebGPU keys a pipeline on, through hidden twins of the set's own warm batches (`gpuWarmTwins`).", 'this.fxEffects = fx;'],
+      ['src/world/particles.ts', "if (GPU.webgpu) for (const blend of ['alpha', 'add', 'modulate'] as const) this.batch('@gpu-warm', blend, this.white);", '// blending draws with behind the loading screen: WebGPU keys a pipeline on its blending, WebGL\'s program never on it.', '}'],
+      ['src/space/hyperspaceTunnel.ts', 'if (GPU.webgpu) this.material.userData.gpuStandIn = () => GPU.rt!.standIns.tunnel();', "// On WebGPU (the GPU port's step 5) the program is a node graph of its own, warmed with the rest behind every screen.", '// A unit sphere with its poles on Z (the nose), scaled to the ellipsoid per jump.'],
+      ['src/main.ts', 'if (GPU.webgpu) this.marks.useGpu();', "// On WebGPU (the GPU port's step 5) both sheets drawn by a node graph of their own: made with the module, before the boot.", '// What lays the mark a bolt leaves where it stops (`src/combat/scars.ts`). The combat code has'],
+      ['src/world/weather.ts', 'if (GPU.webgpu) return renderer.compileAsync(this.gpuRoot, camera, this.scene).then(() => undefined, () => undefined);', '// hidden for want of quads: handed as a root of its drawables, the warm-up lists every one (`patchWarm.ts`).', 'if (waitReady) return renderer.compileAsync(this.scene, camera, this.scene).then(() => undefined, () => undefined);'],
+      ['src/world/heatNoise.ts', 'if (GPU.webgpu) tex.generateMipmaps = false;', "// and the lava's own far fade (its veins faded to their mean past two texels a pixel) carries what the chain carried.", 'tex.needsUpdate = true;'],
+    ];
+    for (const [f, gpu, before, afterLine] of own) {
+      const l = lines(f);
+      const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
+      ok(at.length === 1, `${f}: step 5's WebGPU line is there once: ${gpu}`);
+      ok(l[at[0] - 1] === before && l[at[0] + 1] === afterLine, `${f}: step 5's WebGPU line stands between the lines 28fdb7c had there: ${afterLine}`);
+    }
+    // The lava's site keeps step 3's line: the graph is the runtime's answer to it.
+    ok(lines('src/world/lava.ts').filter((x) => x === 'material.userData.gpuStandIn = () => GPU.rt!.standIns.lava(middle);').length === 1, "lava.ts: step 3's stand-in line stands as it was (the runtime answers it with the client's lava)");
+    // The marks' sheets get their graphs only from the boot's guard: `useGpu` is called nowhere else under src/.
+    const files: string[] = [];
+    const walkSrc = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walkSrc(p);
+        else if (CODE.test(n) && !n.endsWith('.d.ts')) files.push(p);
+      }
+    };
+    walkSrc(SRC);
+    const calls = files.filter((f) => !inGpuDir(f)).flatMap((f) => readFileSync(f, 'utf8').split(/\r?\n/).filter((x) => /\.useGpu\(\)/.test(x) && !/^\s*useGpu\(\)/.test(x)).map((x) => `${rel(f)}: ${x.trim()}`));
+    ok(calls.length === 3 && calls.filter((c) => c.startsWith('src/main.ts: if (GPU.webgpu) this.marks.useGpu();')).length === 1 && calls.filter((c) => c.startsWith('src/world/marks.ts:')).length === 2, `the marks' WebGPU graphs are handed over from the boot's guard alone: ${calls.join('; ')}`);
+    // The particles' warm twins are made by the weather's guarded line alone, and touch nothing on WebGL: the method is
+    // called nowhere else, and the set's dispose reaches them only on its own WebGPU line.
+    const twins = files.flatMap((f) => readFileSync(f, 'utf8').split(/\r?\n/).filter((x) => /\.gpuWarmTwins\(/.test(x)).map((x) => `${rel(f)}: ${x.trim()}`));
+    ok(twins.length === 1 && twins[0].startsWith('src/world/weather.ts: if (GPU.webgpu) for (const portalView of [false, true]) fx.gpuWarmTwins('), `the particles' warm twins are made from the weather's WebGPU guard alone: ${twins.join('; ')}`);
+    ok(lines('src/world/particles.ts').filter((x) => /gpuWarmTwin\b/.test(x) && !/^\s*(\/\/|\*)/.test(x)).every((x) => /twin\.userData\.gpuWarmTwin = true;|if \(GPU\.webgpu\) \{ const own/.test(x)), "particles.ts: the twins' mark is written by the method and read by the dispose's WebGPU line alone");
+    // The weather's root for the warm-up is a getter, made only when the WebGPU line asks for it.
+    const w = readFileSync(join(SRC, 'world', 'weather.ts'), 'utf8');
+    ok(/private get gpuRoot\(\): THREE\.Object3D \{/.test(w) && (w.match(/this\.gpuRoot/g) ?? []).length === 1, 'weather.ts: the warm-up root is a getter read by the WebGPU line alone');
+    ok(existsSync(join(SRC, 'core', 'gpu', 'gpuPrograms.ts')), "step 5's gpuPrograms.ts is under src/core/gpu/");
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes('programs: programsReport(),') && startText.includes('notPorted: { ...NOT_PORTED },'), "start.ts: gpu() says the programs of step 5 and what is not ported");
   }
   // The doorways on WebGPU: their two ways of being drawn each wear a material of their own, the WebGL lines after the guard.
   {

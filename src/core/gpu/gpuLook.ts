@@ -19,6 +19,12 @@ export const GPU_LOOK = {
    * is already near the ground's own colour; less darkens it, more lightens it.
    */
   groundTint: 1,
+  /**
+   * The ground's and the far rings' share of the diffuse three 0.187's physical model cuts for its own highlight, given back
+   * (the GPU port's step 5, `gpuGround.ts`). 1: the WebGL picture, which holds 0.185's uncut diffuse (`threeHolds.ts`,
+   * `light-diffuse` and `ambient-diffuse`); 0 is three 0.187's own.
+   */
+  groundDiffuseBack: 1,
 };
 
 export function tuneGpuLook(o: Partial<typeof GPU_LOOK>): typeof GPU_LOOK {

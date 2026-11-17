@@ -121,7 +121,25 @@ export function carriesReport(renderer: Any, scene: THREE.Object3D | null): Reco
 export const STAYS: Readonly<Record<string, string>> = {
   wetness: "the rain's wet look is an onBeforeCompile wrap (`wetness.ts`), which a node copy never runs: no surface wets on WebGPU (a remake of the owner's)",
   sway: "the flora sway is an onBeforeCompile wrap (`floraSway.ts`) with depth materials of its own: nothing sways on WebGPU, and a swaying mesh casts through three's own depth (a remake of the owner's)",
-  ground: "the ground's tile program is a ShaderMaterial (step 5): drawn as the ground stand-in (`gpu stand-in: ground`)",
-  shaderMaterials: 'every ShaderMaterial is step 5: listed by name and count under `unsupported`, a stand-in drawn where one is named under `standIns`',
-  effects: 'the effects chain is step 6: forced off (`forcedOff.effects`), straight to the canvas with three\'s tone mapping at the game\'s exposure',
+  shaderMaterials: "step 5 ported the programs of ours that stay (the ground, the far rings, lava, the marks, the blades, the client's particles, the tunnel); what is left is `notPorted`, each still listed by name and count under `unsupported` and never drawn, or drawn as step 3's stand-in where one is named under `standIns`",
+  effects: 'the effects chain is step 6 (ambient occlusion, bloom and the colour grade; every other effect a design session of the owner\'s): forced off (`forcedOff.effects`), straight to the canvas with three\'s tone mapping at the game\'s exposure',
+};
+
+/**
+ * What the port leaves for the remakes the owner designs (the GPU port's step 5, his words of 2026-11-14 to 16): each drawn as
+ * step 3 left it (a stand-in where `standIns` names one, else not drawn) and never ported. `__debug.gpu().notPorted`.
+ */
+export const NOT_PORTED: Readonly<Record<string, string>> = {
+  sky: 'the dome, the bodies, the stars, the space sky and the nebulae: a remake (step 3\'s gradient stand-in for the domes; the rest not drawn)',
+  water: 'the lakes, the sea, the rivers, the ripples, underwater, the swell and its specks: a remake (three\'s plain copy of the water\'s classic material, flat in its look\'s colour)',
+  clouds: 'the sheets and the volumetric clouds: a remake (not drawn)',
+  volumetrics: "the air, its dust, our rain, the fog, the ground's air variant and the lava's crust twin: a remake (the master is held off on WebGPU)",
+  wetness: 'the wet look of every surface: a remake (an onBeforeCompile wrap no node copy runs)',
+  sway: 'the flora sway and its depth materials: a remake (nothing sways; a swaying mesh casts through three\'s own depth)',
+  grass: 'the radial tufts, the far tiles\' tree cards and the horizon\'s card field: the remake of the plant sprites (not drawn)',
+  force: "Force lightning and every Force power's own effects: the owner's overhaul (`forceLightning.ts` not drawn; whatever a power places through the client's particles draws as it falls out)",
+  vehicleDust: 'the vehicles\' dust (`vehicles/dust.ts`): not drawn',
+  roomAir: "the rooms' motes and the daylight beams: not drawn",
+  previewDof: "the previews' depth of field: not drawn",
+  effects: 'every effect pass: step 6 ports ambient occlusion, bloom and the colour grade; the rest are design sessions with the owner',
 };

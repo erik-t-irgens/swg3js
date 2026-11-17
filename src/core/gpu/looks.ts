@@ -35,13 +35,27 @@ function atLoad(name: string): boolean {
 }
 
 /** The parts taken in at load, read once. */
-export const LOOKS_AT_LOAD = { spec: atLoad('spec'), env: atLoad('env'), detail: atLoad('detail'), card: atLoad('card') };
+export const LOOKS_AT_LOAD = {
+  spec: atLoad('spec'),
+  env: atLoad('env'),
+  detail: atLoad('detail'),
+  card: atLoad('card'),
+  ground: atLoad('ground'),
+  rings: atLoad('rings'),
+  // Step 5's own programs (`gpuPrograms.ts`): each left out at load falls back to step 3's (the lava's plain colour, and
+  // for the rest nothing drawn). No live switch: each is a program of its own, not a part on a node copy.
+  lava: atLoad('lava'),
+  marks: atLoad('marks'),
+  blades: atLoad('blades'),
+  particles: atLoad('particles'),
+  tunnel: atLoad('tunnel'),
+};
 
 /**
- * The live switches (`__debug.gpu({ look: { spec, env, detail, card } })`), each read by its part as a uniform (or, for the
+ * The live switches (`__debug.gpu({ look: { spec, env, detail, card, ground } })`), each read by its part as a uniform (or, for the
  * environment, by the world's capture). All on by default: the look the WebGL path draws. Not remembered.
  */
-export const GPU_LOOKS = { spec: LOOKS_AT_LOAD.spec, env: LOOKS_AT_LOAD.env, detail: LOOKS_AT_LOAD.detail, card: LOOKS_AT_LOAD.card };
+export const GPU_LOOKS = { spec: LOOKS_AT_LOAD.spec, env: LOOKS_AT_LOAD.env, detail: LOOKS_AT_LOAD.detail, card: LOOKS_AT_LOAD.card, ground: LOOKS_AT_LOAD.ground, rings: LOOKS_AT_LOAD.rings };
 
 /** The parts on the node copy, in the order they go on (`gpuDetail.ts`'s colour first, then the highlight's lighting, then the leaf cards' changes to that lighting, `gpuCard.ts`). */
 export const LOOK_PARTS: LookPart[] = [];
@@ -83,7 +97,7 @@ export function looksReport(extra: Record<string, unknown> = {}): Record<string,
   return {
     atLoad: { ...LOOKS_AT_LOAD },
     live: { ...GPU_LOOKS },
-    switches: "__debug.gpu({ look: { spec, env, detail, card } }) live (a uniform; nothing built); localStorage['swg.gpu.<part>'] = '0' and a reload leaves a part out (three's plain node copy)",
+    switches: "__debug.gpu({ look: { spec, env, detail, card, ground } }) live (a uniform; nothing built); localStorage['swg.gpu.<part>'] = '0' and a reload leaves a part out (three's plain node copy; for the ground step 3's plain ground, for the rings the far tiles); the rings have no live switch of their own: __debug.horizon({ ground }) moves them on WebGPU as on WebGL",
     nodeCopies: LOOK_STATS.copies,
     changedBy: Object.fromEntries(LOOK_STATS.byPart),
     ...extra,

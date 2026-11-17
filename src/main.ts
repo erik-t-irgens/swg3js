@@ -2076,7 +2076,7 @@ class App {
     // The flora's settings into their tunes before any world or camera, so the first world is planted, cast and drawn by them.
     this.applyFlora();
     // The far ground's switch from the Graphics page before any world, so the first arrival loads the bake when it is on.
-    if (GPU.webgpu) HORIZON_TUNE.ground = 'tiles';
+    if (GPU.webgpu) HORIZON_TUNE.ground = S.farRings && GPU.rt!.look({}).rings === true ? 'rings' : 'tiles';
     else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';
     // And the far tree cards to the horizon (the fifth wave, §1b Q11): made at an arrival where the rings stand.
     CARD_FIELD_TUNE.on = S.farCardsHorizon;
@@ -2519,6 +2519,8 @@ class App {
     this.litSources.world = this.world;
     this.litSources.effects = this.effects;
     this.scene.add(this.marks.group);
+    // On WebGPU (the GPU port's step 5) both sheets drawn by a node graph of their own: made with the module, before the boot.
+    if (GPU.webgpu) this.marks.useGpu();
     // What lays the mark a bolt leaves where it stops (`src/combat/scars.ts`). The combat code has
     // no way to reach the marks system and no business knowing what builds a mark, so it asks
     // through a seam and this is the one line that fills it in. The marks system lives for the
@@ -14418,7 +14420,9 @@ class App {
    */
   private volKnobState(key: string): { note?: string; off?: string } | null {
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
-    if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farRings' || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };
+    if (GPU.webgpu && (isFxSettingKey(key) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: 'not on WebGPU yet' };
+    // The far rings are on WebGPU from the port's step 5, unless their part was left out at load (localStorage['swg.gpu.rings'] = '0').
+    if (GPU.webgpu && key === 'farRings' && GPU.rt!.look({}).rings !== true) return { off: 'left out at load on WebGPU (swg.gpu.rings)' };
     // The far tiles' radius while the rings stand in their place (the horizon pass): their reach is the Terrain distance.
     if (key === 'farRadius' && this.settings.farRings) return { off: 'the rings stand in place of the far tiles: their reach is the Terrain distance' };
     // Without reversed depth the rings stop at today's 4.9 km whatever the slider says (the fifth wave's guard), and the page says why.
@@ -24128,11 +24132,15 @@ class App {
   private forceGpuOff(): void {
     const rt = GPU.rt!;
     rt.forced('effects', 'the effects chain is not made on WebGPU this step (step 6): straight to the canvas, three\'s tone mapping at the game\'s exposure');
-    rt.forced('far rings', 'a program of ours (step 5): the far ground is drawn as far tiles');
     rt.forced('volumetrics', 'the master is held off: its remake is the owner\'s');
     rt.forced('shadow hold', 'every cascade is drawn every frame');
     rt.forced('shadow batches', 'every caster draws itself');
-    HORIZON_TUNE.ground = 'tiles';
+    // The far rings are drawn on WebGPU from the port's step 5 (`gpuGround.ts`); with their part left out at load
+    // (`localStorage['swg.gpu.rings'] = '0'`) the far ground is drawn as far tiles, as step 3 drew it.
+    if (rt.look({}).rings !== true) {
+      rt.forced('far rings', "their part is left out at load (localStorage['swg.gpu.rings'] = '0'): the far ground is drawn as far tiles");
+      HORIZON_TUNE.ground = 'tiles';
+    }
     VOL_TUNE.on = false;
     SHADOW_PASS_TUNE.cadence = false;
     SHADOW_PASS_TUNE.batches = false;
@@ -30746,8 +30754,8 @@ class App {
    * between `'both'` and `'rings'`, the far tiles shown, hidden or let go. Answers what it came to.
    */
   private async setHorizonGround(g: HorizonGround): Promise<string> {
-    // The far rings are a program of ours, not drawn on WebGPU this step (step 5): the far tiles stand there.
-    if (GPU.webgpu && g !== 'tiles') return 'not on WebGPU yet: the far ground is drawn as far tiles there (the rings are step 5)';
+    // The far rings are drawn on WebGPU from the port's step 5 (`gpuGround.ts`), unless their part was left out at load.
+    if (GPU.webgpu && g !== 'tiles' && GPU.rt!.look({}).rings !== true) return "left out at load on WebGPU (localStorage['swg.gpu.rings'] = '0'): the far ground is drawn as far tiles there";
     const was = HORIZON_TUNE.ground;
     HORIZON_TUNE.ground = g;
     if (g === 'tiles') {

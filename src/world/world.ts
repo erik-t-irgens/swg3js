@@ -13023,10 +13023,12 @@ export class World {
   }
 
   /** The far ground's self test for the console (`__debug.horizon({ selfTest: true })`): the layer means and the ring program's samplers. */
-  horizonSelfTest(): Record<string, unknown> {
+  horizonSelfTest(): Record<string, unknown> | Promise<Record<string, unknown>> {
     const f = this.horizonField;
     const s = this.horizonSession;
     if (!f || !s || f.state.state !== 'ready' || !this.renderer) return { skipped: 'no bake drawn' };
+    // On WebGPU (the GPU port's step 5) the means, the ring's textures off its WGSL and its arithmetic on the GPU.
+    if (GPU.webgpu) return GPU.rt!.horizonSelfTest({ ground: f.groundTables, groundArray: s.ground.uGround.value, patch: s.patch, scene: this.scene, camera: this.camera!, uniforms: s.uniforms, fine: f.surface.fine, coarse: f.surface.coarse, shape: f.shape });
     return f.selfTest(this.renderer, s.ground, s.material);
   }
 

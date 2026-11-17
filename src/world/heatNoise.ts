@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { HEAT_NOISE_SIZE, heatNoiseData } from './heatNoiseData';
+import { GPU } from '../core/gpuSwitch.ts';
 
 let shared: THREE.Data3DTexture | null = null;
 
@@ -30,5 +31,9 @@ export function setupNoiseVolume(tex: THREE.Data3DTexture): void {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.wrapR = THREE.RepeatWrapping;
+  // On WebGPU (the GPU port's step 5) three 0.187 builds a 3D texture's chain through 2D-array views, which WebGPU refuses
+  // for a 3D texture (every frame a validation error, the lava's binding invalid): the volume goes up with no chain there,
+  // and the lava's own far fade (its veins faded to their mean past two texels a pixel) carries what the chain carried.
+  if (GPU.webgpu) tex.generateMipmaps = false;
   tex.needsUpdate = true;
 }

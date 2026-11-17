@@ -43,6 +43,7 @@
 // rest of the combat code keeps its.
 import * as THREE from 'three';
 import { sabers } from '../audio/saberSounds.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /** Anything with the three fields: a `THREE.Vector3` is one, and so is a plain object in a test. */
 export interface Vec3Like {
@@ -475,6 +476,15 @@ class Sheet {
     this.mesh.visible = !this.compiled || now < this.until;
   }
 
+  /**
+   * On WebGPU alone (the GPU port's step 5): the program is a node graph of its own, and three runs no `onBeforeCompile`.
+   * The warm-up there lists every drawable whatever its visibility (`patchWarm.ts`), so the sheet need not stay shown for it.
+   */
+  useGpu(): void {
+    this.mesh.material.userData.gpuStandIn = () => GPU.rt!.standIns.marks();
+    this.compiled = true;
+  }
+
   /** The texture every cell is read out of; swapped in when the hand-drawn sheet has been rasterised. */
   setSheet(tex: THREE.Texture): void {
     this.mesh.material.uniforms.uSheet.value = tex;
@@ -668,6 +678,15 @@ export class Marks {
    */
   get mesh(): THREE.Object3D {
     return this.group;
+  }
+
+  /** On WebGPU alone (the GPU port's step 5), from the boot, which comes after this module made the marks: both sheets' graphs. */
+  useGpu(): void {
+    // The white texel the sheets read until the sheet arrives, filtered linearly as the sheet is: three writes a texture
+    // filtered nearest both ways as a fetch with no sampler, so the graph built while it was bound would fetch the sheet.
+    this.standIn.minFilter = this.standIn.magFilter = THREE.LinearFilter;
+    this.blended.useGpu();
+    this.additive.useGpu();
   }
 
   /** The clock the marks age by. */

@@ -9,6 +9,7 @@
 // yet formed (or already gone) is discarded, and the world shows through it.
 import * as THREE from 'three';
 import { TUNNEL_LOOK, type TunnelLook } from './hyperspaceMath.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /** Drawn after every sky layer (the dome -10, the skybox -9, the stars -6, the space bodies -4, the world's sky -1) and before every ordinary opaque (0). */
 export const TUNNEL_RENDER_ORDER = -0.5;
@@ -112,6 +113,8 @@ export class HyperspaceTunnel {
     // No cascades (it has no lights), no wet wrap, nothing that would change its program once it is built.
     this.material.userData.unlit = true;
     this.material.userData.dry = true;
+    // On WebGPU (the GPU port's step 5) the program is a node graph of its own, warmed with the rest behind every screen.
+    if (GPU.webgpu) this.material.userData.gpuStandIn = () => GPU.rt!.standIns.tunnel();
     // A unit sphere with its poles on Z (the nose), scaled to the ellipsoid per jump.
     const geometry = new THREE.SphereGeometry(1, 96, 64).rotateX(Math.PI / 2);
     this.mesh = new THREE.Mesh(geometry, this.material);

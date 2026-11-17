@@ -15,6 +15,21 @@ import { MeshBasicNodeMaterial, MeshStandardNodeMaterial, NodeMaterial } from 't
 import { attribute, float, mix, normalize, positionGeometry, positionLocal, renderGroup, smoothstep, uniform, vec3, vec4, vertexColor } from 'three/tsl';
 import type { GpuStandIns, LiveColour } from '../gpuSwitch.ts';
 import { GPU_LOOK } from './gpuLook.ts';
+import { groundFamiliesNode, groundTilesNode, ringNode } from './gpuGround.ts';
+import { bladeNode, lavaNode, marksNode, particlesNode, tunnelNode } from './gpuPrograms.ts';
+import { LOOKS_AT_LOAD } from './looks.ts';
+
+/**
+ * A program of step 5's left out at load (`localStorage['swg.gpu.<part>'] = '0'`): step 3's way, nothing drawn. Every vertex
+ * outside the clip volume, so nothing is rasterised and no attribute of the geometry is read.
+ */
+function drawsNothing(name: string): THREE.Material {
+  const m = new NodeMaterial();
+  m.name = `gpu: ${name} left out at load`;
+  m.vertexNode = vec4(2, 2, 2, 1);
+  m.fragmentNode = vec4(0, 0, 0, 0);
+  return m;
+}
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -42,6 +57,8 @@ export function makeStandIns(): GpuStandIns {
       return m;
     },
     lava(c) {
+      // Step 5: the client's lava itself (`gpuPrograms.ts`), unless its part was left out at load.
+      if (LOOKS_AT_LOAD.lava) return lavaNode();
       const m = new MeshBasicNodeMaterial();
       m.name = 'gpu stand-in: lava';
       const glow = dial(() => GPU_LOOK.lavaGlow);
@@ -63,6 +80,28 @@ export function makeStandIns(): GpuStandIns {
       m.metalnessNode = float(0);
       m.emissiveNode = vec3(0);
       return m;
+    },
+    groundTiles(u) {
+      // Step 5: the tile program itself (`gpuGround.ts`), or step 3's plain ground with its part left out at load.
+      return LOOKS_AT_LOAD.ground ? groundTilesNode(u) : this.ground('tint');
+    },
+    groundFamilies(p) {
+      return LOOKS_AT_LOAD.ground ? groundFamiliesNode(p) : this.ground('color');
+    },
+    ring(u, ground) {
+      return ringNode(u, ground);
+    },
+    marks() {
+      return LOOKS_AT_LOAD.marks ? marksNode() : drawsNothing('marks');
+    },
+    blade() {
+      return LOOKS_AT_LOAD.blades ? bladeNode() : drawsNothing('blades');
+    },
+    particles(weather) {
+      return LOOKS_AT_LOAD.particles ? particlesNode(weather) : drawsNothing('particles');
+    },
+    tunnel() {
+      return LOOKS_AT_LOAD.tunnel ? tunnelNode() : drawsNothing('tunnel');
     },
     depthReset(reversed) {
       // The doorway's depth reset: a full-screen triangle standing inside the clip range whose fragments write the far

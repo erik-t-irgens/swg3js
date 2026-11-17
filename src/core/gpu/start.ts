@@ -25,14 +25,18 @@ import { applyPatches, isPatchName, patchReport, setPatch } from './patches.ts';
 import { installWarm, WARM_PATCH, WARM_STATS, WARM_TUNE } from './patchWarm.ts';
 import { BUNDLE_TUNE, TierBundles } from './bundles.ts';
 import { installUsageHint, setUsageHint, USAGE_HINT } from './usageHint.ts';
-import { installLooks, LOOK_PARTS, looksReport, setLooks } from './looks.ts';
+import { installLooks, LOOK_PARTS, LOOKS_AT_LOAD, looksReport, setLooks } from './looks.ts';
 import { DETAIL_GPU_STATS, detailPart } from './gpuDetail.ts';
 import { SPEC_GPU_STATS, specPart } from './gpuSpec.ts';
 import { specSelfTestGpu } from './gpuSpecSelfTest.ts';
 import { CARD_GPU_STATS, cardPart } from './gpuCard.ts';
 import { cardLightSelfTestGpu, leafShadowSelfTestGpu } from './gpuCardSelfTest.ts';
 import { carriesReport, STAYS } from './carries.ts';
+import { NOT_PORTED } from './carries.ts';
+import { programsReport } from './gpuPrograms.ts';
 import { makeGpuEnvironment } from './gpuEnv.ts';
+import { GROUND_GPU_STATS } from './gpuGround.ts';
+import { groundSelfTestGpu, horizonSelfTestGpu, type HorizonSelfTestInput } from './gpuGroundSelfTest.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -104,6 +108,16 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   renderer.info.autoReset = false;
   // The game's `DynamicDrawUsage` hint dropped as it is set, before any world is made (`usageHint.ts`).
   installUsageHint();
+  // A rectangle put on the card by `copyTextureToTexture` from a data texture holding it (the far rings' windows, the shape
+  // window and the edits, step 5): WebGL's copy uploads the source's own bytes as they stand at every call, whatever its
+  // version; WebGPU's copies texture to texture, takes a source never marked for upload as a 1 by 1 picture, and copies a
+  // source the field refills in place (the shape window's whole stand-in and its block, kept and rewritten) from its first
+  // upload for good. So a data source holding bytes is marked at every copy, and its bytes go up first, as on WebGL.
+  const copyTexture = renderer.copyTextureToTexture.bind(renderer);
+  renderer.copyTextureToTexture = (src: Any, dst: Any, ...rest: Any[]) => {
+    if ((src?.isDataTexture === true || src?.isDataArrayTexture === true) && src.image?.data) src.needsUpdate = true;
+    return copyTexture(src, dst, ...rest);
+  };
   const fallback: FallbackStats = installFallback(renderer);
   // The models' own looks on the node copies three makes (step 4): the detail map's colour, then the client's highlight,
   // then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
@@ -160,6 +174,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         // The leaf cards drawn through the parts of ours and held to their mirror (step 4).
         cardLightSelfTest: () => cardLightSelfTestGpu(renderer),
         leafShadowSelfTest: () => leafShadowSelfTestGpu(renderer),
+        // The ground's tile program drawn through its node graph and held to its mirror (step 5).
+        groundSelfTest: () => groundSelfTestGpu(renderer),
       });
     },
     renderer: renderer as THREE.WebGLRenderer,
@@ -212,6 +228,9 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     forced(name: string, why: string) {
       if (!forcedOff.has(name)) forcedOff.set(name, why);
     },
+    horizonSelfTest(o: HorizonSelfTestInput) {
+      return horizonSelfTestGpu(renderer, o);
+    },
     async compile(scene: THREE.Object3D, camera: THREE.Camera, target: THREE.Scene | null = null) {
       if (RT_HOOKS.compile) await RT_HOOKS.compile(renderer, scene, camera, target);
     },
@@ -244,6 +263,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         stays: { ...STAYS },
         look: { ...GPU_LOOK },
         looks: looksReport({ spec: { ...SPEC_GPU_STATS, by: "a lighting model of ours extending three's physical one, its direct specular the client's term (gpuSpec.ts)" }, detail: { ...DETAIL_GPU_STATS, by: "the node copy's colour times the detail at uv(1) (gpuDetail.ts)" }, card: { ...CARD_GPU_STATS, by: "the card rule's cut, the stored normal, the client's sum after three's indirect light, the sun's shadow from the cascades' own node, the leaf skip as the lookup's place moved toward the sun (gpuCard.ts)" }, env: environment.report() }),
+        // Step 5: the ground's tile program, the version-3 ground and the far rings, node graphs of ours over the WebGL uniforms.
+        ground: { tiles: LOOKS_AT_LOAD.ground ? 'the tile program, a node graph over the very uniforms the WebGL program reads (gpuGround.ts)' : "step 3's plain ground: the part is left out at load (localStorage['swg.gpu.ground'] = '0')", rings: LOOKS_AT_LOAD.rings ? 'the far rings, a node graph over the session ring uniforms and the tile program uniforms (gpuGround.ts); __debug.horizon({ ground }) and the Graphics page move them' : "left out at load (localStorage['swg.gpu.rings'] = '0'): the far ground is drawn as far tiles", graphs: { ...GROUND_GPU_STATS, builds: { ...GROUND_GPU_STATS.builds } }, live: "__debug.gpu({ look: { ground: false } }) draws step 3's plain look through the same graph (a uniform; nothing built)", diffuseBack: GPU_LOOK.groundDiffuseBack, selfTests: '__debug.groundSelfTest() and __debug.horizon({ selfTest: true }) run on WebGPU' },
+        // Step 5's own programs (lava, the marks, the blades, the client's particles, the tunnel), and what is left for the remakes.
+        programs: programsReport(),
+        notPorted: { ...NOT_PORTED },
         sun: sunNow ? sunNow.describe() : 'no cascades yet (the first world makes them)',
         gpuErrors: { count: errors, last: lastError || null },
         warmUp: {

@@ -773,8 +773,9 @@ export function groundTilesMaterial(u: GroundTileUniforms, csm: CSM | null): THR
   // The ground carries its own wet injection; the material scan must not wrap it again.
   mat.userData.wetBuiltIn = true;
   mat.customProgramCacheKey = () => GROUND_TILES_KEY;
-  // On WebGPU (the GPU port's step 3) the tile program does not run: a stand-in draws each chunk in its colour map's colour.
-  if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.ground('tint');
+  // On WebGPU (the GPU port's step 5) the tile program is a node material of its own over the very same uniforms (step 3's
+  // stand-in, each chunk in its colour map's colour, where that part is left out at load).
+  if (GPU.webgpu) mat.userData.gpuStandIn = () => GPU.rt!.standIns.groundTiles(u);
   return mat;
 }
 
@@ -1140,6 +1141,9 @@ export class TerrainTextures {
     // The ground carries its own wet injection; the material scan must not wrap it again.
     mat.userData.wetBuiltIn = true;
     mat.customProgramCacheKey = () => `swg-ground-wet-${count}-${normals ? 'bump' : 'flat'}`;
+    // On WebGPU (the GPU port's step 5) a node material of its own over this world's pictures and lookups, keyed by the
+    // material: three keeps one built graph a key, and two worlds of one count would draw each other's.
+    if (GPU.webgpu) [mat.userData.gpuStandIn, mat.customProgramCacheKey] = [() => GPU.rt!.standIns.groundFamilies({ texture, layerOf, sizeOf, normals, normalScale, glossScale }), () => `swg-ground-wet-${mat.uuid}`];
     this.material = mat;
     return mat;
   }
