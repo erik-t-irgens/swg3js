@@ -11,10 +11,13 @@
  *
  *  - **Which ground keeps a print** is `printDepth` in `./surfaces.ts` -- sand and snow keep one,
  *    stone and metal keep none -- so the rule lives with the rest of what a surface is.
- *  - **Where the print goes.** The step's place is the body's own, between its feet, so each print
- *    is stepped sideways by half a stance and the two feet alternate. Which foot landed is not in
- *    the marks the game's own animations carry (Jedi Academy's say `_l` or `_r`, the game's say
- *    only `footstep`), so a body's feet are simply taken in turn, which is what a walk does.
+ *  - **Where the print goes.** Under the foot that landed, pointing the way that foot points
+ *    (`footAt`, `PRINT_TUNE.rule` 'foot'): the body's ankle and toe joints are read at the step, the
+ *    lower ankle is the landing one (the marks the game's own animations carry say only `footstep`,
+ *    not which foot), and the print's middle lies between that ankle and its toe on the ground.
+ *    A body with no ankle joints (most four-legged creatures), and `rule` 'body', keep the rule of
+ *    before: the step's place is the body's own, between its feet, each print is stepped sideways
+ *    by half a stance along the body's heading, and the two feet are taken in turn.
  *  - **Which ground it lies in.** A print laid flat is half buried on any real slope, and sand and
  *    snow are exactly the ground that is never flat, so the world is asked for the surface's own
  *    normal and the print is lain in it: the sideways step onto the body's other foot is taken in
@@ -61,6 +64,19 @@ export interface PrintTune {
    * lasts the same time and the grading reaches nothing.
    */
   strengthLife: number;
+  /**
+   * Where a print is laid: 'foot' under the landing foot's own ankle and toe, pointing along that
+   * foot (the owner's ask, 2026-11-16: a print where the foot really fell and the way it really
+   * points); 'body' the rule of before, half a stance either side of the body's middle along its
+   * heading. A body with no ankle joints is laid by the rule of before whatever this says.
+   */
+  rule: 'foot' | 'body';
+  /** INVENTED: where between the ankle (0) and the toe joint (1) the print's middle lies; the heel sits behind the ankle and the toes run past the joint. */
+  along: number;
+  /** INVENTED: metres, at a body's scale 1: two ankles nearer in height than this are a tie, and the feet are taken in turn. */
+  footTie: number;
+  /** INVENTED: metres, at a body's scale 1: a foot read farther than this from the body's middle is not believed, and the rule of before lays the print. */
+  footReach: number;
 }
 
 /** Ours, every one; `__debug.footprints({ ... })` moves them live. */
@@ -74,6 +90,10 @@ export const PRINT_TUNE: PrintTune = {
   maxScale: 3,
   bodies: 64,
   strengthLife: 1,
+  rule: 'foot',
+  along: 0.5,
+  footTie: 0.02,
+  footReach: 1.5,
 };
 
 /**
@@ -264,6 +284,163 @@ function normalise(n: FootGround): void {
   n.nz /= len;
 }
 
+/** A joint as a print reads it: three's Object3D satisfies it. */
+interface Joint {
+  updateWorldMatrix(updateParents: boolean, updateChildren: boolean): void;
+  readonly matrixWorld: { readonly elements: ArrayLike<number> };
+}
+/** A body's two ankles, and its toes where it has them. */
+interface FootJoints {
+  lAnkle: Joint;
+  rAnkle: Joint;
+  lToe: Joint | null;
+  rToe: Joint | null;
+}
+/** A body looked through for ankles and none found, at this ask: looked through again only after a while. */
+interface JointMiss {
+  missAt: number;
+}
+/** Per drawn body (a rig, a model): its joints, or when it was last found to have none. Dies with the body. */
+const jointCache = new WeakMap<object, FootJoints | JointMiss>();
+/** Asks made of `footAt`, which is the clock a miss is retried on: a model hung after its body was first met. */
+let footAsks = 0;
+/** A body with no ankles is looked through again after this many asks (of all bodies'), not on every step. */
+const MISS_RETRY = 256;
+
+function isJoint(o: unknown): o is Joint {
+  return !!o && typeof (o as Joint).updateWorldMatrix === 'function' && !!(o as Joint).matrixWorld;
+}
+
+/**
+ * The ankles and toes of a drawn body. A rig hands them over by name (`bone`); a model is walked
+ * once, in three's own order, which is the order the animation mixer binds a name in, so the joint
+ * found is the joint the clips move. The game's skeletons name them `lAnkle`, `rAnkle`, `lToe` and
+ * `rToe`, a few creatures' with a capital (`LAnkle`).
+ */
+function searchJoints(body: object): FootJoints | null {
+  let la: Joint | null = null;
+  let ra: Joint | null = null;
+  let lt: Joint | null = null;
+  let rt: Joint | null = null;
+  const rig = body as { bone?: (name: string) => unknown };
+  if (typeof rig.bone === 'function') {
+    const pick = (a: string, b: string): Joint | null => {
+      const x = rig.bone!(a) ?? rig.bone!(b);
+      return isJoint(x) ? x : null;
+    };
+    la = pick('lAnkle', 'LAnkle');
+    ra = pick('rAnkle', 'RAnkle');
+    lt = pick('lToe', 'LToe');
+    rt = pick('rToe', 'RToe');
+  } else {
+    const tree = body as { traverse?: (cb: (o: { name?: string }) => void) => void };
+    if (typeof tree.traverse !== 'function') return null;
+    // The first of each name in three's own walk, which is the one the mixer binds.
+    const got: Record<string, Joint> = {};
+    tree.traverse((o) => {
+      const n = (o.name ?? '').toLowerCase();
+      if ((n === 'lankle' || n === 'rankle' || n === 'ltoe' || n === 'rtoe') && !got[n] && isJoint(o)) got[n] = o;
+    });
+    la = got.lankle ?? null;
+    ra = got.rankle ?? null;
+    lt = got.ltoe ?? null;
+    rt = got.rtoe ?? null;
+  }
+  return la && ra ? { lAnkle: la, rAnkle: ra, lToe: lt, rToe: rt } : null;
+}
+
+function jointsOf(body: object): FootJoints | null {
+  const known = jointCache.get(body);
+  if (known && 'lAnkle' in known) return known;
+  if (known && footAsks - known.missAt < MISS_RETRY) return null;
+  const found = searchJoints(body);
+  jointCache.set(body, found ?? { missAt: footAsks });
+  return found;
+}
+
+/**
+ * Where the foot that landed is, as `footAt` writes it: the print's middle on the ground's x and z,
+ * the way the foot points (a unit vector, horizontal), and which foot it was. One kept record; its
+ * fields begin as fractions, so a fraction written later is written in place.
+ */
+export class FootAt {
+  x = 0.5;
+  z = 0.5;
+  fx = 0.5;
+  fz = 0.5;
+  left = false;
+  constructor() {
+    this.x = 0;
+    this.z = 0;
+    this.fx = 0;
+    this.fz = 1;
+  }
+}
+
+/**
+ * The landing foot of a step, read off the body's own joints: the lower of its two ankles (a tie
+ * goes to `hintLeft`, the foot the feet would have taken in turn), the print's middle `along` the
+ * way from that ankle to its toe, and the way the foot points, which is that ankle-to-toe line laid
+ * level (the body's heading where there is no toe, or the toe sits on the ankle). False, with
+ * nothing written, where the body is not drawn, has no ankles, or the foot is read implausibly far
+ * from the body (`footReach`): the caller then lays the print by the rule of before.
+ *
+ * The joints' world matrices are worked out afresh (`updateWorldMatrix(true, false)`, the parents and
+ * the joint alone), since the scene's own walk may have stepped over a body standing still or culled.
+ * Asked only for a step that will really lay something, so a walk over stone costs nothing.
+ */
+export function footAt(step: FootStep, hintLeft: boolean, out: FootAt): boolean {
+  const body = step.body;
+  if (!body) return false;
+  footAsks++;
+  const j = jointsOf(body);
+  if (!j) return false;
+  const t = PRINT_TUNE;
+  const s = step.scale > 0 ? step.scale : 1;
+  const scale = s < 0.2 ? 0.2 : s > t.maxScale ? t.maxScale : s;
+  j.lAnkle.updateWorldMatrix(true, false);
+  j.rAnkle.updateWorldMatrix(true, false);
+  const le = j.lAnkle.matrixWorld.elements;
+  const re = j.rAnkle.matrixWorld.elements;
+  const tie = t.footTie * scale;
+  const left = le[13] < re[13] - tie ? true : re[13] < le[13] - tie ? false : hintLeft;
+  const e = left ? le : re;
+  const ax = e[12];
+  const az = e[14];
+  let fx = Math.sin(step.heading);
+  let fz = Math.cos(step.heading);
+  let cx = ax;
+  let cz = az;
+  const toe = left ? j.lToe : j.rToe;
+  if (toe) {
+    // The toe's parent is the ankle, just worked out: the toe alone now.
+    toe.updateWorldMatrix(false, false);
+    const te = toe.matrixWorld.elements;
+    const dx = te[12] - ax;
+    const dz = te[14] - az;
+    const len = Math.sqrt(dx * dx + dz * dz);
+    if (len > 0.01 * scale) {
+      fx = dx / len;
+      fz = dz / len;
+      cx = ax + dx * t.along;
+      cz = az + dz * t.along;
+    }
+  }
+  const ox = cx - step.x;
+  const oz = cz - step.z;
+  const reach = t.footReach * scale;
+  if (!(ox * ox + oz * oz <= reach * reach)) return false;
+  out.x = cx;
+  out.z = cz;
+  out.fx = fx;
+  out.fz = fz;
+  out.left = left;
+  return true;
+}
+
+/** The foot `step` reads, kept. */
+const foot = new FootAt();
+
 /**
  * The feet of everything that walks. One of these lives as long as the game does; a world is let go
  * of with `leave`, which is also what forgets which foot each body had last put down.
@@ -273,7 +450,8 @@ export class Footprints {
   readonly tune: PrintTune = PRINT_TUNE;
   /** Where a print goes; null until the world has a marks system to draw them. */
   sink: PrintSink | null = null;
-  readonly counts = { steps: 0, laid: 0, off: 0, aboard: 0, hardGround: 0, tooSoon: 0, noSink: 0 };
+  /** `onFoot`: laid under the landing foot's own joints; `bodyRule`: `rule` said 'foot' but the body had no joints to read (or was not drawn), so the rule of before laid it. */
+  readonly counts = { steps: 0, laid: 0, off: 0, aboard: 0, hardGround: 0, tooSoon: 0, noSink: 0, onFoot: 0, bodyRule: 0 };
   /** The last few prints, for the report. */
   readonly log: PrintRow[] = [];
 
@@ -314,8 +492,10 @@ export class Footprints {
       this.counts.tooSoon++;
       return;
     }
-    // The feet are taken in turn: the marks the animations carry do not say which one landed.
-    const left = !feet.left;
+    // Which foot landed: the lower ankle where the body has joints to read (`footAt`), else the feet
+    // taken in turn, since the marks the animations carry do not say which one landed.
+    const onFoot = t.rule === 'foot' && footAt(step, !feet.left, foot);
+    const left = onFoot ? foot.left : !feet.left;
     feet.left = left;
     feet.laid = true;
     feet.x = step.x;
@@ -331,13 +511,29 @@ export class Footprints {
     ground.owner = null;
     if (step.ground) step.ground(ground);
     normalise(ground);
-    facingOf(step.heading, fwd);
-    sideOf(step.heading, side);
-    const off = stanceOffset(t.stance, scale, left);
-    slopeStep(side.x, side.z, ground.nx, ground.ny, ground.nz, off, offset);
-    mark.x = step.x + offset.x;
-    mark.y = step.y + offset.y;
-    mark.z = step.z + offset.z;
+    if (onFoot) {
+      // Under the foot itself, on the plane of the ground found under the body: its height follows
+      // the slope from the body's middle out to the foot, so the print lies on a dune's face.
+      this.counts.onFoot++;
+      fwd.x = foot.fx;
+      fwd.z = foot.fz;
+      side.x = foot.fz;
+      side.z = -foot.fx;
+      const dx = foot.x - step.x;
+      const dz = foot.z - step.z;
+      mark.x = foot.x;
+      mark.y = step.y - (ground.nx * dx + ground.nz * dz) / ground.ny;
+      mark.z = foot.z;
+    } else {
+      if (t.rule === 'foot') this.counts.bodyRule++;
+      facingOf(step.heading, fwd);
+      sideOf(step.heading, side);
+      const off = stanceOffset(t.stance, scale, left);
+      slopeStep(side.x, side.z, ground.nx, ground.ny, ground.nz, off, offset);
+      mark.x = step.x + offset.x;
+      mark.y = step.y + offset.y;
+      mark.z = step.z + offset.z;
+    }
     mark.fx = fwd.x;
     mark.fz = fwd.z;
     // Mirrored for the left foot, so one picture draws both and each keeps its own inner edge.
