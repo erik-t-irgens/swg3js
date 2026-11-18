@@ -518,6 +518,86 @@ export interface ClimbTune {
   ropeLandIn: number;
   /** Phase 4, item 4: and goes in over the top at no more than this, m/s (ours, 2: about the let-go clips' own travel, 4.9 to 6 m over their 2 to 3 s, which the importer takes out). */
   ropeLandWalk: number;
+  /**
+   * Feedback round II, item 0a (the owner: "When on a bar, I think that bar's geometry should not make the camera collide"):
+   * 'pass' the camera's block (`Physics.cameraBlock`, the camera's own call and the thrown saber's) leaves out the bar the hands
+   * hold, the bar just let go of for the length of the flight off it, and the bar a catch reaches for (handed to the engine's ray
+   * as its excluded collider); 'block' the ropes commit's, every bar a wall to the camera.
+   */
+  barCamera: 'pass' | 'block';
+  /**
+   * Item 0b (the owner: "it should settle into a hang much faster if I do nothing. 2-3 swings total"): 'swings' with no pump key
+   * held the swing's damping is worked out from the pendulum's own period at the body's radius on that bar, so its angle falls
+   * from where it was to under `barSettleTo` over `barSettleSwings` swings out and back (W or S held: `swingDamp`, so a swing still
+   * builds); 'damp' the ropes commit's, `swingDamp` whatever is held.
+   */
+  barSettle: 'swings' | 'damp';
+  /** Item 0b: a swing let alone settles to under this, degrees either side of straight down (the brief's start, 3: a sway too small to read as a swing). */
+  barSettleTo: number;
+  /** Item 0b: over this many swings out and back (the owner's "2-3 swings total": the brief's start, 2.5, the middle of his two to three). */
+  barSettleSwings: number;
+  /**
+   * Item 0c (the owner: "When we get to just hanging we should use the free hang animation with its shimmying and then switch back
+   * when swinging commences"): 'free' once the swing is under `barHangFrom` with no pump key held, the pose crossfades over
+   * `barHangBlend` from `run_and_swing`'s swing to the ledges' own free-hang loop, the hands on the bar by the ledges' limb solve,
+   * A and D playing the free-hang shimmy clips at the shift's own speed; a pump key, or the swing past `barHangFrom`, crossfades
+   * back to the swing played by its angle; 'swing' the ropes commit's, the swing's clip whatever the swing.
+   */
+  barHang: 'free' | 'swing';
+  /** Item 0c: the still hang's loop from a swing under this, degrees either side (the brief's start, 4: a little over where a swing let alone settles, so the loop comes in as it settles). */
+  barHangFrom: number;
+  /** Item 0c: and the crossfade between the swing's pose and the loop's (either way) over this, seconds (the brief's start, 0.3: a little more than the hang's own ease). */
+  barHangBlend: number;
+  /**
+   * Maker B, item 0d (the owner: "The cue for free hang jumping up [is] bad. It should be a very small pull up. Right now both hands
+   * move through and off what I'm grabbing and my body doesn't move up"): 'pull' while the up cue is held on a free hang the hands
+   * stay on the grip (the limbs' solve holding them), the arms bend and the body rises `freeCueRise`, eased in over `freeCueIn`
+   * and back down when the key is let go before the commit; its pose a part of the owner's table (`FREE_CUE_PARTS`, its seconds
+   * `freeCueParts`); the commit as now, from where the cue left the body. 'arms' the ropes commit's (the braced hop's arms,
+   * `FREE_HOP_PARTS.upper`, through and off the grip).
+   */
+  freeCue: 'pull' | 'arms';
+  /** Item 0d: how far the body rises in the free hang's up cue, metres on the human male (the brief's start, 0.08: "a very small pull up"). */
+  freeCueRise: number;
+  /** Item 0d: how long the rise takes to come in (and as long to go back down), seconds (the brief's start, 0.25: a slow, held pull). */
+  freeCueIn: number;
+  /**
+   * Items 0d and 0e: the parts of the owner's table's clips (`FREE_CUE_PARTS`), seconds: the up cue's pull (`pullFrom` to `pullTo`,
+   * held at the rise's share) and the free hop's leg kick (`kickFrom` to `kickTo`, timed to the hop's pull up to its hands' leave).
+   */
+  freeCueParts: { pullFrom: number; pullTo: number; kickFrom: number; kickTo: number };
+  /**
+   * Item 0e (the owner: "It seems like my body is fully stiff when I do the free hang hop up"): 'kick' under the free hop's arms,
+   * below the spine, the free hang climb's own leg kick (`FREE_CUE_PARTS.kick`, its seconds `freeCueParts.kickFrom` to `kickTo`)
+   * timed to the pull and let go of by the catch, and the sway of item 0f (`swayAmount`) on the hips and legs; 'stiff' the ropes
+   * commit's (the free hang's own legs, held as they hang).
+   */
+  freeHopLegs: 'kick' | 'stiff';
+  /**
+   * Item 0f (the owner: "and also while climbing ladders. Maybe mix in shimmying animations from free hang to give the illusion of
+   * sway"): 'sway' on a free ladder the free hang shimmy's hips and legs laid under the climb's arms, one shimmy step a reach (the
+   * ladder's cycle, `climb.ladderCycle` 'cycle'); on both ladders a lag of the hips and legs driven by the body's own acceleration,
+   * a damped pendulum on the physics' own steps (`swayAmount`, `swayHz`, `swayDamp`), a braced ladder's feet kept on the rungs;
+   * 'stiff' the ropes commit's.
+   */
+  ladderSway: 'sway' | 'stiff';
+  /** Item 0f: how much of the hips' lag is drawn (the brief's start, 1: the pendulum's own; 0 draws none, today's). */
+  swayAmount: number;
+  /** Item 0f: the lag's own swing, swings a second (the brief's start, 1.2: about a hanging body's legs). */
+  swayHz: number;
+  /** Item 0f: how quickly it settles, a share of the critical damping (the brief's start, 0.5: a stop overshoots once and settles). */
+  swayDamp: number;
+  /**
+   * Item 0g (the owner: "There's no way to jump at a ledge behind you for free hanging"): 'reach' the look-away for a free hang too
+   * (the braced one's threshold, `lookStart`, and twist, `lookTwist`; the leading hand reaching back, the trailing hand on the grip)
+   * and its jump at a ledge behind (the braced one's search, `hopBehindTo`), its move the free hang's own side hop of the leading
+   * side (the owner's table, `FREE_BEHIND_PARTS`: the braced one's hop clip has the feet on a wall a free hang has not got) held at
+   * `freeBehindParts.pose` while looking back and played on from there; 'side' the ropes commit's (a free hang looking back reads
+   * as a side).
+   */
+  freeBehind: 'reach' | 'side';
+  /** Item 0g: the free look-away's held pose and the hop's start, seconds into its clip (ours, 0.3: the braced look-away's own `lookPose`). */
+  freeBehindParts: { pose: number };
 }
 
 /**
@@ -687,9 +767,39 @@ export const CLIMB_ROPES_ALSO: (() => void)[] = [];
 
 /** Phase 4's switches at their other setting (phase 3's climbing, `472c90e`). */
 export function climbRopesBefore(): void {
+  // (`472c90e` had none of the feedback round II's either: put back first, so phase 4's own words below win where a switch is shared.)
+  climbFb2Before();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_ROPES_BEFORE)) t[k] = v;
   for (const f of CLIMB_ROPES_ALSO) f();
+}
+
+/**
+ * Climbing II, the feedback round II (the owner's notes after playing the bars, 2026-11-18): every switch it adds, at its other
+ * setting (the climbing as phase 4 shipped it, `5e8f23b`). A later maker of the round adds its own here (`CLIMB_FB2_ALSO` for one
+ * beside the climbing's), so one call puts the whole round back; `climbRopesBefore` calls it first, so every older round's chain
+ * of puts back holds.
+ */
+export const CLIMB_FB2_BEFORE: Record<string, string> = {
+  // Maker A's: items 0a to 0c (the bar and the camera, a swing that settles, the free hang on a bar).
+  barCamera: 'block',
+  barSettle: 'damp',
+  barHang: 'swing',
+  // Maker B's: items 0d to 0g (the free hang's up cue, the free hop's legs, the ladders' sway, the free hang's jump behind).
+  freeCue: 'arms',
+  freeHopLegs: 'stiff',
+  ladderSway: 'stiff',
+  freeBehind: 'side',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_FB2_ALSO: (() => void)[] = [];
+
+/** The feedback round II's switches at their other setting (phase 4's climbing, `5e8f23b`). */
+export function climbFb2Before(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_FB2_BEFORE)) t[k] = v;
+  for (const f of CLIMB_FB2_ALSO) f();
 }
 
 /**
@@ -718,6 +828,38 @@ export const FREE_HOP_PARTS: Readonly<{ upper: string; legs: string }> = {
   upper: 'braced_hang_hop_up',
   legs: 'free_hang_hanging_idle',
 };
+
+/**
+ * The feedback round II, items 0d and 0e (maker B): the owner's table of the free hang's up cue and the free hop's legs, as
+ * `DROP_PARTS` is the drop's: `pull` the clip whose arms the up cue holds at the rise's share (its seconds `climb.freeCueParts`'s
+ * `pullFrom` to `pullTo`: until he names another, the free hang climb up's first pull, its arms bending with the hands kept on the
+ * grip and the legs still hanging; only its torso is laid, the arms then bent onto the grip by the hands' own solve; it ends at
+ * 0.2 because from 0.25 the climb's spine leans back past where the arms reach the grip from, measured off the human male: the
+ * hands 2.5 cm short of the grip at 0.25, 0.7 cm at 0.2), and `kick` the clip whose legs the free hop up lays under its arms (`kickFrom` to `kickTo`: the same climb's
+ * own leg kick, the knees drawn up from 0.15 s and the legs swung out over the top by 0.7). Naming another clip is one line here.
+ */
+export const FREE_CUE_PARTS: Readonly<{ pull: string; kick: string }> = {
+  pull: 'freehang_climb',
+  kick: 'freehang_climb',
+};
+
+/**
+ * Item 0g (maker B): the owner's table of a free hang's jump behind, by its leading side: the clip whose pose the look-away holds
+ * and whose hop is played on from it (its second `climb.freeBehindParts.pose`). The braced look-away's own (`braced_hang_hop_left`,
+ * `_right`) reads on a free hang only in its spine's turn and its hands (both of which a free hang keeps); its legs stand braced on
+ * a wall a free hang has not got (laid over the free hang's own legs, its hands come 0.6 m off the grip). Until he names another,
+ * the free hang's own side hops, whose hands start on the grip and whose body hangs under it.
+ */
+export const FREE_BEHIND_PARTS: Readonly<{ left: string; right: string }> = {
+  left: 'free_hang_hop_left',
+  right: 'free_hang_hop_right',
+};
+
+/**
+ * Item 0f (maker B): the free hang shimmy whose hips and legs a free ladder lays under its climb (one shimmy step a reach: the
+ * shimmy's whole cycle, two steps, over the climb clip's whole cycle, two reaches). One line here.
+ */
+export const LADDER_SWAY_LEGS = 'free_hang_left_shimmy';
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
 export interface BraceTune {
@@ -890,6 +1032,24 @@ export const CLIMB_TUNE: ClimbTune = {
   ropeLandBelow: 0.5,
   ropeLandIn: 0.3,
   ropeLandWalk: 2,
+  barCamera: 'pass',
+  barSettle: 'swings',
+  barSettleTo: 3,
+  barSettleSwings: 2.5,
+  barHang: 'free',
+  barHangFrom: 4,
+  barHangBlend: 0.3,
+  freeCue: 'pull',
+  freeCueRise: 0.08,
+  freeCueIn: 0.25,
+  freeCueParts: { pullFrom: 0, pullTo: 0.2, kickFrom: 0.15, kickTo: 0.7 },
+  freeHopLegs: 'kick',
+  ladderSway: 'sway',
+  swayAmount: 1,
+  swayHz: 1.2,
+  swayDamp: 0.5,
+  freeBehind: 'reach',
+  freeBehindParts: { pose: 0.3 },
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -1021,6 +1181,20 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   ropeLandBelow: { min: 0, max: 3 },
   ropeLandIn: { min: 0, max: 1.5 },
   ropeLandWalk: { min: 0.3, max: 8 },
+  barSettleTo: { min: 0.5, max: 30 },
+  barSettleSwings: { min: 0.5, max: 10 },
+  barHangFrom: { min: 0.5, max: 30 },
+  barHangBlend: { min: 0, max: 1.5 },
+  freeCueRise: { min: 0, max: 0.3 },
+  freeCueIn: { min: 0, max: 1 },
+  'freeCueParts.pullFrom': { min: 0, max: 3.867 },
+  'freeCueParts.pullTo': { min: 0, max: 3.867 },
+  'freeCueParts.kickFrom': { min: 0, max: 3.867 },
+  'freeCueParts.kickTo': { min: 0, max: 3.867 },
+  swayAmount: { min: 0, max: 3 },
+  swayHz: { min: 0.2, max: 4 },
+  swayDamp: { min: 0.05, max: 2 },
+  'freeBehindParts.pose': { min: 0, max: 2 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -1063,6 +1237,13 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   ropes: ['on', 'off'],
   ropeKeys: ['ad', 'ws'],
   ropeLand: ['lips', 'plain'],
+  barCamera: ['pass', 'block'],
+  barSettle: ['swings', 'damp'],
+  barHang: ['free', 'swing'],
+  freeCue: ['pull', 'arms'],
+  freeHopLegs: ['kick', 'stiff'],
+  ladderSway: ['sway', 'stiff'],
+  freeBehind: ['reach', 'side'],
 };
 
 /**

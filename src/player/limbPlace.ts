@@ -22,6 +22,11 @@ export interface LimbRig {
   readonly root: THREE.Object3D;
   boneNamed(name: string): THREE.Bone | null;
   limbPose: { restore(): void } | null;
+  /**
+   * Climbing II, the feedback round II (maker B, the legs laid over the pose: `legClip`): each named bone's own turn at a time
+   * of a clip, four numbers a bone into `out` (src/player/rig.ts's `turnsAt`). Optional: a rig without it lays no clip's legs.
+   */
+  turnsAt?(clip: string, names: readonly string[], when: Float64Array, out: Float64Array): boolean;
 }
 
 /** The little of a physics world the feet ask. */
@@ -115,6 +120,21 @@ const qY = new THREE.Quaternion();
 const pTh = new THREE.Vector3();
 const pN = new THREE.Vector3();
 const TA = new TurnAsk();
+/** The legs laid over the pose (the feedback round II, maker B): the waist, the feet's middle, the turns. Kept, written in place. */
+const pW = new THREE.Vector3();
+const pM = new THREE.Vector3();
+const pR = new THREE.Vector3();
+const pR2 = new THREE.Vector3();
+const qL = new THREE.Quaternion();
+const qL2 = new THREE.Quaternion();
+const qPar = new THREE.Quaternion();
+const qParI = new THREE.Quaternion();
+const qOld = new THREE.Quaternion();
+const qT1 = new THREE.Quaternion();
+const qT2 = new THREE.Quaternion();
+/** The root where the legs were laid and where it stands as the feet are placed (the push between carries the kept feet). */
+const pRootLaid = new THREE.Vector3();
+const pRootNow = new THREE.Vector3();
 
 /** Where a bone stands and how it is turned, in the physics frame (`toPhys` null: the world's). */
 function boneIn(bone: THREE.Object3D, toPhys: THREE.Matrix4 | null, p: THREE.Vector3, q: THREE.Quaternion): void {
@@ -168,6 +188,31 @@ export class LimbPlace {
   reused = 0;
   /** Feet placed on a face found (each foot a frame): what tells a wall met from one missed (the console's and the tests'). */
   feetOn = 0;
+  /**
+   * Climbing II, the feedback round II (maker B, items 0e and 0f): the legs laid over the pose, below the spine. `legClip` a clip
+   * of the rig's (its own name, '' none) whose pelvis and legs are laid at `legAt` seconds by `legW` (0 to 1), the pelvis turned
+   * about the waist and the torso kept as it stands (a free hop's leg kick, a free ladder's shimmy legs); `swayX`, `swayZ` the
+   * world's horizontal way the hips' lag carries the feet, metres, the pelvis and legs turned about the waist by it (the sway's
+   * damped pendulum, `LedgeHang.swayStep`). A braced figure's feet (the ledges' `wallW`) are put where they stood before either,
+   * so a braced ladder's feet stay on the rungs. Written by the caller each frame; `place` takes them and puts them back to none.
+   */
+  legClip = '';
+  legAt = 0.5;
+  legW = 0.5;
+  swayX = 0.5;
+  swayZ = 0.5;
+  /**
+   * Item 0d: a clip's torso laid over the pose (the spine from the waist to the shoulders and each shoulder, never the arms the
+   * hands' solve has, nor the neck and head the look has): `torsoClip` a clip of the rig's ('' none) at `torsoAt` seconds by
+   * `torsoW` (0 to 1): the free hang's small pull-up's own look, its arms then bent onto the grip by the hands' solve. Taken by
+   * `place` as the legs are.
+   */
+  torsoClip = '';
+  torsoAt = 0.5;
+  torsoW = 0.5;
+  /** The legs laid this frame (the tests' read-back): whether, and the feet's middle carried from where the pose had it, metres. */
+  legsLaid = false;
+  legsMoved = 0.5;
   readonly ask = new TwoBoneAsk();
   readonly out = new TwoBoneOut();
   private rig: LimbRig | null = null;
@@ -176,6 +221,23 @@ export class LimbPlace {
   private written = false;
   private ray: RAPIER.Ray | null = null;
   private readonly makeRay: (() => RAPIER.Ray) | null;
+  /** The legs laid over the pose (the feedback round II): the pelvis, the lowest spine bone, the names `turnsAt` is asked for and their bones (the pelvis first), and their clean pose. */
+  private pelvis: THREE.Bone | null = null;
+  private spineBase: THREE.Bone | null = null;
+  private legNames: string[] = [];
+  private legBones: THREE.Bone[] = [];
+  private readonly legBuf = new Float64Array(40);
+  private readonly legClean = new Float64Array(40);
+  private torsoNames: string[] = [];
+  private torsoBones: THREE.Bone[] = [];
+  private readonly torsoBuf = new Float64Array(40);
+  private readonly torsoClean = new Float64Array(40);
+  private readonly pelvisPos = new THREE.Vector3();
+  private readonly spineQ = new THREE.Quaternion();
+  private legsWritten = false;
+  /** Each braced foot's ball and ankle where the pose had them before the legs were laid (the physics frame), and whether kept this frame. */
+  private readonly preFeet = new Float64Array(12);
+  private preKept = false;
 
   constructor(makeRay: (() => RAPIER.Ray) | null = null) {
     this.makeRay = makeRay;
@@ -185,6 +247,13 @@ export class LimbPlace {
     this.past = 0;
     this.footFade = false;
     this.footStep = 1;
+    this.legAt = 0;
+    this.legW = 0;
+    this.swayX = 0;
+    this.swayZ = 0;
+    this.legsMoved = 0;
+    this.torsoAt = 0;
+    this.torsoW = 0;
   }
 
   /** A foot's own share on the wall (0 left, 1 right): the tests' read-back of the ledges' braced feet. */
@@ -233,36 +302,340 @@ export class LimbPlace {
     }
     this.arms = arms;
     this.legs = legs.length === 2 ? legs : null;
+    // The feedback round II: the pelvis both thighs hang from, the lowest spine bone over it (the arms' way up to it), and the
+    // names of the pelvis and every leg bone (what a clip's legs are laid by); none where the skeleton is not so.
+    this.pelvis = null;
+    this.spineBase = null;
+    this.legNames = [];
+    this.legBones = [];
+    const P = this.legs ? this.legs[0].thigh.parent : null;
+    if (P instanceof THREE.Bone && this.legs && this.legs[1].thigh.parent === P) {
+      let sp: THREE.Object3D | null = arms[0].upper;
+      while (sp && sp.parent !== P) sp = sp.parent;
+      if (sp instanceof THREE.Bone) {
+        this.pelvis = P;
+        this.spineBase = sp;
+        const bones: THREE.Bone[] = [P];
+        for (const l of this.legs) {
+          bones.push(l.thigh, l.shin, l.ankle);
+          if (l.toe) bones.push(l.toe);
+        }
+        this.legBones = bones;
+        this.legNames = bones.map((b) => b.name);
+        // The torso's own bones (item 0d's pose laid over it): the spine from the waist up to the shoulders' own bone, and each
+        // shoulder (what each arm hangs from), never the arms (the hands' solve has them) nor the neck and head (the look's).
+        const torso: THREE.Bone[] = [];
+        const c0 = arms[0].upper.parent;
+        const c1 = arms[1].upper.parent;
+        if (c0 instanceof THREE.Bone && c1 instanceof THREE.Bone && c0 !== sp && c1 !== sp) {
+          const chain: THREE.Bone[] = [];
+          for (let o: THREE.Object3D | null = c0.parent; o && o !== P; o = o.parent) if (o instanceof THREE.Bone) chain.push(o);
+          if (chain[chain.length - 1] === sp) {
+            chain.reverse();
+            torso.push(...chain, c0);
+            if (c1 !== c0) torso.push(c1);
+          }
+        }
+        this.torsoBones = torso;
+        this.torsoNames = torso.map((b) => b.name);
+      }
+    }
+    this.legsWritten = false;
     rig.limbPose = this;
     return true;
   }
 
   /** The clean pose back on the bones (the rig calls this at the top of its update, before the mixer). */
   restore(): void {
-    if (!this.written) return;
-    if (this.arms) for (const a of this.arms) {
-      a.upper.quaternion.copy(a.upperQ);
-      a.fore.quaternion.copy(a.foreQ);
-      a.wrist.quaternion.copy(a.wristQ);
+    if (this.written) {
+      if (this.arms) for (const a of this.arms) {
+        a.upper.quaternion.copy(a.upperQ);
+        a.fore.quaternion.copy(a.foreQ);
+        a.wrist.quaternion.copy(a.wristQ);
+      }
+      if (this.legs) for (const l of this.legs) {
+        l.thigh.quaternion.copy(l.thighQ);
+        l.shin.quaternion.copy(l.shinQ);
+        l.ankle.quaternion.copy(l.ankleQ);
+      }
+      this.written = false;
     }
-    if (this.legs) for (const l of this.legs) {
-      l.thigh.quaternion.copy(l.thighQ);
-      l.shin.quaternion.copy(l.shinQ);
-      l.ankle.quaternion.copy(l.ankleQ);
+    // The feedback round II: the legs laid over the pose put back as the pose had them (after the feet's, which kept the laid ones).
+    if (this.legsWritten) this.unlayLegs();
+    this.preKept = false;
+    this.legsLaid = false;
+    this.legsMoved = 0;
+  }
+
+  /** The pelvis, the lowest spine bone and every leg bone back as the pose had them before `layLegs`. */
+  private unlayLegs(): void {
+    this.legsWritten = false;
+    const P = this.pelvis;
+    const S = this.spineBase;
+    if (!P || !S) return;
+    P.position.copy(this.pelvisPos);
+    S.quaternion.copy(this.spineQ);
+    const tb = this.torsoBones;
+    const tc = this.torsoClean;
+    for (let i = 0; i < tb.length; i++) tb[i].quaternion.fromArray(tc, i * 4);
+    const bones = this.legBones;
+    const c = this.legClean;
+    for (let i = 0; i < bones.length; i++) bones[i].quaternion.fromArray(c, i * 4);
+  }
+
+  /**
+   * The feedback round II (maker B, items 0e and 0f): the legs laid over the pose (`legClip` by `legW`, then the sway's carry of
+   * the feet, `swayX`, `swayZ`), the pelvis and the legs turned about the waist (the lowest spine bone's place) and the torso kept
+   * as it stood, so the arms and the hands are as they were. The clean pose kept for `restore`; a braced figure's feet first kept
+   * where they stood (`preFeet`). False where nothing was laid.
+   */
+  private layLegs(rig: LimbRig, toPhys: THREE.Matrix4 | null): boolean {
+    // (What is asked is read off the fields, never handed over: a number across a call is a number made.)
+    const clip = this.legClip;
+    const w = this.legW;
+    const sx = this.swayX;
+    const sz = this.swayZ;
+    const tClip = this.torsoClip;
+    const tW = this.torsoW;
+    const P = this.pelvis;
+    const S = this.spineBase;
+    if (!P || !S || !P.parent) return false;
+    const bones = this.legBones;
+    const n = bones.length;
+    // The braced feet where the pose has them, before anything is laid (the ledges' feet put back there by `placeFeet`).
+    this.preKept = false;
+    if (this.wallW > 0 && this.legs) {
+      for (let li = 0; li < 2; li++) {
+        const l = this.legs[li];
+        boneIn(l.ankle, toPhys, pC, qC);
+        if (l.toe) boneIn(l.toe, toPhys, pT, qW);
+        else pT.copy(pC);
+        const f = this.preFeet;
+        f[li * 6] = pT.x;
+        f[li * 6 + 1] = pT.y;
+        f[li * 6 + 2] = pT.z;
+        f[li * 6 + 3] = pC.x;
+        f[li * 6 + 4] = pC.y;
+        f[li * 6 + 5] = pC.z;
+      }
+      boneIn(rig.root, toPhys, pRootLaid, qC);
+      this.preKept = true;
     }
-    this.written = false;
+    // The clean pose kept.
+    this.pelvisPos.copy(P.position);
+    this.spineQ.copy(S.quaternion);
+    const c = this.legClean;
+    for (let i = 0; i < n; i++) bones[i].quaternion.toArray(c, i * 4);
+    const tb = this.torsoBones;
+    const tc = this.torsoClean;
+    for (let i = 0; i < tb.length; i++) tb[i].quaternion.toArray(tc, i * 4);
+    this.legsWritten = true;
+    let laid = false;
+    // Item 0d: a clip's torso by `tW` (the spine and the shoulders' own turns), first, so the legs below keep it as it then stands.
+    const when = this.turnWhen;
+    when[0] = this.torsoAt;
+    if (tClip && tW > 0 && tb.length > 0 && rig.turnsAt && rig.turnsAt(tClip, this.torsoNames, when, this.torsoBuf)) {
+      const b = this.torsoBuf;
+      this.layK = tW;
+      if (this.layK > 1) this.layK = 1;
+      for (let i = 0; i < tb.length; i++) this.slerpBone(tb[i].quaternion, b, i * 4);
+      S.updateMatrixWorld(true);
+      laid = true;
+    }
+    // The feet's middle before (what the sway and the read-back measure from).
+    this.feetMiddle(pR2);
+    // A clip's pelvis and legs, by `w`: the pelvis turned about the waist, the legs' own turns.
+    when[0] = this.legAt;
+    if (clip && w > 0 && rig.turnsAt && rig.turnsAt(clip, this.legNames, when, this.legBuf)) {
+      const b = this.legBuf;
+      this.layK = w;
+      if (this.layK > 1) this.layK = 1;
+      qL2.copy(P.quaternion);
+      this.slerpBone(qL2, b, 0);
+      this.turnPelvis(qL2);
+      for (let i = 1; i < n; i++) this.slerpBone(bones[i].quaternion, b, i * 4);
+      P.updateMatrixWorld(true);
+      laid = true;
+    }
+    // The sway: the pelvis and the legs turned about the waist so the feet's middle is carried by (sx, sz) in the world.
+    if (sx !== 0 || sz !== 0) {
+      S.getWorldPosition(pW);
+      this.feetMiddle(pM);
+      pR.copy(pM).sub(pW);
+      // (Lengths and the turn between two ways written out: three's hand their numbers across calls.)
+      const len = Math.sqrt(pR.x * pR.x + pR.y * pR.y + pR.z * pR.z);
+      pM.x += sx;
+      pM.z += sz;
+      pM.sub(pW);
+      const len2 = Math.sqrt(pM.x * pM.x + pM.y * pM.y + pM.z * pM.z);
+      if (len > 1e-4 && len2 > 1e-4) {
+        const i1 = 1 / len;
+        const i2 = 1 / len2;
+        pR.x *= i1;
+        pR.y *= i1;
+        pR.z *= i1;
+        pM.x *= i2;
+        pM.y *= i2;
+        pM.z *= i2;
+        // The shortest turn taking pR to pM (both unit; the feet's two ways are never opposite here).
+        const r = pR.x * pM.x + pR.y * pM.y + pR.z * pM.z + 1;
+        const qx = pR.y * pM.z - pR.z * pM.y;
+        const qy = pR.z * pM.x - pR.x * pM.z;
+        const qz = pR.x * pM.y - pR.y * pM.x;
+        const ql = Math.sqrt(qx * qx + qy * qy + qz * qz + r * r);
+        const B = this.qBuf;
+        B[0] = qx / ql;
+        B[1] = qy / ql;
+        B[2] = qz / ql;
+        B[3] = r / ql;
+        qL.fromArray(B, 0);
+        // Into the pelvis's parent's frame, and laid on the pelvis's own turn.
+        P.parent.getWorldQuaternion(qPar);
+        qParI.copy(qPar).invert();
+        qL2.copy(qParI).multiply(qL).multiply(qPar).multiply(P.quaternion);
+        this.turnPelvis(qL2);
+        P.updateMatrixWorld(true);
+        laid = true;
+      }
+    }
+    this.feetMiddle(pM);
+    const mx = pM.x - pR2.x;
+    const my = pM.y - pR2.y;
+    const mz = pM.z - pR2.z;
+    this.legsMoved = Math.sqrt(mx * mx + my * my + mz * mz);
+    this.legsLaid = laid;
+    if (!laid) this.unlayLegs();
+    return laid;
+  }
+
+  /** The pelvis turned to `q` (its parent's frame) about the waist (the lowest spine bone's place), the spine's own turn kept in the world. */
+  private turnPelvis(q: THREE.Quaternion): void {
+    const P = this.pelvis!;
+    const S = this.spineBase!;
+    // The waist in the pelvis's parent's frame (the spine's place under the pelvis's turn and scale).
+    pW.copy(S.position).multiply(P.scale).applyQuaternion(P.quaternion).add(P.position);
+    qOld.copy(P.quaternion);
+    // The turn from the old to the new, about the waist.
+    qT1.copy(q).multiply(qT2.copy(qOld).invert());
+    P.position.sub(pW).applyQuaternion(qT1).add(pW);
+    P.quaternion.copy(q);
+    // The spine's world turn kept: new^-1 old spine.
+    S.quaternion.premultiply(qOld).premultiply(qT2.copy(q).invert());
+  }
+
+  /** The feet's middle (the two ankles') in the world, into `out`. */
+  private feetMiddle(out: THREE.Vector3): void {
+    if (!this.legs) {
+      out.set(0, 0, 0);
+      return;
+    }
+    this.legs[0].ankle.getWorldPosition(out);
+    this.legs[1].ankle.getWorldPosition(pC);
+    out.add(pC).multiplyScalar(0.5);
   }
 
   /**
    * One frame, the figure posed and placed with its world matrices fresh: each hand with a weight put on its target, and
    * with a wall's weight each foot's ball on the wall. `world` for the feet's rays (null: no feet).
    */
+  /**
+   * The feedback round II: the torso and the legs laid over the pose that were asked this frame (`torsoClip`, `legClip`, `swayX`,
+   * `swayZ`), taken and put back to none, laid now. The ledge lays them as it hands them over (`limbsFor`), so the climb's sphere
+   * clearing between it and `place` sees the figure as it is drawn; `place` lays whatever another caller asked. With none asked
+   * this does nothing at all.
+   */
+  lay(rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    const lClip = this.legClip;
+    const lW = this.legW;
+    const sx = this.swayX;
+    const sz = this.swayZ;
+    const tClip = this.torsoClip;
+    const tW = this.torsoW;
+    const legsAsked = (lW > 0 && lClip !== '') || sx !== 0 || sz !== 0 || (tW > 0 && tClip !== '');
+    if (!legsAsked) return;
+    // (Laid once a frame: what a second call would lay is on bones already laid. `layLegs` reads the fields, then they go.)
+    if (this.limbsOf(rig) && !this.legsWritten) this.layLegs(rig, toPhys);
+    this.legClip = '';
+    this.legW = 0;
+    this.swayX = 0;
+    this.swayZ = 0;
+    this.torsoClip = '';
+    this.torsoW = 0;
+  }
+  /** `turnsAt`'s time, handed over in a kept array. */
+  private readonly turnWhen = new Float64Array(1);
+  /** `slerpBone`'s share (a field: no number crosses the call). */
+  private layK = 0.5;
+  /** `slerpBone`'s and the sway's scratch, four numbers a turn. */
+  private readonly qBuf = new Float64Array(4);
+
+  /**
+   * `q` turned toward the turn at `src[off..off + 3]` by `layK` (three's own `Quaternion.slerp`'s arithmetic, written out and
+   * handed through a kept array: three's hands its share across calls, and in a frame a number across a call is a number made).
+   */
+  private slerpBone(q: THREE.Quaternion, src: Float64Array, off: number): void {
+    const B = this.qBuf;
+    q.toArray(B, 0);
+    let x = src[off];
+    let y = src[off + 1];
+    let z = src[off + 2];
+    let w = src[off + 3];
+    let dot = B[0] * x + B[1] * y + B[2] * z + B[3] * w;
+    if (dot < 0) {
+      x = -x;
+      y = -y;
+      z = -z;
+      w = -w;
+      dot = -dot;
+    }
+    const k = this.layK;
+    let s = 1 - k;
+    let t = k;
+    if (dot < 0.9995) {
+      const theta = Math.acos(dot);
+      const sin = Math.sin(theta);
+      s = Math.sin(s * theta) / sin;
+      t = Math.sin(t * theta) / sin;
+      B[0] = B[0] * s + x * t;
+      B[1] = B[1] * s + y * t;
+      B[2] = B[2] * s + z * t;
+      B[3] = B[3] * s + w * t;
+    } else {
+      B[0] = B[0] * s + x * t;
+      B[1] = B[1] * s + y * t;
+      B[2] = B[2] * s + z * t;
+      B[3] = B[3] * s + w * t;
+      const l = Math.sqrt(B[0] * B[0] + B[1] * B[1] + B[2] * B[2] + B[3] * B[3]);
+      if (l === 0) {
+        B[0] = 0;
+        B[1] = 0;
+        B[2] = 0;
+        B[3] = 1;
+      } else {
+        const il = 1 / l;
+        B[0] *= il;
+        B[1] *= il;
+        B[2] *= il;
+        B[3] *= il;
+      }
+    }
+    q.fromArray(B, 0);
+  }
+
   place(rig: LimbRig, world: LimbWorld | null, toPhys: THREE.Matrix4 | null): void {
-    if (!this.busy) return;
+    // The feedback round II: whatever is still asked to be laid over the pose (with none asked this is the round before's to the
+    // letter).
+    this.lay(rig, toPhys);
+    if (!this.busy && !this.legsWritten) {
+      this.preKept = false;
+      return;
+    }
     if (!this.limbsOf(rig)) return;
     const arms = this.arms!;
     // The figure's own left, up and forward in the physics frame (the arms' pole where a posed arm is straight).
     boneIn(rig.root, toPhys, pA, qR);
+    // (The feedback round II: where the root stands now, against where it stood as the legs were laid: the climb's push between.)
+    pRootNow.copy(pA);
     for (let s = 0; s < 2; s++) {
       const w = this.handW[s];
       const a = arms[s];
@@ -329,6 +702,8 @@ export class LimbPlace {
     // The feet on the wall.
     if (this.wallW > 0 && world && this.legs) this.placeFeet(world, toPhys);
     this.written = true;
+    // (The feedback round II: the braced feet's places before the legs were laid serve this frame's solve alone.)
+    this.preKept = false;
   }
 
   /**
@@ -426,6 +801,19 @@ export class LimbPlace {
       // The ball (the toe's joint), else the ankle: how far off the face it stands, by a ray into the wall from it.
       if (l.toe) boneIn(l.toe, toPhys, pT, qW);
       else pT.copy(pC);
+      // The feedback round II: with the legs laid over the pose, a braced foot is put where it stood before (its ball and its
+      // ankle as the pose had them), so a braced ladder's feet stay on the rungs while the hips and legs sway.
+      const pre = this.preKept && !fade;
+      let preFree = false;
+      if (pre) {
+        // (Carried by whatever moved the whole figure since they were kept: the climb's sphere push, which moves the feet with it.)
+        const f = this.preFeet;
+        const ex = pRootNow.x - pRootLaid.x;
+        const ey = pRootNow.y - pRootLaid.y;
+        const ez = pRootNow.z - pRootLaid.z;
+        pT.set(f[li * 6] + ex, f[li * 6 + 1] + ey, f[li * 6 + 2] + ez);
+        pN.set(f[li * 6 + 3] + ex - pC.x, f[li * 6 + 4] + ey - pC.y, f[li * 6 + 5] + ez - pC.z);
+      }
       // The ball (pT) into the face along its normal: the answer is the leg's own (`toi`).
       this.faceAhead(world, l);
       let d = l.toi;
@@ -438,7 +826,13 @@ export class LimbPlace {
         l.w = lw < goal ? (lw + st < goal ? lw + st : goal) : lw - st > goal ? lw - st : goal;
         if (d === d) l.last = d;
         else d = l.last;
-        if (!(l.w > 0) || !(d === d)) continue;
+        if (!(l.w > 0) || !(d === d)) {
+          // (The feedback round II: with the legs laid over the pose, a braced foot no face is under is held where the pose had
+          // it all the same, its ankle put back there and turned as the clip turns it.)
+          if (!pre) continue;
+          d = BALL_OFF;
+          preFree = true;
+        }
       } else if (!(d === d)) {
         // No face under the foot: its hold (item 6) let go of at once.
         if (holds) {
@@ -451,7 +845,7 @@ export class LimbPlace {
       }
       // Each foot by how near the clip has it to the face, where the climb asks (a foot lifted for its next hold is the clip's).
       const off = d - BALL_OFF;
-      let wf = fade ? w * (off <= WALL_PLANT.near ? 1 : off >= WALL_PLANT.far ? 0 : 1 - (off - WALL_PLANT.near) / (WALL_PLANT.far - WALL_PLANT.near)) : w * l.w;
+      let wf = preFree ? 1 : fade ? w * (off <= WALL_PLANT.near ? 1 : off >= WALL_PLANT.far ? 0 : 1 - (off - WALL_PLANT.near) / (WALL_PLANT.far - WALL_PLANT.near)) : w * l.w;
       // Item 6: on its hold until its next reach (its ball's place on the face as the clip has it handed over, and the target and
       // weight the hold answers taken in its place).
       if (holds) {
@@ -476,7 +870,7 @@ export class LimbPlace {
         wf = w * holds.w;
       }
       if (!(wf > 0)) continue;
-      this.feetOn++;
+      if (!preFree) this.feetOn++;
       const move = off * wf;
       const q = this.ask;
       q.ax = pA.x;
@@ -493,6 +887,11 @@ export class LimbPlace {
         q.tx = pC.x + (holds.tx - pT.x) * wf;
         q.ty = pC.y + (holds.ty - pT.y) * wf;
         q.tz = pC.z + (holds.tz - pT.z) * wf;
+      } else if (pre) {
+        // (Where the ankle stood before the legs were laid, onto the face as ever.)
+        q.tx = pC.x + pN.x - nx * move;
+        q.ty = pC.y + pN.y - ny * move;
+        q.tz = pC.z + pN.z - nz * move;
       } else {
         q.tx = pC.x - nx * move;
         q.ty = pC.y - ny * move;
@@ -508,6 +907,7 @@ export class LimbPlace {
       // The ankle: the clip's own turn, turned from its wall to the face's.
       qW.copy(qD2).multiply(qD1).multiply(qB);
       if (fade) qM.copy(qY.copy(qX).slerp(qI.set(0, 0, 0, 1), 1 - wf)).multiply(qC);
+      else if (preFree) qM.copy(qC);
       else qM.copy(qX).multiply(qC);
       setBoneWorld(l.ankle, qM, qW);
     }

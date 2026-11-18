@@ -24,7 +24,7 @@ export async function resolve(s, c, next) {
 register('data:text/javascript,' + encodeURIComponent(hook));
 
 const { CharacterRig } = await import('../../../src/player/rig.ts');
-const { driveHangClips } = await import('../../../src/player/hangClips.ts');
+const { driveBarClips, driveHangClips } = await import('../../../src/player/hangClips.ts');
 const { MixamoPack } = await import('../../../src/anim/mixamoPack.ts');
 const { LEDGE_IDS, ledgeClipName } = await import('../../../src/anim/ledgeClips.ts');
 const { WALL_CLIP_NAMES, WALL_IDS, wallClipName } = await import('../../../src/anim/wallClips.ts');
@@ -185,6 +185,37 @@ export function drawWall(b: TestBody, F: Figure, dt: number): void {
   settleFigure(b, F);
   F.group.updateMatrixWorld(true);
 }
+
+/**
+ * Climbing II, the feedback round II: the game's bar frame on the figure after the body's (the player's `animateBar`: the swing's
+ * placement and the bar's clips through `driveBarClips`; `placeVisual`'s `applyBarRoot`; and `placeBarLimbs`: the hands on the
+ * bar by `BarSwing.limbsFor` and the limbs' own solve while the free hang shows). `wasLimbs` is the player's `barLimbs`, kept
+ * on the figure by the caller (`barLimbs`). The player's own lines are pinned as text by climbFb2Bars.test.ts.
+ */
+export function drawBarFrame(b: TestBody, F: Figure, dt: number, tab: unknown): void {
+  const B = b.bar;
+  B.placeFigure(tab as never, F.root.scale.y, b.pos);
+  driveBarClips(F.rig as never, B as never, dt, F.hang);
+  F.group.position.set(b.pos.x, b.pos.y, b.pos.z);
+  F.group.rotation.set(0, B.heading, 0);
+  F.group.updateMatrixWorld(true);
+  F.rig.twistTorso(0, 0);
+  const c = Math.cos(B.heading);
+  const s = Math.sin(B.heading);
+  F.root.position.set(B.offX * c - B.offZ * s, B.offY, B.offX * s + B.offZ * c);
+  F.root.quaternion.setFromAxisAngle(BAR_X, B.tilt);
+  const show = B.onBar && B.freeW > 0;
+  if ((CLIMB_TUNE.barHang === 'free' || barLimbs.get(F)) && (show || barLimbs.get(F))) {
+    F.group.updateMatrixWorld(true);
+    B.limbsFor(F.lp, F.rig as never, null);
+    if (show) F.lp.place(F.rig as never, null, null);
+    barLimbs.set(F, show);
+  }
+  F.group.updateMatrixWorld(true);
+}
+const BAR_X = new THREE.Vector3(1, 0, 0);
+/** The player's `barLimbs` for each figure (whether the bar put its hands on the bar last frame). */
+const barLimbs = new WeakMap<Figure, boolean>();
 
 /** The figure's frame after the body's: the hang's, the wall's, or nothing climbing (its climb's push let go, as the player's). */
 export function drawClimb(b: TestBody, F: Figure, dt: number): 'hang' | 'wall' | '' {

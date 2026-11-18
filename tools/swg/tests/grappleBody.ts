@@ -1030,6 +1030,9 @@ export class TestBody implements GrappleBody {
   private hangFrame(dt: number, mid = false): void {
     void mid;
     this.hangFrames++;
+    // (The feedback round II: the hips' sway stepped on the physics' own coming steps, as the player's `hangFrame` hands them.)
+    this.ledge.steps = this.physics.stepsAhead(dt);
+    this.ledge.behind = this.physics.behind;
     this.ledge.step(this.physics.world as unknown as LedgeWorld, this, this.fillLedgeIn(dt, null, false), this.stamina);
     // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
     this.setCrouchCollider(this.ledge.crouchedNow);

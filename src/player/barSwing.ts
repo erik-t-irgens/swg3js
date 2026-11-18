@@ -36,13 +36,15 @@
 // Nothing here makes an object on a frame: every ask and answer is a kept record, and the engine's own answers (a shape test's)
 // are the only things made.
 
+import * as THREE from 'three';
 import type { RAPIER } from '../core/physics.ts';
 import { STILL_FLAGS } from './stairSense.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { BAR_CLIP, BAR_CLIP_NAMES, BAR_FACTS, BAR_FLIGHT_NAME, BAR_TIMES, BarPose, type BarFlightTable, type BarSwingTable } from '../anim/barClips.ts';
 import { BAR_HALF_SPAN, BarAxis, BarRoomAsk, barAxisOf, roomUnderBar, type BarCollider, type BarRoomWorld } from './barShape.ts';
 import { LEDGE_CAPSULE, type LedgeBody, type LedgeIn } from './ledge.ts';
-import { LEDGE_FACTS, LEDGE_REST, LEDGE_ROLES } from '../anim/ledgeClips.ts';
+import { LEDGE_FACTS, LEDGE_REST, LEDGE_ROLES, type LedgeClipFacts } from '../anim/ledgeClips.ts';
+import type { LimbPlace, LimbRig } from './limbPlace.ts';
 
 /** The physics' own step (`FIXED_DT` in src/core/physics.ts; climbBars.test.ts holds the two equal): the swing is integrated on it. */
 export const BAR_STEP = 1 / 60;
@@ -76,6 +78,27 @@ const CATCH_LEVEL = 0.5;
 /** Maker B: the free hang's idle (what another player's game is told a bar's hang is: the nearest pose the wire has), its grip over its feet. */
 const PEER_IDLE = LEDGE_FACTS[LEDGE_ROLES.free.idle];
 const PEER_OVER = PEER_IDLE ? PEER_IDLE.g0[1] - (PEER_IDLE.a0 - LEDGE_REST.ankle) : 1.9;
+
+/**
+ * Feedback round II, item 0c (`climb.barHang` 'free'): the ledges' own free-hang loop and its two shimmies (their facts: where
+ * each clip's hands are over its feet, and the shimmy's own pace along the lip), and the rig states that play them.
+ */
+const FREE_IDLE: LedgeClipFacts = LEDGE_FACTS[LEDGE_ROLES.free.idle];
+const FREE_LEFT: LedgeClipFacts = LEDGE_FACTS[LEDGE_ROLES.free.shimmyLeft];
+const FREE_RIGHT: LedgeClipFacts = LEDGE_FACTS[LEDGE_ROLES.free.shimmyRight];
+/** A shimmy clip's own pace along its lip on the human male, m/s (its hands' net travel over its length, as the ledges' shimmy reads it). */
+const FREE_LEFT_PACE = Math.abs(FREE_LEFT.net[0]) / FREE_LEFT.dur;
+const FREE_RIGHT_PACE = Math.abs(FREE_RIGHT.net[0]) / FREE_RIGHT.dur;
+/** The free hang's rig states (the ledges' own words: `LedgeHang.loopState`'s). */
+export const BAR_FREE_IDLE = 'hangFree';
+export const BAR_FREE_LEFT = 'shimmyFreeL';
+export const BAR_FREE_RIGHT = 'shimmyFreeR';
+/** A shift along the bar under this in a frame is no shift (a mechanic: a hand's slip, under a millimetre). */
+const SHIFT_LEAST = 1e-4;
+/** Item 0b: a phase step past this either way is the pendulum's phase wrapping round (a mechanic: half a turn). */
+const HALF_TURN = Math.PI;
+/** Scratch: a hand's grip as posed (kept). */
+const GRIP = new THREE.Vector3();
 
 /** Why a flight off a bar ended (the console's and the tests' word): caught, landed, met a wall, in the water, falling past a grab, or held too long. */
 export type BarFlyEnd = '' | 'caught' | 'land' | 'wall' | 'water' | 'fall' | 'long';
@@ -208,6 +231,37 @@ export class BarSwing {
   /** The frames held, and the shape tests asked (the engine's own answers: what a frame makes). */
   frames = 0;
   casts = 0;
+  /**
+   * Feedback round II, item 0b (`climb.barSettle` 'swings'): a swing let alone settling: whether it is (anchored at the step the
+   * pump keys were let go of), the phase it has swung through since (radians: a whole swing out and back is a turn), the last
+   * phase read, the damping it settles by (a second), and the amplitude it was let alone at (radians, the console's).
+   */
+  settling = false;
+  settleSwung = 0.5;
+  private settleLast = 0.5;
+  settleC = 0.5;
+  settleFrom = 0.5;
+  /**
+   * Item 0c (`climb.barHang` 'free'): the free hang wanted now, its drawn share (nought the swing's pose, one the loop's, eased
+   * over `barHangBlend` as the rig crossfades the two), this frame's start of it and end of it (the swing's clip taken up again,
+   * for the caller's rig), the loop's rig state (still or a shimmy either way) and the rate it plays at (a shimmy at the shift's
+   * own speed), and the way the hands moved along the bar this frame (positive the body's left).
+   */
+  free = false;
+  freeW = 0.5;
+  freeStart = false;
+  freeEnd = false;
+  freeState: string = BAR_FREE_IDLE;
+  freeRate = 0.5;
+  shiftWay = 0.5;
+  /** Item 0c: the loop's drawn offset (eased from clip to clip over `climb.ease`), whether it starts afresh, and the frame's seconds. */
+  private fhX = 0.5;
+  private fhY = 0.5;
+  private fhZ = 0.5;
+  private fhFresh = false;
+  private dtNow = 0.5;
+  /** Item 0c: the swing's clip taken up again this frame: its start put where the pendulum's angle has it (`placeFigure`). */
+  private backNow = false;
 
   private readonly makers: BarMakers;
   private box: RAPIER.Shape | null = null;
@@ -307,6 +361,29 @@ export class BarSwing {
     this.outT = 0;
     this.outDur = 0;
     this.regrabT = 0;
+    this.settleSwung = 0;
+    this.settleLast = 0;
+    this.settleC = 0;
+    this.settleFrom = 0;
+    this.freeW = 0;
+    this.freeRate = 1;
+    this.shiftWay = 0;
+    this.fhX = 0;
+    this.fhY = 0;
+    this.fhZ = 0;
+    this.dtNow = 0;
+  }
+
+  /**
+   * Feedback round II, item 0a (`climb.barCamera` 'pass'): the one bar the camera's block leaves out (the engine's ray handed it
+   * as its excluded collider): the bar the hands hold or are carried onto (a catch's reach included: the bar it reaches for is
+   * the one taken), and in the flight off a bar the one let go of; null otherwise, and always under 'block'.
+   */
+  cameraCollider(): BarCollider | null {
+    if (CLIMB_TUNE.barCamera !== 'pass') return null;
+    if (this.phase === BAR_GRAB || this.phase === BAR_SWING) return this.bar.col;
+    if (this.phase === BAR_FLY) return this.flyCol;
+    return null;
   }
 
   /** Holding the body (carried onto the bar, swinging on it, or in the flight off it). */
@@ -379,6 +456,20 @@ export class BarSwing {
     this.poseT = Number.NaN;
     this.outT = 0;
     this.om = 0;
+    // (Feedback round II: no settle or free hang carried over to the next grab.)
+    this.letAlone();
+  }
+
+  /** Feedback round II, items 0b and 0c: off the bar (or onto a new one): no settle under way, no free hang shown. */
+  private letAlone(): void {
+    this.settling = false;
+    this.free = false;
+    this.freeW = 0;
+    this.freeStart = false;
+    this.freeEnd = false;
+    this.backNow = false;
+    this.freeState = BAR_FREE_IDLE;
+    this.freeRate = 1;
   }
 
   // ---- finding a bar ----------------------------------------------------------------------------------------------------
@@ -674,6 +765,8 @@ export class BarSwing {
     this.ended = false;
     this.landNow = false;
     this.knocked = false;
+    // (Feedback round II: a grab begins with no settle under way and the swing's own pose, as ever.)
+    this.letAlone();
     // (Maker B: the bar's own clip, by its rig name; a catch takes it back from the flight's twin.)
     this.clipName = BAR_CLIP_NAMES[BAR_CLIP];
     this.startClip = this.clipName;
@@ -694,6 +787,139 @@ export class BarSwing {
   private amplitude(): number {
     const c = Math.cos(this.th) - (this.r * this.om * this.om) / (2 * CLIMB_TUNE.swingGravity);
     return c <= -1 ? Math.PI : c >= 1 ? 0 : Math.acos(c);
+  }
+
+  /**
+   * Feedback round II, item 0b: one of the physics' steps of a swing let alone (`climb.barSettle` 'swings'), the damping it settles
+   * by into `settleC`: so its amplitude falls from where it was let alone to under `barSettleTo` over `barSettleSwings` swings out
+   * and back. The swing's phase is read off its angle and speed (one turn a swing, whatever the swing's height), and the damping
+   * is the one that brings the amplitude now down to `barSettleTo` in the time the swings left take at the swing's own period
+   * (the pendulum's at its radius, made longer by its height as a real pendulum's is): a damping `c` takes an amplitude down by
+   * exp(-c t / 2). Worked out again each step from where the swing really is, so the swing reaches `barSettleTo` as its swings
+   * run out whatever the period's arithmetic missed; never less than the swing's own damping (`swingDamp`), and past the swings
+   * asked with the swing still over, critical (it stops at once). Under `barSettleTo` the damping it reached is kept, so a swing
+   * settled goes on dying away. Numbers into fields, nothing handed across a call.
+   */
+  private settleStep(): void {
+    const g = CLIMB_TUNE.swingGravity;
+    const r = this.r;
+    const w0 = Math.sqrt(g / r);
+    const th = this.th;
+    const om = this.om;
+    let cc = Math.cos(th) - (r * om * om) / (2 * g);
+    if (cc > 1) cc = 1;
+    if (cc < -1) cc = -1;
+    const A = Math.acos(cc);
+    const A2 = A * A;
+    // (The period at a height A: a pendulum's own series, 1 + A²/16 + 11 A⁴/3072 of the small swing's.)
+    const w = w0 / (1 + A2 / 16 + (11 * A2 * A2) / 3072);
+    const ph = Math.atan2(-om / w, th);
+    const floor = CLIMB_TUNE.swingDamp;
+    if (!this.settling) {
+      this.settling = true;
+      this.settleSwung = 0;
+      this.settleLast = ph;
+      this.settleFrom = A;
+      this.settleC = floor;
+    } else {
+      let d = ph - this.settleLast;
+      if (d > HALF_TURN) d -= 2 * HALF_TURN;
+      else if (d < -HALF_TURN) d += 2 * HALF_TURN;
+      this.settleSwung += d;
+      this.settleLast = ph;
+    }
+    const to = (CLIMB_TUNE.barSettleTo * Math.PI) / 180;
+    if (A > to) {
+      // (Its height under `barSettleTo` a quarter swing before the swings run out, as it swings through the middle, so the swing's
+      // last turn is under it: reached at the very end, that turn would stand at it.)
+      const left = 2 * HALF_TURN * CLIMB_TUNE.barSettleSwings - HALF_TURN / 2 - this.settleSwung;
+      // (A swing past its swings and still over is brought under within a quarter swing more, never at once. The damping only
+      // ever rises through a settle: the height read off the swing's energy dips and climbs within each swing, and a damping
+      // following it down would fall behind. Held between the swing's own damping and critical by `Math.max` and `Math.min`,
+      // never a local the tune's number and a worked one both reach: where the two meet a number is made each step.)
+      const most = 2 * w0;
+      const k = (2 * Math.log(A / to) * w) / Math.max(left, HALF_TURN / 2);
+      this.settleC = Math.max(this.settleC, floor, Math.min(most, k));
+    }
+    this.dampNow = this.settleC;
+  }
+
+  /** Item 0b: the damping the swing's step takes now (the swing's own, or a settle's). */
+  private dampNow = 0.5;
+
+  /**
+   * Item 0c (`climb.barHang` 'free'), after the frame's steps: the free hang wanted (swinging, no pump key held, the amplitude under
+   * `barHangFrom`) or not; its start (`freeStart`: the caller's rig crossfades the swing's clip into the loop) and its end
+   * (`freeEnd`: the swing's clip begun again from where the pendulum's angle has it, over `barHangBlend`); its drawn share eased
+   * the same way over the same; and the loop's state and rate: a shimmy the way the hands moved along the bar this frame, at
+   * the shift's own speed over the clip's own pace, else still.
+   */
+  private hangStep(li: LedgeIn, pumpHeld: boolean): void {
+    let want = false;
+    if (CLIMB_TUNE.barHang === 'free' && this.phase === BAR_SWING && !pumpHeld) {
+      const g = CLIMB_TUNE.swingGravity;
+      const c = Math.cos(this.th) - (this.r * this.om * this.om) / (2 * g);
+      const A = c <= -1 ? Math.PI : c >= 1 ? 0 : Math.acos(c);
+      want = A < (CLIMB_TUNE.barHangFrom * Math.PI) / 180;
+    }
+    if (want && !this.free) {
+      this.free = true;
+      this.freeStart = true;
+      if (this.freeW === 0) this.fhFresh = true;
+    } else if (!want && this.free) {
+      this.free = false;
+      this.freeEnd = true;
+      // The swing's clip taken up again, crossfaded from the loop (its start put at the pendulum's angle by `placeFigure`).
+      this.startClip = this.clipName;
+      this.startFrom = BAR_FACTS.still;
+      this.startFade = CLIMB_TUNE.barHangBlend;
+      this.backNow = true;
+    }
+    const blend = CLIMB_TUNE.barHangBlend;
+    const k = blend > 0 ? li.dt / blend : 1;
+    if (this.free) this.freeW = this.freeW + k >= 1 ? 1 : this.freeW + k;
+    else this.freeW = this.freeW - k <= 0 ? 0 : this.freeW - k;
+    const way = this.shiftWay;
+    const sc = this.r / BAR_FACTS.radius;
+    if (way > 0) {
+      this.freeState = BAR_FREE_LEFT;
+      this.freeRate = CLIMB_TUNE.barShimmy / (FREE_LEFT_PACE * sc);
+    } else if (way < 0) {
+      this.freeState = BAR_FREE_RIGHT;
+      this.freeRate = CLIMB_TUNE.barShimmy / (FREE_RIGHT_PACE * sc);
+    } else {
+      this.freeState = BAR_FREE_IDLE;
+      this.freeRate = 1;
+    }
+  }
+
+  /**
+   * Item 0c: the hands on the bar while the free hang shows (its share over nought, the hands on the bar): each hand put on the
+   * bar's line where the posed hand stands along it (so the clip's own hand over hand along the bar is kept, as the ledges keep a
+   * shimmy's hands along a lip), wholly, through the ledges' own limb solve (src/player/limbPlace.ts); the hands let go of
+   * otherwise. The figure posed and placed, its world matrices fresh (`toPhys` the physics frame, null the world's).
+   */
+  limbsFor(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    const on = this.onBar && this.freeW > 0;
+    const B = this.bar;
+    for (let s = 0; s < 2; s++) {
+      const g = on ? lp.gripNow(rig, s, toPhys, GRIP) : null;
+      if (!g) {
+        lp.handW[s] = 0;
+        continue;
+      }
+      let a = (g.x - B.ax) * B.ux + (g.y - B.ay) * B.uy + (g.z - B.az) * B.uz;
+      if (a < 0) a = 0;
+      if (a > B.len) a = B.len;
+      lp.hand[s * 3] = B.ax + B.ux * a;
+      lp.hand[s * 3 + 1] = B.ay + B.uy * a;
+      lp.hand[s * 3 + 2] = B.az + B.uz * a;
+      lp.handW[s] = 1;
+    }
+    lp.palmW[0] = 0;
+    lp.palmW[1] = 0;
+    lp.wallW = 0;
+    lp.footFade = false;
   }
 
   /** The body's place for the pendulum now (and, carried, between where it was and there). */
@@ -722,9 +948,13 @@ export class BarSwing {
     // (The grab's own frame keeps its start for the caller's rig, as the ledges' do: 'fresh'.)
     if (!this.fresh) this.startClip = '';
     this.fresh = false;
+    // (Feedback round II, item 0c: the free hang's start and end are this frame's alone.)
+    this.freeStart = false;
+    this.freeEnd = false;
     if (!this.holding) return;
     this.frames++;
     this.landNow = false;
+    this.dtNow = li.dt;
     const h = BAR_STEP;
     const n = this.steps;
     if (this.phase !== BAR_FLY) {
@@ -757,6 +987,9 @@ export class BarSwing {
     const side = li.leftHeld === li.rightHeld ? 0 : li.leftHeld ? leftOnBar : -leftOnBar;
     const margin = BAR_HALF_SPAN * li.scale;
     const r = this.r;
+    // (Feedback round II, item 0b: a swing let alone settles by a damping of its own; the pump keys held, the swing's own.)
+    const settle = CLIMB_TUNE.barSettle === 'swings';
+    const pumpHeld = li.forwardHeld || li.backHeld;
     for (let k = 0; k < n; k++) {
       // Maker B: a step of the flight (which may catch a bar, the steps after it the new swing's, or end it).
       if (this.phase === BAR_FLY) {
@@ -769,7 +1002,14 @@ export class BarSwing {
       if (li.forwardHeld && this.om >= 0) a += pump;
       if (li.backHeld && this.om <= 0) a -= pump;
       if (a !== 0 && this.amplitude() >= most) a = 0;
-      this.om += (-(g / r) * Math.sin(this.th) - damp * this.om + a) * h;
+      // (The damping through a field, always: a local taking the tune's number one way and a field's the other is a number made
+      // each step where the two meet.)
+      if (settle && !pumpHeld) this.settleStep();
+      else {
+        if (settle) this.settling = false;
+        this.dampNow = damp;
+      }
+      this.om += (-(g / r) * Math.sin(this.th) - this.dampNow * this.om + a) * h;
       const th = this.th + this.om * h;
       let s = this.s + side * CLIMB_TUNE.barShimmy * h;
       if (s < margin) s = margin;
@@ -830,6 +1070,14 @@ export class BarSwing {
     this.apexY = body.pos.y;
     this.thDraw = this.th + this.om * rem;
     this.heading = Math.atan2(this.fx, this.fz);
+    // Feedback round II, item 0c: the free hang (`climb.barHang` 'free'), or one still showing when the switch was moved.
+    if (CLIMB_TUNE.barHang === 'free' || this.free || this.freeW > 0) {
+      // (The way the keys move the hands along the bar, short of its ends: never this frame's own move, which is nought on a frame
+      // the physics takes no step, every other frame at 144 a second.)
+      const end = side > 0 ? this.s >= this.bar.len - margin - SHIFT_LEAST : side < 0 ? this.s <= margin + SHIFT_LEAST : true;
+      this.shiftWay = end ? 0 : side * leftOnBar;
+      this.hangStep(li, pumpHeld);
+    }
     body.vel.x = 0;
     body.vel.y = 0;
     body.vel.z = 0;
@@ -872,6 +1120,8 @@ export class BarSwing {
     this.startFrom = BAR_TIMES.release;
     this.startFade = CLIMB_TUNE.ease;
     this.poseT = Number.NaN;
+    // (Feedback round II: the flight crossfades from whatever the hang showed, the swing's or the free hang's loop.)
+    this.letAlone();
   }
 
   /**
@@ -1014,6 +1264,7 @@ export class BarSwing {
     this.regrabT = CLIMB_TUNE.regrab;
     this.regrabCol = this.bar.col;
     this.poseT = Number.NaN;
+    this.letAlone();
   }
 
   /** Off the bar, every frame: the drawn offset eased out after a let-go, and the let-go's one frame put down. */
@@ -1095,6 +1346,60 @@ export class BarSwing {
       this.offZ = this.fromOffZ + (this.offZ - this.fromOffZ) * v;
       this.tilt = this.fromTilt + (this.tilt - this.fromTilt) * v;
     }
+    // Feedback round II, item 0c: the swing's clip taken up again from where the pendulum's angle has it; and while the free
+    // hang shows, the figure drawn between the swing's placement and the loop's by its share.
+    if (this.backNow) {
+      this.startFrom = t;
+      this.backNow = false;
+    }
+    if (this.freeW > 0) {
+      // (The rig's scale through a field: a number handed across a call the compiler leaves out is a number made.)
+      this.kNow = k;
+      this.placeFree(pos);
+    }
+  }
+
+  /** Item 0c: the rig's scale `placeFigure` was handed, for `placeFree`. */
+  private kNow = 0.5;
+
+  /**
+   * Item 0c: the free hang's placement: the loop's own hands over its feet (the clip the rig plays now, still or a shimmy: the
+   * ledges' facts) put on the bar from where the body hangs, only up and out (along the bar the clip's hands are its own, as the
+   * ledges' `gripOff` keeps them), eased from clip to clip over the hang's own ease, upright; the drawn offset and turn the
+   * swing's and this one's between them by the free hang's share. (The limb solve puts each hand on the bar after.)
+   */
+  private placeFree(pos: { x: number; y: number; z: number }): void {
+    const k = this.kNow;
+    const f = this.freeState === BAR_FREE_LEFT ? FREE_LEFT : this.freeState === BAR_FREE_RIGHT ? FREE_RIGHT : FREE_IDLE;
+    const lx = k * f.g0[0];
+    const ly = k * f.g0[1];
+    const lz = k * f.g0[2];
+    const ch = Math.cos(this.heading);
+    const sh = Math.sin(this.heading);
+    const B = this.bar;
+    let tx = B.ax + B.ux * this.s - pos.x - (lx * ch + lz * sh);
+    const ty = B.ay + B.uy * this.s - pos.y - ly;
+    let tz = B.az + B.uz * this.s - pos.z - (-lx * sh + lz * ch);
+    const along = tx * B.ux + tz * B.uz;
+    tx -= B.ux * along;
+    tz -= B.uz * along;
+    if (this.fhFresh) {
+      this.fhX = tx;
+      this.fhY = ty;
+      this.fhZ = tz;
+      this.fhFresh = false;
+    } else {
+      const e = CLIMB_TUNE.ease;
+      const u = e > 0 && this.dtNow < e ? this.dtNow / e : 1;
+      this.fhX += (tx - this.fhX) * u;
+      this.fhY += (ty - this.fhY) * u;
+      this.fhZ += (tz - this.fhZ) * u;
+    }
+    const w = this.freeW;
+    this.offX += (this.fhX - this.offX) * w;
+    this.offY += (this.fhY - this.offY) * w;
+    this.offZ += (this.fhZ - this.offZ) * w;
+    this.tilt -= this.tilt * w;
   }
 
   /**
@@ -1150,6 +1455,16 @@ export class BarSwing {
       tilt: +(this.tilt * deg).toFixed(2),
       frames: this.frames,
       casts: this.casts,
+      // Feedback round II: the camera's block (item 0a), a swing let alone settling (0b) and the free hang (0c).
+      camera: CLIMB_TUNE.barCamera,
+      cameraPasses: this.cameraCollider() !== null,
+      settle: CLIMB_TUNE.barSettle,
+      settling: this.settling ? { from: +(this.settleFrom * deg).toFixed(2), swung: +(this.settleSwung / (2 * Math.PI)).toFixed(2), damping: +this.settleC.toFixed(3) } : null,
+      hang: CLIMB_TUNE.barHang,
+      free: this.free,
+      freeShare: +this.freeW.toFixed(3),
+      freeLoop: this.freeState,
+      freeRate: +this.freeRate.toFixed(3),
     };
   }
 }

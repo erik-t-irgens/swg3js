@@ -116,7 +116,15 @@ export function driveBarClips(rig: CharacterRig, B: BarSwing, dt: number, st: Ha
   }
   // Maker B: with the hands on the bar the rig's state is the free hang's (under the bar's clip, never seen), which is what the
   // wire carries to other players' games: the nearest pose they have; in the flight and after it, the falling loop's.
-  rig.setState(B.onBar ? 'hangFree' : 'air', 0, null, st.hangFade);
+  // Feedback round II, item 0c (`climb.barHang` 'free'): while the free hang shows, its state is the loop's own (still, or a
+  // shimmy at the shift's own speed: `BarSwing.freeRate` through the kept fade), seen now: the swing's clip crossfaded into it as
+  // it begins (`freeStart`), and taken up again from the pendulum's angle as it ends (`startClip` above, over `barHangBlend`).
+  if (B.onBar && (B.free || B.freeW > 0)) {
+    st.ladderRate.rate = B.freeRate;
+    st.ladderRate.fade = CLIMB_TUNE.ease;
+    rig.setState(B.freeState as RigState, 0, null, st.ladderRate);
+    if (B.freeStart && rig.overrideName === B.clipName) rig.yieldOverride(CLIMB_TUNE.barHangBlend);
+  } else rig.setState(B.onBar ? 'hangFree' : 'air', 0, null, st.hangFade);
   if (B.holding && B.poseT === B.poseT) {
     rig.overrideSeekAt = B.poseT;
     rig.overrideSeekNow(B.clipName);

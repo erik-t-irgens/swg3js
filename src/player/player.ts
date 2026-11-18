@@ -4141,7 +4141,39 @@ export class Player {
     this.updateBlades();
     this.animateBar(dt);
     this.placeVisual();
+    // Feedback round II, item 0c: the hands on the bar while the free hang shows (never under `climb.barHang` 'swing').
+    if (CLIMB_TUNE.barHang === 'free' || this.barLimbs) this.placeBarLimbs();
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Feedback round II, item 0c: whether the bar put the hands on it last frame (the frame after lets them go). */
+  private barLimbs = false;
+
+  /**
+   * Item 0c: while the free hang shows on a bar, its hands put on the bar by the ledges' limb solve (`BarSwing.limbsFor`, src/
+   * player/limbPlace.ts), the figure posed and placed; the frame after, let go of. Nothing at all while neither.
+   */
+  private placeBarLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const B = this.bar;
+    const show = B.onBar && B.freeW > 0;
+    if (!show && !this.barLimbs) return;
+    const lp = this.limbs;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    B.limbsFor(lp, rig, toPhys);
+    if (show) lp.place(rig, null, toPhys);
+    this.barLimbs = show;
+  }
+
+  /**
+   * Feedback round II, item 0a (`climb.barCamera` 'pass'): the bar the camera's block leaves out (`BarSwing.cameraCollider`: the one
+   * held, let go of in the flight, or reached for), the engine's own collider; null for none (every bar a wall to the camera).
+   */
+  barCamera(): RAPIER.Collider | null {
+    return this.bar.cameraCollider() as unknown as RAPIER.Collider | null;
   }
 
   /** Phase 3: the bar's clip measured off the rig once (`measureBarTable`), the figure's place for the swing, and the clip on the rig. */
@@ -4251,6 +4283,9 @@ export class Player {
       li.viewYaw = Math.atan2(fwd.x, fwd.z);
     }
     this.clearDt = dt;
+    // The feedback round II (maker B, item 0f): the hips' sway stepped on the physics' own coming steps, as the bar's swing is.
+    this.ledge.steps = this.physics.stepsAhead(dt);
+    this.ledge.behind = this.physics.behind;
     this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
     // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
     this.setCrouchCollider(this.ledge.crouchedNow);
@@ -5301,7 +5336,7 @@ export class Player {
       handPos.applyMatrix4(hullInv);
       aim.transformDirection(hullInv);
     }
-    const blocked = room ? (a: THREE.Vector3, b: THREE.Vector3) => room.physics.cameraBlock(a, b, null, true) !== null : (a: THREE.Vector3, b: THREE.Vector3) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null;
+    const blocked = room ? (a: THREE.Vector3, b: THREE.Vector3) => room.physics.cameraBlock(a, b, null, true) !== null : (a: THREE.Vector3, b: THREE.Vector3) => this.physics.cameraBlock(a, b, this.body, this.inside, this.barCamera()) !== null;
     const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), blocked);
     if (result === 'caught') return;
     if (room) {

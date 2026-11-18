@@ -562,6 +562,9 @@ const gripOf = (Fg: Figure): THREE.Vector3 => {
   return G.multiplyScalar(0.25);
 };
 {
+  // (The swing window's own pose: the feedback round II's free hang, which a still hang and a swing let alone come to under its
+  // `climb.barHang` 'free', has its own suite, climbFb2Bars.test.ts; here the swing's clip is what is drawn whatever the swing.)
+  tuneClimb({ barHang: 'swing' });
   const rows: string[] = [];
   let poseOk = true;
   let dirOk = true;
@@ -623,9 +626,10 @@ const gripOf = (Fg: Figure): THREE.Vector3 => {
     dirOk &&= fwd > 0 && back > 0 && fwdUp / fwd > 0.97 && backDown / back > 0.97;
     rows.push(`${fps}: hands ${(gripWorst * 1000).toFixed(1)} mm off the bar, hips ${(angWorst * DEG).toFixed(3)} degrees off the swing's angle; forward ${fwdUp}/${fwd} frames on, back ${backDown}/${back} back`);
   }
-  ok(stillOk, 'a still hang holds the clip at the window\'s straight-down frame');
+  ok(stillOk, 'a still hang holds the clip at the window\'s straight-down frame (`climb.barHang` at \'swing\')');
   ok(poseOk, `swinging, every frame the drawn hands are on the bar within a centimetre and the drawn hips stand at the pendulum's own angle (the clip's time the swing asks put on the rig) (${rows.join('; ')})`);
   ok(dirOk, 'the clip plays forward while the swing goes forward and backward while it comes back');
+  fresh();
 }
 
 // ---- 'off', the switch's other setting, and the hand-overs -------------------------------------------------------------------

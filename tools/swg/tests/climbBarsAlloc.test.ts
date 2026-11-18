@@ -57,6 +57,12 @@ const shims = await Promise.all(Array.from({ length: PROCESSES }, () => one('shi
 const sm = shims.map((a) => a.meas as Meas);
 ok(shims.every((a) => a.holding && a.held) && sm.every((x) => x.clean && x.casts > x.frames / 50), `in all ${PROCESSES} processes the hands moved along the bar, its room asked again as they went (${Math.min(...sm.map((x) => x.casts))} asks and more over ${sm[0].frames} frames), every window clean`);
 ok(sm.every((x) => per(x) <= PER_FRAME), `the shimmy's frame makes nothing, its asks of the room included (worst ${Math.max(...sm.map(per)).toFixed(4)} bytes a frame over ${sm[0].frames} frames, in every one of ${PROCESSES} processes)`);
+// The feedback round II (items 0b and 0c): W held and let go of in turn, a swing pumped, let alone to settle by its own worked-out
+// damping, into the free hang and out of it again: nothing made at any of it.
+const settles = await Promise.all(Array.from({ length: PROCESSES }, () => one('settle')));
+const tm = settles.map((a) => a.meas as Meas);
+ok(settles.every((a) => a.held && (a.frees as number) > 0 && (a.settles as number) > 0) && tm.every((x) => x.clean && x.casts === 0), `in all ${PROCESSES} processes the swing was pumped, settled and came into the free hang over and over (${Math.min(...settles.map((a) => a.frees as number))} free hangs begun and more), every window clean and nothing asked of the engine`);
+ok(tm.every((x) => per(x) <= PER_FRAME), `the settle's and the free hang's frames make nothing (worst ${Math.max(...tm.map(per)).toFixed(4)} bytes a frame over ${tm[0].frames} frames, in every one of ${PROCESSES} processes)`);
 const clips = await Promise.all(Array.from({ length: PROCESSES }, () => one('clips')));
 const cm = clips.map((a) => a.meas as Meas);
 ok(clips.every((a) => (a.calls as number) > 0) && cm.every((x) => x.clean), `the bar's hand-over drove the rig in every process, every window clean`);

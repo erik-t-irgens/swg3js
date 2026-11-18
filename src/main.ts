@@ -36060,7 +36060,7 @@ class App {
       player.inside = inside;
       const room = player.aboard;
       perf.begin(SEC.camera);
-      this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
+      this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside, player.barCamera()), dt);
       // The world editor's step, from the camera just placed: the aim, the hover, the ghost and the clicks are this frame's.
       if (simulate && this.editor?.on) this.editor.afterCamera(dt);
       perf.end(SEC.camera);

@@ -14,7 +14,7 @@ import { BAR_JOINTS, BarFlightTable, BarSwingTable } from '../../../src/anim/bar
 import { driveBarClips } from '../../../src/player/hangClips.ts';
 import { resetClimbTune } from '../../../src/anim/climbTune.ts';
 
-const PART = process.env.BAR_PART === 'clips' ? 'clips' : process.env.BAR_PART === 'fly' ? 'fly' : process.env.BAR_PART === 'shimmy' ? 'shimmy' : 'swing';
+const PART = process.env.BAR_PART === 'clips' ? 'clips' : process.env.BAR_PART === 'fly' ? 'fly' : process.env.BAR_PART === 'shimmy' ? 'shimmy' : process.env.BAR_PART === 'settle' ? 'settle' : 'swing';
 resetClimbTune();
 let scavenges = 0;
 new PerformanceObserver((l) => {
@@ -73,7 +73,63 @@ function shapeTable(): BarSwingTable {
 }
 
 let out: Record<string, unknown> = {};
-if (PART === 'swing') {
+if (PART === 'settle') {
+  // The feedback round II (items 0b and 0c): W held a while and let go of in turn, so every window holds a swing pumped, a swing
+  // let alone settling (`climb.barSettle` 'swings', its damping worked out each step), the free hang coming in as it settles
+  // and going again as W pumps it (`climb.barHang` 'free'), and the figure's place for all of it.
+  const p = await makePhysics();
+  ground(p, 0);
+  p.world.createCollider(RAPIER.ColliderDesc.cuboid(2, 0.035, 0.035).setTranslation(0, 2.2, 0));
+  p.stepOnce();
+  const world = p.world as unknown as BarWorld;
+  const T = shapeTable();
+  class Run {
+    b = new TestBody(p);
+    li = new LedgeIn();
+    n = 0;
+    frees = 0;
+    settles = 0;
+  }
+  const st = new Run();
+  st.b.jka.forceLevel = 0;
+  st.b.place(0, 0, 0.1);
+  st.b.forward.set(0, 0, 1);
+  st.b.right.set(-1, 0, 0);
+  st.b.run(60, 0.3);
+  st.b.key('KeyE', true);
+  st.b.frame(1 / 60);
+  st.b.key('KeyE', false);
+  st.b.run(60, 0.5);
+  st.li.scale = 1;
+  st.li.filter = st.b.filter;
+  st.li.pool = 100;
+  function frame(): void {
+    const s = st;
+    const li = s.li;
+    const b = s.b.bar;
+    s.n = s.n === 899 ? 0 : s.n + 1;
+    li.dt = 1 / 60;
+    li.forwardHeld = s.n < 300;
+    li.backHeld = false;
+    li.leftHeld = false;
+    li.rightHeld = false;
+    li.jumpPressed = false;
+    li.crouchPressed = false;
+    b.steps = 1;
+    b.behind = 0.004;
+    b.step(world, s.b, li);
+    b.placeFigure(T, 1, s.b.pos);
+    if (b.freeStart) s.frees++;
+    if (b.settling) s.settles++;
+  }
+  function run(n: number): void {
+    for (let k = 0; k < n; k++) frame();
+  }
+  // eslint-disable-next-line no-eval
+  eval('%NeverOptimizeFunction(run)');
+  const meas = await measure(run, 90000, () => st.b.bar.casts);
+  out = { part: PART, held: st.b.bar.holding, frees: st.frees, settles: st.settles, meas };
+} else if (PART === 'swing') {
   const p = await makePhysics();
   ground(p, 0);
   p.world.createCollider(RAPIER.ColliderDesc.cuboid(2, 0.035, 0.035).setTranslation(0, 2.2, 0));
@@ -303,8 +359,13 @@ if (PART === 'swing') {
     update(_dt: number): void {
       this.calls++;
     }
+    // (The feedback round II's free hang: the swing's clip crossfaded into the loop, and what plays now.)
+    yieldOverride(_f: number): void {
+      this.calls++;
+    }
+    overrideName: string | null = 'mx_run_and_swing';
   }
-  for (const m of ['play', 'setState', 'blendOut', 'stopOverride', 'overrideSeekNow', 'update']) {
+  for (const m of ['play', 'setState', 'blendOut', 'stopOverride', 'overrideSeekNow', 'update', 'yieldOverride']) {
     const fn = (StandRig.prototype as unknown as Record<string, unknown>)[m];
     // eslint-disable-next-line no-eval
     eval('(fn) => %NeverOptimizeFunction(fn)')(fn);
@@ -322,12 +383,29 @@ if (PART === 'swing') {
     landNow = false;
     poseT = 0.5;
     clipName = 'mx_run_and_swing';
+    // (The feedback round II's free hang, item 0c: in and out of it in turn, its loop still or a shimmy at a rate of its own.)
+    free = false;
+    freeW = 0.5;
+    freeStart = false;
+    freeState = 'hangFree';
+    freeRate = 0.5;
   }
   const B = new BarS();
   B.poseT = 1.25;
+  B.freeW = 0;
+  B.freeRate = 1;
+  let turnN = 0;
   const drive = (): void => {
     driveBarClips(rig as never, B as never, 1 / 60, hang as never);
     B.poseT = B.poseT > 1.69 ? 0.84 : B.poseT + 0.003;
+    // (Every 300 frames the free hang begins or ends; within it, the loop still, then a shimmy each way at the shift's rate.)
+    turnN = turnN === 1199 ? 0 : turnN + 1;
+    B.freeStart = turnN === 300;
+    B.free = turnN >= 300 && turnN < 900;
+    B.freeW = B.free ? (B.freeW >= 1 ? 1 : B.freeW + 0.0555) : B.freeW <= 0 ? 0 : B.freeW - 0.0555;
+    if (B.freeW < 0) B.freeW = 0;
+    B.freeState = turnN < 500 ? 'hangFree' : turnN < 700 ? 'shimmyFreeL' : 'shimmyFreeR';
+    B.freeRate = turnN < 500 ? 1 : 2.2125;
   };
   const drives = (n: number): void => {
     for (let k = 0; k < n; k++) drive();

@@ -1008,6 +1008,137 @@ export class CharacterRig {
   }
 
   /**
+   * Climbing II, the feedback round II (maker B: a free hop's leg kick, a free ladder's legs, `LimbPlace`'s legs laid over the
+   * pose): each of `names`' own local turn (a bone by its name) at `when[0]` seconds into `clip` (a kept array, so no number crosses the call), from the clip's own tracks (never the
+   * live pose, which this leaves as it is), four numbers a bone (x, y, z, w) into `out`; a bone the clip has no track for at its
+   * rest. The tracks' interpolants are made once a clip and a list of names (an event, kept; the list is the caller's own, kept
+   * and handed the same every frame), so a frame makes nothing. False without the clip or a bone.
+   */
+  turnsAt(clip: string, names: readonly string[], when: Float64Array, out: Float64Array): boolean {
+    const t = when[0];
+    // Kept by the clip and then by the list (a caller asking one clip for two lists in a frame, as a cued free hop's torso and
+    // legs do, must find each kept: kept by the clip alone, each ask rebuilt the other's, about 10 KB a frame).
+    const byNames = this.turnCache.get(clip);
+    let c = byNames ? (byNames.get(names) ?? null) : null;
+    if (!c) c = this.turnTracks(clip, names);
+    if (!c) return false;
+    // Each bone's keys read here, between the two about `t` (a key's own where `t` is past either end), the turn between them
+    // the shortest arc's (three's own `slerpFlat`'s arithmetic, written out: three's interpolants hand their numbers across calls
+    // and box them, a few hundred bytes a frame for a leg's nine bones).
+    const n = c.names.length;
+    for (let i = 0; i < n; i++) {
+      const T = c.times[i];
+      const V = c.values[i];
+      let x = c.rest[i * 4];
+      let y = c.rest[i * 4 + 1];
+      let z = c.rest[i * 4 + 2];
+      let w = c.rest[i * 4 + 3];
+      if (T && V && T.length > 0) {
+        const m = T.length;
+        if (!(t > T[0]) || m === 1) {
+          x = V[0];
+          y = V[1];
+          z = V[2];
+          w = V[3];
+        } else if (t >= T[m - 1]) {
+          x = V[(m - 1) * 4];
+          y = V[(m - 1) * 4 + 1];
+          z = V[(m - 1) * 4 + 2];
+          w = V[(m - 1) * 4 + 3];
+        } else {
+          // The key at or before `t`, from the last one found (a frame's `t` moves on a little), else halved for.
+          let a = c.at[i];
+          if (!(a >= 0 && a < m - 1 && T[a] <= t && t < T[a + 1])) {
+            let lo = 0;
+            let hi = m - 1;
+            while (hi - lo > 1) {
+              const mid = (lo + hi) >> 1;
+              if (T[mid] <= t) lo = mid;
+              else hi = mid;
+            }
+            a = lo;
+            c.at[i] = a;
+          }
+          const u = (t - T[a]) / (T[a + 1] - T[a]);
+          const o0 = a * 4;
+          const o1 = o0 + 4;
+          let x1 = V[o1];
+          let y1 = V[o1 + 1];
+          let z1 = V[o1 + 2];
+          let w1 = V[o1 + 3];
+          x = V[o0];
+          y = V[o0 + 1];
+          z = V[o0 + 2];
+          w = V[o0 + 3];
+          if (w !== w1 || x !== x1 || y !== y1 || z !== z1) {
+            let dot = x * x1 + y * y1 + z * z1 + w * w1;
+            if (dot < 0) {
+              x1 = -x1;
+              y1 = -y1;
+              z1 = -z1;
+              w1 = -w1;
+              dot = -dot;
+            }
+            let s0 = 1 - u;
+            let s1 = u;
+            if (dot < 0.9995) {
+              const theta = Math.acos(dot);
+              const sin = Math.sin(theta);
+              s0 = Math.sin(s0 * theta) / sin;
+              s1 = Math.sin(s1 * theta) / sin;
+            }
+            x = x * s0 + x1 * s1;
+            y = y * s0 + y1 * s1;
+            z = z * s0 + z1 * s1;
+            w = w * s0 + w1 * s1;
+          }
+        }
+      }
+      const l = Math.sqrt(x * x + y * y + z * z + w * w);
+      const k = l > 0 ? 1 / l : 1;
+      out[i * 4] = x * k;
+      out[i * 4 + 1] = y * k;
+      out[i * 4 + 2] = z * k;
+      out[i * 4 + 3] = w * k;
+    }
+    return true;
+  }
+
+  /** `turnsAt`'s tracks for a clip and a list of names, read once (an event) and kept; null without the clip or a bone. */
+  private turnTracks(clip: string, names: readonly string[]): { names: readonly string[]; times: (ArrayLike<number> | null)[]; values: (ArrayLike<number> | null)[]; rest: Float64Array; at: Int32Array } | null {
+    const action = this.actions.get(clip);
+    if (!action) return null;
+    const tracks = new Map<string, THREE.KeyframeTrack>();
+    for (const tr of action.getClip().tracks) tracks.set(tr.name, tr);
+    const times: (ArrayLike<number> | null)[] = [];
+    const values: (ArrayLike<number> | null)[] = [];
+    const rest = new Float64Array(names.length * 4);
+    for (let i = 0; i < names.length; i++) {
+      const bone = this.boneNamed(names[i]);
+      if (!bone) return null;
+      const q = this.restLocal.get(bone) ?? bone.quaternion;
+      rest[i * 4] = q.x;
+      rest[i * 4 + 1] = q.y;
+      rest[i * 4 + 2] = q.z;
+      rest[i * 4 + 3] = q.w;
+      const tr = tracks.get(`${bone.name}.quaternion`);
+      const ok = !!tr && tr.values.length === tr.times.length * 4;
+      times.push(ok ? tr!.times : null);
+      values.push(ok ? tr!.values : null);
+    }
+    const c = { names, times, values, rest, at: new Int32Array(names.length).fill(-1) };
+    let byNames = this.turnCache.get(clip);
+    if (!byNames) {
+      byNames = new Map();
+      this.turnCache.set(clip, byNames);
+    }
+    byNames.set(names, c);
+    return c;
+  }
+  /** `turnsAt`'s tracks by clip and then by the caller's own kept list of names (read once a clip and a list; an event). */
+  private readonly turnCache = new Map<string, Map<readonly string[], { names: readonly string[]; times: (ArrayLike<number> | null)[]; values: (ArrayLike<number> | null)[]; rest: Float64Array; at: Int32Array }>>();
+
+  /**
    * Climbing II, phase 3 (maker B): a twin of `clip` under `name`, its very tracks as an action of its own (made once a rig: an
    * event, at the bar's first use), so the bar's flight can be crossfaded from the swing and back into the reach, which one
    * action cannot be into itself. True where the twin stands (made now or before); false without the clip.

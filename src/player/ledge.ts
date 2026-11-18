@@ -32,9 +32,9 @@ import * as THREE from 'three';
 import type { RAPIER } from '../core/physics.ts';
 import { STILL_FLAGS } from './stairSense.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
-import { CLIMB_TUNE, DROP_PARTS, FREE_HOP_PARTS } from '../anim/climbTune.ts';
+import { CLIMB_TUNE, DROP_PARTS, FREE_BEHIND_PARTS, FREE_CUE_PARTS, FREE_HOP_PARTS, LADDER_SWAY_LEGS } from '../anim/climbTune.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { LEDGE_CLIMB_CUT, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_PUSH_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
+import { LEDGE_CLIMB_CUT, LEDGE_CLIP_NAMES, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_PUSH_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
 import { JKA, UNIT } from './jkaMove.ts';
 import { WALL_CLIPS, WALL_FACTS, clipWall } from '../anim/wallClips.ts';
 import { handMoment } from '../anim/handTimes.ts';
@@ -751,6 +751,17 @@ const WAY_DEPTH_STEP = 0.1;
 /** A way's look carries on the last look's walk along the held lip only while the held face has turned less than this since (cosine of a degree: a lip that curves is walked afresh). */
 const WALK_KEEP_COS = Math.cos(Math.PI / 180);
 const CUE_COIL = 0.35;
+/**
+ * The feedback round II (maker B, item 0f): the physics' own step, seconds (`FIXED_DT` in src/core/physics.ts, which
+ * climbFb2Ledge.test.ts holds equal): the hips' sway is stepped on it, the steps the caller hands over (`LedgeHang.steps`).
+ */
+export const SWAY_STEP = 1 / 60;
+/**
+ * Item 0g: how far past the held lip's line, along the view's way, a free hang's lip behind must stand, metres on the human male
+ * (a mechanic: a free hang holds a beam whose own far face, under its hands, the behind band otherwise finds; the course's beams
+ * are 0.3 m deep, every lip behind it means is a corridor's width away).
+ */
+const FREE_BEHIND_PAST = 0.35;
 const LADDER_LEAST = 0.25;
 const DROP_REACH = 0.5;
 const DROP_SIDE = 0.1;
@@ -1118,6 +1129,33 @@ export class LedgeHang {
     this.barK = 1;
     this.bpast = 0;
     this.qpast = 0;
+    // The feedback round II's fractions (maker B).
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.liftExtra = 0;
+    this.liftBase = 0;
+    this.carry = 0;
+    this.carryLeave = 0;
+    this.liftShare = 0;
+    this.carryShare = 0;
+    this.legAt = 0;
+    this.legW = 0;
+    this.behind = 0;
+    this.swayX = 0;
+    this.swayY = 0;
+    this.swayZ = 0;
+    this.swayVX = 0;
+    this.swayVY = 0;
+    this.swayVZ = 0;
+    this.swHX = 0;
+    this.swHY = 0;
+    this.swHZ = 0;
+    this.swVX = 0;
+    this.swVY = 0;
+    this.swVZ = 0;
+    this.shimW = 0;
+    this.swayLead = 0;
+    this.shimAt = 0;
   }
 
   /** The figure is turned about its front (a sloping lip's tilt, or a side's cue leaning it: the smoothness round's). */
@@ -1185,6 +1223,30 @@ export class LedgeHang {
     this.cycWait = false;
     this.cycSettle = 0;
     this.cycShift = 0;
+    // The feedback round II (maker B): no cue's rise, legs laid under or sway carried past the hold.
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.liftExtra = 0;
+    this.carry = 0;
+    this.legId = '';
+    this.legW = 0;
+    this.shimW = 0;
+    this.swayStill();
+  }
+
+  /** Item 0f: the hips' lag put to rest (a hold begun or given up: nothing of a swing before carried). */
+  private swayStill(): void {
+    this.swayX = 0;
+    this.swayY = 0;
+    this.swayZ = 0;
+    this.swayVX = 0;
+    this.swayVY = 0;
+    this.swayVZ = 0;
+    this.swVX = 0;
+    this.swVY = 0;
+    this.swVZ = 0;
+    this.swayFed = false;
+    this.swayHave = false;
   }
 
   /** After a let-go the drawn offset eases out over this long more (seconds left, and the whole). */
@@ -2971,6 +3033,10 @@ export class LedgeHang {
     m.switched = false;
     m.upper = false;
     m.cycle = false;
+    // (The feedback round II, item 0d: any move ends the free cue's rise; a free hop up carries its laid lift on, `freeHopBegin`.)
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.carry = 0;
     // (Smoothness III, item 4b: any other move ends a ladder's cycle; the hands' holds go with it.)
     this.cycWait = false;
     this.cycPh = Number.NaN;
@@ -3191,6 +3257,8 @@ export class LedgeHang {
     this.barK = i.scale;
     const held = this.stepIn(world, b, i, stam);
     this.fresh = false;
+    // The feedback round II (maker B, items 0e and 0f): the legs laid under and the hips' sway, once the frame's place is written.
+    if (this.phase !== LEDGE_NONE) this.legsStep(b, i);
     return held;
   }
 
@@ -4660,6 +4728,10 @@ export class LedgeHang {
     const from = T.freeHopParts.from < f.dur ? T.freeHopParts.from : 0;
     const to = T.freeHopParts.to > from ? (T.freeHopParts.to < f.dur ? T.freeHopParts.to : f.dur) : f.dur;
     const endH = Math.atan2(-A.nx, -A.nz);
+    // (The feedback round II, item 0d: the whole lift the free cue's pull stood the figure up by over its line-up, the anchor's and
+    // the pull's, carried into the hop, whose anchor waits while it is carried: the hop's arms leave the grip as they always did.)
+    const carry = T.freeCue === 'pull' && this.cueRise > 0 ? this.lifted : 0;
+    const carryShare = carry !== 0 ? this.liftShare : 0;
     this.startMove(id, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, endH, 'idle', 'idle', A);
     const m = this.move;
     m.path = path;
@@ -4705,6 +4777,10 @@ export class LedgeHang {
     if (!(tT > tL)) tT = tL + 1e-3;
     this.arcFit(tL, tT);
     this.freeHops++;
+    // Item 0d: eased out by the hands' leave (`limbsFor`), so the hop starts from where the cue left the figure.
+    this.carry = carry;
+    this.carryShare = carryShare;
+    this.carryLeave = tL > 1e-3 ? tL : 1e-3;
     return true;
   }
 
@@ -5156,7 +5232,8 @@ export class LedgeHang {
     let want = 0;
     // The smoothness round (`climb.hangKeys` 'cue'): the look-away is the behind cue, shown only while W asks behind and a lip
     // there is found (`behindCued`).
-    if (T.lookAway === 'reach' && this.phase === LEDGE_HANG && this.braced && this.shimmy === 0 && !i.leftHeld && !i.rightHeld && (T.hangKeys !== 'cue' || this.behindCued)) {
+    // (The feedback round II, item 0g, `climb.freeBehind` 'reach': a free hang looks away too, by the braced one's threshold and twist.)
+    if (T.lookAway === 'reach' && this.phase === LEDGE_HANG && (this.braced || T.freeBehind === 'reach') && this.shimmy === 0 && !i.leftHeld && !i.rightHeld && (T.hangKeys !== 'cue' || this.behindCued)) {
       const v = i.viewYaw;
       if (v === v) {
         let off = v - this.heading;
@@ -5182,6 +5259,11 @@ export class LedgeHang {
     this.lookTwistNow = this.lookSide * ((T.lookTwist * Math.PI) / 180) * k;
     this.poseClip = goal === 1 ? (this.lookSide > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight) : '';
     this.poseAt = T.lookPose;
+    // The feedback round II, item 0g: a free hang's held pose is the owner's table's (the free hang's own side hop of the leading side).
+    if (goal === 1 && !this.braced) {
+      this.poseClip = this.lookSide > 0 ? FREE_BEHIND_PARTS.left : FREE_BEHIND_PARTS.right;
+      this.poseAt = T.freeBehindParts.pose;
+    }
   }
 
   /**
@@ -5209,7 +5291,10 @@ export class LedgeHang {
     const sz = dx;
     // (The smoothness round's way search asks before the look-away has eased in: the view's own side then.)
     const side = this.lookSide !== 0 ? this.lookSide : this.behindSide;
-    const clip = side > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight;
+    // (The feedback round II, item 0g: a free hang's hop behind is the owner's table's, played on from its own held pose.)
+    const free = !this.braced;
+    const clip = free ? (side > 0 ? FREE_BEHIND_PARTS.left : FREE_BEHIND_PARTS.right) : side > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight;
+    const poseAt = free ? T.freeBehindParts.pose : T.lookPose;
     for (let d = BAND_STEP; d <= range + BAND_STEP + 1e-9; d += BAND_STEP) {
       for (let j = 0; j < 2 * BAND_SIDES + 1; j++) {
         const su = (j + 1) >> 1;
@@ -5224,6 +5309,9 @@ export class LedgeHang {
         this.fnz = -dz;
         this.facc = 0.5;
         if (!this.probeLip(world)) continue;
+        // (Item 0g: a free hang's held thing is a beam whose own far face stands under its hands, inside the band: a lip behind
+        // stands past the held lip's line along the view's way, or it is the held thing's own other side.)
+        if (free && (this.fox - L.ex) * dx + (this.foz - L.ez) * dz < FREE_BEHIND_PAST * s) continue;
         if (!this.hopTo(world, b, i, stam, side, true, T.hopArc, clip)) continue;
         if (this.dryOk) return true;
         if (this.phase !== LEDGE_MOVE) {
@@ -5234,12 +5322,13 @@ export class LedgeHang {
         // On from the held pose, turned round the leading side's way.
         const m = this.move;
         const most = LEDGE_FACTS[clip].dur - 0.05;
-        const t0 = T.lookPose < most ? T.lookPose : most;
+        const t0 = poseAt < most ? poseAt : most;
         m.t0 = t0;
         m.time = t0;
         this.startFrom = t0;
         m.spin = side;
         this.behindHops++;
+        if (free) this.freeBehinds++;
         return true;
       }
     }
@@ -5333,6 +5422,252 @@ export class LedgeHang {
   cueHops = 0;
   drops = 0;
 
+  // ---- the feedback round II (maker B): the free cue's pull, the legs laid under, the sway, the free jump behind -------------
+
+  /**
+   * Item 0d (`climb.freeCue` 'pull'): the free hang's up cue's rise, eased in over `freeCueIn` (0 to 1) while the up cue shows and
+   * back down when it goes, how far it lifts the figure now (`freeCueRise` by it, scaled: metres), and what `limbsFor` laid on over
+   * the anchor's own lift to stand the figure there (`liftExtra`; the plain free hang's own anchor lift kept as what the rise is
+   * measured from, `liftBase`). A commit carries the last frame's laid lift into the hop (`carry`) and eases it out by the hop's
+   * hands' leave (`carryLeave`, the move's seconds), so the hop starts from where the cue left the figure.
+   */
+  cueRise = 0.5;
+  cueLift = 0.5;
+  liftExtra = 0.5;
+  private liftBase = 0.5;
+  private carry = 0.5;
+  private carryLeave = 0.5;
+  /** Item 0d: the pull's torso share drawn last frame (`liftOn`), and its share carried into a commit. */
+  private liftShare = 0.5;
+  private carryShare = 0.5;
+  /** Item 0d: the free hang's own pull shown (the console's and the tests'). */
+  freeCues = 0;
+  /**
+   * Items 0e and 0f: the legs laid under the pose for the caller's limbs (`LimbPlace.legClip`): a ledge clip's id ('' none), its
+   * seconds and its share; written each frame by the step, handed over by `limbsFor`.
+   */
+  legId = '';
+  legAt = 0.5;
+  legW = 0.5;
+  /**
+   * Item 0f (`climb.ladderSway` 'sway', and item 0e's free hop up under 'kick'): the hips' lag, a damped pendulum driven by the
+   * body's own acceleration on the physics' own steps (`steps` and `behind`, written by the caller before the step, as the bar's
+   * swing has them): the lag (`swayX`, `swayY`, `swayZ`, the world's metres) and its rate; the body's place at the last step and
+   * its velocity there; whether it was fed last step. Drawn by `limbsFor` (the feet carried by it, `LimbPlace.swayX`, `swayZ`).
+   */
+  steps = 0;
+  behind = 0.5;
+  swayX = 0.5;
+  swayY = 0.5;
+  swayZ = 0.5;
+  private swayVX = 0.5;
+  private swayVY = 0.5;
+  private swayVZ = 0.5;
+  private swHX = 0.5;
+  private swHY = 0.5;
+  private swHZ = 0.5;
+  private swVX = 0.5;
+  private swVY = 0.5;
+  private swVZ = 0.5;
+  private swayFed = false;
+  private swayHave = false;
+  /** Item 0f: the legs' share of a free ladder's shimmy legs (eased in and out over the hang's ease). */
+  private shimW = 0.5;
+  /** Item 0g: free hops behind begun (the console's and the tests'). */
+  freeBehinds = 0;
+
+  /**
+   * Item 0d, from `limbsFor` once the anchor has put the posed hands on the grip and their places are written: the free cue's
+   * pull stands the figure `cueLift` over where the plain free hang's anchor stood it (its pose's own bend counted: the anchor's
+   * lift taken off), the limbs' solve then holding the hands on the grip; a free hop up begun from it carries the last frame's lay
+   * and eases it out by the hands' leave. Nothing at all under 'arms' or with no cue: the plain hang's anchor lift kept as what
+   * the rise is measured from.
+   */
+  private liftOn(lp: LimbPlace, rig: LimbRig): void {
+    this.liftExtra = 0;
+    const T = CLIMB_TUNE;
+    if (T.freeCue !== 'pull') return;
+    let extra = 0;
+    let share = 0;
+    const m = this.move;
+    if (this.phase === LEDGE_HANG && !this.braced) {
+      if (this.cueRise > 0) {
+        extra = this.cueLift - (this.lifted - this.liftBase);
+        share = this.cueRise * this.cueRise * (3 - 2 * this.cueRise);
+      } else this.liftBase = this.lifted;
+    } else if (this.phase === LEDGE_MOVE && m.upper && this.carry !== 0) {
+      let u = m.time / this.carryLeave;
+      if (!(u > 0)) u = 0;
+      if (u >= 1) this.carry = 0;
+      else {
+        const k = 1 - u * u * (3 - 2 * u);
+        extra = this.carry * k;
+        share = this.carryShare * k;
+      }
+    }
+    // The pull's own torso at the rise's share (the owner's table's part), the arms then bent onto the grip by the hands' solve.
+    if (share > 0) {
+      const P = T.freeCueParts;
+      lp.torsoClip = LEDGE_CLIP_NAMES[FREE_CUE_PARTS.pull] ?? '';
+      lp.torsoAt = P.pullFrom + share * (P.pullTo - P.pullFrom);
+      lp.torsoW = share;
+      this.liftShare = share;
+    } else this.liftShare = 0;
+    if (extra === 0) return;
+    const root = rig.root;
+    root.position.y += extra;
+    root.updateMatrixWorld(true);
+    this.lifted += extra;
+    this.liftExtra = extra;
+  }
+
+  /**
+   * Items 0e and 0f, from `limbsFor`: the legs laid under the pose and the hips' sway handed to the limbs (`LimbPlace.legClip`,
+   * `legAt`, `legW`; `swayX`, `swayZ`): the feet carried horizontally by the lag, its rise or fall carrying them out from or in to
+   * the face, by `swayAmount`, the lag led to the frame's own time (`swayLead`). Not aboard a ship's rooms (their frame turns it).
+   */
+  private legsTo(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    this.legsHand(lp, toPhys);
+    // Laid now, as they are handed over, so the climb's sphere clearing after this sees the figure as it is drawn.
+    lp.lay(rig, toPhys);
+  }
+
+  /** Items 0e and 0f: legsTo's hand-over into the limbs' fields. */
+  private legsHand(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    if (toPhys !== null) return;
+    if (this.legId !== '' && this.legW > 0) {
+      lp.legClip = LEDGE_CLIP_NAMES[this.legId] ?? '';
+      lp.legAt = this.legAt;
+      lp.legW = this.legW;
+    }
+    if (!this.swayHave) return;
+    const a = CLIMB_TUNE.swayAmount;
+    if (!(a > 0)) return;
+    const k = this.swayLead;
+    const lx = this.swayX + this.swayVX * k;
+    const ly = this.swayY + this.swayVY * k;
+    const lz = this.swayZ + this.swayVZ * k;
+    const x = (lx - this.lip.nx * ly) * a;
+    const z = (lz - this.lip.nz * ly) * a;
+    if (x * x + z * z < 1e-12) return;
+    lp.swayX = x;
+    lp.swayZ = z;
+  }
+
+  /** Item 0f: how far past the last physics step the frame's own time stands, seconds (the lag drawn led by it). */
+  private swayLead = 0.5;
+
+  /**
+   * Items 0e and 0f, every frame the hold goes on (from `step`, once the frame's place is written): the legs laid under the pose
+   * (a free hop up's leg kick under 'kick', timed to its pull and let go of by its catch; a free ladder's shimmy legs under
+   * 'sway', one shimmy step a reach of the cycle's own phase), and the hips' lag stepped (fed by a ladder's climb, between two of
+   * its rungs, and a free hop up). Nothing at all with both switches at their other settings.
+   */
+  private legsStep(b: LedgeBody, i: LedgeIn): void {
+    const T = CLIMB_TUNE;
+    // (The frame's seconds read off the frame's record, never handed over: a number across a call is a number made.)
+    const dt = i.dt;
+    this.legId = '';
+    this.legW = 0;
+    const kick = T.freeHopLegs === 'kick';
+    const sway = T.ladderSway === 'sway';
+    if (!kick && !sway) return;
+    const m = this.move;
+    const moving = this.phase === LEDGE_MOVE;
+    const freeHop = moving && m.upper && m.kind === 'hop';
+    // Item 0e: the free hop up's leg kick, timed to its pull (to the hands' leave), let go of over its flight (to the touch).
+    if (freeHop && kick && m.arc) {
+      const P = T.freeCueParts;
+      const lv = m.tL > 1e-3 ? m.tL : 1e-3;
+      const c = m.time;
+      let u = c / lv;
+      if (!(u > 0)) u = 0;
+      if (u > 1) u = 1;
+      this.legId = FREE_CUE_PARTS.kick;
+      this.legAt = P.kickFrom + u * (P.kickTo - P.kickFrom);
+      const span = m.tT - m.tL;
+      let w = c <= m.tL ? 1 : span > 1e-6 ? 1 - (c - m.tL) / span : 0;
+      if (w < 0) w = 0;
+      // (Eased in from the hang's own legs over the hang's ease, so the commit never snaps the legs.)
+      const ein = T.ease > 0 ? c / T.ease : 1;
+      if (ein < 1 && w > ein) w = ein > 0 ? ein : 0;
+      this.legW = w * w * (3 - 2 * w);
+    }
+    // Item 0f: a free ladder's shimmy legs under the climb's arms (the cycle's phase on the climb clip, `upperSeek`).
+    const ladder = (moving && m.kind === 'ladder') || this.cycWait || this.cycSettle > 0;
+    const freeCycle = sway && ladder && this.rigUpper !== '' && this.rigUpper === this.cycClip && this.upperSeek === this.upperSeek;
+    const e = T.ease;
+    const st = e > 0 ? dt / e : 1;
+    this.shimW = freeCycle ? (this.shimW + st < 1 ? this.shimW + st : 1) : this.shimW - st > 0 ? this.shimW - st : 0;
+    if (this.shimW > 0 && this.legW === 0) {
+      const f = LEDGE_FACTS[LADDER_SWAY_LEGS];
+      const dur = this.cycDur > 1e-6 ? this.cycDur : 1;
+      if (f && this.upperSeek === this.upperSeek) {
+        let p = this.upperSeek / dur;
+        p -= Math.floor(p);
+        this.shimAt = p * f.dur;
+      }
+      this.legId = LADDER_SWAY_LEGS;
+      this.legAt = this.shimAt;
+      this.legW = this.shimW;
+    }
+    this.swayStep(b, i, (sway && ladder) || (kick && freeHop));
+  }
+  /** Item 0f: the free ladder's shimmy legs' last seconds (held while the legs ease out). */
+  private shimAt = 0.5;
+
+  /**
+   * Item 0f: the hips' lag stepped on the physics' own coming steps (`steps`, the caller's `Physics.stepsAhead`): a damped
+   * pendulum (`swayHz` its own swing, `swayDamp` of the critical damping) whose rate takes, at each step, the body's own change of
+   * velocity against it while fed (`feed`, or the step after a fed one: a stop counts), the body's place spread evenly over the
+   * steps. The lag is drawn led to the frame's own time (`swayLead`).
+   */
+  private swayStep(b: LedgeBody, i: LedgeIn, feed: boolean): void {
+    const dt = i.dt;
+    if (!this.swayHave) {
+      this.swHX = b.pos.x;
+      this.swHY = b.pos.y;
+      this.swHZ = b.pos.z;
+      this.swVX = 0;
+      this.swVY = 0;
+      this.swVZ = 0;
+      this.swayHave = true;
+    }
+    const n = this.steps;
+    const h = SWAY_STEP;
+    let lead = this.behind + dt - n * h;
+    if (!(lead > 0)) lead = 0;
+    this.swayLead = lead;
+    if (!(n > 0)) return;
+    const T = CLIMB_TUNE;
+    const w = 2 * Math.PI * T.swayHz;
+    const z = T.swayDamp;
+    const vx = (b.pos.x - this.swHX) / (n * h);
+    const vy = (b.pos.y - this.swHY) / (n * h);
+    const vz = (b.pos.z - this.swHZ) / (n * h);
+    for (let k = 0; k < n; k++) {
+      if (feed || this.swayFed) {
+        this.swayVX -= vx - this.swVX;
+        this.swayVY -= vy - this.swVY;
+        this.swayVZ -= vz - this.swVZ;
+      }
+      this.swVX = vx;
+      this.swVY = vy;
+      this.swVZ = vz;
+      this.swayFed = feed;
+      // Spring and damper, the rate first (semi-implicit, steady at every step this short).
+      this.swayVX += (-w * w * this.swayX - 2 * z * w * this.swayVX) * h;
+      this.swayVY += (-w * w * this.swayY - 2 * z * w * this.swayVY) * h;
+      this.swayVZ += (-w * w * this.swayZ - 2 * z * w * this.swayVZ) * h;
+      this.swayX += this.swayVX * h;
+      this.swayY += this.swayVY * h;
+      this.swayZ += this.swayVZ * h;
+    }
+    this.swHX = b.pos.x;
+    this.swHY = b.pos.y;
+    this.swHZ = b.pos.z;
+  }
+
   /** The fade a held pose comes in and goes out over: the cue's own under 'cue', the hang's ease otherwise. */
   poseFadeNow(): number {
     return CLIMB_TUNE.hangKeys === 'cue' ? CLIMB_TUNE.cueEase : CLIMB_TUNE.ease;
@@ -5392,9 +5727,28 @@ export class LedgeHang {
       this.poseClip = this.cueClip;
       this.poseAt = T.cueShare * CUE_COIL;
     }
-    if (freeUp && this.cueKind === WAYK_HOP && this.leanSide === 0 && !this.behindCued && this.cue > 0) {
-      this.rigUpper = FREE_HOP_PARTS.upper;
-      this.upperSeek = T.freeHopParts.from + this.cue * T.cueShare * CUE_COIL;
+    if (freeUp && T.freeCue === 'pull') {
+      // The feedback round II, item 0d (`climb.freeCue` 'pull'): the up cue a small pull-up: the rise eased in over `freeCueIn` while
+      // the up cue shows and back down when it goes, its pose the owner's table's pull held at the rise's share, the hands kept on
+      // the grip and the figure stood `freeCueRise` up by `limbsFor`.
+      const want = showHop && way === WAY_UP ? 1 : 0;
+      const e = T.freeCueIn;
+      const st = e > 0 ? i.dt / e : 1;
+      const r = this.cueRise;
+      this.cueRise = want === 1 ? (r + st < 1 ? r + st : 1) : r - st > 0 ? r - st : 0;
+      if (want === 1 && r === 0 && this.cueRise > 0) this.freeCues++;
+      const k = this.cueRise * this.cueRise * (3 - 2 * this.cueRise);
+      this.cueLift = T.freeCueRise * this.s * k;
+      // (Its pose is the pull's torso laid over the hang by the limbs at the rise's share, `limbsFor`; no layer of the rig's, whose
+      // own fade the rise could not ease.)
+    } else {
+      // (No pull: a braced hang, or 'arms'. Nought already under 'arms'.)
+      this.cueRise = 0;
+      this.cueLift = 0;
+      if (freeUp && this.cueKind === WAYK_HOP && this.leanSide === 0 && !this.behindCued && this.cue > 0) {
+        this.rigUpper = FREE_HOP_PARTS.upper;
+        this.upperSeek = T.freeHopParts.from + this.cue * T.cueShare * CUE_COIL;
+      }
     }
     if (this.cueKind === WAYK_DROP) this.dropAim(i);
     this.headShare = this.cueKind === WAYK_DROP ? this.cue : 0;
@@ -5448,7 +5802,8 @@ export class LedgeHang {
     let off = v - this.heading;
     off -= Math.round(off / TAU) * TAU;
     const a = off < 0 ? -off : off;
-    if (this.braced && T.lookAway === 'reach') {
+    // (The feedback round II, item 0g, `climb.freeBehind` 'reach': a free hang's look back asks behind too.)
+    if ((this.braced || T.freeBehind === 'reach') && T.lookAway === 'reach') {
       const start = (T.lookStart * Math.PI) / 180;
       if (a > (this.way === WAY_BEHIND ? start - LOOK_BACK : start)) {
         this.behindSide = off > 0 ? 1 : -1;
@@ -6657,11 +7012,14 @@ export class LedgeHang {
     // The smoothness round, item 2: a ladder's climb puts each hand on the hold its clip has it nearest (`ladderLimbs`).
     if (this.phase === LEDGE_MOVE && k === 'ladder') {
       this.ladderLimbs(lp, rig, toPhys);
+      // (The feedback round II, item 0f: a ladder's legs laid under and its hips' sway.)
+      this.legsTo(lp, rig, toPhys);
       return;
     }
     // Smoothness III, item 4b: between two rungs of a ladder's cycle, and the hand left a rung down settling onto the held lip.
     if (this.phase === LEDGE_HANG && (this.cycWait || this.cycSettle > 0)) {
       this.cycleLimbs(lp, rig, toPhys);
+      this.legsTo(lp, rig, toPhys);
       return;
     }
     // Climbing II, item 7: the leading hand while looking away (-1 none): 0 the left, 1 the right.
@@ -6675,7 +7033,17 @@ export class LedgeHang {
       this.leadDrop = true;
     }
     this.leadNow = lead;
-    if (this.phase === LEDGE_HANG || (this.phase === LEDGE_MOVE && (k === 'hop' || k === 'grab' || k === 'turn'))) this.anchor(lp, rig, toPhys);
+    // (The feedback round II, item 0d: a free hop up carrying the cue's lift is not anchored while it carries it: its arms leave the
+    // grip as a free hop's always have, and the anchor following them off it and letting go was a drop of the figure.)
+    const carried = this.carry !== 0 && this.phase === LEDGE_MOVE && this.move.upper;
+    let hold = 0;
+    if (carried) {
+      let u = this.move.time / this.carryLeave;
+      if (!(u > 0)) u = 0;
+      if (u > 1) u = 1;
+      hold = 1 - u * u * (3 - 2 * u);
+    }
+    if (!carried && (this.phase === LEDGE_HANG || (this.phase === LEDGE_MOVE && (k === 'hop' || k === 'grab' || k === 'turn')))) this.anchor(lp, rig, toPhys);
     // Smoothness II, item 8 (`climb.slopeHands` 'each'): on a sloping lip each hand is near its own place by the pair's error,
     // never by the slope's own rise between them (a straight-line pose reaching a lip 35 degrees steep has its lower hand a
     // forearm over its place, which the old rule let go of): the hands' middle as posed against the lip's at the middle.
@@ -6723,7 +7091,10 @@ export class LedgeHang {
       const dz = g.z - tz;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // Wholly placed within a hand's width of the line, let go of by a forearm's length off it.
-      const near = caught || d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      let near = caught || d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      // (The feedback round II, item 0d: a free hop up carrying the cue's lift keeps its hands on the grip they were on at the
+      // commit, let go of as the carry eases out by the hands' leave, so the hop's arms take them off the grip smoothly.)
+      if (carried && hold > near) near = hold;
       // Written into the limbs' own arrays (`setHand`'s), so no number crosses a call.
       lp.hand[s * 3] = tx;
       lp.hand[s * 3 + 1] = ty;
@@ -6753,6 +7124,10 @@ export class LedgeHang {
         lp.handW[s] = wl;
       }
     }
+    // The feedback round II (maker B): the free cue's pull stands the figure up over its hands (item 0d), and the legs laid under
+    // and the hips' sway handed to the limbs (items 0e and 0f). Nothing under the round's other settings.
+    this.liftOn(lp, rig);
+    this.legsTo(lp, rig, toPhys);
     const L = this.lip;
     // The clip's own palms and both feet wholly on the wall (maker B's bracing and wall climb set their own).
     lp.palmW[0] = 0;
@@ -7114,6 +7489,13 @@ export class LedgeHang {
       // contact, its touch on the move's clock), the drops on their own move, and the hangs refused for the ground under them.
       flight: this.phase === LEDGE_MOVE && this.move.arc ? { seconds: n(this.move.F), flown: n(this.move.fly), stretch: n(this.move.S), held: this.move.hm === 1, touch: n(this.move.tT), parts: this.move.parts, clip: this.move.id } : null,
       dropMoves: this.dropMoves,
+      // The feedback round II (maker B): a free hang's pull-up cue (its share, the rise it asks, how much of it this frame stood
+      // the figure up by, and how many were begun), the legs laid under the arms (the clip, its second, its weight), the hips' lag
+      // (metres, x up z) and the free hang's jumps behind.
+      freeCue: { share: n(this.cueRise), rise: n(this.cueLift), extra: n(this.liftExtra), begun: this.freeCues },
+      legs: this.legId === '' ? null : { clip: this.legId, at: n(this.legAt), weight: n(this.legW) },
+      sway: this.swayHave ? [n(this.swayX), n(this.swayY), n(this.swayZ)] : null,
+      freeBehinds: this.freeBehinds,
       groundRefused: this.groundRefused,
       groundLast: this.groundRefused > 0 ? { met: [n(this.groundAtX), n(this.groundAtY), n(this.groundAtZ)], feet: n(this.groundFeet), from: n(this.groundFrom), way: this.groundPath, lip: [n(this.groundLip.ex), n(this.groundLip.ey), n(this.groundLip.ez), n(this.groundLip.nx), n(this.groundLip.nz)], ray: [n(this.groundQx), n(this.groundQz)], hang: [n(this.groundBx), n(this.groundBz)] } : null,
       lastLetGo: this.lastLetGo,
