@@ -19,7 +19,8 @@ import { WALL_ON } from '../../../src/player/wallClimb.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { climbCourse, lipPiece, type ClimbCourse, type CourseLip, type CoursePiece } from '../../../src/anim/climbCourse.ts';
-import { buildCourseColliders, courseToWorld, courseWayToWorld, worldToCourse, type CourseCollider, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
+import { buildCourseColliders, courseToWorld, courseWayToWorld, standCourseRopes, worldToCourse, type CourseCollider, type CourseFrame } from '../../../src/anim/climbCourseBuild.ts';
+import type { HangingRope } from '../../../src/player/hangingRope.ts';
 
 /** How far under its slab's top the ground stands (the game's `climbTest` stands each slab this far over the highest ground under it). */
 export const SLAB_LIFT = 0.05;
@@ -33,6 +34,8 @@ export interface Stood {
   lips: { name: string; chain: string; a: [number, number, number]; b: [number, number, number] }[];
   /** Its colliders (the feedback round: a refused climb up names the course's solid it met, as the game's `climbTest` does). */
   colliders: CourseCollider[];
+  /** Climbing II, phase 4: its ropes (the rope piece's, as the game's `climbTest` stands them: a body's `rope.ropes` takes them). */
+  ropes: HangingRope[];
 }
 
 export async function standPiece(piece: CoursePiece, shiftX = 0, shiftZ = 0): Promise<Stood> {
@@ -43,6 +46,8 @@ export async function standPiece(piece: CoursePiece, shiftX = 0, shiftZ = 0): Pr
   const frame: CourseFrame = { ox: piece.at[0] + shiftX, oz: -piece.at[1] + shiftZ, h: 0, ref: () => 0 };
   const one: ClimbCourse = { pieces: [piece], floor: 1, reach: { standing: 0, running: 0 }, lipSlope: 0, unknown: [] };
   const colliders = buildCourseColliders(physics.world, one, frame);
+  // (Phase 4: the rope piece's column a rope under `climb.ropes` 'on', its collider off before the world first steps.)
+  const ropes = standCourseRopes(one, frame, colliders);
   physics.stepOnce();
   const w = { x: 0, y: 0, z: 0 };
   const lips = piece.lips.map((L: CourseLip) => {
@@ -51,7 +56,7 @@ export async function standPiece(piece: CoursePiece, shiftX = 0, shiftZ = 0): Pr
     courseToWorld(frame, piece, L.b[0], L.b[1], L.b[2], w);
     return { name: L.name, chain: L.name.replace(/\d+$/, ''), a, b: [w.x, w.y, w.z] as [number, number, number] };
   });
-  return { physics, piece, frame, lips, colliders };
+  return { physics, piece, frame, lips, colliders, ropes };
 }
 
 /** A collider of a stood piece by its name on the course (`the course's beam (room-beam)`), as the game's `climbTest` names its own; null for another (the harness's ground). */

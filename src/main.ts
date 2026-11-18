@@ -136,8 +136,10 @@ import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climb
 import { climbDialsFor } from './anim/climbDials.ts';
 import { moveDialsFor } from './anim/moveDials.ts';
 import { MOVE_TUNE, moveBefore, resetMoveTune, tuneMove } from './anim/moveTune.ts';
-import { climbCourse, courseIds, extraIds, type ClimbCourse } from './anim/climbCourse.ts';
-import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
+import { climbCourse, courseIds, extraIds, ropeLandIds, type ClimbCourse } from './anim/climbCourse.ts';
+import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, standCourseRopes, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
+import { HangingRope } from './player/hangingRope.ts';
+import type { SolidRole } from './anim/climbCourse.ts';
 import { pieceLabel } from './anim/climbLabels.ts';
 import { COURSE_LABEL_TUNE, CourseLabels } from './ui/courseLabels.ts';
 import { animDialsFor } from './anim/animDials.ts';
@@ -574,6 +576,10 @@ LOCO_TUNE.on = locoSwitchOn(() => localStorage.getItem(LOCO_SWITCH));
  * What `__debug.climb` takes (wave 4: the ledges, the wall climb and the hands' bracing): the ledges' switch (`on`), the
  * wall climb's (`wall`), the bracing's (`brace`), the tune by group, back as shipped, and a let-go of a lip or a wall.
  */
+/** Climbing II, phase 4: the course drawn as two meshes, every solid but the rope's column, and the rope's column alone. */
+const notRopeColumn = (role: SolidRole): boolean => role !== 'rope';
+const ropeColumnOnly = (role: SolidRole): boolean => role === 'rope';
+
 interface ClimbDebugOptions {
   on?: boolean;
   wall?: boolean;
@@ -583,6 +589,12 @@ interface ClimbDebugOptions {
   letGo?: boolean;
   /** The feedback round: answer the last climb up's room tests in full (`LedgeHang.roomReport`) instead of the rest. */
   room?: boolean;
+  /**
+   * Climbing II, phase 4: a rope stood: `true` at the aim (hanging from a ceiling the crosshair meets, else its end a little over
+   * the ground there), `{ at: [x, y, z], length }` from an anchor in the game's frame (its length the slider's unless given),
+   * `'clear'` the console's ropes taken down.
+   */
+  rope?: boolean | 'clear' | { at?: [number, number, number]; length?: number };
 }
 
 /** What `__debug.loco` takes. */
@@ -6932,15 +6944,20 @@ class App {
        * wall climb read as the world's own still geometry, stood behind a short curtain so nothing is built in play.
        * `pieces` stands only those ids; `{ clear: true }` takes it down (so do a travel, the select screen and a reload).
        */
-      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean } = {}) => {
+      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean; ropeLands?: boolean } = {}) => {
         const cleared = this.dropClimbTest('cleared');
         if (o.clear) return { cleared };
         if (!this.inWorld || this.traveling) return { cleared, error: 'not now: enter the world first' };
         if (this.world.planet.space) return { cleared, error: 'a space zone has no ground to stand a course on' };
         // The owner's extra rows (the ladders and the vertical pieces) stand too unless `extras: false`.
         const extras = o.extras ?? true;
-        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras });
-        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : []) };
+        // (Climbing II, phase 4, maker B: and the rope's landings unless `ropeLands: false`; the fixer: only while `climb.ropes` is
+        // 'on' unless asked, so under 'off' the course is 472c90e's, its slabs' depth worked out over the same pieces.)
+        const ropeLands = o.ropeLands ?? CLIMB_TUNE.ropes === 'on';
+        // (The fixer: and laid for the figure standing, its lips in the middle of each band for its size: `ropeLandTops`.)
+        const ropeScale = this.player.ledgeScale();
+        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras, ropeLands, ropeScale });
+        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : [], ropeLands ? ropeLandIds() : []) };
         const h = this.player.heading;
         const ahead = o.ahead ?? 4;
         const p = this.player.worldPos;
@@ -6970,7 +6987,7 @@ class App {
           deep = Math.max(deep, hi - lo + 0.55);
         }
         const floor = Math.ceil(deep * 10) / 10;
-        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras });
+        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras, ropeLands, ropeScale });
         const frame: CourseFrame = { ox, oz, h, ref: (q) => refs.get(q.id) ?? 0 };
         await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');
         const out = course.pieces.map((piece) => {
@@ -7682,6 +7699,7 @@ class App {
             // drawn here either and only the player's, the fighters' and the catalogue's meet.
             this.player.drawBlades(dt, this.cam.camera);
             this.player.drawGrapple(this.cam.camera, window.innerHeight);
+            this.player.drawRopes(this.cam.camera, window.innerHeight);
             this.stepClashes();
             this.effects.update(dt);
             this.updateCamera(null);
@@ -14999,6 +15017,8 @@ class App {
     s.grapple = p.grapple.promptWord();
     // Climbing II, phase 3 (maker B): on a bar (Space lets go, the crouch drops), or in the flight off one (nothing to press).
     s.bar = p.bar.promptWord();
+    // Phase 4 (maker B): on a rope, the bar's own words (Space lets go, the crouch drops), and nothing to press flying off it or landing.
+    if (!s.bar) s.bar = p.rope.promptWord();
     // On foot, and standing at a bridge's controls too: the long line asks for the lift underfoot
     // before it asks what is flown, and both readings are gathered here so that the long line can
     // read them rather than ask for them again on every frame it is written.
@@ -15101,6 +15121,8 @@ class App {
     s.climb = p.climbReach() ? (p.climbFalls ? 'air' : 'ground') : '';
     // (Phase 3, maker B: and whether what the key would take is a bar, whose word is "grab".)
     s.climbBar = s.climb !== '' && p.reachBar;
+    // (Phase 4, maker B: and a rope, whose word is "grab" too.)
+    if (s.climb !== '' && p.reachRope) s.climbBar = true;
     return s;
   }
 
@@ -17947,10 +17969,11 @@ class App {
     // While the world editor flies, the player is where its body was kept (the return point), hidden (`j`): the server
     // measures creature keeping, a group's reach and a duel's from the body, never from the camera.
     const edRet = this.editor?.returnPlace ?? null;
-    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.worldPos;
+    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.rope.onRope && !p.aboard ? p.rope.peerPlace(leanedAt) : p.worldPos;
     // (Climbing II, phase 3, maker B: hanging from a bar the place is where a free hang's hands would be on the grip, and the
     // rig's state the free hang's, so another player's game, which has no bar's swing on the wire, stands the nearest pose it
-    // has, its hands on the bar; in the flight off it the body's own place and the falling loop's state.)
+    // has, its hands on the bar; in the flight off it the body's own place and the falling loop's state. Phase 4, maker B: on a
+    // rope the same, its hands on the rope's grip, and the rope itself goes as a held rope from its anchor: `ropeForWire`.)
     const n2 = (n: number) => Number(n.toFixed(2));
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
@@ -18096,6 +18119,16 @@ class App {
   private ropeForWire(now: number): { gr: number[]; grf: number[] | null } | null {
     const p = this.player;
     const g = p.grapple;
+    // Climbing II, phase 4 (maker B): on a hanging rope (never with the hook out: a rope held refuses the hook), the rope itself as
+    // a held rope from its anchor to the figure's hand, the anchor sent twice: the mark of a hanging rope (src/net/peerRope.ts's
+    // `hung`), which a game built for it draws with no dart and hears nowhere, and one built before draws as a hook's rope.
+    const hung = p.rope.onRope && !g.out && !p.aboard && !p.eva ? p.rope.rope : null;
+    if (hung) {
+      const n2 = (n: number) => Number(n.toFixed(2));
+      const gr = [1, 0, n2(hung.ax), n2(hung.ay), n2(hung.az), n2(hung.ax), n2(hung.ay), n2(hung.az)];
+      this.ropeSent = { gr, grf: null, bytes: JSON.stringify(gr).length, grfBytes: 0, at: now };
+      return { gr, grf: null };
+    }
     if (!g.out || p.aboard || p.eva) {
       this.ropeSent = { gr: null, grf: null, bytes: 0, grfBytes: 0, at: now };
       return null;
@@ -21711,7 +21744,7 @@ class App {
   /** The test flights `__debug.stairsTest` stood (by the keys they are filed under), taken down by `{ clear: true }`. */
   private stairTestKeys: string[] = [];
   /** The test course `__debug.climbTest` stood (its one mesh and material, its colliders, how many pieces), taken down by `dropClimbTest`. */
-  private climbTestStood: { mesh: THREE.Mesh; material: THREE.Material; colliders: CourseCollider[]; pieces: number } | null = null;
+  private climbTestStood: { mesh: THREE.Mesh; material: THREE.Material; colliders: CourseCollider[]; pieces: number; ropes: HangingRope[]; ropeMesh: THREE.Mesh | null } | null = null;
   private readonly trackFilesSaved = new Set<string>();
   private trackArm: { what: string; until: number } | null = null;
   /** The editor's list in the debug menu, made the first time the menu asks for it. */
@@ -21933,6 +21966,8 @@ class App {
   private leaveTracks(why: string): void {
     // The climbing test course is the world's too (in the same task as the unload: no collider of it outlives the world).
     this.dropClimbTest(why);
+    // (Climbing II, phase 4: and the console's ropes.)
+    this.dropConsoleRopes();
     if (this.raceRun) this.endRun(why);
     this.clearRun();
     if (this.trackHeld && this.trackHeldUnsaved) console.info(`tracks: ${this.trackHeld.id} was put down unsaved (${why})`);
@@ -21952,7 +21987,8 @@ class App {
    * colliders with no body in the exterior group.
    */
   private standClimbCourse(course: ClimbCourse, frame: CourseFrame): void {
-    const tri = courseTriangles(course, frame);
+    // (Climbing II, phase 4: every solid but the rope's column, which is drawn apart below.)
+    const tri = courseTriangles(course, frame, notRopeColumn);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(tri.positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(tri.normals, 3));
@@ -21967,7 +22003,30 @@ class App {
     mesh.receiveShadow = true;
     this.world.scene.add(mesh);
     const colliders = buildCourseColliders(this.physics.world, course, frame);
-    this.climbTestStood = { mesh, material, colliders, pieces: course.pieces.length };
+    // Climbing II, phase 4: the rope piece's column a rope hanging from its top (`climb.ropes` 'on'), drawn as the hook's rope;
+    // its column, collider and mesh alike, stands only while ropes are 'off' (`HangingRope.sync`, every frame).
+    const ropes = standCourseRopes(course, frame, colliders);
+    const columns = courseTriangles(course, frame, ropeColumnOnly);
+    let ropeMesh: THREE.Mesh | null = null;
+    if (columns.positions.length > 0) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(columns.positions, 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(columns.normals, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(columns.colors, 3));
+      g.computeBoundingBox();
+      g.computeBoundingSphere();
+      ropeMesh = new THREE.Mesh(g, material);
+      ropeMesh.name = 'climbTest rope column';
+      ropeMesh.castShadow = true;
+      ropeMesh.receiveShadow = true;
+      this.world.scene.add(ropeMesh);
+    }
+    for (const r of ropes) {
+      r.columnMesh = ropeMesh;
+      if (ropeMesh) ropeMesh.visible = r.columnStands;
+      this.player.addRope(r);
+    }
+    this.climbTestStood = { mesh, material, colliders, pieces: course.pieces.length, ropes, ropeMesh };
     // Each piece's label over its first start (the owner's: "label what I'm meant to test near each test geometry").
     const at = { x: 0, y: 0, z: 0 };
     this.courseLabels?.dispose();
@@ -21993,6 +22052,12 @@ class App {
     this.courseLabels?.dispose();
     this.courseLabels = null;
     for (const c of s.colliders) this.physics.removeCollider(c.collider);
+    // (Climbing II, phase 4: its ropes taken down, and the rope's column's mesh, on the same material.)
+    for (const r of s.ropes) this.player.removeRope(r);
+    if (s.ropeMesh) {
+      s.ropeMesh.removeFromParent();
+      s.ropeMesh.geometry.dispose();
+    }
     s.mesh.removeFromParent();
     this.world.forgetMaterials([s.material]);
     s.mesh.geometry.dispose();
@@ -28829,6 +28894,9 @@ class App {
     if (o.letGo && p.wall.holding) p.wall.letGo(p as never, 'console', 0, 0, 0);
     // Climbing II, phase 3: off a bar the plain way (the swing's own velocity kept).
     if (o.letGo && p.bar.holding) p.bar.letGo(p as never, true);
+    // Phase 4: off a rope the plain way (the swing's own velocity kept); and a rope stood or the console's taken down.
+    if (o.letGo && p.rope.holding) p.rope.letGo(p as never, true);
+    if (o.rope !== undefined && o.rope !== false) words.push(this.consoleRope(o.rope));
     // The feedback round: the last climb up's room tests in full (which test, where, what it met and how far into it, and
     // what the rule made of it), and nothing else.
     if (o.room) return { room: p.ledge.roomReport(), roomRule: CLIMB_TUNE.roomRule, roomSay: CLIMB_TUNE.roomSay, grabFree: CLIMB_TUNE.grabFree, grabsFreed: p.ledge.grabsFreed };
@@ -28840,12 +28908,66 @@ class App {
       wall: p.wall.report(),
       // Climbing II, phase 3: the bar held, its swing and the clip's time it is drawn at.
       bar: p.bar.report(),
+      // Phase 4: the rope held, its swing, the ropes standing and the clips' times it is drawn at.
+      rope: p.rope.report(),
       brace: p.brace.report(),
       limbs: p.limbs.report(),
       // Smoothness II, items 3 and 4: the figure's spheres (the push laid on now, what is left in a wall, the drawn top held).
       spheres: { ...p.spheres.report(), crouchHeadCm: p.crouchHeadCm, crouchHeads: p.deepHeads },
       tune: JSON.parse(JSON.stringify(CLIMB_TUNE)) as unknown,
     };
+  }
+
+  /** Climbing II, phase 4: the ropes the console stood (`climb({ rope })`), taken down with the world. */
+  private consoleRopes: HangingRope[] = [];
+
+  /** Phase 4: a rope stood from the console (`climb({ rope })`), or the console's taken down; its words. */
+  private consoleRope(o: true | 'clear' | { at?: [number, number, number]; length?: number }): string {
+    if (o === 'clear') return `${this.dropConsoleRopes()} rope(s) taken down`;
+    const length = typeof o === 'object' && typeof o.length === 'number' && o.length > 0 ? o.length : Number.NaN;
+    const len = length === length ? length : CLIMB_TUNE.ropeLength;
+    let ax: number;
+    let ay: number;
+    let az: number;
+    if (typeof o === 'object' && o.at) {
+      [ax, ay, az] = o.at;
+      if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az)) return 'no rope stood: its anchor must be three numbers (the game\'s frame)';
+    } else {
+      // At the aim: hung from what the crosshair meets where that faces down (a ceiling, a beam's underside), else its end hung
+      // 0.3 m over what it meets (the ground, a wall's foot); nothing met within 40 m, 4 m ahead over the ground there.
+      const cam = this.cam.camera;
+      const dir = new THREE.Vector3();
+      cam.getWorldDirection(dir);
+      const hit = { toi: 0, nx: 0, ny: 0, nz: 0, handle: -1 };
+      const met = this.physics.aimHit(cam.position.x, cam.position.y, cam.position.z, dir.x, dir.y, dir.z, 40, this.player.inside, hit);
+      const d = met ? hit.toi : 4;
+      const x = cam.position.x + dir.x * d;
+      const y = cam.position.y + dir.y * d;
+      const z = cam.position.z + dir.z * d;
+      if (met && hit.ny < -0.5) {
+        ax = x;
+        ay = y - 0.02;
+        az = z;
+      } else {
+        const foot = met ? y : (this.world.groundAt(x, cam.position.y, z, this.player.inside) ?? this.player.pos.y);
+        ax = x;
+        ay = foot + 0.3 + len;
+        az = z;
+      }
+    }
+    const r = new HangingRope(`the console's rope ${this.consoleRopes.length + 1}`, ax, ay, az, length);
+    this.consoleRopes.push(r);
+    this.player.addRope(r);
+    const off = CLIMB_TUNE.ropes === 'on' ? '' : " (ropes are off: climb({ tune: { ropes: 'on' } }) to see it)";
+    return `${r.name} stood from (${ax.toFixed(2)}, ${ay.toFixed(2)}, ${az.toFixed(2)}), ${len.toFixed(2)} m${off}`;
+  }
+
+  /** Phase 4: the console's ropes taken down (let go of first where one is held); how many. */
+  private dropConsoleRopes(): number {
+    const n = this.consoleRopes.length;
+    for (const r of this.consoleRopes) this.player.removeRope(r);
+    this.consoleRopes = [];
+    return n;
   }
 
   /**
@@ -36275,6 +36397,8 @@ class App {
       player.drawBlades(dt, this.cam.camera);
       // And the grapple's rope and dart, laid once a frame before the render from the drawn left hand.
       player.drawGrapple(this.cam.camera, window.innerHeight);
+      // Climbing II, phase 4: and the ropes hanging in the world, laid the same way (the hook's ribbon each).
+      player.drawRopes(this.cam.camera, window.innerHeight);
       // The other players' blades, from where their hands ended up this frame as well (their figures
       // were moved and posed in stepNet above). With the glow pass on they light the world through
       // it, exactly as the player's do, and ask for no light at all. With it off they take a pooled

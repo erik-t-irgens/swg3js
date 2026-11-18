@@ -339,7 +339,7 @@ const WAYS: [string, Keys, number][] = [['forward', { w: true }, 0], ['forward-l
   console.warn = warn;
   const used = index.clips.filter((c) => c.use).length;
   ok(plain.length === used && more.length === used + moreClips().length && moreClips().every((id) => more.includes(`mx_${id}`) && !plain.includes(`mx_${id}`)), `the pack fits the clips its index marks (${used}), and with the game's own list beside them wave 2b's ten as well (${more.length}): nothing is reimported for them`);
-  ok(text('src/anim/mixamoPack.ts').includes('also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS, ...BAR_IDS],'), 'and the game hands its pack that list (and wave 3\'s stair clips, wave 4\'s ledge and wall clips and Climbing II phase 3\'s bar clip beside it)');
+  ok(text('src/anim/mixamoPack.ts').includes('also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS, ...BAR_IDS, ...ROPE_IDS],'), 'and the game hands its pack that list (and wave 3\'s stair clips, wave 4\'s ledge and wall clips and Climbing II phase 3\'s bar clip beside it)');
 }
 
 // ---- D. walking hurt -------------------------------------------------------------------------------------------------------

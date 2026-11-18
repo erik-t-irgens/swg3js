@@ -93,6 +93,8 @@ interface RopeRecord {
   readonly armDir: THREE.Vector3;
   ribbon: RopeRibbon | null;
   dart: THREE.Mesh | null;
+  /** Climbing II, phase 4 (maker B): a hanging rope they hold, not a hook's (`PeerRope.hung`): no dart, and nothing heard. */
+  hung: boolean;
 }
 
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
@@ -226,6 +228,7 @@ export class RemoteRopes implements PeerWatcher {
       armDir: new THREE.Vector3(0, 1, 0),
       ribbon: null,
       dart: null,
+      hung: false,
     };
   }
 
@@ -237,7 +240,10 @@ export class RemoteRopes implements PeerWatcher {
   private take(r: RopeRecord, rope: PeerRope): void {
     const was = r.kind;
     const now = rope.kind;
-    if (r.shown && r.wasShown && this.sound) {
+    // (Phase 4, maker B: a hanging rope taken or let go of is no hook's fire, bite or let-go.)
+    const hungNow = rope.hung || r.hung;
+    r.hung = rope.hung;
+    if (r.shown && r.wasShown && this.sound && !hungNow) {
       const what = was < 0 && now === 0 ? 'fire' : now === 1 && was !== 1 ? 'bite' : was >= 0 && now < 0 ? 'letGo' : '';
       if (what) {
         this.handOf(r, hand);
@@ -384,6 +390,8 @@ export class RemoteRopes implements PeerWatcher {
       this.layDart(r, camera, screenH);
     }
     this.pointDart(r.dart!);
+    // (Phase 4, maker B: a hanging rope is no hook's: its anchor carries no dart.)
+    if (r.hung) r.dart!.visible = false;
   }
 
   /** A held rope: from the anchor through every bend to the hand, hung by the slack sent; the dart bitten in at the anchor. */

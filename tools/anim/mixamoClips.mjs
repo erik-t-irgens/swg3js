@@ -88,6 +88,21 @@ export const CLIPS = {
   // played in parts by the bar's own clock (the swing by the pendulum's angle). Its feet are on the ground only at its two
   // ends, and the parts the game plays are in the air: nothing under its feet.
   run_and_swing: { loop: false, ground: false },
+
+  // ---- Climbing II, phase 4: the ropes (src/anim/ropeClips.ts names what the game plays of them) -----------------------
+  // On the rope: the still hang, the climb (a loop; played backward for down), and the owner's getting on and swinging,
+  // usable from his frame 32 (1.07 s, the feet off the ground, both hands on the rope) and played by the pendulum's angle
+  // from there. Nothing under the feet of any of the three.
+  hanging: { loop: true, ground: false },
+  climbing_a_rope: { loop: true, ground: false },
+  start_swinging: { loop: false, ground: false, trimStart: frames(32) },
+  // Letting go into a landing (phase 4's item 4), each from the owner's let-go frame: level with the body (31, 1.03 s), knee
+  // high (40, 1.33 s), between knee and waist (31, 1.03 s), and waist high with the feet to the wall (28, 0.93 s). Each lands
+  // on its feet, so its ground is measured as ever.
+  swinging: { loop: false, trimStart: frames(31) },
+  swing_to_land_1: { loop: false, trimStart: frames(40) },
+  swing_to_land: { loop: false, trimStart: frames(31) },
+  swing_into_wall: { loop: false, trimStart: frames(28) },
 };
 
 /** A clip's row over the defaults. */

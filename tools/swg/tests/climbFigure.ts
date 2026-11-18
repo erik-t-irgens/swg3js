@@ -29,6 +29,7 @@ const { MixamoPack } = await import('../../../src/anim/mixamoPack.ts');
 const { LEDGE_IDS, ledgeClipName } = await import('../../../src/anim/ledgeClips.ts');
 const { WALL_CLIP_NAMES, WALL_IDS, wallClipName } = await import('../../../src/anim/wallClips.ts');
 const { BAR_IDS } = await import('../../../src/anim/barClips.ts');
+const { ROPE_IDS } = await import('../../../src/anim/ropeClips.ts');
 const { LimbPlace } = await import('../../../src/player/limbPlace.ts');
 const { CLIMB_TUNE } = await import('../../../src/anim/climbTune.ts');
 const { STILL_FLAGS } = await import('../../../src/player/stairSense.ts');
@@ -60,7 +61,8 @@ const pack = new MixamoPack({
   breath: async () => {},
   // (And the crouched walk, whose head the duck reads at its deepest: Smoothness II's item 4.)
   // (And Climbing II, phase 3's bar clip, which its suites pose: src/anim/barClips.ts.)
-  also: [...LEDGE_IDS, ...WALL_IDS, 'crouched_walking', ...BAR_IDS],
+  // (And phase 4's rope clips: src/anim/ropeClips.ts.)
+  also: [...LEDGE_IDS, ...WALL_IDS, 'crouched_walking', ...BAR_IDS, ...ROPE_IDS],
   now: () => performance.now(),
 });
 const info = console.info;

@@ -12,6 +12,7 @@
 // course's own (ours: a test bed, not a rule of the game), except the two reaches below, measured on today's climbing.
 
 import { CLIMB_TUNE } from './climbTune.ts';
+import { ROPE_FACTS } from './ropeClips.ts';
 
 /** What a piece is for (the design's list; `room` the feedback round's climbs up that only nearly fit). */
 export type CourseKind = 'lip' | 'wall' | 'corner' | 'slope' | 'steps' | 'gap' | 'bar' | 'rope' | 'pole' | 'obstacle' | 'run' | 'room';
@@ -108,6 +109,17 @@ export interface CourseOptions {
    * the harness, `courseIds()` and every digest are as they were; the game's `__debug.climbTest()` asks for them by default.
    */
   extras?: boolean;
+  /**
+   * Climbing II, phase 4 (maker B): the rope's landings, a row after every other (`ropeLandPieces`): a rope over level ground
+   * and a platform ahead of it at each landing's height (level, knee, between knee and waist, waist), and one with no platform
+   * at all (the fall). Off unless asked, so every digest is as it was; the game's `__debug.climbTest()` asks for them by default.
+   */
+  ropeLands?: boolean;
+  /**
+   * The fixer: the scale of the figure the rope's landings are laid for (`ropeLandTops`; the game's `climbTest` hands the stood
+   * figure's, the player's own ledge scale), 1 for the human male's own size.
+   */
+  ropeScale?: number;
 }
 
 /**
@@ -553,6 +565,7 @@ export function climbCourse(o: CourseOptions = {}): ClimbCourse {
   const rowGap = o.rowGap ?? 4;
   let pieces = allPieces(floor, lipSlope, reach);
   if (o.extras) pieces = pieces.concat(extraPieces(floor));
+  if (o.ropeLands) pieces = pieces.concat(ropeLandPieces(floor, o.ropeScale ?? 1));
   const unknown: string[] = [];
   if (o.pieces) {
     const want = new Set(o.pieces);
@@ -1001,4 +1014,91 @@ function freePieces(floor: number): CoursePiece[] {
 /** Every id the extra rows have, in their order. */
 export function extraIds(): string[] {
   return extraPieces(1).map((p) => p.id);
+}
+
+// ---- Climbing II, phase 4 (maker B): the rope's landings (`ropeLands`) ------------------------------------------------------
+
+/** The rope landings' row (after every other, so no piece before it moves). */
+export const ROPE_LAND_ROW = 'rope landings';
+/** Where the landings' rope hangs from: its beam's underside over the piece's floor, at z `ROPE_LAND_AT` (its length the slider's, 8 m: its end half a metre over the floor). */
+export const ROPE_LAND_ANCHOR = 8.5;
+export const ROPE_LAND_AT = 5;
+/**
+ * How far ahead of the rope's line the landing platform's face stands, metres: just past the front of the swing the default push
+ * settles at (33 degrees on this rope, its front 4.0 m out, the hanging capsule's own 0.37 m more), so the swing never meets it.
+ */
+export const ROPE_LAND_FACE = 4.5;
+/** The fixer: the let-go the landings' platforms are laid for, radians: on the forward swing at 28 degrees (the proof's). */
+export const ROPE_LAND_LET_GO = (28 * Math.PI) / 180;
+/** The standing capsule's middle over its feet, metres (src/player/ledge.ts's `LEDGE_CAPSULE`, r and stand: climbRopesLand.test.ts holds the two equal). */
+export const ROPE_LAND_MID = 0.8;
+/**
+ * The fixer: each band's lip over the feet at the let-go a platform is laid at, metres for a figure of the human male's own size
+ * and scaled with the figure, as the bands are: the middle of each band at the bands' starting edges (knee 0.2 to 0.45, between
+ * to 0.78, waist to 1.1), the level top a little under the feet (the flight comes down onto it from above, or meets its edge).
+ * The middles, because where the flight meets a face is the let-go's feet give or take a tenth of a metre by how long the swing
+ * was pumped (a swing pumped longer flies higher, as does a longer figure's: measured, 9 s of A leaves the human male's at 33.5
+ * degrees and one a twentieth taller at 35.6, and the flight's last few hundredths of a metre fall in the one and rise in the
+ * other). Laid at the bands' lower parts, as they were, a taller figure or a longer pump landed each a band lower (the review's
+ * human male at the height slider's top, `figureScaleOf` 1.11, landed the knee piece level).
+ */
+export const ROPE_LAND_LIPS = { level: -0.2, knee: 0.325, between: 0.615, waist: 0.94 } as const;
+
+/**
+ * The fixer: the feet's height over the floor at the let-go (`ROPE_LAND_LET_GO`) for a figure of scale `k` that grabbed the rope
+ * standing on the floor (src/player/ropeSwing.ts's grab: the hands `ROPE_FACTS.grip` over the feet, the body's middle
+ * `ROPE_FACTS.hang` under them, both scaled; the rope's stretch at that grip `climb.ropeGive` over `climb.ropeLength`), metres.
+ */
+export function ropeLandFeet(k: number): number {
+  const s = ROPE_LAND_ANCHOR - ROPE_FACTS.grip * k;
+  const e = CLIMB_TUNE.ropeGive * (s / Math.max(1e-3, CLIMB_TUNE.ropeLength));
+  const R = s + e + ROPE_FACTS.hang * k;
+  return ROPE_LAND_ANCHOR - R * Math.cos(ROPE_LAND_LET_GO) - ROPE_LAND_MID;
+}
+
+/** The fixer: each landing's platform top over the floor for a figure of scale `k`: its band's lip (scaled) over the feet at the let-go, to the centimetre. */
+export function ropeLandTops(k = 1): { level: number; knee: number; between: number; waist: number } {
+  const f = ropeLandFeet(k);
+  const at = (lip: number) => Math.round((f + lip * k) * 100) / 100;
+  const L = ROPE_LAND_LIPS;
+  return { level: at(L.level), knee: at(L.knee), between: at(L.between), waist: at(L.waist) };
+}
+
+/** Each landing's platform top over the floor, metres, for the human male's own size (the harness's figure). */
+export const ROPE_LAND_TOPS = ropeLandTops(1);
+
+/**
+ * A rope's landing (the brief's "lips at level, knee, between and waist"): the rope from a beam `ROPE_LAND_ANCHOR` over level floor
+ * (a column standing in for it while ropes are off, as the rope piece's), the body starting under it, and a platform 4 m wide and
+ * 3 m deep with its face `ROPE_LAND_FACE` ahead at `top` over the floor; `top` null, nothing ahead at all (the fall with no lip).
+ */
+function ropeLandPiece(id: string, band: string, top: number | null, floor: number): CoursePiece {
+  const r = 0.02;
+  const z = ROPE_LAND_AT;
+  const solids: CourseSolid[] = [aabb('beam', -1, ROPE_LAND_ANCHOR, z - 0.1, 1, ROPE_LAND_ANCHOR + 0.2, z + 0.1), aabb('rope', -r, 0.5, z - r, r, ROPE_LAND_ANCHOR, z + r)];
+  const lips: CourseLip[] = [];
+  if (top !== null) {
+    solids.push(aabb('platform', -2, 0, z + ROPE_LAND_FACE, 2, top, z + ROPE_LAND_FACE + 3));
+    lips.push(frontLip('L', -2, 2, top, z + ROPE_LAND_FACE));
+  }
+  const numbers: CoursePiece['numbers'] = { band, anchor: ROPE_LAND_ANCHOR, face: ROPE_LAND_FACE };
+  if (top !== null) numbers.top = top;
+  return piece(id, 'rope', ROPE_LAND_ROW, solids, lips, [{ name: 'stand', at: [0, 0, round(z - 0.3)], face: [0, 1] }], numbers, floor);
+}
+
+/** The rope landings' pieces, in their order, laid for a figure of scale `k`. */
+function ropeLandPieces(floor: number, k = 1): CoursePiece[] {
+  const T = ropeLandTops(k);
+  return [
+    ropeLandPiece('rope-land-level', 'level', T.level, floor),
+    ropeLandPiece('rope-land-knee', 'knee', T.knee, floor),
+    ropeLandPiece('rope-land-between', 'between', T.between, floor),
+    ropeLandPiece('rope-land-waist', 'waist', T.waist, floor),
+    ropeLandPiece('rope-land-none', 'none', null, floor),
+  ];
+}
+
+/** Every id the rope landings' row has, in its order. */
+export function ropeLandIds(): string[] {
+  return ropeLandPieces(1).map((p) => p.id);
 }

@@ -463,6 +463,61 @@ export interface ClimbTune {
   catchSlack: number;
   /** Phase 3: a blow of at least this much health knocks the body off the bar, straight down (ours, 25: a quarter of a whole health bar; the ledges have no such rule). */
   barKnock: number;
+  /**
+   * Climbing II, phase 4 (the owner's "rope climbing and swinging"): 'on' a rope hangs from its anchor (src/player/hangingRope.ts:
+   * no collider, drawn as the grappling hook's ribbon, free to swing), the course's `rope` piece is one, and E in reach grabs it at
+   * the height met and swings it as a pendulum from the anchor at the body's place along it (src/player/ropeSwing.ts); 'off'
+   * phase 4's before, the course's rope a still column (and nothing hangs).
+   */
+  ropes: 'on' | 'off';
+  /**
+   * Phase 4: which keys pump the swing (the owner's to choose): 'ad' A toward the view's way and D away from it, W and S climbing
+   * up and down; 'ws' the same, and W and S pump as well while the rope swings (past `ropeSwingFrom`), climbing only while it
+   * hangs still. Not a before: either reads the rope as phase 4 builds it.
+   */
+  ropeKeys: 'ad' | 'ws';
+  /** Phase 4: a rope's length, metres, every rope stood without one of its own (ours, 8: the course's, from its beam 6 m over the take-off floor to a metre over the pit's floor). */
+  ropeLength: number;
+  /** Phase 4: how far a rope gives under a hanging body at its whole length, metres (ours, 0.15: a climbing rope's couple of per cent at 8 m; a catch from a fall bounces about as much again for each metre a second it came in at). */
+  ropeGive: number;
+  /** Phase 4: W and S climb the rope at this, m/s (ours, 0.5: a climb a game can wait for, the clip a little over twice its own pace, 0.22, its holding hand still keeping its place on the rope since its phase follows the way climbed). */
+  ropeClimb: number;
+  /** Phase 4: a grab carries the body onto the rope over this, seconds (ours, 0.25: the bar's own grab's). */
+  ropeGrab: number;
+  /** Phase 4: a pump key held at the swing's own phase pushes it on by this, m/s² along the swing (ours, 4: the bar's own push at its radius, so a long rope pumps no harder than a bar). */
+  ropePush: number;
+  /** Phase 4: the swing dies away by this, a second (ours, 0.35: the bar's, a swing let alone halving in about four seconds). */
+  ropeDamp: number;
+  /** Phase 4: the largest swing the keys pump to, degrees either side of straight down (ours, 60: short of the bar's 70, a rope swung further reading as a trapeze act). */
+  ropeMost: number;
+  /** Phase 4: how much of the body's speed along the swing at the grab is carried into it (ours, 1: all of it, held to the largest swing). */
+  ropeCarry: number;
+  /** Phase 4: the swing's plane turns toward the view's way at most this, degrees a second (ours, 60: a quarter turn in a second and a half, slow enough that a swing is never thrown about). */
+  ropeTurn: number;
+  /** Phase 4: a swing past this either way plays the swing's clip, under it the still hang (ours, 5 degrees: a smaller sway reads as hanging still); back to the hang under half of it. */
+  ropeSwingFrom: number;
+  /**
+   * Phase 4, item 4 (maker B): 'lips' Space lets go on the swing's velocity and, where the flight's arrival meets a lip at a
+   * landing's height, the body flies there held on the physics' own steps and lands on it by the clip the lip's height under
+   * the feet chooses (level `swinging`, knee `swing_to_land_1`, between knee and waist `swing_to_land`, waist `swing_into_wall`:
+   * src/player/ropeSwing.ts's `release`), carried up onto the top; with no lip, the plain let-go. 'plain' maker A's let-go: the
+   * swing's velocity handed to the movement, whatever is ahead.
+   */
+  ropeLand: 'lips' | 'plain';
+  /** Phase 4, item 4: a lip whose top stands under this over the feet where the flight meets it is landed on level (ours, 0.2 m: a step the level landing takes in its stride, a stair's riser). */
+  ropeLandKnee: number;
+  /** Phase 4, item 4: from this the knee landing gives way to the one between knee and waist (ours, 0.45 m: about the human male's knee, past which the knee clip's raised legs no longer clear the lip). */
+  ropeLandBetween: number;
+  /** Phase 4, item 4: from this the waist landing, the feet to the wall (ours, 0.78 m: halfway between the between clip's own lip, its lower foot rising 0.70 m onto the top, and the waist clip's, 0.86 m, both measured off the clips on the human male). */
+  ropeLandWaist: number;
+  /** Phase 4, item 4: a lip higher than this over the feet is a wall, no landing (ours, 1.1 m: the waist clip's own 0.86 and a quarter metre). */
+  ropeLandTop: number;
+  /** Phase 4, item 4: a top met from above is a level landing only this far under the feet at the let-go (ours, 0.5 m: the owner's "level with the body"; deeper, the body falls onto it as a fall does today). */
+  ropeLandBelow: number;
+  /** Phase 4, item 4: the body stands up this far in past the lip's edge (ours, 0.3 m: a foot's length over the edge past the capsule's own radius). */
+  ropeLandIn: number;
+  /** Phase 4, item 4: and goes in over the top at no more than this, m/s (ours, 2: about the let-go clips' own travel, 4.9 to 6 m over their 2 to 3 s, which the importer takes out). */
+  ropeLandWalk: number;
 }
 
 /**
@@ -608,9 +663,33 @@ export const CLIMB_BARS_ALSO: (() => void)[] = [];
 
 /** Phase 3's switches at their other setting (Smoothness III's climbing, `955fb04`). */
 export function climbBarsBefore(): void {
+  // (`955fb04` had none of phase 4's either: put back first, so phase 3's own words below win where a switch is shared.)
+  climbRopesBefore();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_BARS_BEFORE)) t[k] = v;
   for (const f of CLIMB_BARS_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 4 (ropes): every switch it adds, at its other setting (the climbing as phase 3 shipped it, `472c90e`). A later
+ * maker of the round adds its own here (`CLIMB_ROPES_ALSO` for one beside the climbing's), so one call puts the whole round back;
+ * `climbBarsBefore` calls it first, so every older round's chain of puts back holds. (`ropeKeys` is a choice of the round's own,
+ * not a before: under 'off' nothing reads it.)
+ */
+export const CLIMB_ROPES_BEFORE: Record<string, string> = {
+  ropes: 'off',
+  // (Maker B: the let-go maker A built, the swing's velocity handed to the movement: under 'off' nothing reads it.)
+  ropeLand: 'plain',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the phase's climbing ones. */
+export const CLIMB_ROPES_ALSO: (() => void)[] = [];
+
+/** Phase 4's switches at their other setting (phase 3's climbing, `472c90e`). */
+export function climbRopesBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_ROPES_BEFORE)) t[k] = v;
+  for (const f of CLIMB_ROPES_ALSO) f();
 }
 
 /**
@@ -791,6 +870,26 @@ export const CLIMB_TUNE: ClimbTune = {
   catchReach: 0.6,
   catchSlack: 0.35,
   barKnock: 25,
+  ropes: 'on',
+  ropeKeys: 'ad',
+  ropeLength: 8,
+  ropeGive: 0.15,
+  ropeClimb: 0.5,
+  ropeGrab: 0.25,
+  ropePush: 4,
+  ropeDamp: 0.35,
+  ropeMost: 60,
+  ropeCarry: 1,
+  ropeTurn: 60,
+  ropeSwingFrom: 5,
+  ropeLand: 'lips',
+  ropeLandKnee: 0.2,
+  ropeLandBetween: 0.45,
+  ropeLandWaist: 0.78,
+  ropeLandTop: 1.1,
+  ropeLandBelow: 0.5,
+  ropeLandIn: 0.3,
+  ropeLandWalk: 2,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -905,6 +1004,23 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   catchReach: { min: 0, max: 1.5 },
   catchSlack: { min: 0.05, max: 1 },
   barKnock: { min: 0, max: 200 },
+  ropeLength: { min: 1.5, max: 30 },
+  ropeGive: { min: 0, max: 1.5 },
+  ropeClimb: { min: 0, max: 3 },
+  ropeGrab: { min: 0.02, max: 1 },
+  ropePush: { min: 0, max: 15 },
+  ropeDamp: { min: 0, max: 3 },
+  ropeMost: { min: 5, max: 80 },
+  ropeCarry: { min: 0, max: 1.5 },
+  ropeTurn: { min: 0, max: 360 },
+  ropeSwingFrom: { min: 0.5, max: 30 },
+  ropeLandKnee: { min: 0, max: 1 },
+  ropeLandBetween: { min: 0, max: 1.5 },
+  ropeLandWaist: { min: 0, max: 2 },
+  ropeLandTop: { min: 0, max: 2.5 },
+  ropeLandBelow: { min: 0, max: 3 },
+  ropeLandIn: { min: 0, max: 1.5 },
+  ropeLandWalk: { min: 0.3, max: 8 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -944,6 +1060,9 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   pushOff: ['jka', 'before'],
   bars: ['on', 'off'],
   barFlight: ['fly', 'plain'],
+  ropes: ['on', 'off'],
+  ropeKeys: ['ad', 'ws'],
+  ropeLand: ['lips', 'plain'],
 };
 
 /**

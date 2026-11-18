@@ -14,6 +14,8 @@ import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { LEDGE_CLIP_NAMES, ledgeClipName } from '../anim/ledgeClips.ts';
 import { WALL_CLIP_NAMES } from '../anim/wallClips.ts';
 import { BAR_TIMES } from '../anim/barClips.ts';
+import type { RopeSwing } from './ropeSwing.ts';
+import { ROPE_CLIMB, ROPE_CLIP_NAMES, ROPE_HANG, ROPE_MODE_CLIMB as MODE_CLIMB, ROPE_MODE_SWING as MODE_SWING, ROPE_TIMES } from '../anim/ropeClips.ts';
 
 /** Climbing II, phase 3 (maker B): how long the bar's landing fades in from the flight's pose, seconds (a mechanic: the clip's own two frames). */
 export const BAR_LAND_FADE = 0.06;
@@ -129,6 +131,86 @@ export function driveBarClips(rig: CharacterRig, B: BarSwing, dt: number, st: Ha
  */
 export function releaseBarClip(rig: CharacterRig | null, B: BarSwing): void {
   if (!B.ended || !rig || rig.overrideName !== B.clipName) return;
+  if (CLIMB_TUNE.transitions === 'blend') rig.blendOut(CLIMB_TUNE.transitionBlend);
+  else rig.stopOverride(CLIMB_TUNE.ease);
+}
+
+/**
+ * Climbing II, phase 4 (`climb.ropes` 'on'): the rope's clips on the rig for this frame and the rig stepped by `dt`, as the
+ * bar's are. With the hands on the rope the rig's state is the free hang's, its clip the rope's own (`prefer`): `hanging` while it
+ * hangs still, `climbing_a_rope` while it climbs, either held (its rate nought) and put each frame at the time the rope has it
+ * at (`RopeSwing.loopT`: the hang's own clock, the climb's phase by the way climbed; through the rig's own `timeAt`, no number
+ * handed across a call), so the pose is the one the figure is placed by; while it swings `start_swinging` (or its
+ * twin, in turn) held over it at the time the pendulum asks (`RopeSwing.poseT`, through `overrideSeekAt`), begun as the swing
+ * begins and crossfaded into the hang or the climb as it ends ('blend'; let go over the hang's ease, 'before'). On the let-go the
+ * rope's preference taken off and the falling loop taken up. Every clip's name is the rope's own, made once.
+ */
+export function driveRopeClips(rig: CharacterRig, R: RopeSwing, dt: number, st: HangClipState): void {
+  st.hangFade.fade = CLIMB_TUNE.ease;
+  const blend = CLIMB_TUNE.transitions === 'blend';
+  if (R.ended) {
+    rig.prefer('hangFree', null);
+    // (Maker B, item 4: a landing ends in the crouch its clip ends in, every other let-go in the falling loop; the flight's or
+    // the landing's clip let go of as the swing's is.)
+    rig.setState(R.landedNow ? 'crouch' : 'air', 0, null, st.hangFade);
+    if (rig.overrideName === R.swingName || rig.overrideName === R.airClip) {
+      if (blend) rig.blendOut(CLIMB_TUNE.transitionBlend);
+      else rig.stopOverride(CLIMB_TUNE.ease);
+    }
+  }
+  // Maker B, item 4 (`climb.ropeLand` 'lips'): the flight off the rope plays the level clip from its let-go (crossfaded from the
+  // swing's pose, the rope's preference taken off), a landing on a face its band's clip from the owner's second (crossfaded from
+  // the flight's), each held (its rate nought) and put each frame at the time the flight or the landing has it at
+  // (`RopeSwing.airT`, through the rig's own `overrideSeekAt`), the falling loop under it.
+  if (R.startFly) {
+    rig.prefer('hangFree', null);
+    rig.play(R.airClip, { from: R.airT === R.airT ? R.airT : ROPE_TIMES.landLevel, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0, keepWeight: blend });
+  } else if (R.startLand) rig.play(R.airClip, { from: R.airT === R.airT ? R.airT : 0, fadeIn: blend ? CLIMB_TUNE.transitionBlend : CLIMB_TUNE.ease, hold: true, timeScale: 0, keepWeight: blend });
+  if (R.flying) {
+    rig.setState('air', 0, null, st.hangFade);
+    if (R.airT === R.airT) {
+      rig.overrideSeekAt = R.airT;
+      rig.overrideSeekNow(R.airClip);
+    }
+  }
+  if (R.onRope) {
+    const climbing = R.mode === MODE_CLIMB;
+    rig.prefer('hangFree', climbing ? ROPE_CLIP_NAMES[ROPE_CLIMB] : ROPE_CLIP_NAMES[ROPE_HANG]);
+    // The swing begun, or ended into what follows.
+    if (R.mode !== R.lastMode || R.startClip) {
+      if (R.mode === MODE_SWING) rig.play(R.swingName, { from: R.poseT === R.poseT ? R.poseT : ROPE_TIMES.swingFrom, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0, keepWeight: blend });
+      else if (R.lastMode === MODE_SWING && rig.overrideName === R.swingName) {
+        if (blend) rig.blendOut(CLIMB_TUNE.ease);
+        else rig.stopOverride(CLIMB_TUNE.ease);
+      }
+    }
+    // The loop (the hang's or the climb's) held (its rate nought) and put at the time the rope has it at, so its pose and the
+    // figure's placement are one.
+    st.ladderRate.rate = 0;
+    st.ladderRate.fade = CLIMB_TUNE.ease;
+    rig.setState('hangFree', 0, null, st.ladderRate);
+    if (R.loopT === R.loopT) {
+      rig.timeAt = R.loopT;
+      rig.setTimeNow(climbing ? ROPE_CLIP_NAMES[ROPE_CLIMB] : ROPE_CLIP_NAMES[ROPE_HANG]);
+    }
+    if (R.mode === MODE_SWING && R.poseT === R.poseT) {
+      rig.overrideSeekAt = R.poseT;
+      rig.overrideSeekNow(R.swingName);
+    }
+  }
+  rig.update(dt);
+}
+
+/**
+ * Phase 4: off the rope (the player's `ledgeClocks`, every frame of the movement, before the rope's own `tick`): a rope let go of
+ * by a path that never ran the rope's frame (stood elsewhere, off the feet) still has its clips on the rig, which are let go of
+ * here as the let-go's own frame would (the rope's preference, and its swing while that is the one playing; nothing otherwise).
+ */
+export function releaseRopeClip(rig: CharacterRig | null, R: RopeSwing): void {
+  if (!R.ended || !rig) return;
+  rig.prefer('hangFree', null);
+  // (Maker B: and the flight's or the landing's clip, as the swing's.)
+  if (rig.overrideName !== R.swingName && rig.overrideName !== R.airClip) return;
   if (CLIMB_TUNE.transitions === 'blend') rig.blendOut(CLIMB_TUNE.transitionBlend);
   else rig.stopOverride(CLIMB_TUNE.ease);
 }

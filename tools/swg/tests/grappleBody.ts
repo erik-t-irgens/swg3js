@@ -22,6 +22,7 @@ import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { ClimbAsk, LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { driveDropClip } from '../../../src/player/hangClips.ts';
 import { BarSwing, type BarWorld } from '../../../src/player/barSwing.ts';
+import { RopeSwing, type RopeWorld } from '../../../src/player/ropeSwing.ts';
 import type { CharacterRig } from '../../../src/player/rig.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
@@ -228,6 +229,10 @@ export class TestBody implements GrappleBody {
   readonly bar = new BarSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   /** The frames the bar held the body for. */
   barFrames = 0;
+  /** Climbing II, phase 4: the ropes (`climb.ropes`), stepped in the player's own places: the swing in place of the movement, the grab after the move, after the bars'. */
+  readonly rope = new RopeSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** The frames the rope held the body for. */
+  ropeFrames = 0;
   /** The frames the climb held the body for. */
   wallFrames = 0;
   /** The move was cut short across the ground (the player's `wallBlocked`). */
@@ -373,6 +378,7 @@ export class TestBody implements GrappleBody {
     this.ledge.reset('stood elsewhere');
     this.wall.reset('stood elsewhere');
     this.bar.reset('stood elsewhere');
+    this.rope.reset('stood elsewhere');
     this.body.setTranslation({ x, y, z }, true);
     this.body.setNextKinematicTranslation({ x, y, z });
     // The feedback round, items 3 and 4: stood up fresh, standing (the player's `reset`).
@@ -568,16 +574,23 @@ export class TestBody implements GrappleBody {
     const input = this.input;
     const g = this.grapple;
     this.t += dt;
+    // Phase 4: the ropes nobody holds swung once a frame, ahead of every way out (the player's `tickRopes`, at the top of its update).
+    this.rope.tickRopes(dt);
     // The key block: the grapple's own part, as `stepGrappleKeys` calls it.
     if (this.hooks) g.stepKeys(input, this, this.mutes, this.fireNow);
     // Climbing II: the use key, as the game's dispatch hands it (here nothing else takes it, so every press is the climb's),
     // held while it is held, and let go while the hands already hold something (the game mutes the key then).
-    const climbHolds = this.ledge.holding || this.wall.holding || this.bar.holding;
+    const climbHolds = this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding;
     if (!climbHolds && input.pressedAction('mount')) this.climbAsk.press();
     this.climbAsk.hold(!climbHolds && input.held('mount'));
     // Climbing II, phase 3: on a bar, the swing has the body in place of the movement (the player's `barFrame`).
     if (this.bar.holding) {
       this.barFrame(dt);
+      return;
+    }
+    // Climbing II, phase 4: on a rope, the swing has the body in place of the movement (the player's `ropeFrame`).
+    if (this.rope.holding) {
+      this.ropeFrame(dt);
       return;
     }
     // Wave 4: hanging, the ledge has the body in place of the movement (the player's `hangFrame`).
@@ -778,6 +791,8 @@ export class TestBody implements GrappleBody {
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
     // Climbing II, phase 3: and the bar's (the player's `ledgeClocks`; no rig here, so no clip to let go of).
     this.bar.tick(dt);
+    // Phase 4: and the rope's (the player's `ledgeClocks`: a let-go's offset eased out; the ropes nobody holds were swung at the top).
+    this.rope.tick(dt);
     // Wave 4, item B: the move cut short across the ground (the player's own lines).
     const askH = moveX * moveX + moveZ * moveZ;
     this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
@@ -791,6 +806,17 @@ export class TestBody implements GrappleBody {
       if (took) {
         this.takenByBar();
         this.barFrame(dt);
+        return;
+      }
+    }
+    // Climbing II, phase 4: a rope grabbed with the use key, after the bars (the player's `senseRope`).
+    if (CLIMB_TUNE.ropes === 'on' && this.rope.ropes.length > 0) {
+      const li = this.fillLedgeIn(dt, move, wasGrounded);
+      li.busy = this.swimming || (this.hooks && (g.out || g.released)) || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || this.prone;
+      this.rope.said = '';
+      if (this.rope.sense(this.physics.world as unknown as RopeWorld, this, li)) {
+        this.takenByRope();
+        this.ropeFrame(dt);
         return;
       }
     }
@@ -818,6 +844,11 @@ export class TestBody implements GrappleBody {
     if (this.bar.said) {
       this.ledgeWords.push(this.bar.said);
       this.bar.said = '';
+    }
+    // (Phase 4: and the rope's, the same way.)
+    if (this.rope.said) {
+      this.ledgeWords.push(this.rope.said);
+      this.rope.said = '';
     }
     this.ground = this.groundAt ? this.groundAt(this.pos.x, this.pos.z) : Number.NEGATIVE_INFINITY;
     if (this.hooks && g.out) g.afterMove(this, dt);
@@ -943,6 +974,42 @@ export class TestBody implements GrappleBody {
     this.jka.holdApex(B.apexY);
     this.grounded = false;
     if (B.holding) this.heading = B.heading;
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    this.input.endFrame();
+    this.beforeStep?.(dt);
+    this.physics.step(dt);
+  }
+
+  /** A rope grabbed, as the player's `takenByRope`: the fall ends with no harm and the slope's memory is put down. */
+  private takenByRope(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.slope.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.rope.heading;
+    this.ropeHp = this.hp;
+  }
+  /** Maker B: the health at the last frame on a rope (the player's `ropeHp`). */
+  private ropeHp = 0.5;
+
+  /** A frame on a rope (the player's `ropeFrame`): the swing's step on the physics' own coming steps in place of the movement, then the physics. */
+  private ropeFrame(dt: number): void {
+    this.ropeFrames++;
+    const R = this.rope;
+    // (Maker B: a blow since the last frame on the rope knocks the body off; the water under the body lets go into the swim.)
+    if (this.hp < this.ropeHp) R.knock(this.ropeHp - this.hp);
+    this.ropeHp = this.hp;
+    if (!this.inside) R.swimLine = this.surface(this.pos.x, this.pos.z, this.t) - SWIM_DEPTH;
+    else R.swimLine = Number.NEGATIVE_INFINITY;
+    R.steps = this.physics.stepsAhead(dt);
+    R.behind = this.physics.behind;
+    R.step(this.physics.world as unknown as RopeWorld, this, this.fillLedgeIn(dt, null, false));
+    this.setCrouchCollider(false);
+    // (Maker B: the fall's memory where the rope says, and a landing ended stood.)
+    this.jka.holdApex(R.apexY);
+    this.grounded = R.landedNow;
+    if (R.holding) this.heading = R.heading;
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     this.input.endFrame();
     this.beforeStep?.(dt);
