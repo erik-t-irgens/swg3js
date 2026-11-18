@@ -120,6 +120,15 @@ export class ThirdPersonCamera {
   /** How far out along its line a blocked chase may stand this frame, in metres: pulled in at once, let out again eased. */
   private chaseClear = Infinity;
   /**
+   * Climbing II, Smoothness II, item 7: seconds the orbit, pulled in by a wall, takes to go back out (the player's `climbCamOut`
+   * while it climbs; nought everywhere else, the orbit exactly as it always was), and how far out it may stand this frame.
+   */
+  blockOut = 0.5;
+  private orbitClear = 0.5;
+  /** (The letting out's ask, kept: the orbit's distance this frame and the frame's seconds; no number crosses a call.) */
+  private orbitWant = 0.5;
+  private orbitDt = 0.5;
+  /**
    * The frame the view is upright in: the world's, or aboard a ship the hull's, so the orbit,
    * its up and the yaw all follow the room whatever the hull is doing. Yaw and pitch are in this frame.
    */
@@ -129,6 +138,11 @@ export class ThirdPersonCamera {
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(60, aspect, 0.05, 9000);
+    // (A field that will hold a fraction starts as one and is put to nought here.)
+    this.blockOut = 0;
+    this.orbitClear = Infinity;
+    this.orbitWant = 0;
+    this.orbitDt = 0;
   }
 
   /**
@@ -220,6 +234,30 @@ export class ThirdPersonCamera {
     this.camera.quaternion.copy(hull).multiply(FLIP);
     this.focus.copy(eye);
     this.applyShake(dt);
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 7 (`blockOut` over nought, the player's while it climbs under `climb.camera` 'eased'):
+   * a wall's pull-in taken at once, its letting out eased over `blockOut` seconds, as the race view's chase lets out.
+   * Reads its ask from kept fields (`orbitWant`, `orbitDt`), so no number crosses a call; answers whether the orbit is
+   * held in (`orbitClear`, the place written into `desired`). Nought: today's (the caller never asks).
+   */
+  private letOut(): boolean {
+    const want = this.orbitWant;
+    if (want < this.orbitClear) {
+      this.orbitClear = want;
+      return false;
+    }
+    const c = this.orbitClear + (want - this.orbitClear) * (1 - Math.exp(-this.orbitDt / this.blockOut));
+    this.orbitClear = c;
+    if (!(c < want)) return false;
+    const d = this.desired;
+    const pd = this.posDir;
+    const f = this.focus;
+    d.x = pd.x * c + f.x;
+    d.y = pd.y * c + f.y;
+    d.z = pd.z * c + f.z;
+    return true;
   }
 
   /**
@@ -392,6 +430,13 @@ export class ThirdPersonCamera {
         this.desired.copy(this.posDir).multiplyScalar(dist).add(this.focus);
       }
     }
+    // Climbing II, Smoothness II, item 7 (`blockOut` over nought, the player's while it climbs under `climb.camera` 'eased'): a
+    // wall's pull-in at once, its letting out eased over `blockOut` seconds, as the race view's chase lets out; nought, today's.
+    if (this.blockOut > 0) {
+      this.orbitWant = dist;
+      this.orbitDt = dt;
+      if (this.letOut()) dist = this.orbitClear;
+    } else this.orbitClear = Infinity;
     this.camera.position.copy(this.desired);
     this.orbitDistance = dist;
     if (posPitch === this.pitch) this.camera.lookAt(this.focus);

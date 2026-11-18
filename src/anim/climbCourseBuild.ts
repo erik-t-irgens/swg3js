@@ -62,8 +62,9 @@ export function solidCorners(f: CourseFrame, p: CoursePiece, s: CourseSolid): { 
   const w = { x: 0, y: 0, z: 0 };
   const bottom: [number, number, number][] = [];
   const top: [number, number, number][] = [];
+  const bottoms = s.kind === 'prism' ? s.bottoms : undefined;
   foot.forEach(([x, z], i) => {
-    courseToWorld(f, p, x, y0, z, w);
+    courseToWorld(f, p, x, bottoms ? bottoms[i] : y0, z, w);
     bottom.push([w.x, w.y, w.z]);
     courseToWorld(f, p, x, tops[i], z, w);
     top.push([w.x, w.y, w.z]);

@@ -138,6 +138,8 @@ import { moveDialsFor } from './anim/moveDials.ts';
 import { MOVE_TUNE, moveBefore, resetMoveTune, tuneMove } from './anim/moveTune.ts';
 import { climbCourse, courseIds, extraIds, type ClimbCourse } from './anim/climbCourse.ts';
 import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
+import { pieceLabel } from './anim/climbLabels.ts';
+import { COURSE_LABEL_TUNE, CourseLabels } from './ui/courseLabels.ts';
 import { animDialsFor } from './anim/animDials.ts';
 import { locoDialsFor } from './anim/locoDials.ts';
 import { LOCO_SWITCH, LOCO_TUNE, locoSwitchOn, tuneLoco } from './anim/locoTune.ts';
@@ -20703,6 +20705,10 @@ class App {
       this.raceBehindOf = null;
       // Asked only while there is a widening to ease out: with the pass off, or never raced, it is nought for good.
       const refit = (this.raceView.fov !== 0 || this.raceView.fitFov !== 0) && easeFovOut(this.raceView, dt, RACE_TUNE);
+      // Climbing II, Smoothness II, item 7: the follow eased while climbing (`player.followAt` reads it), and a wall's pull-in
+      // let out eased (`blockOut` nought otherwise: the orbit as it always was).
+      player.stepClimbCam(dt);
+      this.cam.blockOut = player.climbCamOut;
       this.cam.speedFov = this.raceView.fov;
       // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
       // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
@@ -21955,13 +21961,30 @@ class App {
     this.world.scene.add(mesh);
     const colliders = buildCourseColliders(this.physics.world, course, frame);
     this.climbTestStood = { mesh, material, colliders, pieces: course.pieces.length };
+    // Each piece's label over its first start (the owner's: "label what I'm meant to test near each test geometry").
+    const at = { x: 0, y: 0, z: 0 };
+    this.courseLabels?.dispose();
+    this.courseLabels = new CourseLabels(
+      this.ui,
+      course.pieces.map((piece) => {
+        const st = piece.starts[0];
+        courseToWorld(frame, piece, st.at[0], st.at[1] + COURSE_LABEL_TUNE.lift, st.at[2], at);
+        const words = pieceLabel(piece);
+        return { x: at.x, y: at.y, z: at.z, title: words.title, what: words.what };
+      }),
+    );
   }
+
+  /** The climbing course's labels while it stands (`standClimbCourse`), placed each frame after the display's own. */
+  private courseLabels: CourseLabels | null = null;
 
   /** The climbing test course taken down: its colliders out of the physics, its mesh out of the scene, its material out of the world's sets, all disposed. How many pieces it held. */
   private dropClimbTest(why: string): number {
     const s = this.climbTestStood;
     if (!s) return 0;
     this.climbTestStood = null;
+    this.courseLabels?.dispose();
+    this.courseLabels = null;
     for (const c of s.colliders) this.physics.removeCollider(c.collider);
     s.mesh.removeFromParent();
     this.world.forgetMaterials([s.material]);
@@ -28808,6 +28831,8 @@ class App {
       wall: p.wall.report(),
       brace: p.brace.report(),
       limbs: p.limbs.report(),
+      // Smoothness II, items 3 and 4: the figure's spheres (the push laid on now, what is left in a wall, the drawn top held).
+      spheres: { ...p.spheres.report(), crouchHeadCm: p.crouchHeadCm, crouchHeads: p.deepHeads },
       tune: JSON.parse(JSON.stringify(CLIMB_TUNE)) as unknown,
     };
   }
@@ -36214,6 +36239,8 @@ class App {
       this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
       this.stepMinimap();
+      // The climbing course's labels, only while a course stands (nothing at all otherwise).
+      this.courseLabels?.frame(this.cam.camera);
       // A real-elevation world's map picture made a few rows a frame (Map-maker II's eighth wave), nothing on any other world.
       this.stepMadeMap();
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The

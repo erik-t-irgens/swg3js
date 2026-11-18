@@ -35,6 +35,12 @@ export interface CoursePrism {
   foot: [number, number][];
   y0: number;
   tops: number[];
+  /**
+   * The underside under each footprint corner where it is not `y0` (a free-hanging beam's, which slopes with its top: the
+   * owner's free twins, 2026-11-17); absent on every solid made before, whose underside is level at `y0`. `y0` is then the
+   * lowest of them.
+   */
+  bottoms?: number[];
 }
 
 export type CourseSolid = CourseBox | CoursePrism;
@@ -733,6 +739,262 @@ function extraPieces(floor: number): CoursePiece[] {
   for (const h of DUCK_UNDER) out.push(lowPiece(`duck-${f1(h)}`, h, 0.4, 'duck', floor));
   out.push(lowPiece('tunnel-0.9', 0.9, 4, 'tunnel', floor));
   for (const h of CRAWL_UNDER) out.push(lowPiece(`crawl-${f1(h)}`, h, 4, 'crawl', floor));
+  // The owner's free twins, traverses and climbing walls (2026-11-17), last: no piece before them moves.
+  out.push(...freePieces(floor));
+  return out;
+}
+
+// ---- the owner's free twins, traverses and climbing walls (2026-11-17) -------------------------------------------------------
+//
+// The owner: "we have a ton of stuff that all has walls for hanging. Can we make a copy for each test that is also for
+// free-hanging and not braced-hanging? As in, the slopes and such you grab, I want an example of each (stairs, etc) that are
+// just poles to grab onto as well. Also, I want to test out sideways jumping and navigation. If we can do rock climbing-like
+// handholds area too, that would be great. both for braces and free hanging". So: one free twin of each kind of lip the
+// course has (its lip a beam standing in the air with nothing under it, where the braced one stands on a wall), a traverse
+// of lips at changing heights and gaps to cross sideways (braced and free), and climbing walls of holds (on a wall, and in
+// the air). Every number here is ours, a test bed.
+
+/**
+ * A free-hanging beam: how far it reaches back from its lip and how thick it is (a rung's: a shallow lip the controls round
+ * grabs), standing on nothing (a fixed collider needs no posts). Thicker than phase 3's bars (`barThin`, 0.12 m), so it
+ * stays a lip and is never taken for a bar to swing on.
+ */
+export const BEAM_DEEP = 0.3;
+export const BEAM_THICK = 0.2;
+
+/** A beam from x0 to x1, its lip's top at `h` on its near face at `z` (looking toward -z), reaching back to z + `BEAM_DEEP`. */
+function beam(name: string, x0: number, x1: number, h: number, z: number, role: SolidRole = 'beam'): { solid: CourseBox; lip: CourseLip } {
+  return { solid: aabb(role, x0, round(h - BEAM_THICK), z, x1, h, round(z + BEAM_DEEP)), lip: frontLip(name, x0, x1, h, z) };
+}
+
+/** A beam along a lip's polyline (as `lipWall`, its lip the points, `BEAM_DEEP` deep and `BEAM_THICK` thick, its underside following its top). */
+function beamLine(points: [number, number][], tops: number[], name = 'A'): { solids: CoursePrism[]; lips: CourseLip[] } {
+  const w = lipWall(points, tops, BEAM_DEEP, name);
+  for (const s of w.solids) {
+    s.role = 'beam';
+    s.bottoms = s.tops.map((t) => round(t - BEAM_THICK));
+    s.y0 = Math.min(...s.bottoms);
+  }
+  return w;
+}
+
+/** The points of a curving lip as `curvePiece` lays them (3 m straight, the curve in `steps`, 2 m straight), and its centre. */
+function curvePoints(radius: number, sweep: number, steps: number, outer: boolean): { pts: [number, number][]; cz: number } {
+  const pts: [number, number][] = [[-3, FACE_Z], [0, FACE_Z]];
+  const cz = outer ? FACE_Z + radius : FACE_Z - radius;
+  for (let k = 1; k <= steps; k++) {
+    const t = ((sweep * k) / steps) * (Math.PI / 180);
+    pts.push(outer ? [round(radius * Math.sin(t)), round(cz - radius * Math.cos(t))] : [round(radius * Math.sin(t)), round(cz + radius * Math.cos(t))]);
+  }
+  const last = pts[pts.length - 1];
+  const te = (sweep * Math.PI) / 180;
+  const tx = Math.cos(te);
+  const tz = outer ? Math.sin(te) : -Math.sin(te);
+  pts.push([round(last[0] + 2 * tx), round(last[1] + 2 * tz)]);
+  return { pts, cz };
+}
+
+const FREE = 'free twins';
+
+/** The free twin of a corner or a bend (`cornerPiece`'s lip, a beam). */
+function freeCornerPiece(id: string, angle: number, outer: boolean, floor: number): CoursePiece {
+  const a = (angle * Math.PI) / 180;
+  const sgn = outer ? 1 : -1;
+  const pts: [number, number][] = [[-4, FACE_Z], [0, FACE_Z], [round(4 * Math.cos(a)), round(FACE_Z + sgn * 4 * Math.sin(a))]];
+  const w = beamLine(pts, [LIP_HEIGHT, LIP_HEIGHT, LIP_HEIGHT]);
+  return piece(id, 'corner', FREE, w.solids, w.lips, [stand(-2)], { angle, turn: outer ? 'outer' : 'inner', height: LIP_HEIGHT, free: true }, floor);
+}
+
+/** The free twin of a curve (`curvePiece`'s lip, a beam). */
+function freeCurvePiece(id: string, radius: number, sweep: number, steps: number, outer: boolean, floor: number): CoursePiece {
+  const { pts } = curvePoints(radius, sweep, steps, outer);
+  const w = beamLine(pts, pts.map(() => LIP_HEIGHT));
+  return piece(id, 'corner', FREE, w.solids, w.lips, [stand(-1.5)], { radius, sweep, turn: outer ? 'outer' : 'inner', height: LIP_HEIGHT, free: true }, floor);
+}
+
+/** The free twin of a sloping lip (`slopePiece`'s, a beam whose underside slopes with it). */
+function freeSlopePiece(id: string, angle: number, floor: number): CoursePiece {
+  const rise = round(2.5 * Math.tan((angle * Math.PI) / 180));
+  const top = round(LIP_HEIGHT + rise);
+  const w = beamLine([[-4, FACE_Z], [-1.5, FACE_Z], [1, FACE_Z], [3, FACE_Z]], [LIP_HEIGHT, LIP_HEIGHT, top, top]);
+  return piece(id, 'slope', FREE, w.solids, w.lips, [stand(-2.75)], { angle, run: 2.5, rise, height: LIP_HEIGHT, free: true }, floor);
+}
+
+/** The free twin of a stepped lip (`stepsPiece`'s five steps, each a beam). */
+function freeStepsPiece(id: string, step: number, floor: number): CoursePiece {
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  for (let k = 0; k < 5; k++) {
+    const x0 = -3.75 + 1.5 * k;
+    const b = beam(`S${k}`, x0, x0 + 1.5, round(LIP_HEIGHT + (k - 2) * step), FACE_Z);
+    solids.push(b.solid);
+    lips.push(b.lip);
+  }
+  return piece(id, 'steps', FREE, solids, lips, [stand(0)], { step, segment: 1.5, count: 5, height: LIP_HEIGHT, free: true }, floor);
+}
+
+/** Free hops: sideways (`sidePiece`), up and down (`upDownPiece`, B over A's right 4 m and stepped 0.3 m back), diagonally (`diagPiece`), behind (`behindPiece`), each lip a beam. */
+function freeHopPiece(id: string, dir: 'side' | 'updown' | 'diag' | 'behind', span: number, floor: number): CoursePiece {
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  const add = (b: { solid: CourseBox; lip: CourseLip }): void => {
+    solids.push(b.solid);
+    lips.push(b.lip);
+  };
+  let starts: CourseStart[];
+  const numbers: CoursePiece['numbers'] = { dir, span, height: LIP_HEIGHT, free: true };
+  if (dir === 'side') {
+    const h = span / 2;
+    add(beam('A', -h - 3, -h, LIP_HEIGHT, FACE_Z));
+    add(beam('B', h, h + 3, LIP_HEIGHT, FACE_Z));
+    starts = [{ ...stand(-h - 1.5), name: 'onA' }, { ...stand(h + 1.5), name: 'onB' }];
+  } else if (dir === 'updown') {
+    add(beam('A', -4, 2, LIP_HEIGHT, FACE_Z));
+    add(beam('B', -2, 2, round(LIP_HEIGHT + span), FACE_Z + 0.3));
+    starts = [{ ...stand(-3), name: 'onA' }];
+  } else if (dir === 'diag') {
+    const d = round(span / Math.SQRT2);
+    const h = d / 2;
+    add(beam('A', -h - 3, -h, LIP_HEIGHT, FACE_Z));
+    add(beam('B', h, h + 3, round(LIP_HEIGHT + d), FACE_Z));
+    starts = [{ ...stand(-h - 1.5), name: 'onA' }];
+    numbers.dx = d;
+    numbers.dy = d;
+  } else {
+    add(beam('A', -3, 3, LIP_HEIGHT, FACE_Z));
+    // B faces A across the corridor: its lip on its far face (toward +z), the beam reaching back toward the start.
+    solids.push(aabb('beam', -3, round(LIP_HEIGHT - BEAM_THICK), round(FACE_Z - span - BEAM_DEEP), 3, LIP_HEIGHT, round(FACE_Z - span)));
+    lips.push({ name: 'B', a: [3, LIP_HEIGHT, round(FACE_Z - span)], b: [-3, LIP_HEIGHT, round(FACE_Z - span)], out: [0, 1] });
+    starts = [{ ...stand(0), name: 'onA' }];
+  }
+  return piece(id, 'gap', FREE, solids, lips, starts, numbers, floor);
+}
+
+/** The free twin of a ladder (`ladderPiece`'s rungs, `zigzag` `zigzagPiece`'s), each rung a beam with no wall behind it. */
+function freeLadderPiece(id: string, step: number, zigzag: boolean, floor: number): CoursePiece {
+  const rungs = zigzag ? 7 : LADDER_RUNGS;
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  for (let k = 0; k < rungs; k++) {
+    const left = k % 2 === 0;
+    const [x0, x1] = zigzag ? (left ? [-2.25, -0.25] : [0.25, 2.25]) : [-2, 2];
+    const b = beam(`R${k}`, x0, x1, round(LIP_HEIGHT + k * step), FACE_Z);
+    solids.push(b.solid);
+    lips.push(b.lip);
+  }
+  return piece(id, 'gap', FREE, solids, lips, [stand(zigzag ? -1.25 : 0)], { dir: zigzag ? 'zigzag' : 'ladder', step, rungs, first: LIP_HEIGHT, free: true }, floor);
+}
+
+/** The traverse: lips in a line across, 2 m each, the gaps between them and each lip's height over the first. */
+export const TRAVERSE_GAPS = [1, 1.5, 2, 1.25, 2.5, 1] as const;
+export const TRAVERSE_RISES = [0, 0.4, -0.2, 0.6, 0, -0.4, 0.2] as const;
+const TRAVERSE_LIP = 2;
+
+/**
+ * A traverse (the owner's "sideways jumping and navigation"): lips 2 m long in a line across, `TRAVERSE_GAPS` apart, each at
+ * its own height (`TRAVERSE_RISES` over the lip height): braced (each on a wall 1 m deep) or free (each a beam). Grab the
+ * first, shimmy to its end, look across and hop, all the way along and back.
+ */
+function traversePiece(id: string, braced: boolean, floor: number): CoursePiece {
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  const total = TRAVERSE_RISES.length * TRAVERSE_LIP + TRAVERSE_GAPS.reduce((s, g) => s + g, 0);
+  let x = -total / 2;
+  for (let k = 0; k < TRAVERSE_RISES.length; k++) {
+    const x0 = round(x);
+    const x1 = round(x + TRAVERSE_LIP);
+    const h = round(LIP_HEIGHT + TRAVERSE_RISES[k]);
+    if (braced) {
+      solids.push(aabb('wall', x0, 0, FACE_Z, x1, h, FACE_Z + 1));
+      lips.push(frontLip(`T${k}`, x0, x1, h, FACE_Z));
+    } else {
+      const b = beam(`T${k}`, x0, x1, h, FACE_Z);
+      solids.push(b.solid);
+      lips.push(b.lip);
+    }
+    x = x1 + (k < TRAVERSE_GAPS.length ? TRAVERSE_GAPS[k] : 0);
+  }
+  const first = round(-total / 2 + TRAVERSE_LIP / 2);
+  const last = round(total / 2 - TRAVERSE_LIP / 2);
+  return piece(id, 'gap', 'traverses', solids, lips, [{ ...stand(first), name: 'first' }, { ...stand(last), name: 'last' }], { dir: 'traverse', braced, lips: TRAVERSE_RISES.length, lip: TRAVERSE_LIP, gaps: TRAVERSE_GAPS.join(' '), rises: TRAVERSE_RISES.join(' ') }, floor);
+}
+
+/** A climbing wall's holds: rows up from `HOLD_FIRST`, `HOLD_ROW` apart, four columns across, each nudged a little (seeded, so every run stands the same wall). */
+export const HOLD_FIRST = 2.0;
+export const HOLD_ROW = 0.9;
+export const HOLD_ROWS = 9;
+export const HOLD_COLUMNS = [-2.25, -0.75, 0.75, 2.25] as const;
+/** How far a hold is nudged from its place at most: up or down, and across. */
+export const HOLD_NUDGE = { up: 0.12, across: 0.25 } as const;
+/** The top of a climbing wall (a lip to climb out onto, 0.8 m over the last row's place). */
+const HOLD_TOP = round(HOLD_FIRST + (HOLD_ROWS - 1) * HOLD_ROW + 0.8);
+
+/** A number in [0, 1) from a hold's row and column (a fixed hash: the same in node and the browser). */
+function holdHash(r: number, c: number, salt: number): number {
+  const v = Math.sin(r * 127.1 + c * 311.7 + salt * 74.7) * 43758.5453;
+  return v - Math.floor(v);
+}
+
+/**
+ * A climbing wall (the owner's "rock climbing-like handholds area ... both for braces and free hanging"): holds `width`
+ * wide, each standing `BEAM_DEEP` out and `BEAM_THICK` thick, in `HOLD_ROWS` rows `HOLD_ROW` apart (within the controls
+ * round's ladder range, so W, S, A and D climb hand to hand) and four columns 1.5 m apart, every hold nudged by its own
+ * hash and now and then one left out (never two stacked): braced, on a wall 6 m wide climbed out onto at its top; free, in
+ * the air under a slab 1.5 m deep to climb out onto.
+ */
+function climbingWallPiece(id: string, braced: boolean, width: number, floor: number): CoursePiece {
+  const solids: CourseSolid[] = [];
+  const lips: CourseLip[] = [];
+  const front = braced ? round(FACE_Z - BEAM_DEEP) : FACE_Z;
+  if (braced) {
+    solids.push(aabb('wall', -3, 0, FACE_Z, 3, HOLD_TOP, FACE_Z + 1.5));
+    lips.push(frontLip('top', -3, 3, HOLD_TOP, FACE_Z));
+  } else {
+    solids.push(aabb('platform', -3, round(HOLD_TOP - 0.3), FACE_Z, 3, HOLD_TOP, FACE_Z + 1.5));
+    lips.push(frontLip('top', -3, 3, HOLD_TOP, FACE_Z));
+  }
+  let held = 0;
+  for (let r = 0; r < HOLD_ROWS; r++) {
+    // At most one hold left out, and only on every other row from the third: every hold then has one under it within the
+    // ladder's reach (its own column's, or a neighbour's beside a gap), so the wall climbs hand to hand from the bottom.
+    const gap = r >= 2 && r % 2 === 0 && holdHash(r, 0, 3) < 0.5 ? Math.floor(holdHash(r, 1, 3) * HOLD_COLUMNS.length) : -1;
+    HOLD_COLUMNS.forEach((cx, c) => {
+      if (c === gap) return;
+      const x = round(cx + (holdHash(r, c, 1) * 2 - 1) * HOLD_NUDGE.across);
+      const h = round(HOLD_FIRST + r * HOLD_ROW + (holdHash(r, c, 2) * 2 - 1) * HOLD_NUDGE.up);
+      const b = beam(`H${r}-${c}`, round(x - width / 2), round(x + width / 2), h, front, braced ? 'plate' : 'beam');
+      solids.push(b.solid);
+      lips.push(b.lip);
+      held++;
+    });
+  }
+  const starts: CourseStart[] = [stand(0, round(front - STAND_OFF)), { name: 'top', at: [0, HOLD_TOP, FACE_Z + 1], face: [0, -1] }];
+  return piece(id, 'wall', 'climbing walls', solids, lips, starts, { braced, holdWidth: width, holds: held, rows: HOLD_ROWS, rowApart: HOLD_ROW, top: HOLD_TOP }, floor);
+}
+
+/** The free twins, the traverses and the climbing walls, in their order. */
+function freePieces(floor: number): CoursePiece[] {
+  const out: CoursePiece[] = [];
+  out.push(freeCornerPiece('free-corner-outer-90', 90, true, floor));
+  out.push(freeCornerPiece('free-corner-inner-90', 90, false, floor));
+  out.push(freeCornerPiece('free-bend-outer-45', 45, true, floor));
+  out.push(freeCornerPiece('free-bend-inner-45', 45, false, floor));
+  out.push(freeCurvePiece('free-curve-outer-3m', 3, 90, 9, true, floor));
+  out.push(freeCurvePiece('free-curve-inner-3m', 3, 90, 9, false, floor));
+  for (const a of [15, 25, 35]) out.push(freeSlopePiece(`free-slope-${a}`, a, floor));
+  for (const s of [0.35, 0.5]) out.push(freeStepsPiece(`free-steps-${f1(s)}`, s, floor));
+  for (const d of [1, 2, 3, 4]) out.push(freeHopPiece(`free-gap-side-${d.toFixed(1)}`, 'side', d, floor));
+  for (const d of [1, 1.5, 2]) out.push(freeHopPiece(`free-gap-updown-${d.toFixed(1)}`, 'updown', d, floor));
+  for (const d of [1.5, 2.5]) out.push(freeHopPiece(`free-gap-diag-${d.toFixed(1)}`, 'diag', d, floor));
+  for (const d of [2, 3]) out.push(freeHopPiece(`free-gap-behind-${d.toFixed(1)}`, 'behind', d, floor));
+  for (const s of [1, 1.25]) out.push(freeLadderPiece(`free-ladder-${f1(s)}`, s, false, floor));
+  out.push(freeLadderPiece('free-ladder-zigzag-1', 1, true, floor));
+  out.push(traversePiece('traverse-braced', true, floor));
+  out.push(traversePiece('traverse-free', false, floor));
+  out.push(climbingWallPiece('climbwall-braced', true, 0.7, floor));
+  out.push(climbingWallPiece('climbwall-free', false, 0.7, floor));
+  out.push(climbingWallPiece('climbwall-braced-small', true, 0.45, floor));
+  out.push(climbingWallPiece('climbwall-free-small', false, 0.45, floor));
   return out;
 }
 

@@ -168,6 +168,10 @@ export interface RigOptions {
   variants?: Record<string, { variable: string; values: string[] }>;
 }
 
+/** A keyframe track's own interpolant (three's, which its types leave out): Smoothness II's nearest phase reads a pose with it. */
+function interpOf(tr: THREE.KeyframeTrack): THREE.Interpolant {
+  return (tr as unknown as { createInterpolant(): THREE.Interpolant }).createInterpolant();
+}
 const tmpQ = new THREE.Quaternion();
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
@@ -665,6 +669,49 @@ export class CharacterRig {
     return this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]) ?? null;
   }
 
+  /**
+   * Climbing II, Smoothness II, item 4, after its review: the highest `measure` answers with this skeleton posed by each of
+   * `clips` (those the rig has) alone, at `samples` times through it, every node put back as it stood after (a mixer of its
+   * own, let go). An event (once a rig), read off the clips' own keys and never the live pose, so a crossfade into a crouch or
+   * a fidget never moves it; NaN where the rig has none of them.
+   */
+  posedHighest(clips: readonly string[], samples: number, measure: () => number): number {
+    const named = clips.filter((c, i) => this.actions.has(c) && clips.indexOf(c) === i);
+    if (named.length === 0) return Number.NaN;
+    const nodes: THREE.Object3D[] = [];
+    this.root.traverse((o) => {
+      if (o !== this.root) nodes.push(o);
+    });
+    const kept = nodes.map((o) => ({ p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() }));
+    const mixer = new THREE.AnimationMixer(this.root);
+    let best = Number.NaN;
+    try {
+      for (const name of named) {
+        const clip = this.actions.get(name)!.getClip();
+        const act = mixer.clipAction(clip);
+        act.play();
+        for (let k = 0; k < samples; k++) {
+          mixer.setTime((clip.duration * k) / samples);
+          this.root.updateMatrixWorld(true);
+          const v = measure();
+          if (v === v && !(v <= best)) best = v;
+        }
+        act.stop();
+        mixer.uncacheAction(clip);
+      }
+    } finally {
+      mixer.stopAllAction();
+      mixer.uncacheRoot(this.root);
+      nodes.forEach((o, i) => {
+        o.position.copy(kept[i].p);
+        o.quaternion.copy(kept[i].q);
+        o.scale.copy(kept[i].s);
+      });
+      this.root.updateMatrixWorld(true);
+    }
+    return best;
+  }
+
   /** The clip a state's own table gives, whatever is preferred. */
   tableClip(state: RigState): string | null {
     return this.findClip(STATE_CLIPS[state]) ?? null;
@@ -1055,7 +1102,7 @@ export class CharacterRig {
    * `from` starts a one-off that many seconds into the clip (an imported landing's trim: the part of
    * it before the feet come down is skipped), and what is returned is then what is left to play.
    */
-  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false, from = 0 }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean; from?: number } = {}): number | null {
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false, from = 0, keepWeight = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean; from?: number; keepWeight?: boolean } = {}): number | null {
     if (!this.actions.has(clip)) return null;
     // Never past the clip's own end, less a moment, so a trim set too long still shows its last pose and ends.
     const startAt = from > 0 ? Math.min(from, Math.max(0, this.actions.get(clip)!.getClip().duration - 0.02)) : 0;
@@ -1098,7 +1145,13 @@ export class CharacterRig {
       this.swingFading = was;
       if (this.current && this.current !== was) this.current.fadeOut(fadeIn);
       next.fadeIn(fadeIn);
-    } else if (was && was !== next) was.crossFadeTo(next, fadeIn, false);
+    } else if (was && was !== next) {
+      // Climbing II, Smoothness II, item 2 after its review (`keepWeight`, the hang's one-offs under `climb.transitions`
+      // 'blend'): a clip still fading in fades out from the weight it has, never from a whole one (three's fade out starts at
+      // one: a grab begun while the falling loop was three quarters in jumped it to all of it in a frame).
+      if (keepWeight && was.enabled && was.getEffectiveWeight() < 1) was.setEffectiveWeight(was.getEffectiveWeight());
+      was.crossFadeTo(next, fadeIn, false);
+    }
     else if (was === next) next.fadeIn(0);
     this.overrideUpper = false;
     this.override = next;
@@ -1108,6 +1161,130 @@ export class CharacterRig {
     this.overrideEnds = loop || hold ? Infinity : duration;
     this.overrideTime = 0;
     return duration;
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 1: the whole-body one-off playing now played at `rate` of its own rate from this frame
+   * (a timed hop's flight, a drop's fall): the climbing's clock and the pose keep one time. Nothing while none plays.
+   */
+  overrideRate(rate: number, clip: string | null = null): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && (clip === null || o.getClip().name === clip)) o.timeScale = rate;
+  }
+
+  /** Smoothness II, item 1: the whole-body one-off `clip` (when it is the one playing) put `t` seconds into its clip. */
+  overrideSeek(t: number, clip: string): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) o.time = t;
+  }
+
+  /**
+   * Smoothness II, item 1: the whole-body one-off `clip` (when it is the one playing) held past its own end for `lease` more
+   * seconds of the rig's time, the caller renewing it every frame it drives the clip (a drop played by the owner's rule): a
+   * hold its driver stops renewing (the body taken by a path that runs no drop) lets go by itself, as a one-off's end does.
+   */
+  holdOverride(clip: string, lease: number): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) this.overrideEnds = this.overrideTime + lease;
+  }
+
+  /** The whole-body one-off's own time now (seconds into its clip), NaN while none plays: the climbing's tests read it. */
+  overrideAt(): number {
+    const o = this.override;
+    return o && !this.overrideUpper ? o.time : Number.NaN;
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 2 (`climb.transitions` 'blend'): end the whole-body one-off by crossfading it straight
+   * into the clip of the state as it stands now (never through the clip that played before the one-off), that clip started
+   * where its pose is nearest the one-off's own last pose (`nearestPhase`), over `fade` seconds. As `yieldOverride`, with the
+   * phase. Nothing while none plays.
+   */
+  blendOut(fade: number): void {
+    const ending = this.override;
+    if (!ending) return;
+    if (this.overrideUpper) {
+      this.stopOverride(fade);
+      return;
+    }
+    const state = this.state;
+    const upper = this.wantedUpper;
+    this.override = null;
+    this.current = ending;
+    this.state = null;
+    this.upperName = null;
+    if (state) this.setState(state, 0, upper, { fade });
+    const next = this.current;
+    if (next === ending) {
+      ending.fadeOut(fade);
+      return;
+    }
+    if (next) {
+      // The loop picked up where its pose is nearest the one-off's last (its own time: a fade starts the clip from nought).
+      next.time = this.nearestPhase(ending.getClip(), next.getClip());
+      ending.crossFadeTo(next, fade, false);
+    }
+  }
+
+  /**
+   * Smoothness II, item 2: a clip `setState` changes to is taken up where its pose is nearest the one it fades from (the wall
+   * climb's caller sets it before its `setState` under `climb.transitions` 'blend'; false everywhere else, as ever).
+   */
+  nearestNext = false;
+
+  /** Each pair's answer, kept (an event's arithmetic, once a pair a session): one-off clip name, a tab, the loop's. */
+  private readonly phaseCache = new Map<string, number>();
+
+  /**
+   * The time in `loop` whose pose is nearest `from`'s last frame: every joint's turn compared (the sum of the angles between
+   * the two quaternions, the hips' place by its distance at a radian a metre), at each of the loop's own keyframes. Worked out
+   * once a pair and kept.
+   */
+  nearestPhase(from: THREE.AnimationClip, loop: THREE.AnimationClip, fromTime = Number.NaN): number {
+    // At its last frame (a one-off ending: kept), or at a time of its own (a loop left part way: an event, worked out each time).
+    const atEnd = !(fromTime === fromTime);
+    const key = `${from.name}\t${loop.name}`;
+    const known = atEnd ? this.phaseCache.get(key) : undefined;
+    if (known !== undefined) return known;
+    const last = new Map<string, number[]>();
+    for (const tr of from.tracks) {
+      const vs = tr.values;
+      const n = tr.getValueSize();
+      const k = tr.times.length - 1;
+      if (k < 0) continue;
+      if (atEnd) last.set(tr.name, Array.from(vs.slice(k * n, k * n + n)));
+      else last.set(tr.name, Array.from(interpOf(tr).evaluate(fromTime) as ArrayLike<number>));
+    }
+    let times: ArrayLike<number> = [0];
+    for (const tr of loop.tracks) if (tr.times.length > times.length) times = tr.times;
+    let best = 0;
+    let bestCost = Infinity;
+    const interps = loop.tracks.map((tr) => interpOf(tr));
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];
+      let cost = 0;
+      for (let j = 0; j < loop.tracks.length; j++) {
+        const tr = loop.tracks[j];
+        const want = last.get(tr.name);
+        if (!want) continue;
+        const v = interps[j].evaluate(t) as ArrayLike<number>;
+        if (tr.getValueSize() === 4) {
+          const d = Math.abs(v[0] * want[0] + v[1] * want[1] + v[2] * want[2] + v[3] * want[3]);
+          cost += 2 * Math.acos(d > 1 ? 1 : d);
+        } else if (tr.getValueSize() === 3 && /\.position$/.test(tr.name)) {
+          const dx = v[0] - want[0];
+          const dy = v[1] - want[1];
+          const dz = v[2] - want[2];
+          cost += Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = t;
+      }
+    }
+    if (atEnd) this.phaseCache.set(key, best);
+    return best;
   }
 
   /** End a one-off clip early and fade the state clip back in. */
@@ -1197,6 +1374,10 @@ export class CharacterRig {
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
         next.clampWhenFinished = true;
+        // Climbing II, Smoothness II, item 2 (the wall climb's clips under `climb.transitions` 'blend', `nearestNext`): the clip
+        // taken up where its pose is nearest the one it fades from as that one stands now (never a striding pair, which keep
+        // their step).
+        if (this.nearestNext && was && !same && was.enabled && !(a && b)) next.time = this.nearestPhase(was.getClip(), next.getClip(), was.time);
         this.syncOn = false;
         if (a && b && was) {
           next.time = startAt;

@@ -20,7 +20,16 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { climbCourse, extraIds } from '../../../src/anim/climbCourse.ts';
 import { courseToWorld, courseWayToWorld, worldToCourse } from '../../../src/anim/climbCourseBuild.ts';
-import { resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { resetClimbTune as resetShipped, tuneClimb, climbSmooth2Before } from '../../../src/anim/climbTune.ts';
+// Smoothness II: these drives hold the smoothness round's extra rows (its digest below), so Smoothness II's switches go to
+// their 'before' at every reset.
+// Smoothness II's item 9 drives these rows again with every switch of that round on (tools/swg/tests/smooth2Rows.test.ts sets
+// SWG3JS_ROWS_AFTER and imports this file): its own digest below.
+const ROWS_AFTER = process.env.SWG3JS_ROWS_AFTER === '1';
+const resetClimbTune = (): void => {
+  resetShipped();
+  if (!ROWS_AFTER) climbSmooth2Before();
+};
 import { resetMoveTune } from '../../../src/anim/moveTune.ts';
 import { LEDGE_HANG, WAYK_DROP, WAYK_HOP } from '../../../src/player/ledge.ts';
 import { LYING, STAND_TALL } from '../../../src/player/bodyShape.ts';
@@ -35,7 +44,7 @@ const ok = (cond: boolean, what: string) => {
 };
 const RATES = [30, 60, 144, 240] as const;
 /** The digest of every frame of every drive below, at every rate, recorded from this round's own harness. */
-const RECORDED = '22b33037449c98ba20a78757cf1ff9542bce41f1099a0ad773d10b89b7f9dd1d';
+const RECORDED = ROWS_AFTER ? '50f082fe9fee8e201f5a040ff94ec54bfbe4813dabb279f720b9aaa41bcdc509' : '22b33037449c98ba20a78757cf1ff9542bce41f1099a0ad773d10b89b7f9dd1d';
 const piece = (id: string) => climbCourse({ extras: true, pieces: [id] }).pieces[0];
 const hangs = (b: TestBody) => b.ledge.phase === LEDGE_HANG;
 const nameOf = (s: Stood, b: TestBody) => (b.ledge.holding ? nearestLip(s, b.ledge.lip.ex, b.ledge.lip.ey, b.ledge.lip.ez).name : '-');
@@ -137,7 +146,9 @@ const join = (a: string[]) => a.join(' ');
 
 resetClimbTune();
 resetMoveTune();
-ok(JSON.stringify(extraIds()) === JSON.stringify(['ladder-0.75', 'ladder-1', 'ladder-1.25', 'ladder-1.5', 'ladder-2', 'ladder-zigzag-1', 'ladder-zigzag-1.5', 'shelves-1', 'shelves-1.5', 'shelves-2', 'chimney-2.5', 'tower', 'duck-1.5', 'duck-1.2', 'duck-0.9', 'tunnel-0.9', 'crawl-0.6', 'crawl-0.55']), 'every extra piece is driven below, in the rows\' order');
+// (The free twins, the traverses and the climbing walls the lead added after this round, `freePieces`, come after these rows and are
+// driven by tools/swg/tests/smooth2Rows.test.ts.)
+ok(JSON.stringify(extraIds().slice(0, 18)) === JSON.stringify(['ladder-0.75', 'ladder-1', 'ladder-1.25', 'ladder-1.5', 'ladder-2', 'ladder-zigzag-1', 'ladder-zigzag-1.5', 'shelves-1', 'shelves-1.5', 'shelves-2', 'chimney-2.5', 'tower', 'duck-1.5', 'duck-1.2', 'duck-0.9', 'tunnel-0.9', 'crawl-0.6', 'crawl-0.55']), 'every extra piece is driven below, in the rows\' order');
 
 for (const fps of RATES) {
   // ---- the ladders: W up rung by rung, S down, W up again and onto the top ----------------------------------------------------

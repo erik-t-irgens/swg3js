@@ -20,6 +20,8 @@ import { SlopeRule } from '../../../src/player/slopeRule.ts';
 import { StepUp } from '../../../src/player/stepUp.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { ClimbAsk, LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
+import { driveDropClip } from '../../../src/player/hangClips.ts';
+import type { CharacterRig } from '../../../src/player/rig.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
 import { WallClimb } from '../../../src/player/wallClimb.ts';
@@ -168,6 +170,8 @@ export class TestBody implements GrappleBody {
   readonly vel = new THREE.Vector3();
   grounded = true;
   swimming = false;
+  /** Smoothness II: a rig a test poses, handed to the drop's call as the player hands its own (null: the clocks alone). */
+  dropRig: CharacterRig | null = null;
   submerged = false;
   depth = Number.NEGATIVE_INFINITY;
   inside = false;
@@ -230,7 +234,8 @@ export class TestBody implements GrappleBody {
    * lying turn after the heading. With both switches at their other setting none of it runs and the frame is as it was.
    */
   readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
-  private readonly shapeIn = new ShapeIn();
+  /** (Readable: Smoothness II's item 4 tests hand it the posed figure's top, as the player's `duckFigure` does.) */
+  readonly shapeIn = new ShapeIn();
   /** Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace`): the player's own `duck`, stepped in its places (the pace without the speed classes, as this body has none). */
   readonly duck = new DuckPace();
   /** The prone key's jump latch (the player's `jumpLatched`): getting up on the jump key does not also jump. */
@@ -757,6 +762,8 @@ export class TestBody implements GrappleBody {
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
     // Wave 4: a let-go's clocks, then a lip grabbed or lowered into (the player's `ledgeClocks` and `senseLedge`).
     if (this.ledge.tick(dt)) this.heading = this.ledge.turnNow;
+    // (Smoothness II, item 1: the drop's clocks, the player's own call; a test that poses a rig hands it in as `dropRig`.)
+    driveDropClip(this.dropRig, this.ledge, dt, this.grounded, !this.swimming && !(this.hooks && (g.attached || g.released)));
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
     // Wave 4, item B: the move cut short across the ground (the player's own lines).
     const askH = moveX * moveX + moveZ * moveZ;

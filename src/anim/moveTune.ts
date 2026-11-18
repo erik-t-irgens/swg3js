@@ -55,6 +55,16 @@ export interface MoveTune {
   proneAhead: number;
   /** The room over its feet a body that lay down for a low roof needs before it gets up into a crouch, metres (ours, 1.0: the crouch's own height; the duck stands it the rest of the way as the room allows). */
   riseAt: number;
+  /**
+   * Climbing II, Smoothness II, item 4 (the owner: "My head sometimes clips through low ceilings when doing the auto-crouch and
+   * ducking mechanic"): 'clear' the duck reads how far the drawn figure's own top (its head, neck and chest spheres, src/player/
+   * bodySpheres.ts, as the pose stands) reaches over the capsule's top, and keeps the room over and ahead of the body that much and
+   * `headSkin` more, so it ducks further (and lies down sooner) until the drawn head clears what is over it; 'before' the
+   * smoothness round's duck (the capsule's own 5 cm).
+   */
+  duckHead: 'clear' | 'before';
+  /** Item 4: how far the drawn head keeps under what stands over it, metres (ours, 0.03: a hair, so a beam just over the head is passed with the head brushing nothing). */
+  headSkin: number;
 }
 
 export const MOVE_TUNE: MoveTune = {
@@ -73,6 +83,8 @@ export const MOVE_TUNE: MoveTune = {
   proneUnder: 0.8,
   proneAhead: 1.2,
   riseAt: 1.0,
+  duckHead: 'clear',
+  headSkin: 0.03,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -96,6 +108,7 @@ export const MOVE_RANGES: Record<string, { min: number; max: number }> = {
   proneAhead: { min: 0.3, max: 3 },
   // Never under the capsule's own two radii and a hair (0.75 m).
   riseAt: { min: 0.75, max: 1.6 },
+  headSkin: { min: 0, max: 0.2 },
 };
 
 /** The table's choices and the words each takes. */
@@ -103,6 +116,7 @@ export const MOVE_CHOICES: Readonly<Record<string, readonly string[]>> = {
   proneShape: ['lying', 'crouch'],
   duck: ['on', 'off'],
   duckPace: ['height', 'before'],
+  duckHead: ['clear', 'before'],
 };
 
 /** Every switch of the round at its other setting: the body's shape as `12ae8ad` shipped it. */
@@ -129,6 +143,19 @@ export const MOVE_SMOOTH_BEFORE: Readonly<Record<string, string>> = { duckPace: 
 export function moveSmoothBefore(): void {
   const t = MOVE_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(MOVE_SMOOTH_BEFORE)) t[k] = v;
+}
+
+/**
+ * Climbing II, Smoothness II: the body's switches it adds, at their other setting (`dd88180`'s body): item 4's `duckHead`
+ * ('before': the smoothness round's duck, the capsule's own clearance). `climbSmooth2Before` (climbTune.ts) puts these back with
+ * the climbing's.
+ */
+export const MOVE_SMOOTH2_BEFORE: Readonly<Record<string, string>> = { duckHead: 'before' };
+
+/** Smoothness II's body switches at their other setting. */
+export function moveSmooth2Before(): void {
+  const t = MOVE_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(MOVE_SMOOTH2_BEFORE)) t[k] = v;
 }
 
 /** Whether anything of the round decides the capsule (either switch on): off, the capsule is today's to the line. */

@@ -17,7 +17,13 @@
 import assert from 'node:assert/strict';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
 import { courseWayToWorld, courseToWorld } from '../../../src/anim/climbCourseBuild.ts';
-import { resetClimbTune, tuneClimb, CLIMB_TUNE, CLIMB_SMOOTH_BEFORE, climbSmoothBefore } from '../../../src/anim/climbTune.ts';
+import { resetClimbTune as resetShipped, tuneClimb, CLIMB_TUNE, CLIMB_SMOOTH_BEFORE, climbSmoothBefore, climbSmooth2Before } from '../../../src/anim/climbTune.ts';
+// Smoothness II: this suite holds the smoothness round's climbing, so Smoothness II's switches go to their 'before' at every
+// reset (its own suites, smooth2*.test.ts, hold what they do).
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth2Before();
+};
 import { LEDGE_HANG, WAYK_DROP, WAYK_HOP, WAYK_LADDER, WAYK_NONE } from '../../../src/player/ledge.ts';
 import { resetMoveTune } from '../../../src/anim/moveTune.ts';
 import { WALL_ON } from '../../../src/player/wallClimb.ts';

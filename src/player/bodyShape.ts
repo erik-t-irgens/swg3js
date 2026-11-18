@@ -47,6 +47,13 @@ export const LYING_LENGTH = 1.8;
 const LIFT = 0.02;
 /** What stays between the top of a ducked capsule and what stands over it, metres (just over the controller's own offset of 0.04, so it never presses the capsule's top into a roof). */
 export const DUCK_CLEAR = 0.05;
+/** Smoothness II, item 4: the step the drawn figure's top over the capsule is rounded up to (mechanics: 2 cm, over the walk's own bob of a centimetre or so, so the path box is not asked again for it). */
+export const HEAD_STEP = 0.02;
+/**
+ * Smoothness II, item 4: the crouch's share at and past which the duck is at its deepest (the crouched walk's own clips carry
+ * the figure), where the drawn head's height over the feet is read (`ShapeIn.deepHead`). Not one: the share eases toward it.
+ */
+export const DEEP_SHARE = 0.95;
 /** The ball a column is cast with: the capsule's own top (its radius), so where it stops is where the capsule's top would, at a roof's edge as under its middle. */
 const BALL_R = BODY_CAPSULE.r;
 /** Columns along the travel at most this far apart: the balls overlap (2 x 0.35 over 0.5), so no beam slips between two. */
@@ -153,7 +160,20 @@ export class ShapeIn {
   nx = 0.5;
   ny = 0.5;
   nz = 0.5;
+  /**
+   * Climbing II, Smoothness II, item 4 (`move.duckHead` 'clear'): how far the drawn figure's own top (its head, neck and chest
+   * spheres as the pose stands, src/player/bodySpheres.ts) reaches over the capsule's top, metres, written by the caller after
+   * the pose (held over the walk's bob); NaN where no figure says (the duck keeps the capsule's own clearance).
+   */
+  headOver = 0.5;
+  /**
+   * Smoothness II, item 4: the drawn figure's top over the feet at the duck's deepest (the crouched walk's own head), held over
+   * its bob; NaN until a figure has worn it (the duck then lays the body down only by `proneUnder`).
+   */
+  deepHead = 0.5;
   constructor() {
+    this.headOver = Number.NaN;
+    this.deepHead = Number.NaN;
     this.nx = 0;
     this.ny = 1;
     this.nz = 0;
@@ -256,6 +276,16 @@ export class BodyShape {
   private zoneReach = 0.5;
   private zoneMost = 0.5;
   private zoneFilter = 0.5;
+  /** The path box's last clear answer's top over the feet (item 4 of Smoothness II: a box asked taller covers one asked lower). */
+  private zoneHigh = 0.5;
+  /**
+   * Climbing II, Smoothness II, item 4 (`move.duckHead` 'clear'): the room kept over the capsule's top this frame, metres (the
+   * capsule's own 5 cm, or the drawn figure's top over it and `headSkin`, in 2 cm steps), and how much it is over the 5 cm.
+   */
+  clr = 0.5;
+  private clrExtra = 0.5;
+  /** Item 4: the height over the feet under which a roof ahead lays the body down (`roofAhead`); nought with no head known. */
+  private lieTop = 0.5;
   /** The share of a frame's turn a lying body's next turn tries first (0 the whole; past a refusal the smallest). */
   private turnFrom = 0;
   /** The console's and the tests': how many frames the path box's last clear answer stood for, and how many it was asked. */
@@ -279,6 +309,9 @@ export class BodyShape {
   private lowOf = 0.5;
   private riseCap: RAPIER.Shape | null = null;
   private riseOf = 0.5;
+  /** Item 4: the crouched walk's own height as a capsule, asked over the feet before a laid-down body gets up (`riseClear`). */
+  private headCap: RAPIER.Shape | null = null;
+  private headCapOf = 0.5;
   private metNow = 0.5;
   /** Item 4 (the round's review): how far the path box looks this frame, the roof probe's reach, and this frame's travel the probe reaches further by (set by each caller of `roofAhead` before it asks). */
   private lookNow = 0.5;
@@ -288,6 +321,10 @@ export class BodyShape {
 
   constructor(makers: ShapeMakers) {
     this.makers = makers;
+    this.clr = DUCK_CLEAR;
+    this.clrExtra = 0;
+    this.lieTop = 0;
+    this.zoneHigh = 0;
     this.tall = STAND_TALL;
     this.room = Infinity;
     this.want = STAND_TALL;
@@ -319,6 +356,7 @@ export class BodyShape {
     this.roofOf = -1;
     this.lowOf = -1;
     this.riseOf = -1;
+    this.headCapOf = -1;
     this.metNow = 0;
   }
 
@@ -699,6 +737,27 @@ export class BodyShape {
   stepUpright(world: ShapeWorld, f: ShapeIn, col: ShapeCollider): void {
     this.notePlane(f);
     this.lieAhead = false;
+    // Smoothness II, item 4 (`move.duckHead` 'clear'): the room kept over the capsule's top is the drawn figure's own top over it
+    // and `headSkin`, in 2 cm steps (so the walk's bob never asks the path box again), never less than the capsule's own 5 cm.
+    this.clr = DUCK_CLEAR;
+    this.clrExtra = 0;
+    // And a roof the crouched walk's own head cannot pass under by `headSkin` lays the body down (where lying fits), in 2 cm
+    // steps: ducking deeper than the crouch does not lower the drawn head (the walk's clip carries it over the capsule).
+    this.lieTop = 0;
+    if (MOVE_TUNE.duckHead === 'clear' && f.headOver === f.headOver) {
+      const c = Math.ceil((f.headOver + MOVE_TUNE.headSkin) / HEAD_STEP) * HEAD_STEP;
+      if (c > DUCK_CLEAR) {
+        this.clr = c;
+        this.clrExtra = c - DUCK_CLEAR;
+      }
+    }
+    // (After the round's review: only a roof low enough to duck the body into the crouch's own clips (`duckPace` 'height': at
+    // `crouchAt` and its band, the room kept over the capsule on top) brings the crouch's head under it; a roof over that the
+    // duck passes bent, its head the standing measure's, and laid down for it a tall figure crawled under a 1.5 m beam it walked.)
+    if (MOVE_TUNE.duckHead === 'clear' && f.deepHead === f.deepHead) {
+      const deep = Math.ceil((f.deepHead + MOVE_TUNE.headSkin) / HEAD_STEP) * HEAD_STEP;
+      this.lieTop = MOVE_TUNE.duckPace === 'height' ? Math.min(deep, MOVE_TUNE.crouchAt + MOVE_TUNE.crouchBand + this.clr) : deep;
+    }
     const crouchKey = f.crouch;
     const rule = MOVE_TUNE.duck === 'on';
     const duck = rule && f.feet;
@@ -711,7 +770,7 @@ export class BodyShape {
     const held = rule && !f.feet && this.kind === UPRIGHT && this.tall < this.wantNow - 1e-6;
     if (duck) {
       this.roomAlong(world, f);
-      this.ownNow = this.room - DUCK_CLEAR;
+      this.ownNow = this.room - this.clr;
       const most = MOVE_TUNE.duckMost;
       if (this.want < this.wantNow) this.wantNow = this.want;
       if (this.wantNow < most) this.wantNow = most;
@@ -721,7 +780,7 @@ export class BodyShape {
       this.want = this.wantNow;
       if (held) {
         this.roomOverFeet(world, f);
-        this.ownNow = this.room - DUCK_CLEAR;
+        this.ownNow = this.room - this.clr;
       }
     }
     this.tallTo = this.tall;
@@ -839,7 +898,7 @@ export class BodyShape {
     // The box over the path: from just under `duckMost` to the standing height and the clearance, the capsule's width,
     // from behind the feet by the radius to the far end of the look ahead.
     const low = most - 0.02;
-    const high = STAND_TALL + DUCK_CLEAR;
+    const high = STAND_TALL + this.clr;
     // The box's last clear answer stands while the body moving along its way is still inside what that box covered: no
     // further on than its margin, no more across than its side, its feet no higher or lower than its reach (the review of the
     // round: asked every frame, walking anywhere asked the engine a box a frame, about 380 bytes a frame of the engine's own
@@ -858,7 +917,7 @@ export class BodyShape {
       this.probeNow = MOVE_TUNE.proneAhead + BALL_R + this.roofLead;
       if (this.probeNow > this.lookNow) this.lookNow = this.probeNow;
     }
-    if (moving && this.zoneClear && this.zoneMost === most && this.zoneFilter === f.filter) {
+    if (moving && this.zoneClear && this.zoneMost === most && this.zoneFilter === f.filter && this.zoneHigh >= high - 1e-9) {
       const dx = f.x - this.zoneX;
       const dz = f.z - this.zoneZ;
       const dy = f.y - this.zoneY;
@@ -911,6 +970,7 @@ export class BodyShape {
         this.zoneReach = lenQ - 2 * r;
         this.zoneMost = most;
         this.zoneFilter = f.filter;
+        this.zoneHigh = high;
       }
       this.room = Infinity;
       this.want = STAND_TALL;
@@ -971,7 +1031,7 @@ export class BodyShape {
       // time the body needs to bring its capsule over it. A column within `DUCK_BIND` overlaps the capsule's own space and
       // binds at once: a body held up at a roof's edge (the controller keeps its offset off the edge, so the room over its
       // own feet says it fits) is shrunk by the column just ahead, under the roof, and passes.
-      this.aNow = under - DUCK_CLEAR;
+      this.aNow = under - this.clr;
       if (d > DUCK_BIND && v > 0.01) this.aNow += (rate * (d - DUCK_BIND)) / v;
       if (this.aNow < this.want) this.want = this.aNow;
     }
@@ -1000,7 +1060,7 @@ export class BodyShape {
    */
   private roofAhead(world: ShapeWorld, f: ShapeIn): boolean {
     const T = MOVE_TUNE;
-    const top = T.proneUnder - ROOF_SKIN;
+    const top = Math.max(T.proneUnder + this.clrExtra, this.lieTop) - ROOF_SKIN;
     let r = (top - ROOF_FLOOR) / 2;
     if (r > BALL_R) r = BALL_R;
     if (r < 0.05) r = 0.05;
@@ -1063,6 +1123,22 @@ export class BodyShape {
     if (world.intersectionWithShape(at, this.still, this.riseCap, STILL_FLAGS, f.filter) !== null) {
       this.roofSaid = 'no room over the feet to get up';
       return false;
+    }
+    // Smoothness II, item 4 (`duckHead` 'clear'): and room over the feet for the crouched walk's own head, or the body would get
+    // up under the very roof it lay down for and walk on with the drawn head through it.
+    if (this.lieTop > MOVE_TUNE.riseAt) {
+      let hh = this.lieTop / 2 - r;
+      if (hh < 0.01) hh = 0.01;
+      if (this.headCap === null || this.headCapOf !== hh) {
+        this.headCap = this.makers.capsule(hh, r);
+        this.headCapOf = hh;
+      }
+      at.y = f.y + LIFT + r + hh;
+      this.asks++;
+      if (world.intersectionWithShape(at, this.still, this.headCap, STILL_FLAGS, f.filter) !== null) {
+        this.roofSaid = "no room over the feet for the crouched walk's head";
+        return false;
+      }
     }
     let ux = f.vx;
     let uz = f.vz;

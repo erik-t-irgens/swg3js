@@ -36,7 +36,7 @@ import { SlopeRule } from './slopeRule.ts';
 import { StepUp } from './stepUp.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
+import { CROUCH, CROUCH_BACK, CROUCH_CLIPS, STAND, clipOfId, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 import { FootIk, stairFeetOf } from './footIk.ts';
 import { StairSense } from './stairSense.ts';
@@ -44,11 +44,16 @@ import { ClimbAsk, LedgeHang, LedgeIn, climbTakesUseFirst, type LedgeWorld } fro
 import { LimbPlace } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { MOVE_TUNE, shapeRulesOn } from '../anim/moveTune.ts';
-import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { BodyShape, CROUCH_TALL, DEEP_SHARE, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { BodySpheres, measureSpheres, sphereSourceOf, SPHERES_TRUNK, type SphereWorld } from './bodySpheres.ts';
+import { clearClimb, settleClimb } from './climbClear.ts';
+import { STILL_FLAGS } from './stairSense.ts';
 import { DuckPace, lieOn, paceOn } from './duckPace.ts';
 import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
+import { ClimbCamFollow } from './climbCam.ts';
+import { driveDropClip, driveHangClips, type HangClipState } from './hangClips.ts';
 import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
 import { BraceIn, Crowd, HandBrace } from './brace.ts';
 import { hostileSides } from '../combat/targets.ts';
@@ -90,6 +95,27 @@ const WALK_SPEED = 2.0;
 const JUMP_HEIGHT = 1.4;
 /** Depth at which the head is under and looking down dives. */
 const DIVE_DEPTH = 1.9;
+
+/**
+ * Smoothness II, item 4, after its review: the crouch's own head is read off these clips (`Player.measureDeep`): the
+ * crouched walk by class (Alt, nothing, Shift), backing up, and the crouch's own still and moving states where they are a
+ * crouch's. The plain crouched walk names when the pack is in. Samples a clip: enough that a cycle's top is within a few
+ * millimetres. No number of feel.
+ */
+const DEEP_MAIN = clipOfId('crouched_walking');
+const DEEP_SAMPLES = 48;
+/** For a rig whose crouch clips cannot be read: the live read waits this long at the deepest (the crouch's crossfade done), seconds. */
+const DEEP_SETTLE = 0.4;
+function deepClipsOf(rig: CharacterRig): string[] {
+  const out: string[] = [];
+  for (const id of CROUCH_CLIPS) if (id) out.push(clipOfId(id));
+  out.push(clipOfId(CROUCH_BACK));
+  for (const s of ['crouch', 'crouchWalk', 'crouchWalkBack'] as const) {
+    const c = rig.stateClip(s);
+    if (c && /crouch|sneak/i.test(c)) out.push(c);
+  }
+  return out;
+}
 const dive = new THREE.Vector3();
 const SWING_TIME = 0.45;
 
@@ -524,6 +550,28 @@ export class Player {
    */
   readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly shapeIn = new ShapeIn();
+  /**
+   * Climbing II, Smoothness II, items 3 and 4 (`climb.bodyClear` 'spheres', `move.duckHead` 'clear'): the figure's sixteen
+   * spheres, measured off the body's own rest mesh when a rig is attached (src/player/bodySpheres.ts): asked of what stands still
+   * after the pose while climbing and ducking, the figure pushed out of what they are in; and the drawn top over the capsule's
+   * that the duck keeps room for.
+   */
+  readonly spheres = new BodySpheres({ ball: (r) => new RAPIER.Ball(r), contact: () => new RAPIER.ShapeContact(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }) });
+  /** The frame's seconds the climb's spheres ease their push by (written by the hang's and the wall's frames). */
+  private clearDt = 0.5;
+  /** Whether the last frame's spheres were the climb's (a climb begun after anything else starts with no push). */
+  private spheresClimb = false;
+  /** Whether the duck's spheres pushed the figure's root across last frame (its across place is put back before the next). */
+  private duckPushed = false;
+  /**
+   * Smoothness II, item 4, after its review: the rig whose crouch clips have been read for the crouch's own head, and that head
+   * (the highest drawn top over the feet the crouched walks and the crouch's own clips carry, metres; NaN until read), read off
+   * the clips once a rig (`measureDeep`) so the duck knows it before the first deep duck and never from a pose still crossfading.
+   */
+  private deepRig: CharacterRig | null = null;
+  private deepClip = 0.5;
+  /** How long the duck has stood at its deepest (the live read's settle, for a rig whose crouch clips cannot be read). */
+  private deepFor = 0.5;
   /** Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace`): what the ducked height means for the pace and the clips, and whether the duck laid the body down (src/player/duckPace.ts). */
   readonly duck = new DuckPace();
   /** The placing hand holds something (a building or a prop being put down): the game sets it; the duck waits while it does. */
@@ -1080,6 +1128,14 @@ export class Player {
    * the step's lag, along the figure's own up), else `worldPos` itself (the capsule's, its pop at each step and all).
    */
   get followAt(): THREE.Vector3 {
+    // Climbing II, Smoothness II, item 7 (`climb.camera` 'eased'): while a climb holds the body, and after it until caught,
+    // the eased follow stepped this frame (`stepClimbCam`); never under 'before', where it is never on.
+    if (this.camFollow.on && this.camStepped === this.frameNo) return this.followEased.set(this.camFollow.x, this.camFollow.y, this.camFollow.z);
+    return this.rawFollowAt();
+  }
+
+  /** The place the chase follows with no climbing's ease (wave 3's own): the drawn body's height, else the capsule's place. */
+  private rawFollowAt(): THREE.Vector3 {
     const lag = this.drawn.offset;
     if (LOCO_TUNE.stairs.camera !== 'smooth' || lag === 0) return this.worldPos;
     const out = this.followPoint.copy(this.worldPos);
@@ -1088,6 +1144,53 @@ export class Player {
     return out;
   }
   private readonly followLift = new THREE.Vector3();
+  /** Smoothness II, item 7: the eased follow while climbing, the frame it was last stepped, the frame now, and its answer (kept). */
+  private readonly camFollow = new ClimbCamFollow();
+  private camStepped = -1;
+  private frameNo = 0;
+  private readonly followEased = new THREE.Vector3();
+
+  /**
+   * Smoothness II, item 7: a frame of the camera's follow while climbing (the game's, before it places the camera): toward the
+   * place the chase would follow (`rawFollowAt`), critically damped over `climb.camEase` while a climb holds the body and, after
+   * it, until caught. Nothing at all under 'before' or with no climb (the follow stays off and the chase reads the body).
+   */
+  stepClimbCam(dt: number): void {
+    const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds;
+    const p = this.rawFollowAt();
+    const F = this.camFollow;
+    // The followed place's own speed (the frame before), so a follow begun on a body flying at a lip goes on at its pace.
+    const k = dt > 0 && this.camLastOk ? 1 / dt : 0;
+    const vx = (p.x - this.camLastX) * k;
+    const vy = (p.y - this.camLastY) * k;
+    const vz = (p.z - this.camLastZ) * k;
+    this.camLastX = p.x;
+    this.camLastY = p.y;
+    this.camLastZ = p.z;
+    this.camLastOk = true;
+    if (!climbing && !F.on) return;
+    // (The ask written into the follow's own fields: no number crosses a call.)
+    F.tx = p.x;
+    F.ty = p.y;
+    F.tz = p.z;
+    F.dt = dt;
+    F.climbing = climbing;
+    F.ease = CLIMB_TUNE.camEase;
+    F.bvx = vx;
+    F.bvy = vy;
+    F.bvz = vz;
+    F.stepIn();
+    this.camStepped = this.frameNo;
+  }
+  private camLastX = 0.5;
+  private camLastY = 0.5;
+  private camLastZ = 0.5;
+  private camLastOk = false;
+
+  /** Smoothness II, item 7: how long the camera, pulled in by a wall, takes to go back out this frame (seconds; nought: today's). */
+  get climbCamOut(): number {
+    return CLIMB_TUNE.camera === 'eased' && this.camFollow.on ? CLIMB_TUNE.camOut : 0;
+  }
 
   /**
    * Wave 3: how far the first-person eye is put back up after the feet's placement lowered the pelvis (`ik.eye` 'steady',
@@ -1313,6 +1416,9 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.grounded = true;
     this.hp = this.maxHp;
+    // Smoothness II, item 7: the camera's follow starts afresh on the body where it is stood.
+    this.camFollow.reset();
+    this.camLastOk = false;
     // Whole again means not alight either: health back and a fire still burning would be a body put
     // together from two different moments. It is the second of the two guards (the first is at the
     // death itself) and it covers every way a body is stood up fresh -- the respawn, an arrival, the
@@ -1393,6 +1499,12 @@ export class Player {
     rig.stopOverride();
     this.group.remove(rig.root);
     this.rig = null;
+    this.spheres.use(null, []);
+    this.shapeIn.headOver = Number.NaN;
+    this.shapeIn.deepHead = Number.NaN;
+    this.deepRig = null;
+    this.deepClip = Number.NaN;
+    this.deepFor = 0;
     this.hasJkaClips = false;
     this.parts.hips.visible = true;
   }
@@ -1407,6 +1519,15 @@ export class Player {
     // What first person hides, worked out now while the character loads (the masks saved include the actor layer just set).
     rig.prepareHeadHiding();
     this.group.updateMatrixWorld(true);
+    // Climbing II, Smoothness II, items 3 and 4: the figure's spheres measured off its own body's rest mesh (an event, once a rig).
+    const sphereSrc = rig.character ? sphereSourceOf(rig.character.bodyMeshes()) : null;
+    this.spheres.use(rig, sphereSrc ? measureSpheres(sphereSrc) : []);
+    this.spheres.headHeld = 0;
+    this.shapeIn.headOver = Number.NaN;
+    this.shapeIn.deepHead = Number.NaN;
+    this.deepRig = null;
+    this.deepClip = Number.NaN;
+    this.deepFor = 0;
     const hand = rig.boneFor('rightHand');
     const fore = rig.boneFor('rightForeArm');
     const spine = rig.boneFor('spine');
@@ -2666,6 +2787,8 @@ export class Player {
 
   update(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
     this.world = world;
+    // Smoothness II, item 7: the frame the camera's follow is stepped against (`stepClimbCam`, `followAt`).
+    this.frameNo++;
     // What the grapple's rope may meet that moves: the vehicles this browser simulates.
     this.grappleVehicles = world.vehicles;
     // Dead: the body is the physics' now, and nothing else moves.
@@ -3615,13 +3738,16 @@ export class Player {
     this.grounded = false;
     this.heading = this.ledge.heading;
     // (Climbing II, item 7: no look-away pose carried over from a hang before.)
-    this.posePlaying = '';
+    this.hangClips.posePlaying = '';
   }
 
   /** Off the ledge: a let-go's clocks (`LedgeHang.tick`): the drop's clip handed to the falling loop, the jump off's turn round. */
   private ledgeClocks(dt: number): void {
     if (this.ledge.tick(dt)) this.heading = this.ledge.turnNow;
-    if (this.ledge.cutNow) this.rig?.yieldOverride(CLIMB_TUNE.ease);
+    // Climbing II, Smoothness II, item 1: a drop played by the owner's rule (its clip timed to the fall, held while still
+    // falling, the landing from the feet's touch, ended at once in the water or on the rope), and a let-go's cut handed to the
+    // loop that follows (src/player/hangClips.ts, which the climbing's tests drive); nothing while there is neither.
+    driveDropClip(this.rig, this.ledge, dt, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released);
     // Wave 4, item B: and the wall's (its drawn lean and offset eased out after a let-go, the jump off's turn round).
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
   }
@@ -3652,6 +3778,7 @@ export class Player {
       cam.forward(fwd);
       li.viewYaw = Math.atan2(fwd.x, fwd.z);
     }
+    this.clearDt = dt;
     this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
     // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
     this.setCrouchCollider(this.ledge.crouchedNow);
@@ -3693,41 +3820,23 @@ export class Player {
     return L.headShare > 0 ? pitch + (L.headDown - pitch) * L.headShare : pitch;
   }
 
-  /** The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself. */
+  /**
+   * The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself (Smoothness II moved them
+   * whole into `driveHangClips`, src/player/hangClips.ts, so the climbing's tests drive the very hand-over on the real rig).
+   */
   private animateHang(dt: number): void {
     const rig = this.rig;
     if (!rig) return;
     const L = this.ledge;
-    this.hangFade.fade = CLIMB_TUNE.ease;
-    if (L.startClip) rig.play(ledgeClipName(L.startClip), { from: L.startFrom, fadeIn: L.startFade, hold: L.holding });
-    else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
-    // Climbing II, item 7: the reach-back pose held from the leading side's hop clip while looking away, and let go of.
-    else if (L.poseClip !== this.posePlaying) {
-      // (The smoothness round: a cue's pose eases over the cue's own fade, `climb.cueEase`; the hang's ease otherwise.)
-      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: L.poseFadeNow(), hold: true, timeScale: 0 });
-      else rig.stopOverride(L.poseFadeNow());
-      this.posePlaying = L.poseClip;
-    }
-    // A one-off begun or ended takes the held pose's place: it is held again from the next frame where still looking away.
-    if (L.startClip || L.ended) this.posePlaying = '';
-    if (L.rigState) {
-      rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
-      // The smoothness round, item 2: a ladder's climb plays the wall's clip at its rate, or its arms over a free hang's legs.
-      if (L.rigRate === L.rigRate) {
-        this.ladderRate.rate = L.rigRate;
-        this.ladderRate.fade = CLIMB_TUNE.ease;
-        rig.setState(L.rigState as RigState, 0, null, this.ladderRate);
-      } else rig.setState(L.rigState as RigState, 0, L.rigUpper ? (WALL_CLIP_NAMES[L.rigUpper] ?? null) : null, this.hangFade);
-    } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
-    rig.update(dt);
+    driveHangClips(rig, L, dt, this.hangClips);
     this.group.updateMatrixWorld(true);
     // Climbing II, item 7: the spine turned toward the view while looking away (nought otherwise, every hang frame, so with
     // no look-away this is phase 1's own call to the letter: it eases the steady share and puts the clean pose back).
     rig.twistTorso(L.lookTwistNow, 0);
   }
 
-  /** The hop clip held as the look-away's pose on the rig now ('' for none). */
-  private posePlaying = '';
+  /** The hop clip held as the look-away's pose on the rig now ('' for none), and the fades handed to the rig: the hang's clips' own. */
+  private readonly hangClips: HangClipState = { posePlaying: '', hangFade: this.hangFade, ladderRate: this.ladderRate };
 
   /** The rig's root put where the ledge draws the figure against the body (its offset, the world's frame, into the group's). */
   private applyLedgeRoot(): void {
@@ -3756,8 +3865,128 @@ export class Player {
     const room = this.aboard;
     const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
     this.ledge.limbsFor(lp, rig, toPhys);
+    this.clearFigure(lp, toPhys);
     lp.filter = this.moveFilter();
     lp.place(rig, this.physics.world, toPhys);
+    this.settleFigure(lp, toPhys);
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 3 (`climb.bodyClear` 'spheres'): after the hang or the wall has lined the figure up and
+   * before the limbs' solves, the figure's spheres asked of what stands still and the figure pushed out of what they are in (a
+   * hand or the feet planted on the lip or the face allowed their contact: their spheres are not asked). Never aboard a ship's
+   * rooms (their frame turns the push); nothing under 'before'.
+   */
+  private clearFigure(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    const S = this.spheres;
+    const rig = this.rig;
+    if (CLIMB_TUNE.bodyClear !== 'spheres' || toPhys !== null || !S.ready || !rig) return;
+    if (!this.spheresClimb) S.reset();
+    this.spheresClimb = true;
+    // The held lip's outward way, or on a wall its face's (the limbs' own copy of it).
+    const onWall = this.wall.holding && !this.ledge.holding;
+    clearClimb(S, lp, rig, this.physics.world as unknown as SphereWorld, this.moveFilter(), this.clearDt, this.pos.x, this.pos.y + this.colliderOffsetY, this.pos.z, onWall ? lp.wall[3] : this.ledge.lip.nx, onWall ? lp.wall[5] : this.ledge.lip.nz);
+  }
+
+  /** Item 3, after the limbs' solves: what they took back into something pushed out at once (`settleClimb`). */
+  private settleFigure(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    const S = this.spheres;
+    const rig = this.rig;
+    if (CLIMB_TUNE.bodyClear !== 'spheres' || toPhys !== null || !S.ready || !rig) return;
+    settleClimb(S, lp, rig, this.physics.world as unknown as SphereWorld, this.moveFilter());
+  }
+
+  /**
+   * Smoothness II, items 3 and 4 on the feet, after the pose (`animate`): the drawn figure's top over the capsule's, held over
+   * the walk's bob, handed to the duck (`move.duckHead` 'clear', `ShapeIn.headOver`); and ducked under something, the figure
+   * pushed out across of anything still its spheres are in (`climb.bodyClear` 'spheres'; across only, never into its floor),
+   * eased back once out from under it. Nothing at all with both switches at 'before'.
+   */
+  /**
+   * Smoothness II, item 4, after its review: the crouch's own head off the rig's crouch clips (`deepClipsOf`, posed alone by
+   * `CharacterRig.posedHighest`, every node put back): the highest drawn top of the head, neck and chest over the rig's root
+   * (the feet). An event, once a rig, as soon as it has the plain crouched walk (the pack's clips may come in after the rig).
+   */
+  /** The console's: the crouch's own head read off its clips, cm over the feet (null until read). */
+  get crouchHeadCm(): number | null {
+    return this.deepClip === this.deepClip ? Math.round(this.deepClip * 1000) / 10 : null;
+  }
+
+  private measureDeep(rig: CharacterRig): void {
+    if (!rig.has(DEEP_MAIN)) return;
+    this.deepRig = rig;
+    const S = this.spheres;
+    const root = rig.root;
+    const measure = () => {
+      S.sample();
+      S.topOfUpper();
+      return S.topNow - root.matrixWorld.elements[13];
+    };
+    this.deepClip = rig.posedHighest(deepClipsOf(rig), DEEP_SAMPLES, measure);
+    // (Each clip's own, for the console: an event, once a rig.)
+    this.deepHeads = {};
+    for (const c of deepClipsOf(rig)) if (rig.has(c)) this.deepHeads[c] = Math.round(rig.posedHighest([c], DEEP_SAMPLES, measure) * 1000) / 10;
+  }
+  /** The console's: each crouch clip's own head over the feet, cm (`measureDeep`'s, per clip). */
+  deepHeads: Record<string, number> = {};
+
+  private duckFigure(dt: number, rig: CharacterRig, ducked: boolean): void {
+    this.spheresClimb = false;
+    const S = this.spheres;
+    const head = MOVE_TUNE.duckHead === 'clear' && MOVE_TUNE.duck === 'on';
+    const clear = CLIMB_TUNE.bodyClear === 'spheres' && MOVE_TUNE.duck === 'on' && (ducked || this.duckPushed);
+    // (The push laid across last frame taken back: on the feet the root stands at nought across.)
+    if (this.duckPushed) {
+      rig.root.position.set(0, rig.root.position.y, 0);
+      this.duckPushed = false;
+    }
+    if (!S.ready || this.aboard !== null || (!head && !clear)) {
+      if (S.push.x !== 0 || S.push.y !== 0 || S.push.z !== 0) S.reset();
+      if (!head) {
+        this.shapeIn.headOver = Number.NaN;
+        this.shapeIn.deepHead = Number.NaN;
+      }
+      return;
+    }
+    // (The crouch's own head read off its clips once a rig, as soon as the rig has them: before the first deep duck, and never
+    // from a pose still crossfading into the crouch, which once read 1.51 m and laid the body down under every beam past it.)
+    if (head && this.deepRig !== rig) this.measureDeep(rig);
+    rig.root.updateMatrixWorld(true);
+    S.sample();
+    // (Read only standing at full height on the feet, and held while ducked: the figure's head over its standing capsule is the
+    // figure's own, and read while the capsule shrinks ahead of the pose's crouch it grew with the shrink and ran the duck down.)
+    if (head && this.shapeIn.feet && !this.prone && !this.kneeling && !this.crouching && this.shape.kind !== LYING && this.shape.tall >= STAND_TALL - 1e-3) {
+      S.headFeet = this.pos.y;
+      S.headTall = this.shape.tall;
+      S.headDt = dt;
+      S.holdHead();
+      if (S.topNow === S.topNow) this.shapeIn.headOver = S.headHeld;
+    }
+    // (And at the duck's deepest, the crouch's own or the duck's past it, the drawn top over the feet: the crouched walk's own
+    // head, which the duck cannot lower and the body lies down for under a roof it cannot pass. Read off the crouch's clips
+    // where the rig has them; else live, once the deepest has stood `DEEP_SETTLE` (the crossfade into the crouch done), and
+    // never over the standing head.)
+    const deep = head && this.shapeIn.feet && !this.prone && !this.kneeling && this.shape.kind !== LYING && (this.crouching || this.shape.share >= DEEP_SHARE || this.shape.bend > 0);
+    this.deepFor = deep ? this.deepFor + dt : 0;
+    const standing = STAND_TALL + S.headHeld;
+    if (head && this.deepClip === this.deepClip) this.shapeIn.deepHead = Math.min(this.deepClip, standing);
+    else if (deep && this.deepFor >= DEEP_SETTLE) {
+      S.headFeet = this.pos.y;
+      S.headDt = dt;
+      S.holdDeep();
+      if (S.deepHeld > 0) this.shapeIn.deepHead = Math.min(S.deepHeld, standing);
+    }
+    if (!clear) {
+      if (S.push.x !== 0 || S.push.y !== 0 || S.push.z !== 0) S.reset();
+      return;
+    }
+    S.refX = this.pos.x;
+    S.refY = this.pos.y + this.colliderOffsetY;
+    S.refZ = this.pos.z;
+    S.axX = 0;
+    S.axZ = 0;
+    S.clearOut(this.physics.world as unknown as SphereWorld, SPHERES_TRUNK, STILL_FLAGS, this.moveFilter(), dt, CLIMB_TUNE.clearEase, CLIMB_TUNE.clearMost, true);
+    this.duckPushed = S.push.x !== 0 || S.push.z !== 0;
   }
 
   // ---- wave 4, item B: the wall climb and the hands' bracing -----------------------------------------------------------------
@@ -3814,6 +4043,7 @@ export class Player {
     const li = this.fillLedgeIn(dt, input, null, false);
     const W = this.wall;
     W.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina, this.ledge);
+    this.clearDt = dt;
     if (W.said) {
       this.onLedgeWords?.(W.said);
       W.said = '';
@@ -3860,7 +4090,10 @@ export class Player {
       else if (W.rigState === 'wallLeft' || W.rigState === 'wallRight') rig.prefer(W.rigState, WALL_CLIP_NAMES[W.rigClip] ?? wallClipName(W.rigClip));
       this.wallRate.rate = W.rate;
       this.wallRate.fade = CLIMB_TUNE.ease;
+      // Climbing II, Smoothness II, item 2: a clip of the climb taken up where its pose is nearest the one it fades from ('blend').
+      rig.nearestNext = CLIMB_TUNE.transitions === 'blend';
       rig.setState(W.rigState as RigState, 0, null, this.wallRate);
+      rig.nearestNext = false;
     } else rig.setState(W.stood ? 'idle' : 'air', 0, null, this.hangFade);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
@@ -3881,7 +4114,9 @@ export class Player {
     const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
     lp.filter = this.moveFilter();
     this.wall.limbsFor(lp, rig, this.physics.world as unknown as LedgeWorld, toPhys);
+    this.clearFigure(lp, toPhys);
     lp.place(rig, this.physics.world, toPhys);
+    this.settleFigure(lp, toPhys);
   }
 
   /** The player's own key, kept (the crowd's `fights` asks with it: no closure a frame). */
@@ -4237,6 +4472,8 @@ export class Player {
     if (duckBend > 0) pitch += (duckBend * MOVE_TUNE.duckBend * Math.PI) / 180;
     rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, pitch);
     if (duckBend > 0) rig.bendNeck((duckBend * MOVE_TUNE.duckNeck * Math.PI) / 180);
+    // Climbing II, Smoothness II, items 3 and 4: the drawn top handed to the duck, and a ducked figure out of what is beside it.
+    this.duckFigure(dt, rig, ducks && (this.shape.share > 0 || this.shape.bend > 0));
     // An imported clip posing the arms (the jump's start, a loop of the air, a landing) holds the gun wherever the clip
     // has it, so the barrel says nothing of the aim while it plays.
     this.correctAim(dt, gunUp, rig.armSource().startsWith('mx_'));

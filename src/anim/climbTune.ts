@@ -6,7 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
-import { moveBefore, moveSmoothBefore } from './moveTune.ts';
+import { moveBefore, moveSmoothBefore, moveSmooth2Before } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -264,6 +264,89 @@ export interface ClimbTune {
    * (a lip level with the hands is A's or D's alone); 'before' phase 2's band, 0.3 m either way of the hands' height.
    */
   diagonals: 'below' | 'before';
+  /**
+   * Climbing II, Smoothness II, item 1 (the owner: "our body will be in position in time for the animation's hand-touch to the
+   * ledge ... with a natural slow-down near the top as if gravity is slowing me down"): 'timed' a hop, a grab and a step down
+   * carry the body only between their clip's own moments (src/anim/handTimes.ts: the owner's where he gave them, else the
+   * clip's measure): still on the held lip (or the ground) until the hands leave it, then through the air on a thrown body's
+   * arc (constant acceleration: a quadratic way at an even pace, lifted `flightLift` of its length, an up hop slowing to its
+   * top), on the new lip exactly as the clip's hands touch it, and still after; the clip's airborne stretch played at a rate
+   * fitted to the way (`flightRateMin` to `flightRateMax`), the figure drawn with the clip's own travel put back so its hands
+   * stay on a lip while the body is still. A let-go drop's clip is played by the owner's drops' rule (`dropRateLeast`).
+   * 'before': the smoothness round's (the body carried over the whole clip).
+   */
+  hopFlight: 'timed' | 'before';
+  /** Item 1: the slowest and quickest a clip's airborne stretch is played, of its own rate (ours: 0.7 and 1.5: slower is slow motion, quicker a snap). */
+  flightRateMin: number;
+  flightRateMax: number;
+  /** Item 1: how high a hop's way rises over the straight way at its middle, a share of its length (ours: the band's own 0.1, a 3 m hop rising 0.3 m). */
+  flightLift: number;
+  /** Item 1: how much of a grab's clip before its touch frame is played as the reach, when the grab is caught in the air, seconds (ours: 0.2, about the owner's grabs' own reach before their touch). */
+  grabLead: number;
+  /** Item 1, the owner's drops' rule: the slowest a drop's stretch between the hands' release and the feet's touch is played, of its own rate (ours: 0.35); a longer fall holds the stretch's last frame until the feet meet the ground. */
+  dropRateLeast: number;
+  /**
+   * Item 2 (the owner: "there's a freeze then a jump in the animation before going to the idle"): 'blend' every one-off into or
+   * out of a hang or a wall climb crossfades straight into what follows, `transitionBlend` before its own end, the loop that
+   * follows started at the phase whose pose is nearest the one-off's last; never through the clip that played before it.
+   * 'before': the smoothness round's (the one-off's last frame held, then faded through the clip before it).
+   */
+  transitions: 'blend' | 'before';
+  /** Item 2: how long a transition's crossfade is, seconds (ours: 0.25, a little more than the hang's own ease, so the loop is well under way as the one-off ends). */
+  transitionBlend: number;
+  /** Item 2's measure (`climb({ transitions: true })` and the tests): a bone faster than this many times the faster clip's own fastest is a jump (ours: 2). */
+  poseJump: number;
+  /**
+   * Item 7 (the owner: "my camera can snap around and jump quickly in some movements while climbing or shimmying around
+   * corners"): 'eased' while hanging, shimmying, hopping, climbing a wall or topping out, the camera follows the body through a
+   * critically damped follow of `camEase`, and a pull-in at a wall is let out again eased; 'before' the body's own place.
+   */
+  camera: 'eased' | 'before';
+  /** Item 7: how quickly the camera's follow catches the body, seconds (ours: 0.12, the follow settling in about a third of a second, never snapping). */
+  camEase: number;
+  /** Item 7: how long the camera, pulled in at once by a wall while climbing, takes to go back out, seconds (the race view's own 0.5). */
+  camOut: number;
+  /** Item 7's measure: a frame's change of the camera's place more than this many times the eased follow's own is a snap (ours: 3). */
+  camJump: number;
+  /**
+   * Item 8 (the owner: "when grabbing a ledge that is already at an incline or decline, my hands should grab appropriately"):
+   * 'each' each hand's target is the lip at that hand's own place along it from the grab's touch frame on, and where the lower
+   * hand cannot reach its point the body hangs lower; 'before' the grab's hands on the line through the lip's middle.
+   */
+  slopeHands: 'each' | 'before';
+  /**
+   * Item 3 (the owner: "when shimmying takes me around a corner, even a sharp corner, my body tends to phase through the wall
+   * ... using the mesh as either a collider or a guide"): 'spheres' the posed figure's sixteen spheres (src/player/bodySpheres.ts,
+   * measured off the rest mesh at load) are asked of what stands still every frame it hangs, shimmies, hops, climbs a wall or
+   * ducks, and the figure is pushed out of what they are in along its own face (a hand or a foot planted on its lip or face
+   * allowed its contact); 'before' the smoothness round's (nothing asked).
+   */
+  bodyClear: 'spheres' | 'before';
+  /** Item 3: how quickly the push eases back in once the need for it falls away, seconds (ours, 0.08: a few frames, so a corner rounded is let go of smoothly; it goes out at once). */
+  clearEase: number;
+  /** Item 3: the furthest the figure is pushed out, metres (ours, 0.3: about a forearm, past which the hands would leave the lip; a body deeper than that is the hang's own place at fault). */
+  clearMost: number;
+  /**
+   * Item 5 (the owner: "when I reach the top, my hand in the animation sometimes can reach above the topmost ledge and grab air
+   * ... dynamically grab lower or deeper in to make it grab actual wall"): 'grip' a wall climb's hand whose hold stands in air
+   * (over the top, past a side, over a hole) is moved to the nearest real grip, down the face under the top or in over the top
+   * onto its edge; 'before' the smoothness round's (a hand with no face under it left as the clip has it).
+   */
+  wallHands: 'grip' | 'before';
+  /** Item 5: how far a hand in the air may be moved to find a grip, metres (ours, 0.9: a whole arm's reach and a hand, so a climb clip's hand stretched high over a wall's top still finds the lip under it, and no further). */
+  gripSeek: number;
+  /**
+   * Item 6 (the owner: "the animation for jumping off the wall is slow and annoying ... use the JKA animation for wall grabbing
+   * ... it's shorter and pushes me back further"): 'jka' Space off a wall climb, and S with Space off a braced hang where no hop
+   * is cued, play Jedi Academy's BOTH_FORCEWALLREBOUND_BACK and push the body back off the face at Jedi Academy's own wall
+   * rebound (src/player/jkaMove.ts's `JKA.jumpOffWallSpeed` back and `JKA.wallJumpStrength` up), facing the wall as it flies; 'before'
+   * the smoothness round's jump off (`jump_from_wall`, turned round at its end).
+   */
+  pushOff: 'jka' | 'before';
+  /** Item 6: the push back off the face, a share of Jedi Academy's own (ours, 1: Jedi Academy's 5.08 m/s). */
+  pushBack: number;
+  /** Item 6: the lift with it, a share of Jedi Academy's own (ours, 1: Jedi Academy's 8.53 m/s). */
+  pushUp: number;
 }
 
 /**
@@ -337,6 +420,30 @@ export function climbSmoothBefore(): void {
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_SMOOTH_BEFORE)) t[k] = v;
   moveSmoothBefore();
+  // `d2d5bc4` had none of Smoothness II's either.
+  climbSmooth2Before();
+}
+
+/**
+ * Climbing II, Smoothness II: every switch it adds to the climbing, at its other setting (the climbing as the smoothness
+ * round shipped it, `dd88180`). A later maker of the round adds its own here (the body's beside them in `moveTune.ts`), so one
+ * call puts the whole round back.
+ */
+export const CLIMB_SMOOTH2_BEFORE: Readonly<Record<string, string>> = {
+  hopFlight: 'before',
+  transitions: 'before',
+  camera: 'before',
+  slopeHands: 'before',
+  bodyClear: 'before',
+  wallHands: 'before',
+  pushOff: 'before',
+};
+
+/** Smoothness II's switches at their other setting (the smoothness round's climbing, `dd88180`), the body's (`moveTune.ts`) with them. */
+export function climbSmooth2Before(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH2_BEFORE)) t[k] = v;
+  moveSmooth2Before();
 }
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
@@ -437,6 +544,28 @@ export const CLIMB_TUNE: ClimbTune = {
   dropMost: 2.5,
   dropHold: 0.25,
   diagonals: 'below',
+  hopFlight: 'timed',
+  flightRateMin: 0.7,
+  flightRateMax: 1.5,
+  flightLift: 0.1,
+  grabLead: 0.2,
+  dropRateLeast: 0.35,
+  transitions: 'blend',
+  transitionBlend: 0.25,
+  poseJump: 2,
+  camera: 'eased',
+  camEase: 0.12,
+  camOut: 0.5,
+  camJump: 3,
+  slopeHands: 'each',
+  bodyClear: 'spheres',
+  clearEase: 0.08,
+  clearMost: 0.3,
+  wallHands: 'grip',
+  gripSeek: 0.9,
+  pushOff: 'jka',
+  pushBack: 1,
+  pushUp: 1,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -507,6 +636,21 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   cueLean: { min: 0, max: 30 },
   dropMost: { min: 0, max: 8 },
   dropHold: { min: 0.05, max: 2 },
+  flightRateMin: { min: 0.2, max: 1 },
+  flightRateMax: { min: 1, max: 4 },
+  flightLift: { min: 0, max: 0.5 },
+  grabLead: { min: 0, max: 0.6 },
+  dropRateLeast: { min: 0.05, max: 1 },
+  transitionBlend: { min: 0, max: 1 },
+  poseJump: { min: 1, max: 10 },
+  camEase: { min: 0, max: 1 },
+  camOut: { min: 0, max: 2 },
+  camJump: { min: 1, max: 10 },
+  clearEase: { min: 0, max: 1 },
+  clearMost: { min: 0, max: 0.8 },
+  gripSeek: { min: 0, max: 1.2 },
+  pushBack: { min: 0, max: 3 },
+  pushUp: { min: 0, max: 3 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -533,6 +677,13 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   shelves: ['grab', 'before'],
   hangKeys: ['cue', 'before'],
   diagonals: ['below', 'before'],
+  hopFlight: ['timed', 'before'],
+  transitions: ['blend', 'before'],
+  camera: ['eased', 'before'],
+  slopeHands: ['each', 'before'],
+  bodyClear: ['spheres', 'before'],
+  wallHands: ['grip', 'before'],
+  pushOff: ['jka', 'before'],
 };
 
 /**

@@ -612,6 +612,12 @@ export class LimbPlace {
   /** What the console says. */
   report(): Record<string, unknown> {
     const n = (v: number) => Math.round(v * 1000) / 1000;
-    return { hands: [n(this.handW[0]), n(this.handW[1])], wall: n(this.wallW), casts: this.casts, reused: this.reused, feetOn: this.feetOn };
+    // (Smoothness II, item 8: each hand's grip as drawn now against its place on the lip, metres; null for a hand not on one.)
+    const grip: (number | null)[] = [null, null];
+    if (this.rig) for (let s = 0; s < 2; s++) {
+      const g = this.handW[s] > 0 ? this.gripNow(this.rig, s, null, new THREE.Vector3()) : null;
+      if (g) grip[s] = n(Math.hypot(g.x - this.hand[s * 3], g.y - this.hand[s * 3 + 1], g.z - this.hand[s * 3 + 2]));
+    }
+    return { hands: [n(this.handW[0]), n(this.handW[1])], grip, wall: n(this.wallW), casts: this.casts, reused: this.reused, feetOn: this.feetOn };
   }
 }

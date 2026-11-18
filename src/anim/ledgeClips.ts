@@ -146,4 +146,11 @@ export const LEDGE_STEP_DOWN = 'drop_to_freehang';
 export const LEDGE_IDS: readonly string[] = Object.keys(LEDGE_FACTS);
 
 /** A clip's name on a rig (the pack's `mx_` prefix). */
-export const ledgeClipName = (id: string): string => `mx_${id}`;
+/**
+ * Climbing II, Smoothness II, item 6 (`climb.pushOff` 'jka'): the push off a wall is Jedi Academy's own rebound back off a wall,
+ * which the rig plays by its own name as it plays every Jedi Academy move.
+ */
+export const LEDGE_PUSH_OFF = 'BOTH_FORCEWALLREBOUND_BACK';
+
+/** A clip's name on the rig: the pack's `mx_` names, a Jedi Academy move's own (`BOTH_`) as it stands. */
+export const ledgeClipName = (id: string): string => (id.startsWith('BOTH_') ? id : `mx_${id}`);

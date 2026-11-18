@@ -58,6 +58,14 @@ export const MOVE_GROUPS: DialGroup[] = [
       dial('riseAt', 'Gets up where the room is', 0.01, 'm', "1.0: the crouch's own height; the duck stands it the rest of the way as the room allows."),
     ],
   },
+  {
+    title: "The duck's head (Climbing II, Smoothness II)",
+    note: "clear: the duck keeps the room over and ahead of the body as tall as the drawn figure's own top (its head, neck and chest spheres as the pose stands) and headSkin more, so it ducks further, and lies down sooner, until the drawn head clears what is over it. before: the smoothness round's duck, the capsule's own 5 cm.",
+    dials: [
+      choice('duckHead', 'The head clear of a low roof', "before is the smoothness round's duck."),
+      dial('headSkin', 'The head keeps under a roof by', 0.005, 'm', '0.03: a hair, so a beam just over the head is passed with the head brushing nothing.'),
+    ],
+  },
 ];
 
 export const MOVE_DIALS: DialSet = { helper: 'move', groups: MOVE_GROUPS, shipped: readDials(MOVE_GROUPS) };
