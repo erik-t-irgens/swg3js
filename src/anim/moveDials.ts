@@ -66,6 +66,15 @@ export const MOVE_GROUPS: DialGroup[] = [
       dial('headSkin', 'The head keeps under a roof by', 0.005, 'm', '0.03: a hair, so a beam just over the head is passed with the head brushing nothing.'),
     ],
   },
+  {
+    title: "Lying down and the duck's crouch (Climbing II, Smoothness III)",
+    note: "proneMin opening: the duck lies down only into a real opening, a gap whose floor and roof run on past the lying body's length with the skin below to spare (never at a wall, a step or a slab's side); a probe that begins inside something answers nothing and the body stands. today: the room alone, as Smoothness II left it. duckClip clearance: the duck wears the crouch clip whose head stands highest and still clears what is over it by headSkin (the sneak walk the last), its capsule shrunk to that clip's own measured head, and lies only under the sneak's head; one: the one crouch walk the duck always wore.",
+    dials: [
+      choice('proneMin', 'Lying down', 'opening: only into a real opening; today: the room alone, as before.'),
+      dial('proneSkin', 'An opening has to have to spare', 0.005, 'm', "Ours: 0.05, the duck's own clearance: a gap the lying body only scrapes through is no opening."),
+      choice('duckClip', "The duck's crouch", 'clearance: the highest crouch clip that clears, the sneak walk last; one: the one crouch walk, as before.'),
+    ],
+  },
 ];
 
 export const MOVE_DIALS: DialSet = { helper: 'move', groups: MOVE_GROUPS, shipped: readDials(MOVE_GROUPS) };

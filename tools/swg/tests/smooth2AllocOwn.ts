@@ -11,7 +11,12 @@ import * as THREE from 'three';
 import { TestBody, box, ground, makePhysics } from './grappleBody.ts';
 import { LedgeIn, LEDGE_HANG, LEDGE_MOVE, LEDGE_NONE, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, resetClimbTune as resetShipped, climbSmooth3Before } from '../../../src/anim/climbTune.ts';
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
 import { LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { handMoment } from '../../../src/anim/handTimes.ts';
 import { ClimbCamFollow } from '../../../src/player/climbCam.ts';

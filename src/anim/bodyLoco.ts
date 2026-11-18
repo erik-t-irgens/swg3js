@@ -107,6 +107,12 @@ export class LocoIn {
    */
   duckToCrouch = 0.5;
   duckToCrawl = 0.5;
+  /**
+   * Climbing II, Smoothness III, item 3b (`move.duckClip` 'clearance', src/player/bodyShape.ts `duckCls`): the crouched class the
+   * duck wears by its head's clearance under something (1 to 3), in place of the one the keys ask; nought (the default, and every
+   * frame under 'one') the keys' own, to the bit.
+   */
+  crouchCls = 0;
 }
 
 export function newLocoIn(): LocoIn {
@@ -549,6 +555,8 @@ export class BodyLoco {
     let cls = this.walkOn ? 1 : this.asked >= RUN ? 3 : 2;
     if (this.asked > RUN && !this.walkOn) this.refused = prone ? 'no sprint prone: the quickest crawl' : 'no sprint crouched: the quickest crouch';
     if (this.walkOn && this.asked > JOG) this.refused = 'the walk key holds the slowest';
+    // Smoothness III, item 3b: ducked under something, the crouch whose head clears it (the shape's choice), whatever the keys ask.
+    if (!prone && f.crouchCls > 0) cls = f.crouchCls;
     if (this.stamina.tired && cls > 2) {
       cls = 2;
       this.refused = 'tired: not the quickest until the stamina is back';

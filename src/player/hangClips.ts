@@ -10,8 +10,14 @@
 import type { CharacterRig, RigState } from './rig.ts';
 import type { LedgeHang } from './ledge.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
-import { ledgeClipName } from '../anim/ledgeClips.ts';
+import { LEDGE_CLIP_NAMES, ledgeClipName } from '../anim/ledgeClips.ts';
 import { WALL_CLIP_NAMES } from '../anim/wallClips.ts';
+
+/**
+ * A clip's rig name for what is named every frame (Smoothness III, the review's): a wall clip's or a table clip's own, made once
+ * (`WALL_CLIP_NAMES`, `LEDGE_CLIP_NAMES`); any other made as ever.
+ */
+const rigName = (id: string): string => WALL_CLIP_NAMES[id] ?? LEDGE_CLIP_NAMES[id] ?? ledgeClipName(id);
 
 /** What the hang's clips keep between frames: the pose held now ('' for none) and the fades and rate handed to the rig (kept). */
 export interface HangClipState {
@@ -49,14 +55,36 @@ export function driveHangClips(rig: CharacterRig, L: LedgeHang, dt: number, st: 
   if (L.rigState) {
     rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
     // The smoothness round, item 2: a ladder's climb plays the wall's clip at its rate, or its arms over a free hang's legs.
+    // (Smoothness III, item 4: a free hop up's arms, and its cue's, are a ledge clip's over the free hang's legs.)
+    const upper = L.rigUpper ? rigName(L.rigUpper) : null;
     if (L.rigRate === L.rigRate) {
       st.ladderRate.rate = L.rigRate;
       st.ladderRate.fade = CLIMB_TUNE.ease;
       rig.setState(L.rigState as RigState, 0, null, st.ladderRate);
-    } else rig.setState(L.rigState as RigState, 0, L.rigUpper ? (WALL_CLIP_NAMES[L.rigUpper] ?? null) : null, st.hangFade);
+    } else rig.setState(L.rigState as RigState, 0, upper, st.hangFade);
+    // Smoothness III, item 4b (`climb.ladderCycle` 'cycle'): the ladder's clip put at its cycle's phase; and items 4 and 4b, the
+    // upper layer's at the move's own (NaN: each plays at its rate, as ever).
+    if (L.rigSeek === L.rigSeek) {
+      rig.timeAt = L.rigSeek;
+      rig.setTimeNow(rigName(L.rigClip));
+    }
+    if (L.upperSeek === L.upperSeek && upper) {
+      rig.upperAt = L.upperSeek;
+      rig.upperSeek(upper);
+    }
   } else rig.setState(L.stood || L.blendStand ? 'crouch' : 'air', 0, null, st.hangFade);
+  // Smoothness III, item 1: an arc's move puts its one-off where the move's clock stood at the frame's start (NaN: nowhere, as
+  // ever), so the pose and the clock are one at every frame rate.
+  if (L.moveSeek === L.moveSeek) {
+    rig.overrideSeekAt = L.moveSeek;
+    rig.overrideSeekNow(rigName(L.moveClip));
+  }
   // Smoothness II, item 1: a timed move's one-off played at the move's own clock (NaN: its own rate, as ever).
-  if (L.moveRate === L.moveRate) rig.overrideRate(L.moveRate);
+  // (Each number through the rig's own field, the review's: one handed across the call was made anew every frame.)
+  if (L.moveRate === L.moveRate) {
+    rig.overrideRateAt = L.moveRate;
+    rig.overrideRateNow();
+  }
   rig.update(dt);
 }
 

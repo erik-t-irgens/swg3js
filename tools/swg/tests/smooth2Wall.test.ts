@@ -11,8 +11,18 @@
 // Run: node tools/swg/tests/smooth2Wall.test.ts
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
-import { resetMoveTune } from '../../../src/anim/moveTune.ts';
+import { CLIMB_TUNE, resetClimbTune as resetShipped, climbSmooth3Before, tuneClimb } from '../../../src/anim/climbTune.ts';
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+import { resetMoveTune as resetMoveShipped, moveSmooth3Before } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
 import { worldToCourse } from '../../../src/anim/climbCourseBuild.ts';
 import { LEDGE_JUMP_OFF, LEDGE_PUSH_OFF, ledgeClipName } from '../../../src/anim/ledgeClips.ts';

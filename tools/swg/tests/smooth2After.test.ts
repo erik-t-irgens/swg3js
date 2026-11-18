@@ -9,8 +9,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
-import { MOVE_TUNE, resetMoveTune } from '../../../src/anim/moveTune.ts';
+import { CLIMB_TUNE, climbSmooth3Before, resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { MOVE_TUNE, resetMoveTune as resetMoveShipped, moveSmooth3Before } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { RATES, runCourse, summarize } from './climbCourseBody.ts';
 
 let checks = 0;
@@ -26,6 +31,8 @@ const SHIPPED = {
 };
 resetClimbTune();
 resetMoveTune();
+// (Smoothness III's switches at their other setting: the course as Smoothness II left it.)
+climbSmooth3Before();
 ok(CLIMB_TUNE.hopFlight === 'timed' && CLIMB_TUNE.transitions === 'blend' && CLIMB_TUNE.camera === 'eased' && CLIMB_TUNE.slopeHands === 'each' && CLIMB_TUNE.bodyClear === 'spheres' && CLIMB_TUNE.wallHands === 'grip' && CLIMB_TUNE.pushOff === 'jka' && MOVE_TUNE.duckHead === 'clear', "every switch of Smoothness II at its shipped setting");
 const pieces = climbCourse().pieces;
 const t0 = performance.now();

@@ -16,8 +16,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
-import { CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
-import { MOVE_TUNE, resetMoveTune, tuneMove } from '../../../src/anim/moveTune.ts';
+import { CLIMB_TUNE, resetClimbTune as resetShipped, climbSmooth3Before, tuneClimb } from '../../../src/anim/climbTune.ts';
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+import { MOVE_TUNE, resetMoveTune as resetMoveShipped, moveSmooth3Before, tuneMove } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
 import { LEDGE_HANG } from '../../../src/player/ledge.ts';
 import { BodySpheres, HEAD_OVER_MOST, headOverHeld, measureSpheres, sphereSourceOf, SPHERE_COUNT, SPH_HEAD, SPHERES_TRUNK } from '../../../src/player/bodySpheres.ts';

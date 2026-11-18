@@ -23,8 +23,18 @@ delete process.env.SWG3JS_ROWS_AFTER;
 
 const { climbCourse, extraIds } = await import('../../../src/anim/climbCourse.ts');
 const { courseWayToWorld, worldToCourse } = await import('../../../src/anim/climbCourseBuild.ts');
-const { resetClimbTune, tuneClimb } = await import('../../../src/anim/climbTune.ts');
-const { resetMoveTune } = await import('../../../src/anim/moveTune.ts');
+const { resetClimbTune: resetShipped, climbSmooth3Before, tuneClimb } = await import('../../../src/anim/climbTune.ts');
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+const { resetMoveTune: resetMoveShipped, moveSmooth3Before } = await import('../../../src/anim/moveTune.ts');
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 const { LEDGE_HANG, WAYK_HOP } = await import('../../../src/player/ledge.ts');
 const { SPHERE_COUNT, SPHERES_TRUNK } = await import('../../../src/player/bodySpheres.ts');
 const { PLACED } = await import('../../../src/player/climbClear.ts');

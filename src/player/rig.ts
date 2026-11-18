@@ -637,6 +637,39 @@ export class CharacterRig {
   }
 
   /**
+   * Climbing II, Smoothness III, items 4 and 4b: the state's upper layer (`setState`'s `upper`) put `t` seconds into its clip and
+   * held there (its rate nought: the caller puts it every frame), where the layer plays `clip`: a free hop up's arms over a free
+   * hang's legs, a free ladder's cycle. Nothing otherwise.
+   */
+  upperSeek(clip: string): void {
+    const u = this.upper;
+    if (!u || this.upperName !== clip) return;
+    u.time = this.upperAt;
+    u.timeScale = 0;
+  }
+
+  /**
+   * Smoothness III, item 4b (the review's): `setTime` for a ladder's cycle every frame, the seconds read from `timeAt`, which the
+   * caller writes just before (a number handed across the call is made anew every frame).
+   */
+  setTimeNow(clip: string): void {
+    const cur = this.current;
+    if (!cur) return;
+    const name = cur.getClip().name;
+    if (name !== clip && !(name.length === clip.length + 6 && name.startsWith('lower:') && name.endsWith(clip))) return;
+    cur.time = this.timeAt;
+  }
+
+  /** `setTimeNow`'s seconds (written by the caller first). */
+  timeAt = 0.5;
+
+  /**
+   * Where `upperSeek` puts the upper layer, seconds into its clip: written by the caller just before (the review's: a number
+   * handed across the call was made anew every frame of a free hop's arms).
+   */
+  upperAt = 0.5;
+
+  /**
    * The ground speed a clip's feet were made for on this figure, m/s: a striding clip's own at the figure's size, else
    * the converter's manifest's, else null. What a caller divides the body's speed by for the rate the clip plays at.
    */
@@ -1177,6 +1210,25 @@ export class CharacterRig {
     const o = this.override;
     if (o && !this.overrideUpper && o.getClip().name === clip) o.time = t;
   }
+
+  /**
+   * Smoothness III, item 1 (the review's): `overrideSeek` and `overrideRate` for a hop's move every frame, the seconds and the
+   * rate read from `overrideSeekAt` and `overrideRateAt`, which the caller writes just before: a number handed across the call was
+   * made anew every frame of every hop.
+   */
+  overrideSeekNow(clip: string): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) o.time = this.overrideSeekAt;
+  }
+
+  overrideRateNow(): void {
+    const o = this.override;
+    if (o && !this.overrideUpper) o.timeScale = this.overrideRateAt;
+  }
+
+  /** `overrideSeekNow`'s seconds and `overrideRateNow`'s rate (written by the caller first). */
+  overrideSeekAt = 0.5;
+  overrideRateAt = 0.5;
 
   /**
    * Smoothness II, item 1: the whole-body one-off `clip` (when it is the one playing) held past its own end for `lease` more

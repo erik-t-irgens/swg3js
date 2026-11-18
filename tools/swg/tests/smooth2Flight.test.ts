@@ -16,8 +16,18 @@
 // Run: node tools/swg/tests/smooth2Flight.test.ts
 import assert from 'node:assert/strict';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
-import { CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
-import { resetMoveTune } from '../../../src/anim/moveTune.ts';
+import { CLIMB_TUNE, resetClimbTune as resetShipped, climbSmooth3Before, tuneClimb } from '../../../src/anim/climbTune.ts';
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+import { resetMoveTune as resetMoveShipped, moveSmooth3Before } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { handMoment } from '../../../src/anim/handTimes.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { LEDGE_HANG, LEDGE_MOVE, LEDGE_NONE } from '../../../src/player/ledge.ts';

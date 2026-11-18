@@ -78,7 +78,7 @@ export class DuckPace {
    * on its feet on the ground, not prone, kneeling, swimming, climbing, riding or placing), and whether the crouch key
    * crouches it (its clips and pace are the crouch's already; it eases on toward the crawl's in a tunnel all the same).
    */
-  step(tall: number, feet: boolean, crouchKey: boolean): void {
+  step(tall: number, feet: boolean, crouchKey: boolean, cls = 0): void {
     const was = this.crouch;
     this.crouch = false;
     this.toCrouch = 0;
@@ -89,7 +89,9 @@ export class DuckPace {
     const at = T.crouchAt;
     const curve = T.paceCurve;
     if (!crouchKey) {
-      this.crouch = tall <= at + 1e-6 || (was && tall <= at + T.crouchBand + 1e-6);
+      // Smoothness III, item 3b (`move.duckClip` 'clearance'): a crouch the shape chose by its head's clearance (`cls`, the
+      // class it wears) is worn whatever its capsule's height, which is that clip's own head.
+      this.crouch = cls > 0 || tall <= at + 1e-6 || (was && tall <= at + T.crouchBand + 1e-6);
       if (!this.crouch && tall < STAND_TALL - 1e-6) {
         let s = at < STAND_TALL - 1e-6 ? (STAND_TALL - tall) / (STAND_TALL - at) : 1;
         if (s > 1) s = 1;

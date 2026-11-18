@@ -133,6 +133,13 @@ export class LimbPlace {
   /** The move's own collision groups (the feet's rays). */
   filter = 0.5;
   /**
+   * Smoothness III, item 0: the share of the climb's sphere push (`clearClimb`, `settleClimb`) the figure keeps: 1, but while a
+   * climb up crossfades into the crouch it ends in, the crossfade's own share left (the ledge's `standKeep`), so the push goes
+   * out with the climb's own line-up and nothing of it is dropped in one frame at the hand-back. Written by the ledge and the
+   * wall each frame they place the limbs.
+   */
+  pushKeep = 0.5;
+  /**
    * Maker B's wall climb: each foot placed on the wall by how near the clip has it to the face as well (wholly within
    * `WALL_PLANT.near`, let go of from `far`), so a foot the clip lifts for its next hold is the clip's own. The ledges'
    * braced feet leave it false (both feet wholly on the wall, as they were).
@@ -174,6 +181,7 @@ export class LimbPlace {
     this.makeRay = makeRay;
     this.wallW = 0;
     this.filter = 0;
+    this.pushKeep = 1;
     this.past = 0;
     this.footFade = false;
     this.footStep = 1;
@@ -606,6 +614,7 @@ export class LimbPlace {
     this.palmW[1] = 0;
     this.footFade = false;
     this.holds = null;
+    this.pushKeep = 1;
     if (this.legs) for (const l of this.legs) l.toi = Number.NaN, (l.rx = Number.NaN), (l.w = 0), (l.last = Number.NaN);
   }
 

@@ -1037,6 +1037,8 @@ export class WallClimb {
   limbsFor(lp: LimbPlace, rig: LimbRig, world: LedgeWorld, toPhys: THREE.Matrix4 | null): void {
     // The hands' rays cast in the limbs' own groups (the caller writes `lp.filter` first: a number handed across a call is made).
     const flt = lp.filter;
+    // (Smoothness III, item 0: a wall keeps its spheres' push whole; only a climb up's crossfade into the stand lets it go.)
+    lp.pushKeep = 1;
     const s = this.s;
     const near = WALL_PLANT.near * s;
     const far = WALL_PLANT.far * s;

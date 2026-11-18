@@ -20,17 +20,24 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { climbCourse, extraIds } from '../../../src/anim/climbCourse.ts';
 import { courseToWorld, courseWayToWorld, worldToCourse } from '../../../src/anim/climbCourseBuild.ts';
-import { resetClimbTune as resetShipped, tuneClimb, climbSmooth2Before } from '../../../src/anim/climbTune.ts';
+import { resetClimbTune as resetShipped, tuneClimb, climbSmooth2Before, climbSmooth3Before } from '../../../src/anim/climbTune.ts';
 // Smoothness II: these drives hold the smoothness round's extra rows (its digest below), so Smoothness II's switches go to
 // their 'before' at every reset.
 // Smoothness II's item 9 drives these rows again with every switch of that round on (tools/swg/tests/smooth2Rows.test.ts sets
-// SWG3JS_ROWS_AFTER and imports this file): its own digest below.
+// SWG3JS_ROWS_AFTER and imports this file): its own digest below. (Smoothness III's switches at their other setting there: the
+// rows as Smoothness II left them.)
 const ROWS_AFTER = process.env.SWG3JS_ROWS_AFTER === '1';
 const resetClimbTune = (): void => {
   resetShipped();
   if (!ROWS_AFTER) climbSmooth2Before();
+  else climbSmooth3Before();
 };
-import { resetMoveTune } from '../../../src/anim/moveTune.ts';
+import { resetMoveTune as resetMoveShipped, moveSmooth3Before } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { LEDGE_HANG, WAYK_DROP, WAYK_HOP } from '../../../src/player/ledge.ts';
 import { LYING, STAND_TALL } from '../../../src/player/bodyShape.ts';
 import { bodyAt, nearestLip, runUntil, standPiece, tap, type Stood, type Watch } from './climbCourseBody.ts';

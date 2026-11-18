@@ -65,6 +65,28 @@ export interface MoveTune {
   duckHead: 'clear' | 'before';
   /** Item 4: how far the drawn head keeps under what stands over it, metres (ours, 0.03: a hair, so a beam just over the head is passed with the head brushing nothing). */
   headSkin: number;
+  /**
+   * Climbing II, Smoothness III, item 3 (the owner: "I'm also automatically proning when I get close to intersecting geometry, so
+   * I wonder if there's also no minimum to trying to go under something"): 'opening' the duck lays the body down only where it
+   * moves toward a real opening: a roof under `proneUnder` whose underside stands at least the lying body's height and
+   * `proneSkin` over the floor, open under it for a lying body's length past where the roof begins, the lying body fitting where
+   * it lies down; and every cast of the roof probe is asked from a place clear of everything (one that starts inside something,
+   * a slab's edge, a piece standing into the floor, the ground's own seam, is no answer: said, and the body stays upright). Anything
+   * else (a wall, a step, a slab's edge, a crack lower than that) blocks as a wall does. 'today': Smoothness II's (its casts taken
+   * as they come back, a cast begun inside the ground read as an open way under).
+   */
+  proneMin: 'opening' | 'today';
+  /** Item 3: how much over the lying capsule's full height an opening's underside must stand, metres (the brief's start, 0.05: the lying body's 0.4 m and a hand's thickness). */
+  proneSkin: number;
+  /**
+   * Smoothness III, item 3b (the owner: "the animation we use for crouching + walk (alt) has the lowest head clearance of the 3
+   * animations"): 'clearance' a body the duck walks under something in the crouch's clips wears the highest-headed of the three
+   * crouched walks (`CROUCH_CLIPS`, their heads read off the rig at load) that still clears the roof by `headSkin`, the sneak
+   * walk last of all, its capsule held no taller than that clip's own head and never shrunk under the sneak walk's (under it
+   * the body lies down by item 3's rule, into an opening, else is stopped as by a wall); the pace the clip's own. 'one':
+   * Smoothness II's (the class the keys ask, the capsule shrunk to whatever the room allows down to `duckMost`).
+   */
+  duckClip: 'clearance' | 'one';
 }
 
 export const MOVE_TUNE: MoveTune = {
@@ -85,6 +107,9 @@ export const MOVE_TUNE: MoveTune = {
   riseAt: 1.0,
   duckHead: 'clear',
   headSkin: 0.03,
+  proneMin: 'opening',
+  proneSkin: 0.05,
+  duckClip: 'clearance',
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -109,6 +134,7 @@ export const MOVE_RANGES: Record<string, { min: number; max: number }> = {
   // Never under the capsule's own two radii and a hair (0.75 m).
   riseAt: { min: 0.75, max: 1.6 },
   headSkin: { min: 0, max: 0.2 },
+  proneSkin: { min: 0, max: 0.5 },
 };
 
 /** The table's choices and the words each takes. */
@@ -117,6 +143,8 @@ export const MOVE_CHOICES: Readonly<Record<string, readonly string[]>> = {
   duck: ['on', 'off'],
   duckPace: ['height', 'before'],
   duckHead: ['clear', 'before'],
+  proneMin: ['opening', 'today'],
+  duckClip: ['clearance', 'one'],
 };
 
 /** Every switch of the round at its other setting: the body's shape as `12ae8ad` shipped it. */
@@ -156,6 +184,18 @@ export const MOVE_SMOOTH2_BEFORE: Readonly<Record<string, string>> = { duckHead:
 export function moveSmooth2Before(): void {
   const t = MOVE_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(MOVE_SMOOTH2_BEFORE)) t[k] = v;
+}
+
+/**
+ * Climbing II, Smoothness III: the body's switches it adds, at their other setting (Smoothness II's body, `c57c0a5`): items 3 and
+ * 3b (`proneMin` 'today', `duckClip` 'one'). `climbSmooth3Before` (climbTune.ts) puts these back with the climbing's.
+ */
+export const MOVE_SMOOTH3_BEFORE: Readonly<Record<string, string>> = { proneMin: 'today', duckClip: 'one' };
+
+/** Smoothness III's body switches at their other setting. */
+export function moveSmooth3Before(): void {
+  const t = MOVE_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(MOVE_SMOOTH3_BEFORE)) t[k] = v;
 }
 
 /** Whether anything of the round decides the capsule (either switch on): off, the capsule is today's to the line. */

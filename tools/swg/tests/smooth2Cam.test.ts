@@ -19,8 +19,18 @@ import * as THREE from 'three';
 import { ClimbCamFollow } from '../../../src/player/climbCam.ts';
 import { ThirdPersonCamera } from '../../../src/core/camera.ts';
 import { climbCourse } from '../../../src/anim/climbCourse.ts';
-import { CLIMB_TUNE, resetClimbTune } from '../../../src/anim/climbTune.ts';
-import { resetMoveTune } from '../../../src/anim/moveTune.ts';
+import { CLIMB_TUNE, resetClimbTune as resetShipped, climbSmooth3Before } from '../../../src/anim/climbTune.ts';
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+import { resetMoveTune as resetMoveShipped, moveSmooth3Before } from '../../../src/anim/moveTune.ts';
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 import { LEDGE_HANG } from '../../../src/player/ledge.ts';
 import type { TestBody } from './grappleBody.ts';
 import { bodyAt, runUntil, shimmy, standPiece, tap } from './climbCourseBody.ts';

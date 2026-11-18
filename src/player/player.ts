@@ -3043,6 +3043,8 @@ export class Player {
     // Wave 2b: crouched and prone under the classes, the injured walk by the health's share, and the figure's scale a
     // game clip's measured stride is scaled by. Item 4: ducked to `crouchAt`, the crouch's.
     lo.crouched = this.crouching || this.duck.crouch;
+    // Smoothness III, item 3b (`move.duckClip` 'clearance'): ducked under something, the crouch whose head clears it.
+    lo.crouchCls = this.duck.crouch && !this.crouching ? this.shape.duckCls : 0;
     lo.prone = this.prone;
     lo.hpShare = this.hp / this.maxHp;
     lo.scale = this.rig ? this.rig.root.scale.y : 1;
@@ -3913,6 +3915,8 @@ export class Player {
   }
 
   private measureDeep(rig: CharacterRig): void {
+    // (Item 3b: a rig whose crouch is not read yet wears the keys' class: no head of another rig's stands for its own.)
+    if (this.shapeIn.clipHeads[2] === this.shapeIn.clipHeads[2] && this.deepRig !== rig) this.shapeIn.clipHeads.fill(Number.NaN);
     if (!rig.has(DEEP_MAIN)) return;
     this.deepRig = rig;
     const S = this.spheres;
@@ -3926,7 +3930,20 @@ export class Player {
     // (Each clip's own, for the console: an event, once a rig.)
     this.deepHeads = {};
     for (const c of deepClipsOf(rig)) if (rig.has(c)) this.deepHeads[c] = Math.round(rig.posedHighest([c], DEEP_SAMPLES, measure) * 1000) / 10;
+    // Smoothness III, item 3b (`move.duckClip` 'clearance'): each crouched walk's own head by its class, which the duck wears by
+    // its clearance (NaN for a class the rig has no clip of: the duck then wears the keys' class, as ever); and the crouch's own
+    // idle's, for the console.
+    const heads = this.shapeIn.clipHeads;
+    heads.fill(Number.NaN);
+    for (let cls = 1; cls <= 3; cls++) {
+      const c = clipOfId(CROUCH_CLIPS[cls]);
+      if (rig.has(c)) heads[cls] = rig.posedHighest([c], DEEP_SAMPLES, measure);
+    }
+    const idle = rig.stateClip('crouch');
+    this.crouchIdleHead = idle && rig.has(idle) ? rig.posedHighest([idle], DEEP_SAMPLES, measure) : Number.NaN;
   }
+  /** Item 3b, the console's: the crouch's own idle's head over the feet, metres (NaN until read). */
+  crouchIdleHead = Number.NaN;
   /** The console's: each crouch clip's own head over the feet, cm (`measureDeep`'s, per clip). */
   deepHeads: Record<string, number> = {};
 
@@ -4660,7 +4677,7 @@ export class Player {
    */
   private stepDuckPace(): void {
     if (this.prone) this.crouching = false;
-    this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, this.crouching);
+    this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, this.crouching, this.shape.duckCls);
   }
 
   /**

@@ -6,7 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
-import { moveBefore, moveSmoothBefore, moveSmooth2Before } from './moveTune.ts';
+import { moveBefore, moveSmoothBefore, moveSmooth2Before, moveSmooth3Before } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -274,8 +274,82 @@ export interface ClimbTune {
    * fitted to the way (`flightRateMin` to `flightRateMax`), the figure drawn with the clip's own travel put back so its hands
    * stay on a lip while the body is still. A let-go drop's clip is played by the owner's drops' rule (`dropRateLeast`).
    * 'before': the smoothness round's (the body carried over the whole clip).
+   *
+   * Climbing II, Smoothness III, item 1 (the owner: "the hopping timing for free hanging left/right is determining how quickly it
+   * will take to get to the landing spot, so I'm going incredibly fast through the air ... do a near-correct physics calculation
+   * that just knows what arc would be needed to complete that naturally and the correct speed, and hold the animation until
+   * contact happens"): 'arc' a hop's flight takes the time the arc gives it, never the clip's: the body placed frame by frame on a
+   * thrown body's arc under `flightGravity`, rising `arcRise` over the higher of its two ends (a drop to a lower lip falls from
+   * rest), its time the rise's and the fall's; the clip played at its own rate before the hands leave and after they touch, and
+   * its airborne stretch fitted to the flight: slowed to `flightRateMin` and then its frames just before the touch held (eased in
+   * and out over `holdEase`) for as long as the flight lasts, sped up to `flightRateMax` at most (a flight shorter than that is
+   * flown slower, never the clip hurried). Grabs and step downs as 'timed'.
    */
-  hopFlight: 'timed' | 'before';
+  hopFlight: 'arc' | 'timed' | 'before';
+  /** Smoothness III, item 1: the gravity a hop's arc is worked out under, m/s^2 (the game's own on foot, Jedi Academy's 800 units: 20.32). */
+  flightGravity: number;
+  /** Item 1: how high a hop's arc rises over the higher of its two ends, metres (ours: the brief's own example, a 3 m hop taking about the time a 0.5 m rise and fall does). */
+  arcRise: number;
+  /** Item 1: how long the clip eases into and out of a held frame while it waits for the hands' contact, seconds (ours: 0.1, about three of the clip's own frames at 30 a second). */
+  holdEase: number;
+  /**
+   * Smoothness III, item 2 (the owner: "the ledge checker doesn't check to see if my body will fit from the ledge to whatever is
+   * beneath it. I clipped through the world by accidentally hopping down to one of the test track's base cubes"): 'fit' every
+   * lip a grab, a hop, a cued hop, a drop and a step along a lip would take is tested for the body that will hang there: the
+   * ground (the terrain's heightfield, which a shape test cannot find a body wholly under) and anything still under the hang,
+   * felt for with one ray from over the lip down past the hanging feet in front of its face, and the move's way checked for the
+   * ground as well as for solids; a lip whose hang meets the ground is no target (a lip within a body's hang of the ground is
+   * stood on or dropped to, never hung from). 'none': Smoothness II's (only what a shape test finds).
+   */
+  targetRoom: 'fit' | 'none';
+  /**
+   * Smoothness III, item 4b (Smoothness II's 6b; the owner: "the animation for dropping down to a lower ledge while already on a
+   * ledge seems to be repeating the left or right ledge jump animation"): 'drop' a drop to a lower lip (the crouch's tap, a cued
+   * drop, S with Space down) plays a move of its own made of two parts of the owner's table (`DROP_PARTS`): the held kind's drop
+   * clip from its start through the hands' release and on into the fall, then the catch clip for the lower hang's kind into the
+   * hang, crossfaded over `transitionBlend`, the flight between timed by item 1; 'reverse' the hop up played backward (a hop's
+   * arc reversed in time is still a fall); 'hop': Smoothness II's (the side hop toward the side it lands).
+   */
+  dropMove: 'drop' | 'reverse' | 'hop';
+  /** Item 4b: each part's start and end, seconds into its clip (the owner's table, `DROP_PARTS`, names the clips). */
+  dropParts: {
+    bracedFrom: number;
+    bracedTo: number;
+    freeFrom: number;
+    freeTo: number;
+    catchBracedFrom: number;
+    catchBracedTo: number;
+    catchFreeFrom: number;
+    catchFreeTo: number;
+  };
+  /**
+   * Smoothness III, item 4 (the owner: "I also can't hop up/down while free hanging"): 'on' a free hang hops up to a lip above
+   * past the ladder's range within `hopUp` (W, the cue and Space; W alone within the ladder's range as ever), on a move of its
+   * own from the owner's table (`FREE_HOP_PARTS`): the braced hop up's upper body, its arms' reach and pull, over the free
+   * hang's own hanging legs (his rule for hands with no wall: "use the animation's upper body, then just have the feet hang and
+   * legs sway"), timed by item 1's arc; and drops down as a braced hang does, by item 4b's drop move. 'off': Smoothness II's (a
+   * free hang hops up to nothing past the ladder's range: "a free hang has nothing to brace on to hop up").
+   */
+  freeHops: 'on' | 'off';
+  /** Item 4: the free hop up's part of its clip, seconds (the owner's table, `FREE_HOP_PARTS`, names the clip). */
+  freeHopParts: { from: number; to: number };
+  /**
+   * Smoothness III, item 4b (Smoothness II's 5b; the owner: "ladder climbing uses the wall climbing animation which is good but it
+   * has a weird repeating hitch where it's not using the whole animation and hands don't take turns grabbing the next rung or
+   * grip"): 'cycle' a ladder's climb plays the wall clip's whole cycle laid over two rungs, one hand reaching per rung in turn,
+   * its phase driven by how far the body has climbed and never restarted per rung (held where it stands between two rungs while
+   * the key is held), the clip's rate held within `ladderStretch` of its own (the body's pace from rung to rung follows from
+   * it, so a near or far rung stretches the reach rather than snapping the clip); each reaching hand eased from where the clip
+   * carries it onto its rung over the reach and held there while the other reaches. 'rung': Smoothness II's (the clip from its
+   * start at every rung).
+   */
+  ladderCycle: 'cycle' | 'rung';
+  /** Item 4b: how far a ladder's clip may be played off its own rate, a share either way (the brief's start, 0.2: ±20%). */
+  ladderStretch: number;
+  /** Item 4b: how far a free ladder's reaching hand is led out round the rungs' front at its reach's middle, metres (ours: 0.2). */
+  ladderArc: number;
+  /** Item 4b: how much of the way a reaching hand is led rather than carried by the clip at its reach's middle, a share (ours: 0.5). */
+  ladderLead: number;
   /** Item 1: the slowest and quickest a clip's airborne stretch is played, of its own rate (ours: 0.7 and 1.5: slower is slow motion, quicker a snap). */
   flightRateMin: number;
   flightRateMax: number;
@@ -441,10 +515,65 @@ export const CLIMB_SMOOTH2_BEFORE: Readonly<Record<string, string>> = {
 
 /** Smoothness II's switches at their other setting (the smoothness round's climbing, `dd88180`), the body's (`moveTune.ts`) with them. */
 export function climbSmooth2Before(): void {
+  // (`dd88180` had none of Smoothness III's either: put back first, so Smoothness II's own words below win where a switch is shared.)
+  climbSmooth3Before();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_SMOOTH2_BEFORE)) t[k] = v;
   moveSmooth2Before();
 }
+
+/**
+ * Climbing II, Smoothness III: every switch it adds to the climbing, at its other setting (the climbing as Smoothness II shipped
+ * it, `c57c0a5`). A later maker of the round adds its own here (the body's beside them in `moveTune.ts`), so one call puts the
+ * whole round back. Item 0 (no drop after topping out) is a fault mended with no switch.
+ */
+export const CLIMB_SMOOTH3_BEFORE: Record<string, string> = {
+  hopFlight: 'timed',
+  targetRoom: 'none',
+  dropMove: 'hop',
+  // Maker B's: items 4 and 4b (the free hops; the ladder's whole cycle).
+  freeHops: 'off',
+  ladderCycle: 'rung',
+};
+
+/** A later maker's own puts back (the body's switches, `moveTune.ts`), run after this round's climbing ones. */
+export const CLIMB_SMOOTH3_ALSO: (() => void)[] = [];
+// Maker B's: items 3 and 3b on the body (`move.proneMin`, `move.duckClip`).
+CLIMB_SMOOTH3_ALSO.push(moveSmooth3Before);
+
+/** Smoothness III's switches at their other setting (Smoothness II's climbing, `c57c0a5`). */
+export function climbSmooth3Before(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH3_BEFORE)) t[k] = v;
+  for (const f of CLIMB_SMOOTH3_ALSO) f();
+}
+
+/**
+ * Item 4b: the owner's table of the parts a drop to a lower lip is made of (`climb.dropMove` 'drop'), by the held hang's kind
+ * (the release) and the lower hang's kind (the catch). Each part's seconds are sliders (`climb.dropParts`); its clip a name of
+ * the ledge clips the game asks the pack for (src/anim/ledgeClips.ts), so naming another part of another clip is one line here.
+ * The release's hands leave at the clip's own moment (src/anim/handTimes.ts: the owner's 0.35 s for `braced_hang_drop`), the
+ * catch's touch at its own (his 0.28 s for `jumping_to_hanging`); a free hang's catch is the free grab's (`jump_to_hang`, his
+ * 0.26 s, "transitions into free hanging"), since the braced catch ends braced.
+ */
+export const DROP_PARTS: Readonly<{ braced: string; free: string; catchBraced: string; catchFree: string }> = {
+  braced: 'braced_hang_drop',
+  free: 'freehang_drop',
+  catchBraced: 'jumping_to_hanging',
+  catchFree: 'jump_to_hang',
+};
+
+/**
+ * Smoothness III, item 4 (`climb.freeHops` 'on'): the owner's table of the free hop up, as `DROP_PARTS` is the drop's: the clip
+ * whose upper body plays (its seconds the sliders `climb.freeHopParts`), played over the legs of the free hang's own idle (a
+ * loop: its legs hang and sway as they do there). Its hands leave and touch at the clip's own moments (src/anim/handTimes.ts:
+ * the owner's 0.46 s and 0.78 s for `braced_hang_hop_up`), the flight between them item 1's arc. Naming another clip's arms is
+ * one line here.
+ */
+export const FREE_HOP_PARTS: Readonly<{ upper: string; legs: string }> = {
+  upper: 'braced_hang_hop_up',
+  legs: 'free_hang_hanging_idle',
+};
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
 export interface BraceTune {
@@ -544,7 +673,23 @@ export const CLIMB_TUNE: ClimbTune = {
   dropMost: 2.5,
   dropHold: 0.25,
   diagonals: 'below',
-  hopFlight: 'timed',
+  hopFlight: 'arc',
+  flightGravity: 20.32,
+  arcRise: 0.5,
+  holdEase: 0.1,
+  targetRoom: 'fit',
+  dropMove: 'drop',
+  // The owner's drops' parts (item 4b): the braced release from its start on a quarter second past its hands' release (his 0.35
+  // s), well before its feet would meet its own ground (his 0.81); the free release likewise past its measured release (0.233)
+  // and short of its feet's touch (0.533); each catch from its own start ("starts by falling/approaching the ledge") to its end.
+  dropParts: { bracedFrom: 0, bracedTo: 0.6, freeFrom: 0, freeTo: 0.45, catchBracedFrom: 0, catchBracedTo: 1.5, catchFreeFrom: 0, catchFreeTo: 2 },
+  freeHops: 'on',
+  // The free hop up's part (item 4): the braced hop up whole, its arms' coil, reach, pull and catch.
+  freeHopParts: { from: 0, to: 1.667 },
+  ladderCycle: 'cycle',
+  ladderStretch: 0.2,
+  ladderArc: 0.2,
+  ladderLead: 0.5,
   flightRateMin: 0.7,
   flightRateMax: 1.5,
   flightLift: 0.1,
@@ -651,6 +796,22 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   gripSeek: { min: 0, max: 1.2 },
   pushBack: { min: 0, max: 3 },
   pushUp: { min: 0, max: 3 },
+  flightGravity: { min: 1, max: 60 },
+  arcRise: { min: 0.05, max: 3 },
+  holdEase: { min: 0, max: 0.5 },
+  'dropParts.bracedFrom': { min: 0, max: 1.667 },
+  'dropParts.bracedTo': { min: 0, max: 1.667 },
+  'dropParts.freeFrom': { min: 0, max: 1.333 },
+  'dropParts.freeTo': { min: 0, max: 1.333 },
+  'dropParts.catchBracedFrom': { min: 0, max: 1.5 },
+  'dropParts.catchBracedTo': { min: 0, max: 1.5 },
+  'dropParts.catchFreeFrom': { min: 0, max: 2 },
+  'dropParts.catchFreeTo': { min: 0, max: 2 },
+  'freeHopParts.from': { min: 0, max: 1.667 },
+  'freeHopParts.to': { min: 0, max: 1.667 },
+  ladderStretch: { min: 0, max: 1 },
+  ladderArc: { min: 0, max: 0.6 },
+  ladderLead: { min: 0, max: 1 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -677,7 +838,11 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   shelves: ['grab', 'before'],
   hangKeys: ['cue', 'before'],
   diagonals: ['below', 'before'],
-  hopFlight: ['timed', 'before'],
+  hopFlight: ['arc', 'timed', 'before'],
+  targetRoom: ['fit', 'none'],
+  dropMove: ['drop', 'reverse', 'hop'],
+  freeHops: ['on', 'off'],
+  ladderCycle: ['cycle', 'rung'],
   transitions: ['blend', 'before'],
   camera: ['eased', 'before'],
   slopeHands: ['each', 'before'],

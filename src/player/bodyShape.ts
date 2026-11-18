@@ -93,6 +93,14 @@ const ZONE_UP = 0.05;
 const ROOF_SKIN = 0.005;
 const ROOF_FLOOR = 0.1;
 const ROOF_GAP = 0.01;
+/**
+ * Smoothness III, item 3: how much shorter the opening a lying body's rise asks for is than the one the lie-down asked (mechanics:
+ * over the controller's own 0.04 m that a lying body's feet may stand nearer the floor than an upright one's, so the two never
+ * part over one opening).
+ */
+const RISE_SLACK = 0.05;
+/** Item 3: how far an upright body's feet stand over the floor (the character controller's own offset). Mechanics. */
+const FEET_OVER = 0.04;
 
 /** A collider nothing is written to (the tests' turn with numbers). */
 const NO_COLLIDER = { setHalfHeight() {}, setRadius() {}, setRotationWrtParent() {}, setTranslationWrtParent() {}, setTranslation() {}, setRotation() {} };
@@ -171,7 +179,14 @@ export class ShapeIn {
    * its bob; NaN until a figure has worn it (the duck then lays the body down only by `proneUnder`).
    */
   deepHead = 0.5;
+  /**
+   * Smoothness III, item 3b (`move.duckClip` 'clearance'): each crouched walk's own head over the feet by its class (1 Alt's sneak
+   * walk, 2 the plain crouched walk, 3 Shift's game crouch: `CROUCH_CLIPS`), read off the rig at load (`Player.measureDeep`,
+   * `CharacterRig.posedHighest`); NaN where none is known (the duck then wears the class the keys ask, as ever).
+   */
+  readonly clipHeads = new Float64Array(4);
   constructor() {
+    this.clipHeads.fill(Number.NaN);
     this.headOver = Number.NaN;
     this.deepHead = Number.NaN;
     this.nx = 0;
@@ -299,6 +314,38 @@ export class BodyShape {
   lieAhead = false;
   /** The console's: what the last roof probe found, in words. */
   roofSaid = '';
+  /**
+   * Smoothness III, item 3b (`move.duckClip` 'clearance'): the crouched walk's class the duck wears this frame (1 to 3, the
+   * classes' own numbering), or nought for the class the keys ask; and the lowest underside the duck's columns met over the feet
+   * and ahead this frame (Infinity for none).
+   */
+  duckCls = 0;
+  roofLow = 0.5;
+  /** Item 3b: the lowest crouched walk's head this frame (the sneak walk's), and the least the duck's capsule shrinks to (fields: see `tallTo`). */
+  private leastHead = 0.5;
+  private mostNow = 0.5;
+
+  /**
+   * Item 3b (`move.duckClip` 'clearance'): where the stoop would carry its capsule under the highest crouched walk's own head
+   * (the room's `want`), the duck wears a crouch instead: the highest-headed of the plain crouched walk and the game's crouch that
+   * clears the lowest roof over and ahead of the body (`roofLow`) by `headSkin`, else the sneak walk, last of all (which then
+   * meets a roof it does not clear as a wall, or the body lies down under it into an opening: `lieTop`). Its capsule is that
+   * clip's own head, held under the room over the feet less the duck's own clearance. Fields only.
+   */
+  private wearFor(f: ShapeIn): void {
+    const H = f.clipHeads;
+    const first = H[2] >= H[3] ? 2 : 3;
+    const second = first === 2 ? 3 : 2;
+    if (!(this.want < H[first]) || !(this.roofLow < Infinity)) return;
+    const R = this.roofLow;
+    const sk = MOVE_TUNE.headSkin;
+    let cls = 1;
+    if (H[first] + sk <= R) cls = first;
+    else if (H[second] + sk <= R) cls = second;
+    this.duckCls = cls;
+    this.wantNow = H[cls];
+    this.ownNow = this.room - DUCK_CLEAR;
+  }
   /** The roof probe's way along (fields, so no number crosses a call), its two balls and the rise's capsule, each made again only when its size moves (an event). */
   private wx = 0.5;
   private wz = 0.5;
@@ -358,6 +405,8 @@ export class BodyShape {
     this.riseOf = -1;
     this.headCapOf = -1;
     this.metNow = 0;
+    this.openOf = -1;
+    this.roofLow = Infinity;
   }
 
   /** Whether the capsule is ducked under something (an upright one shorter than standing that the key did not ask for). */
@@ -758,6 +807,16 @@ export class BodyShape {
       const deep = Math.ceil((f.deepHead + MOVE_TUNE.headSkin) / HEAD_STEP) * HEAD_STEP;
       this.lieTop = MOVE_TUNE.duckPace === 'height' ? Math.min(deep, MOVE_TUNE.crouchAt + MOVE_TUNE.crouchBand + this.clr) : deep;
     }
+    // Smoothness III, item 3b (`move.duckClip` 'clearance', the crouched walks' heads known): the body lies down only under the
+    // lowest of them (the sneak walk's) and `headSkin`; over it the duck wears the crouch that clears (`wearFor`).
+    this.duckCls = 0;
+    this.roofLow = Infinity;
+    const H = f.clipHeads;
+    const clear3 = MOVE_TUNE.duckClip === 'clearance' && H[1] === H[1] && H[2] === H[2] && H[3] === H[3];
+    if (clear3) {
+      this.leastHead = H[1] < H[2] ? (H[1] < H[3] ? H[1] : H[3]) : H[2] < H[3] ? H[2] : H[3];
+      this.lieTop = Math.ceil((this.leastHead + MOVE_TUNE.headSkin) / HEAD_STEP) * HEAD_STEP;
+    }
     const crouchKey = f.crouch;
     const rule = MOVE_TUNE.duck === 'on';
     const duck = rule && f.feet;
@@ -771,10 +830,15 @@ export class BodyShape {
     if (duck) {
       this.roomAlong(world, f);
       this.ownNow = this.room - this.clr;
-      const most = MOVE_TUNE.duckMost;
+      this.mostNow = MOVE_TUNE.duckMost;
       if (this.want < this.wantNow) this.wantNow = this.want;
-      if (this.wantNow < most) this.wantNow = most;
-      if (this.ownNow < most) this.ownNow = most;
+      // Item 3b: under what the stoop cannot pass, the crouch that clears, its capsule its own head, never under the sneak's.
+      if (clear3 && !crouchKey) {
+        this.wearFor(f);
+        if (this.leastHead > this.mostNow) this.mostNow = this.leastHead;
+      }
+      if (this.wantNow < this.mostNow) this.wantNow = this.mostNow;
+      if (this.ownNow < this.mostNow) this.ownNow = this.mostNow;
     } else {
       this.room = Infinity;
       this.want = this.wantNow;
@@ -1027,6 +1091,8 @@ export class BodyShape {
       // Over the standing height and its clearance: no roof the duck answers (the cast reaches its constant's most).
       if (under > high) continue;
       if (i === 0) this.room = under;
+      // Smoothness III, item 3b: the lowest underside met over the feet and ahead (the crouch worn must clear it).
+      if (under < this.roofLow) this.roofLow = under;
       // What a column ahead allows now: its room, less the clearance, plus what the shrink at `duckRate` takes off in the
       // time the body needs to bring its capsule over it. A column within `DUCK_BIND` overlaps the capsule's own space and
       // binds at once: a body held up at a roof's edge (the controller keeps its offset off the edge, so the room over its
@@ -1077,6 +1143,17 @@ export class BodyShape {
     at.x = f.x;
     at.y = f.y + top - r;
     at.z = f.z;
+    // Smoothness III, item 3 (`move.proneMin` 'opening'): a cast begun inside something is no answer (a ball inside the ground's
+    // own seam, a slab's edge or a piece standing into the floor is cast on as if it were not there): said, and the body stands.
+    const opening = T.proneMin === 'opening';
+    if (opening) {
+      this.asks++;
+      if (world.intersectionWithShape(at, this.still, this.roofBall, STILL_FLAGS, f.filter) !== null) {
+        this.roofSaid = 'the roof probe began inside something: no answer, standing';
+        this.inside++;
+        return false;
+      }
+    }
     this.asks++;
     const a = world.castShape(at, this.still, dir, this.roofBall, 0, AHEAD_MOST, false, STILL_FLAGS, f.filter);
     if (a === null || a.time_of_impact > T.proneAhead + this.roofLead) {
@@ -1084,6 +1161,7 @@ export class BodyShape {
       return false;
     }
     this.metNow = a.time_of_impact + this.roofR;
+    if (opening) return this.openingAhead(world, f);
     const lr = T.lyingRadius;
     if (this.lowBall === null || this.lowOf !== lr) {
       this.lowBall = this.makers.ball(lr);
@@ -1101,6 +1179,58 @@ export class BodyShape {
     this.roofSaid = 'a roof under proneUnder ahead';
     return true;
   }
+
+  /**
+   * Smoothness III, item 3 (`move.proneMin` 'opening'), after the upper ball met something under `proneUnder` within reach (at
+   * `metNow`): whether it is a real opening. A ball as tall as the lying capsule and `proneSkin` (its bottom at the feet, where the
+   * lying capsule's bottom is held, the controller's own offset over the floor; lifted by the floor's rise under its rim on a
+   * slope), asked first whether it starts clear of everything (one that
+   * starts inside something is no answer: said, and the body stands), cast along the travel: it must go on a lying body's length
+   * past where the roof begins, so the roof's underside stands at least that tall over the floor and is open under it all that
+   * way (a wall, a step, a slab's edge, a crack lower than that meet it, and block as a wall does). Fields only.
+   */
+  private openingAhead(world: ShapeWorld, f: ShapeIn): boolean {
+    const T = MOVE_TUNE;
+    // (Asked by a lying body whether it may get up, `riseClear`: a ball `RISE_SLACK` shorter, so an opening the lie-down took is
+    // never refused by the rise a frame on: the controller holds a lying body's feet up to its own offset nearer the floor than an
+    // upright one's, and asked alike the two answered one opening both ways and the body lay down and got up every frame.)
+    // (The lying body's height and `proneSkin` over where it would lie: its feet, which the controller holds its own offset over
+    // the floor, so 0.49 m over the floor at the starts. Never from the floor itself: the controller keeps its offset over the
+    // lying capsule as well as under it, so a lying body needs 0.48 m (measured: it goes in under 0.48 m at 30 and 144 frames a
+    // second and stalls under 0.479 at 144), and a ball asking 0.45 over the floor laid the body down in front of 0.46 to 0.479 m
+    // gaps it then could not go into. The skin over the controller's own 4 cm is the owner's margin over that edge.)
+    let rp = (2 * T.lyingRadius + T.proneSkin - (this.kind === LYING ? RISE_SLACK : 0)) / 2;
+    if (rp < 0.05) rp = 0.05;
+    if (this.openBall === null || this.openOf !== rp) {
+      this.openBall = this.makers.ball(rp);
+      this.openOf = rp;
+    }
+    const at = this.at;
+    at.x = f.x;
+    // (Its bottom at the feet, which stand the controller's offset over the floor upright; a lying body's may lie on it, so its
+    // ball is lifted that much off it, or it slides along the floor meeting every seam as a wall.)
+    at.y = f.y + (this.kind === LYING ? FEET_OVER : 0) + rp + (f.rise * rp) / BODY_CAPSULE.r;
+    at.z = f.z;
+    this.asks++;
+    if (world.intersectionWithShape(at, this.still, this.openBall, STILL_FLAGS, f.filter) !== null) {
+      this.roofSaid = 'the opening probe began inside something: no answer, standing';
+      this.inside++;
+      return false;
+    }
+    this.asks++;
+    const b = world.castShape(at, this.still, this.way, this.openBall, 0, AHEAD_MOST, true, STILL_FLAGS, f.filter);
+    if (b !== null && b.time_of_impact + rp < this.metNow + LYING_LENGTH * (f.scale > 0.2 ? f.scale : 1)) {
+      this.roofSaid = 'a wall, a step or a gap lower than proneMin ahead, not an opening';
+      return false;
+    }
+    this.roofSaid = 'an opening under proneUnder ahead';
+    return true;
+  }
+  /** Item 3: the opening probe's ball, made again only when its size moves (an event); the floor's dot, and the floor found. */
+  private openBall: RAPIER.Shape | null = null;
+  private openOf = 0.5;
+  /** Item 3, the console's and the tests': how many roof probes began inside something and were no answer. */
+  inside = 0;
 
   /**
    * Item 4: whether a body the duck laid down may get up again into a crouch (`riseAt` tall) at the feet in `f`: an upright

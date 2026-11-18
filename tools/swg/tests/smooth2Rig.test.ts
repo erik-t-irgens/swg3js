@@ -36,8 +36,18 @@ const { MixamoPack } = await import('../../../src/anim/mixamoPack.ts');
 const { LEDGE_IDS, LEDGE_ROLES, ledgeClipName } = await import('../../../src/anim/ledgeClips.ts');
 const { LEDGE_HANG, LEDGE_MOVE } = await import('../../../src/player/ledge.ts');
 const { LimbPlace } = await import('../../../src/player/limbPlace.ts');
-const { CLIMB_TUNE, resetClimbTune, tuneClimb } = await import('../../../src/anim/climbTune.ts');
-const { resetMoveTune } = await import('../../../src/anim/moveTune.ts');
+const { CLIMB_TUNE, resetClimbTune: resetShipped, climbSmooth3Before, tuneClimb } = await import('../../../src/anim/climbTune.ts');
+// (Smoothness III's switches at their other setting too: this suite holds Smoothness II's climbing.)
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmooth3Before();
+};
+const { resetMoveTune: resetMoveShipped, moveSmooth3Before } = await import('../../../src/anim/moveTune.ts');
+// (Smoothness III's body switches at their other setting too: this suite holds the body before it.)
+const resetMoveTune = (): void => {
+  resetMoveShipped();
+  moveSmooth3Before();
+};
 const { handMoment } = await import('../../../src/anim/handTimes.ts');
 const { climbCourse } = await import('../../../src/anim/climbCourse.ts');
 const { figureScaleOf } = await import('../../../src/player/peerHang.ts');

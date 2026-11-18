@@ -613,7 +613,7 @@ export class TestBody implements GrappleBody {
     // Item 4 (the player's `stepDuckPace`): a body the duck laid down crouches no more; the pace and the clips from the height.
     if (paceOn()) {
       if (this.prone) crouching = false;
-      this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, crouching);
+      this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, crouching, this.shape.duckCls);
     } else if (this.duck.active) this.duck.step(STAND_TALL, false, false);
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * (crouching && this.grounded ? 0.5 : 1);
     // Item 4, as the player's without the speed classes (this body has none).

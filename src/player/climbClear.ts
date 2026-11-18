@@ -71,6 +71,11 @@ export function clearClimb(S: BodySpheres, lp: LimbPlace, rig: LimbRig & SphereR
     if (!(AFTER[0] > BEFORE[0] + REACH_SLACK) && !(AFTER[1] > BEFORE[1] + REACH_SLACK)) break;
     S.scalePush(i < 4 ? 0.5 : 0);
   }
+  // Smoothness III, item 0: a climb up crossfading into the crouch it ends in hands its figure onto its feet, which are never
+  // pushed out of the floor they stand on (the feet's spheres reach a tenth of a metre under their soles, so a figure standing
+  // on the top it climbed onto was pushed up as much again and dropped at once at the hand-back): the push goes out by the
+  // crossfade's own share, as the climb's line-up does. Untouched at every other time (nothing moved at a share of 1).
+  if (lp.pushKeep < 1) S.scalePush(lp.pushKeep > 0 ? lp.pushKeep : 0);
   for (let side = 0; side < 2; side++) {
     if (lp.handW[side] > 0.01) continue;
     if (!S.handOut(world, side === 0 ? SPH_L_HAND : SPH_R_HAND, STILL_FLAGS, filter)) continue;
@@ -90,7 +95,8 @@ export function settleClimb(S: BodySpheres, lp: LimbPlace, rig: LimbRig & Sphere
   rig.root.updateMatrixWorld(true);
   // Only while no hand is placed (a hop's flight, a let-go's fall): pushed after the solves, a placed hand would leave its lip.
   if (PLACED[0] > 0.01 || PLACED[1] > 0.01) return;
-  S.settle(world, climbMask(lp.wallW), STILL_FLAGS, filter, CLIMB_TUNE.clearMost);
+  // (Item 0: the settle's reach goes out with the push's, or it would lay back at once what the crossfade let go.)
+  S.settle(world, climbMask(lp.wallW), STILL_FLAGS, filter, lp.pushKeep < 1 ? CLIMB_TUNE.clearMost * (lp.pushKeep > 0 ? lp.pushKeep : 0) : CLIMB_TUNE.clearMost);
 }
 
 /** The climb's measure now: every sphere but a hand placed by the climb itself and the feet planted (metres; `worstAt` names it). */
