@@ -244,6 +244,33 @@ export const CLIMB_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Climbing II: bars, the swing',
+    note: 'off: a bar is whatever the ledges make of a thin box (the course\'s bars caught as a free lip). on: a still thing long, level and thin, with room under it to hang, is a bar and never a lip; E in reach grabs it (from the ground under it, a jump, or a fall past it; a running jump plays the swing clip\'s reach), and the body hangs from its hands as a pendulum on the physics\' own steps, W and S pushing it on at its own phase as on a swing, A and D moving the hands along it; the pose is run_and_swing\'s swing played by the pendulum\'s own angle.',
+    dials: [
+      choice('bars', 'Bars', 'on: grabbed with E and swung on; off: as before, a thin box is a lip.'),
+      dial('barThin', 'A bar is thinner than', 0.01, 'm', 'The brief\'s 0.12: a hand round it (the course\'s bars are 0.07, its free beams 0.2 by 0.3 and stay lips).'),
+      dial('barLength', 'And at least as long as', 0.05, 'm', 'The brief\'s 0.8: room for both hands and a shift along it.'),
+      dial('swingGravity', 'The swing\'s gravity', 0.1, 'm/s²', 'Ours: the game\'s own on foot, 20.32 (Jedi Academy\'s 800 units), as a hop\'s arc is.'),
+      dial('swingPump', 'W or S pushes the swing on by', 0.1, 'rad/s²', 'Ours: 4, W alone pumping a still hang to the largest swing in about four swings against the damping.'),
+      dial('swingDamp', 'The swing dies away by', 0.01, 'a second', 'Ours: 0.35, a swing let alone halving in about four seconds.'),
+      dial('swingMost', 'The largest swing the keys pump to', 1, 'degrees', 'Ours: 70 either side of straight down, short of the clip\'s own front (84).'),
+      dial('swingCarry', 'Of the body\'s speed at the grab, carried into the swing', 0.05, '', 'Ours: 1, all of it, held to the largest swing.'),
+      dial('barShimmy', 'A and D move the hands along it at', 0.05, 'm/s', 'Ours: 0.6, a slow hand over hand.'),
+      dial('barGrab', 'A standing or falling grab carries the body onto it over', 0.01, 's', 'Ours: 0.25; a running jump\'s is the clip\'s own reach, 0.13.'),
+    ],
+  },
+  {
+    title: 'Climbing II: bars, the flight',
+    note: 'plain: Space hands the body the swing\'s own velocity and the falling clips, nothing caught. fly: Space flies on the swing\'s own velocity and the boost, on the physics\' own steps, in run_and_swing\'s flight; a bar within the band ahead of the hands along the flight is caught into the clip\'s reach, the flight\'s speed carried into the new swing; else the clip\'s landing where the feet meet ground, or the falling clips. The crouch key drops straight down; a hard blow knocks the body off.',
+    dials: [
+      choice('barFlight', 'The flight off a bar', 'fly: the flight, the catch and the landing; plain: the swing\'s velocity handed to the movement, as maker A had it.'),
+      dial('barBoost', 'Space adds along the swing\'s own way', 0.1, 'm/s', 'Ours: 1, a let-go on the forward swing reaching a bar 2 or 3 m on; 2.5 reaches 4 m and 4 reaches 5.'),
+      dial('catchReach', 'A bar is caught this far ahead of the hands', 0.05, 'm', 'Ours: 0.6, about what the flight covers in the clip\'s own 0.13 s reach.'),
+      dial('catchSlack', 'And within this above, below or beside them', 0.05, 'm', 'Ours: 0.35, a hand\'s span and a little, as the hops\' band forgives.'),
+      dial('barKnock', 'A blow of at least this knocks the body off', 1, 'health', 'Ours: 25, a quarter of a whole bar (the ledges have no such rule).'),
+    ],
+  },
+  {
     title: 'The hands bracing',
     note: 'before: the arms as they were (nothing is felt for). on: moving into a wall the hand on that side rests on it (head on, both), in a passage narrower than the tight share both touch its sides, among people the hand on their side rests on them, and drifting in space near a surface both hands reach to it and step along it.',
     dials: [

@@ -61,7 +61,15 @@ for (const part of ['ladder', 'free', 'body', 'hang']) {
   ok(now.every((a) => a.meas.clean) && before.every((a) => a.meas.clean), `${part}: every process measured clean (collections inside ${now.map((a) => a.dirty).join(', ')})`);
   if (part === 'ladder') {
     ok(now.every((a) => a.hanging && a.made === 8 && a.marks === 1) && before.every((a) => a.marks === 0), `ladder: in all ${PROCESSES} processes the ladder is climbed up and down on its cycle (and on the rung's before)`);
-    ok(worst <= was * 1.05, `ladder: the cycle's frames make no more than the rung's (worst ${worst.toFixed(0)} bytes a frame against ${was.toFixed(0)}: the hang's every-frame look for the next rung, the engine's)`);
+    // (The phase 3 fix round's: these frames are the engine's wrappers, near thirteen kilobytes a frame, and in about one process
+    // in a hundred, at 955fb04 as since, the cycle's frames come out some 6% over the rest, a compile of their own (measured: 1 of
+    // 224 processes over 13,300 bytes at 955fb04, 13,644 the most, against a median of 12,897). The worst of twelve against the worst
+    // of four within a twentieth failed one run in ten or so; so the typical frame is held to the rung's within a twentieth, the
+    // median against the median, and every process within a tenth of the rung's worst.)
+    const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[xs.length >> 1];
+    const mid = median(now.map((a) => per(a.meas)));
+    const wasMid = median(before.map((a) => per(a.meas)));
+    ok(mid <= wasMid * 1.05 && worst <= was * 1.1, `ladder: the cycle's frames make no more than the rung's (the median ${mid.toFixed(0)} bytes a frame against ${wasMid.toFixed(0)}, within a twentieth; the worst ${worst.toFixed(0)} against ${was.toFixed(0)}, within a tenth: the hang's every-frame look for the next rung, the engine's)`);
   } else if (part === 'free') {
     ok(now.every((a) => a.hanging && a.made >= 28 && a.marks >= 14), `free: in all ${PROCESSES} processes a free hang hops up on its own move and drops down again (moves ${now.map((a) => a.made).join(', ')}; free hops ${now.map((a) => a.marks).join(', ')})`);
     ok(worst <= was, `free: a free hop's and drop's frames make no more than a braced hop's off a wall (worst ${worst.toFixed(0)} bytes a frame against ${was.toFixed(0)}: the move's own engine casts)`);

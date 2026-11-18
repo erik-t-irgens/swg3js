@@ -38,11 +38,16 @@ import { LEDGE_CLIMB_CUT, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_PUSH_OFF, LEDGE_RES
 import { JKA, UNIT } from './jkaMove.ts';
 import { WALL_CLIPS, WALL_FACTS, clipWall } from '../anim/wallClips.ts';
 import { handMoment } from '../anim/handTimes.ts';
+import { BarAxis, BarRoomAsk, barAxisOf, barGripNear, roomUnderBar, type BarCollider, type BarRoomWorld } from './barShape.ts';
+
+/** Climbing II, phase 3: how many bars one ray goes on past, and how far past each it starts again (a mechanic: a bar's thickness and a little). */
+const BAR_PASSES = 3;
+const BAR_PAST = 0.15;
 
 /** The little of a physics world the ledges ask (rapier's `World`). */
 export interface LedgeWorld {
   castRayAndGetNormal(ray: RAPIER.Ray, maxToi: number, solid: boolean, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.RayColliderIntersection | null;
-  intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: RAPIER.Shape, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.Collider | null;
+  intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: RAPIER.Shape, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number, filterExcludeCollider?: RAPIER.Collider): RAPIER.Collider | null;
 }
 
 /** The engine's ray and the two capsules the room checks ask with, handed in once (so this file loads under node with no engine of its own). */
@@ -907,6 +912,15 @@ export class LedgeHang {
    * its way out (the smoothness round's shelf walk, `probeShelf`, through a top it has passed).
    */
   private qsolid = true;
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on'): the figure's scale the last entry was handed (what a bar's room under it is asked
+   * for), how far along the ray its hit on a bar-shaped collider stands, and the kept bar and ask `barHit` reads into.
+   */
+  private barK = 0.5;
+  private bpast = 0.5;
+  private qpast = 0.5;
+  private readonly barAx = new BarAxis();
+  private readonly barAsk = new BarRoomAsk();
   /** The shelf walk takes a top over the height it asks about before any under it (the smoothness round's look behind, which W asks: up a chimney). */
   private shelfUp = false;
   /** The hang place worked out last (`placeFor`). */
@@ -1101,6 +1115,9 @@ export class LedgeHang {
     this.fadeT = 1;
     this.fadeDur = 0;
     this.s = 1;
+    this.barK = 1;
+    this.bpast = 0;
+    this.qpast = 0;
   }
 
   /** The figure is turned about its front (a sloping lip's tilt, or a side's cue leaning it: the smoothness round's). */
@@ -1192,14 +1209,18 @@ export class LedgeHang {
     ray.dir.y = this.qdy;
     ray.dir.z = this.qdz;
     this.casts++;
-    const h = world.castRayAndGetNormal(ray, this.qlen, this.qsolid, STILL_FLAGS, this.qflt);
+    let h = world.castRayAndGetNormal(ray, this.qlen, this.qsolid, STILL_FLAGS, this.qflt);
+    // Climbing II, phase 3 (`climb.bars` 'on'): a bar is never a lip, so a ray that meets one goes on past it (`passBars`).
+    // Under 'off' not a line of it runs.
+    this.qpast = 0;
+    if (h !== null && CLIMB_TUNE.bars === 'on') h = this.passBars(world, h, ray);
     const o = this.hit;
     if (!h) {
       o.hit = false;
       return false;
     }
     o.hit = true;
-    o.toi = h.timeOfImpact;
+    o.toi = this.qpast + h.timeOfImpact;
     o.x = this.qx + this.qdx * o.toi;
     o.y = this.qy + this.qdy * o.toi;
     o.z = this.qz + this.qdz * o.toi;
@@ -1207,6 +1228,56 @@ export class LedgeHang {
     o.ny = h.normal.y;
     o.nz = h.normal.z;
     return true;
+  }
+
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on'): a ray's hit `first` that is a bar (`barHit`) gone on past, a few times at most, to
+   * whatever stands behind; the hit that stops it, or null, with how far along the ray it was cast from kept in `qpast`. Kept out
+   * of `cast` itself, which every probe of the ledges calls, so `cast` stays about the small function it was before the bars.
+   */
+  private passBars(world: LedgeWorld, first: RAPIER.RayColliderIntersection, ray: RAPIER.Ray): RAPIER.RayColliderIntersection | null {
+    let h: RAPIER.RayColliderIntersection | null = first;
+    let past = 0;
+    let k = 0;
+    while (h !== null) {
+      this.bpast = past + h.timeOfImpact;
+      if (!this.barHit(world, h.collider as unknown as BarCollider)) break;
+      past += h.timeOfImpact + BAR_PAST;
+      if (++k > BAR_PASSES || past >= this.qlen) {
+        h = null;
+        break;
+      }
+      ray.origin.x = this.qx + this.qdx * past;
+      ray.origin.y = this.qy + this.qdy * past;
+      ray.origin.z = this.qz + this.qdz * past;
+      this.casts++;
+      h = world.castRayAndGetNormal(ray, this.qlen - past, this.qsolid, STILL_FLAGS, this.qflt);
+    }
+    this.qpast = past;
+    return h;
+  }
+
+  /**
+   * Climbing II, phase 3: whether what the ray met `bpast` along it is a bar the ledges pass (src/player/barShape.ts): bar-shaped,
+   * long enough for both hands, and with room under it for a hanging body at the grip nearest the point met (`roomUnderBar`, the
+   * grab's own test, one shape test). A bar-shaped collider with no room under it there (a rail along a wall's top, a rod at chest
+   * height over the ground) is no bar: the ray stops at it, and the ledges make of it what they make of it under 'off'.
+   */
+  private barHit(world: LedgeWorld, c: BarCollider): boolean {
+    const B = this.barAx;
+    if (!barAxisOf(c, B)) return false;
+    const A = this.barAsk;
+    A.scale = this.barK;
+    A.px = this.qx + this.qdx * this.bpast;
+    A.py = this.qy + this.qdy * this.bpast;
+    A.pz = this.qz + this.qdz * this.bpast;
+    if (!barGripNear(B, A)) return false;
+    let cap = this.shapeStand;
+    if (!cap) cap = this.shapeStand = this.makers.capsule(LEDGE_CAPSULE.stand, LEDGE_CAPSULE.r);
+    A.flags = STILL_FLAGS;
+    A.filter = this.qflt;
+    this.casts++;
+    return roomUnderBar(world as unknown as BarRoomWorld, B, A, cap);
   }
 
   /** Whether a capsule (crouched or standing) with its feet at (q) is clear of what stands still. */
@@ -2525,6 +2596,7 @@ export class LedgeHang {
    * is held from here (`holding`), its velocity is put down, and a one-off is asked for (`startClip`). False otherwise.
    */
   sense(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     // `climb.grabSweep`: where the feet stood at the last look (nothing while something holds the body), for the frame's rise or fall.
     const y0 = this.seenY;
@@ -2612,6 +2684,7 @@ export class LedgeHang {
    * the grab's own look the way the keys push, else the body travels, else it faces, and nothing begun. A few rays.
    */
   canGrab(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     if (T.ledges !== 'on' || this.phase !== LEDGE_NONE || i.busy || -b.vel.y > T.grabFall) return false;
     const s = i.scale;
@@ -2710,6 +2783,7 @@ export class LedgeHang {
    * there if the lip is in reach ahead of the body (a top steeper than walkable counts). True where it took the body.
    */
   fromHaul(world: LedgeWorld, b: LedgeBody, i: LedgeIn, dx: number, dz: number): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
     const s = i.scale;
@@ -2763,6 +2837,7 @@ export class LedgeHang {
    * up from it (the top-out). False where the ledges are switched off or the body has no room there.
    */
   fromWall(world: LedgeWorld, b: LedgeBody, i: LedgeIn, L: Lip, ox: number, oy: number, oz: number): boolean {
+    this.barK = i.scale;
     if (CLIMB_TUNE.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
     const s = i.scale;
     const braced = this.bracedAt(world, L, s, i.filter);
@@ -3113,6 +3188,7 @@ export class LedgeHang {
    * movement takes it from the next).
    */
   step(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    this.barK = i.scale;
     const held = this.stepIn(world, b, i, stam);
     this.fresh = false;
     return held;
@@ -6921,6 +6997,7 @@ export class LedgeHang {
    * near enough to where the hang puts their hands (their hands are then drawn as the clip has them).
    */
   peerLip(world: LedgeWorld, q: { readonly x: number; readonly y: number; readonly z: number; readonly heading: number; readonly scale: number; readonly filter: number }, braced: boolean): boolean {
+    this.barK = q.scale;
     const T = CLIMB_TUNE;
     const x = q.x;
     const y = q.y;

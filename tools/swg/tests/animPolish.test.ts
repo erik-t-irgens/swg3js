@@ -294,6 +294,10 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
   // Climbing II, Smoothness II, item 3: the duck's push across taken back before the next frame lays its own (the spheres'
   // `move` lays it through the root's parent's frame, as the ledges' anchor does, with no line of this shape).
   const S2_ROOT = ['rig.root.position.set(0, rig.root.position.y, 0);'];
+  // Climbing II, phase 3: the bar's own three (its figure's offset, as the ledges' are), beside its two noughts, which read as the
+  // ledges' own text (the put-back where nothing swings).
+  const BAR_ROOT = ['rig.root.position.x = B.offX * c - B.offZ * s;', 'rig.root.position.y += B.offY;', 'rig.root.position.z = B.offX * s + B.offZ * c;'];
+  const barRoot: string[] = [];
   const s2Root: string[] = [];
   const writers: string[] = [];
   const walk = (dir: string) => {
@@ -305,14 +309,15 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
         const own = rel === 'src/player/rig.ts' ? '|\\bthis\\.root' : '';
         const write = new RegExp(`(\\brig\\??\\.root${own})\\.position(\\.[xyz])?\\s*([-+*/]?=(?!=)|\\.(set|setX|setY|setZ|copy|add|sub|addScaledVector|multiplyScalar|lerp|applyMatrix4|applyQuaternion)\\()`);
         text(rel).split('\n').forEach((line, i) => {
-          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : S2_ROOT.includes(line.trim()) ? s2Root : writers).push(`${rel}:${i + 1}`);
+          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : S2_ROOT.includes(line.trim()) ? s2Root : BAR_ROOT.includes(line.trim()) ? barRoot : writers).push(`${rel}:${i + 1}`);
         });
       }
     }
   };
   walk('src');
   const rigTs = text('src/player/rig.ts');
-  ok(wave4Root.length === 10 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 7 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's ten writers of a rig's root are the ledges' own lines and the wall's two noughts, and nothing else (${wave4Root.join(', ')})`);
+  ok(wave4Root.length === 12 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 9 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's twelve writers of a rig's root are the ledges' own lines and the wall's two noughts and the bar's (phase 3), and nothing else (${wave4Root.join(', ')})`);
+  ok(barRoot.length === 3 && barRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 3's own three, the bar's figure's offset, in the player alone (${barRoot.join(', ')})`);
   ok(s2Root.length === 1 && s2Root[0].startsWith('src/player/player.ts:'), `Smoothness II's one: the duck's push across taken back, in the player alone (${s2Root.join(', ')})`);
   ok(wave4bRoot.length === 3 && wave4bRoot.every((w) => w.startsWith('src/player/player.ts:')), `and the wall's own three, in the player alone (${wave4bRoot.join(', ')})`);
   ok(wave3Root.length === 4 && wave3Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 2 && wave3Root.filter((w) => w.startsWith('src/player/footIk.ts:')).length === 2, `wave 3's four writers of a rig's root are its own lines and nothing else (${wave3Root.join(', ')})`);

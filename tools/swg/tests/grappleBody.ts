@@ -21,6 +21,7 @@ import { StepUp } from '../../../src/player/stepUp.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
 import { ClimbAsk, LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/player/ledge.ts';
 import { driveDropClip } from '../../../src/player/hangClips.ts';
+import { BarSwing, type BarWorld } from '../../../src/player/barSwing.ts';
 import type { CharacterRig } from '../../../src/player/rig.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
@@ -223,6 +224,10 @@ export class TestBody implements GrappleBody {
   hangFrames = 0;
   /** Wave 4, item B: the wall climb (`climb.wall`), stepped in the player's own places: the climb in place of the movement, the start after the ledges' grab. */
   readonly wall = new WallClimb({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Climbing II, phase 3: the bars (`climb.bars`), stepped in the player's own places: the swing in place of the movement, the grab after the move, before the ledges'. */
+  readonly bar = new BarSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** The frames the bar held the body for. */
+  barFrames = 0;
   /** The frames the climb held the body for. */
   wallFrames = 0;
   /** The move was cut short across the ground (the player's `wallBlocked`). */
@@ -367,6 +372,7 @@ export class TestBody implements GrappleBody {
     this.slope.reset();
     this.ledge.reset('stood elsewhere');
     this.wall.reset('stood elsewhere');
+    this.bar.reset('stood elsewhere');
     this.body.setTranslation({ x, y, z }, true);
     this.body.setNextKinematicTranslation({ x, y, z });
     // The feedback round, items 3 and 4: stood up fresh, standing (the player's `reset`).
@@ -566,9 +572,14 @@ export class TestBody implements GrappleBody {
     if (this.hooks) g.stepKeys(input, this, this.mutes, this.fireNow);
     // Climbing II: the use key, as the game's dispatch hands it (here nothing else takes it, so every press is the climb's),
     // held while it is held, and let go while the hands already hold something (the game mutes the key then).
-    const climbHolds = this.ledge.holding || this.wall.holding;
+    const climbHolds = this.ledge.holding || this.wall.holding || this.bar.holding;
     if (!climbHolds && input.pressedAction('mount')) this.climbAsk.press();
     this.climbAsk.hold(!climbHolds && input.held('mount'));
+    // Climbing II, phase 3: on a bar, the swing has the body in place of the movement (the player's `barFrame`).
+    if (this.bar.holding) {
+      this.barFrame(dt);
+      return;
+    }
     // Wave 4: hanging, the ledge has the body in place of the movement (the player's `hangFrame`).
     if (this.ledge.holding) {
       this.hangFrame(dt);
@@ -765,9 +776,24 @@ export class TestBody implements GrappleBody {
     // (Smoothness II, item 1: the drop's clocks, the player's own call; a test that poses a rig hands it in as `dropRig`.)
     driveDropClip(this.dropRig, this.ledge, dt, this.grounded, !this.swimming && !(this.hooks && (g.attached || g.released)));
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
+    // Climbing II, phase 3: and the bar's (the player's `ledgeClocks`; no rig here, so no clip to let go of).
+    this.bar.tick(dt);
     // Wave 4, item B: the move cut short across the ground (the player's own lines).
     const askH = moveX * moveX + moveZ * moveZ;
     this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
+    // Climbing II, phase 3: a bar grabbed with the use key, before the ledges (the player's `senseBar`).
+    if (CLIMB_TUNE.bars === 'on') {
+      const li = this.fillLedgeIn(dt, move, wasGrounded);
+      li.busy = this.swimming || (this.hooks && (g.out || g.released)) || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || this.prone;
+      // (A refusal the last frame's lip or wall took is never said: said below only once neither took the press.)
+      this.bar.said = '';
+      const took = this.bar.sense(this.physics.world as unknown as BarWorld, this, li);
+      if (took) {
+        this.takenByBar();
+        this.barFrame(dt);
+        return;
+      }
+    }
     if (CLIMB_TUNE.ledges === 'on') {
       const li = this.fillLedgeIn(dt, move, wasGrounded);
       li.busy = this.swimming || (this.hooks && (g.out || g.released)) || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || this.prone;
@@ -787,6 +813,11 @@ export class TestBody implements GrappleBody {
         this.wallFrame(dt);
         return;
       }
+    }
+    // Climbing II, phase 3: the bar's refusal said only once neither a lip nor a wall took the press (the player's own lines).
+    if (this.bar.said) {
+      this.ledgeWords.push(this.bar.said);
+      this.bar.said = '';
     }
     this.ground = this.groundAt ? this.groundAt(this.pos.x, this.pos.z) : Number.NEGATIVE_INFINITY;
     if (this.hooks && g.out) g.afterMove(this, dt);
@@ -876,6 +907,42 @@ export class TestBody implements GrappleBody {
       this.grounded = false;
       this.heading = this.ledge.heading;
     } else this.grounded = W.stood;
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    this.input.endFrame();
+    this.beforeStep?.(dt);
+    this.physics.step(dt);
+  }
+
+  /** A bar grabbed, as the player's `takenByBar`: the fall ends with no harm and the slope's memory is put down. */
+  private takenByBar(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.slope.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.bar.heading;
+    this.barHp = this.hp;
+  }
+  /** Maker B: the health at the last frame on a bar (the player's `barHp`). */
+  private barHp = 0.5;
+
+  /** A frame on a bar (the player's `barFrame`): the swing's step on the physics' own coming steps in place of the movement, then the physics. */
+  private barFrame(dt: number): void {
+    this.barFrames++;
+    const B = this.bar;
+    // (Maker B: a blow since the last frame on the bar knocks the body off; the water under the body ends a flight off it.)
+    if (this.hp < this.barHp) B.knock(this.barHp - this.hp);
+    this.barHp = this.hp;
+    if (!this.inside) B.swimLine = this.surface(this.pos.x, this.pos.z, this.t) - SWIM_DEPTH;
+    else B.swimLine = Number.NEGATIVE_INFINITY;
+    B.steps = this.physics.stepsAhead(dt);
+    B.behind = this.physics.behind;
+    B.step(this.physics.world as unknown as BarWorld, this, this.fillLedgeIn(dt, null, false));
+    this.setCrouchCollider(false);
+    // (Maker B: the fall's memory at the flight's top while flying off a bar, else the feet.)
+    this.jka.holdApex(B.apexY);
+    this.grounded = false;
+    if (B.holding) this.heading = B.heading;
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     this.input.endFrame();
     this.beforeStep?.(dt);

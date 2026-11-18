@@ -14997,6 +14997,8 @@ class App {
     if (s.noclip) return s;
     // The grapple while it is out, in the rope's own words (`ropeModes`): the bar's own rules decide what it shows.
     s.grapple = p.grapple.promptWord();
+    // Climbing II, phase 3 (maker B): on a bar (Space lets go, the crouch drops), or in the flight off one (nothing to press).
+    s.bar = p.bar.promptWord();
     // On foot, and standing at a bridge's controls too: the long line asks for the lift underfoot
     // before it asks what is flown, and both readings are gathered here so that the long line can
     // read them rather than ask for them again on every frame it is written.
@@ -15097,6 +15099,8 @@ class App {
     this.gatherGate(s);
     // Climbing II: the use key would grab a lip or start a wall climb (`climb.grab` 'use'): first while falling, else last.
     s.climb = p.climbReach() ? (p.climbFalls ? 'air' : 'ground') : '';
+    // (Phase 3, maker B: and whether what the key would take is a bar, whose word is "grab".)
+    s.climbBar = s.climb !== '' && p.reachBar;
     return s;
   }
 
@@ -17943,7 +17947,10 @@ class App {
     // While the world editor flies, the player is where its body was kept (the return point), hidden (`j`): the server
     // measures creature keeping, a group's reach and a duel's from the body, never from the camera.
     const edRet = this.editor?.returnPlace ?? null;
-    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.worldPos;
+    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.worldPos;
+    // (Climbing II, phase 3, maker B: hanging from a bar the place is where a free hang's hands would be on the grip, and the
+    // rig's state the free hang's, so another player's game, which has no bar's swing on the wire, stands the nearest pose it
+    // has, its hands on the bar; in the flight off it the body's own place and the falling loop's state.)
     const n2 = (n: number) => Number(n.toFixed(2));
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
@@ -28820,6 +28827,8 @@ class App {
     if (o.tune !== undefined) words.push(...tuneClimb(o.tune));
     if (o.letGo && p.ledge.holding) p.ledge.letGo(p as never, 'console', 0, 0, 0);
     if (o.letGo && p.wall.holding) p.wall.letGo(p as never, 'console', 0, 0, 0);
+    // Climbing II, phase 3: off a bar the plain way (the swing's own velocity kept).
+    if (o.letGo && p.bar.holding) p.bar.letGo(p as never, true);
     // The feedback round: the last climb up's room tests in full (which test, where, what it met and how far into it, and
     // what the rule made of it), and nothing else.
     if (o.room) return { room: p.ledge.roomReport(), roomRule: CLIMB_TUNE.roomRule, roomSay: CLIMB_TUNE.roomSay, grabFree: CLIMB_TUNE.grabFree, grabsFreed: p.ledge.grabsFreed };
@@ -28829,6 +28838,8 @@ class App {
       holding: p.climbHolds,
       ...p.ledge.report(),
       wall: p.wall.report(),
+      // Climbing II, phase 3: the bar held, its swing and the clip's time it is drawn at.
+      bar: p.bar.report(),
       brace: p.brace.report(),
       limbs: p.limbs.report(),
       // Smoothness II, items 3 and 4: the figure's spheres (the push laid on now, what is left in a wall, the drawn top held).

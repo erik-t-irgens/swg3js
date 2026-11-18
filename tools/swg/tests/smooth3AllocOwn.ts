@@ -119,6 +119,9 @@ async function oneHop(up: boolean): Promise<void> {
   hops(2);
   const n = framesLeft() - 3;
   if (n < 20) return;
+  // (The phase 3 fix round's: wall time for the optimising compiler, on a thread of its own, as ledgeAllocOwn.ts waits: in a
+  // chained run on a loaded machine one process's arc measured 450 bytes a frame against its fellows' 344, clean run alone.)
+  await new Promise<void>((r) => setTimeout(r, 25));
   globalThis.gc!({ type: 'minor' } as never);
   await turn();
   await turn();

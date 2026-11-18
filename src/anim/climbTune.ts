@@ -421,6 +421,48 @@ export interface ClimbTune {
   pushBack: number;
   /** Item 6: the lift with it, a share of Jedi Academy's own (ours, 1: Jedi Academy's 8.53 m/s). */
   pushUp: number;
+  /**
+   * Climbing II, phase 3 (the owner's "a pole for swinging - swinging between perpendicular poles across a chasm like tomb
+   * raider"): 'on' a still collider that is long, level and thin (`barThin`, `barLength`) with room under it for a hanging body
+   * is a bar (src/player/barShape.ts), never a lip (the ledges' rays pass it), grabbed with E (src/player/barSwing.ts) and swung
+   * on as a pendulum; 'off' phase 3's before, where a bar is whatever the ledge search makes of a thin box (the course's bars
+   * caught free as a lip).
+   */
+  bars: 'on' | 'off';
+  /** Phase 3: a bar's cross-section is under this, metres (the brief's start, 0.12: a hand's grip round it; the course's bars are 0.07 and its free beams, 0.2 by 0.3, stay lips). */
+  barThin: number;
+  /** Phase 3: and its length at least this, metres (the brief's start, 0.8: room for both hands and a shift along it; the course's bars are 4). */
+  barLength: number;
+  /** Phase 3: the swing is a pendulum under this gravity, m/s² (ours, 20.32: the game's own on foot, Jedi Academy's 800 units, as a hop's arc is). */
+  swingGravity: number;
+  /** Phase 3: W or S held at the swing's own phase pushes it on by this, rad/s² (ours, 4: W alone pumps a still hang to the largest swing in about four swings against the damping, W and S in turn in about two). */
+  swingPump: number;
+  /** Phase 3: the swing dies away by this, a second (ours, 0.35: let go of the keys, a swing halves in about four seconds and comes to a still hang). */
+  swingDamp: number;
+  /** Phase 3: the largest swing the keys pump to, degrees either side of straight down (ours, 70: short of the clip's own front, 84, so the pose has room past it). */
+  swingMost: number;
+  /** Phase 3: how much of the body's speed at the grab is carried into the swing (ours, 1: all of it, held to the largest swing). */
+  swingCarry: number;
+  /** Phase 3: A and D move the hands along the bar at this, m/s (ours, 0.6: a slow hand over hand, about the free shimmy's own 0.39 m in 1.4 s and a little more). */
+  barShimmy: number;
+  /** Phase 3: a grab from the ground or a standing jump or a fall carries the body onto the bar over this, seconds (ours, 0.25: the ledges' own grab's eases and a little more); a running jump's is the clip's own reach, 0.13. */
+  barGrab: number;
+  /**
+   * Climbing II, phase 3 (maker B): 'fly' Space off a bar flies on the swing's own velocity and a little more (`barBoost`) in
+   * `run_and_swing`'s flight, held by the bar on the physics' own steps: a bar within the band ahead of the hands along the
+   * flight (`catchReach`, `catchSlack`) is caught into the clip's reach with the flight's speed carried into the new swing,
+   * else the clip's landing where the feet meet ground or the falling clips where they do not; 'plain' maker A's let-go, the
+   * swing's velocity handed to the movement with no boost, no catch and the falling clips.
+   */
+  barFlight: 'fly' | 'plain';
+  /** Phase 3: Space off a bar adds this along the swing's own way, m/s (ours, 1: a let-go on the forward swing then reaches a bar 2 or 3 m on; 2.5 reaches 4 m, 4 reaches 5). */
+  barBoost: number;
+  /** Phase 3: in the flight a bar is caught this far ahead of the hands along the flight's way, metres (ours, 0.6: about what the flight covers in the clip's own 0.13 s reach). */
+  catchReach: number;
+  /** Phase 3: and within this of the hands above, below and to either side, metres (ours, 0.35: a hand's span and a little, as the hops' band is forgiving). */
+  catchSlack: number;
+  /** Phase 3: a blow of at least this much health knocks the body off the bar, straight down (ours, 25: a quarter of a whole health bar; the ledges have no such rule). */
+  barKnock: number;
 }
 
 /**
@@ -543,9 +585,32 @@ CLIMB_SMOOTH3_ALSO.push(moveSmooth3Before);
 
 /** Smoothness III's switches at their other setting (Smoothness II's climbing, `c57c0a5`). */
 export function climbSmooth3Before(): void {
+  // (`c57c0a5` had none of phase 3's either: put back first, so Smoothness III's own words below win where a switch is shared.)
+  climbBarsBefore();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_SMOOTH3_BEFORE)) t[k] = v;
   for (const f of CLIMB_SMOOTH3_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 3 (bars): every switch it adds, at its other setting (the climbing as Smoothness III shipped it, `955fb04`).
+ * A later maker of the round adds its own here (`CLIMB_BARS_ALSO` for one beside the climbing's), so one call puts the whole
+ * round back; `climbSmooth3Before` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_BARS_BEFORE: Record<string, string> = {
+  bars: 'off',
+  // (Maker B: the flight off a bar, the catch and the landing; 'plain' maker A's let-go, which 'off' never reaches either.)
+  barFlight: 'plain',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the phase's climbing ones. */
+export const CLIMB_BARS_ALSO: (() => void)[] = [];
+
+/** Phase 3's switches at their other setting (Smoothness III's climbing, `955fb04`). */
+export function climbBarsBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_BARS_BEFORE)) t[k] = v;
+  for (const f of CLIMB_BARS_ALSO) f();
 }
 
 /**
@@ -711,6 +776,21 @@ export const CLIMB_TUNE: ClimbTune = {
   pushOff: 'jka',
   pushBack: 1,
   pushUp: 1,
+  bars: 'on',
+  barThin: 0.12,
+  barLength: 0.8,
+  swingGravity: 20.32,
+  swingPump: 4,
+  swingDamp: 0.35,
+  swingMost: 70,
+  swingCarry: 1,
+  barShimmy: 0.6,
+  barGrab: 0.25,
+  barFlight: 'fly',
+  barBoost: 1,
+  catchReach: 0.6,
+  catchSlack: 0.35,
+  barKnock: 25,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -812,6 +892,19 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   ladderStretch: { min: 0, max: 1 },
   ladderArc: { min: 0, max: 0.6 },
   ladderLead: { min: 0, max: 1 },
+  barThin: { min: 0.02, max: 0.4 },
+  barLength: { min: 0.2, max: 4 },
+  swingGravity: { min: 1, max: 60 },
+  swingPump: { min: 0, max: 12 },
+  swingDamp: { min: 0, max: 3 },
+  swingMost: { min: 5, max: 85 },
+  swingCarry: { min: 0, max: 1.5 },
+  barShimmy: { min: 0, max: 3 },
+  barGrab: { min: 0.02, max: 1 },
+  barBoost: { min: 0, max: 6 },
+  catchReach: { min: 0, max: 1.5 },
+  catchSlack: { min: 0.05, max: 1 },
+  barKnock: { min: 0, max: 200 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -849,6 +942,8 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   bodyClear: ['spheres', 'before'],
   wallHands: ['grip', 'before'],
   pushOff: ['jka', 'before'],
+  bars: ['on', 'off'],
+  barFlight: ['fly', 'plain'],
 };
 
 /**

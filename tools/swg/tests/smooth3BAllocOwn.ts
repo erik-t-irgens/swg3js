@@ -102,6 +102,8 @@ let made = 0;
 let marks = 0;
 /** `n` frames of `run` measured: no collection inside, the young generation's growth summed. */
 async function measure(run: (n: number) => void, n: number): Promise<void> {
+  // (The phase 3 fix round's: wall time for the optimising compiler, on a thread of its own, as ledgeAllocOwn.ts waits.)
+  await new Promise<void>((r) => setTimeout(r, 25));
   globalThis.gc!({ type: 'minor' } as never);
   await turn();
   await turn();

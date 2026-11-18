@@ -80,6 +80,14 @@ export const CLIPS = {
   // A shimmy that ends nine degrees off where it began; a cycle all the same.
   left_shimmy: { loop: true, ground: false },
   free_hang_left_shimmy: { loop: true, ground: false },
+
+  // ---- Climbing II, phase 3: the bars (src/anim/barClips.ts names what the game plays of it) --------------------------
+  // The owner's bar swing: a run, a leap, the hands on the bar, the swing, the release, the flight and the landing, one
+  // take (his frames at 30 a second: 17 off the ground, 24-25 the hands on the bar, 25-51 the swing, 52 the release, 63
+  // the landing). Its first and last poses are both a body on its feet, so the poses read it as a loop: it is a one-off,
+  // played in parts by the bar's own clock (the swing by the pendulum's angle). Its feet are on the ground only at its two
+  // ends, and the parts the game plays are in the air: nothing under its feet.
+  run_and_swing: { loop: false, ground: false },
 };
 
 /** A clip's row over the defaults. */

@@ -66,7 +66,7 @@ export function pieceLabel(p: CoursePiece): PieceLabel {
   if (p.kind === 'wall') {
     return { title: `Wall climb, ${m(n.height)}${n.top === 'edge' ? ' to a thin edge' : ''}`, what: 'E at the wall to start the climb, W/A/S/D, and climb out (or Space off)' };
   }
-  if (p.kind === 'bar') return { title: `Bars ${m(n.spacing ?? '')} apart (phase 3)`, what: 'Bars come with phase 3: until then they are lips or nothing' };
+  if (p.kind === 'bar') return { title: `Bars ${m(n.spacing ?? '')} apart`, what: 'E grabs a bar, W and S swing, Space lets go for the next (4 and 5 m want more boost), the crouch drops' };
   if (p.kind === 'rope') return { title: 'Rope (phase 4)', what: 'Ropes come with phase 4' };
   if (p.kind === 'pole') return { title: 'Poles (phase 5)', what: 'Poles come with phase 5' };
   if (p.kind === 'obstacle' && n.dir === 'duck') return { title: `Beam ${m(n.under)} over the floor`, what: 'Walk and run under it with only the move keys: you should duck on your own' };

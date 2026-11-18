@@ -19,6 +19,7 @@ import { factsOf, type ClipFacts } from './locoPhase.ts';
 import { STAIR_IDS, moreClips } from './locoTable.ts';
 import { LEDGE_IDS } from './ledgeClips.ts';
 import { WALL_IDS } from './wallClips.ts';
+import { BAR_IDS } from './barClips.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -487,7 +488,8 @@ export function browserIo(deps: {
     breath: browserBreath,
     // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner),
     // wave 3's stair clips, and wave 4's ledge clips (src/anim/ledgeClips.ts) and wall clips (src/anim/wallClips.ts).
-    also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS],
+    // (And Climbing II, phase 3's bar clip, src/anim/barClips.ts.)
+    also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS, ...BAR_IDS],
     now: () => performance.now(),
   };
 }

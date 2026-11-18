@@ -9,9 +9,14 @@
 // it with the real `CharacterRig`.
 import type { CharacterRig, RigState } from './rig.ts';
 import type { LedgeHang } from './ledge.ts';
+import type { BarSwing } from './barSwing.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { LEDGE_CLIP_NAMES, ledgeClipName } from '../anim/ledgeClips.ts';
 import { WALL_CLIP_NAMES } from '../anim/wallClips.ts';
+import { BAR_TIMES } from '../anim/barClips.ts';
+
+/** Climbing II, phase 3 (maker B): how long the bar's landing fades in from the flight's pose, seconds (a mechanic: the clip's own two frames). */
+export const BAR_LAND_FADE = 0.06;
 
 /**
  * A clip's rig name for what is named every frame (Smoothness III, the review's): a wall clip's or a table clip's own, made once
@@ -86,6 +91,46 @@ export function driveHangClips(rig: CharacterRig, L: LedgeHang, dt: number, st: 
     rig.overrideRateNow();
   }
   rig.update(dt);
+}
+
+/**
+ * Climbing II, phase 3 (`climb.bars` 'on'): the bar's clip on the rig for this frame and the rig stepped by `dt`, as the hang's
+ * are: the bar's clip (`run_and_swing`) begun held at its start's time (still, its rate nought), put each frame at the time the
+ * swing's pendulum asks (`BarSwing.poseT`, through the rig's own `overrideSeekAt`: no number handed across a call), the body's
+ * own falling loop under it; and on the let-go crossfaded into that loop ('blend') or let go over the hang's ease ('before').
+ * The clip's name is the bar's own, made once (`BarSwing.clipName`).
+ */
+export function driveBarClips(rig: CharacterRig, B: BarSwing, dt: number, st: HangClipState): void {
+  st.hangFade.fade = CLIMB_TUNE.ease;
+  if (B.startClip) rig.play(B.clipName, { from: B.startFrom, fadeIn: B.startFade, hold: true, timeScale: 0, keepWeight: CLIMB_TUNE.transitions === 'blend' });
+  // Maker B (`climb.barFlight` 'fly'): a flight landed, the clip's landing (2.10 s on) played at its own rate to its end, a
+  // one-off the rig ends by itself (or the body's own landing takes its place, as a drop's), on the flight's twin.
+  else if (B.landNow) rig.play(B.clipName, { from: BAR_TIMES.land, fadeIn: BAR_LAND_FADE, hold: false, timeScale: 1, keepWeight: CLIMB_TUNE.transitions === 'blend' });
+  else if (B.ended) {
+    // (Maker B: the falling loop remembered first, since the hands on the bar remember the free hang's.)
+    rig.setState('air', 0, null, st.hangFade);
+    if (CLIMB_TUNE.transitions === 'blend') rig.blendOut(CLIMB_TUNE.transitionBlend);
+    else rig.stopOverride(CLIMB_TUNE.ease);
+  }
+  // Maker B: with the hands on the bar the rig's state is the free hang's (under the bar's clip, never seen), which is what the
+  // wire carries to other players' games: the nearest pose they have; in the flight and after it, the falling loop's.
+  rig.setState(B.onBar ? 'hangFree' : 'air', 0, null, st.hangFade);
+  if (B.holding && B.poseT === B.poseT) {
+    rig.overrideSeekAt = B.poseT;
+    rig.overrideSeekNow(B.clipName);
+  }
+  rig.update(dt);
+}
+
+/**
+ * Phase 3: off the bar (the player's `ledgeClocks`, every frame of the movement, before the bar's own `tick`): a bar let go of
+ * by a path that never ran the bar's frame (stood elsewhere, off the feet) still has its held clip on the rig, which is let go
+ * of here as the let-go's own frame would (only while that clip is the one playing; nothing at all otherwise).
+ */
+export function releaseBarClip(rig: CharacterRig | null, B: BarSwing): void {
+  if (!B.ended || !rig || rig.overrideName !== B.clipName) return;
+  if (CLIMB_TUNE.transitions === 'blend') rig.blendOut(CLIMB_TUNE.transitionBlend);
+  else rig.stopOverride(CLIMB_TUNE.ease);
 }
 
 /**

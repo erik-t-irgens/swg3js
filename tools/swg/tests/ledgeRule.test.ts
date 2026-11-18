@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestBody, box, ground, makePhysics, THREE, type Physics } from './grappleBody.ts';
-import { CLIMB_FEEDBACK_BEFORE, CLIMB_SMOOTH_BEFORE, CLIMB_SMOOTH2_BEFORE, CLIMB_SMOOTH3_BEFORE, CLIMB_TUNE, CLIMB_TUNE_SHIPPED, CLIMB_TWO_BEFORE, resetClimbTune, tuneClimb, climbTwoBefore } from '../../../src/anim/climbTune.ts';
+import { CLIMB_BARS_BEFORE, CLIMB_FEEDBACK_BEFORE, CLIMB_SMOOTH_BEFORE, CLIMB_SMOOTH2_BEFORE, CLIMB_SMOOTH3_BEFORE, CLIMB_TUNE, CLIMB_TUNE_SHIPPED, CLIMB_TWO_BEFORE, resetClimbTune, tuneClimb, climbTwoBefore } from '../../../src/anim/climbTune.ts';
 import { LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { LOCO_TUNE } from '../../../src/anim/locoTune.ts';
@@ -456,7 +456,7 @@ const restore = () => {
   }
   restore();
 }
-ok(JSON.stringify(CLIMB_TUNE) === JSON.stringify({ ...CLIMB_TUNE_SHIPPED, ...CLIMB_TWO_BEFORE, ...CLIMB_FEEDBACK_BEFORE, ...CLIMB_SMOOTH_BEFORE, ...CLIMB_SMOOTH3_BEFORE, ...CLIMB_SMOOTH2_BEFORE }), "and the tune is back as shipped (phase 2's switches, the feedback round's, the smoothness round's, Smoothness III's and Smoothness II's at their 'before', as this suite holds them)");
+ok(JSON.stringify(CLIMB_TUNE) === JSON.stringify({ ...CLIMB_TUNE_SHIPPED, ...CLIMB_TWO_BEFORE, ...CLIMB_FEEDBACK_BEFORE, ...CLIMB_SMOOTH_BEFORE, ...CLIMB_SMOOTH3_BEFORE, ...CLIMB_BARS_BEFORE, ...CLIMB_SMOOTH2_BEFORE }), "and the tune is back as shipped (phase 2's switches, the feedback round's, the smoothness round's, Smoothness III's, Climbing II phase 3's and Smoothness II's at their 'before', as this suite holds them)");
 
 void THREE;
 note(`casts: a standing jump at a lip costs the rays shown in the console's report (one a frame in open air, four a frame near a face)`);

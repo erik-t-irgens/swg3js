@@ -951,6 +951,75 @@ export class CharacterRig {
     return { eye: new THREE.Vector3(eye[0], eye[1], eye[2]), pelvis: new THREE.Vector3(pelvis[0], pelvis[1], pelvis[2]) };
   }
 
+  /**
+   * Climbing II, phase 3: where each of `joints` (a bone by its name, '' the skeleton's root bone) stands at each of `times` in
+   * `clip`, in the rig root's own (unscaled) frame, from the clip's own tracks (never the live pose, which this leaves as it
+   * is), three numbers a joint a time into `out` (time first: `out[(i * joints.length + j) * 3]`). False without the clip or a
+   * joint, or with a scaled node on a chain (none in the packs). An event's arithmetic, made once by its caller and kept (the
+   * bar's swing measured off its clip at its first use, src/anim/barClips.ts).
+   */
+  sampleJoints(clip: string, joints: readonly string[], times: ArrayLike<number>, out: Float64Array): boolean {
+    const action = this.actions.get(clip);
+    if (!action) return false;
+    const unit = (x: number) => Math.abs(x - 1) < 1e-4;
+    const tracks = new Map<string, THREE.KeyframeTrack>();
+    for (const t of action.getClip().tracks) tracks.set(t.name, t);
+    let rootBone: THREE.Bone | null = null;
+    for (const b of this.bones.values()) if (!(b.parent instanceof THREE.Bone)) { rootBone = b; break; }
+    type Link = { restP: Vec3; restQ: Quat; p: THREE.Interpolant | null; q: THREE.Interpolant | null };
+    const chains: Link[][] = [];
+    for (const name of joints) {
+      const joint = name === '' ? rootBone : this.boneNamed(name);
+      if (!joint) return false;
+      const chain: Link[] = [];
+      for (let o: THREE.Object3D | null = joint; o !== this.root; o = o.parent) {
+        if (!o) return false;
+        const bone = o as THREE.Bone;
+        const s = (bone.isBone ? this.restScale.get(bone) : null) ?? o.scale;
+        const sk = tracks.get(`${o.name}.scale`);
+        if (sk && sk.values.length >= 3 ? !(unit(sk.values[0]) && unit(sk.values[1]) && unit(sk.values[2])) : !(unit(s.x) && unit(s.y) && unit(s.z))) return false;
+        const p = (bone.isBone ? this.restPosition.get(bone) : null) ?? o.position;
+        const q = (bone.isBone ? this.restLocal.get(bone) : null) ?? o.quaternion;
+        const pt = tracks.get(`${o.name}.position`);
+        const qt = tracks.get(`${o.name}.quaternion`);
+        chain.push({ restP: [p.x, p.y, p.z], restQ: [q.x, q.y, q.z, q.w], p: pt ? interpOf(pt) : null, q: qt ? interpOf(qt) : null });
+      }
+      chain.reverse();
+      chains.push(chain);
+    }
+    const nj = joints.length;
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];
+      for (let j = 0; j < nj; j++) {
+        const links = chains[j].map((L) => {
+          const pv = L.p ? (L.p.evaluate(t) as ArrayLike<number>) : L.restP;
+          const qv = L.q ? (L.q.evaluate(t) as ArrayLike<number>) : L.restQ;
+          const l = Math.hypot(qv[0], qv[1], qv[2], qv[3]) || 1;
+          return { p: [pv[0], pv[1], pv[2]] as Vec3, q: [qv[0] / l, qv[1] / l, qv[2] / l, qv[3] / l] as Quat };
+        });
+        const v = chainPoint(links, [0, 0, 0]);
+        const k = (i * nj + j) * 3;
+        out[k] = v[0];
+        out[k + 1] = v[1];
+        out[k + 2] = v[2];
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Climbing II, phase 3 (maker B): a twin of `clip` under `name`, its very tracks as an action of its own (made once a rig: an
+   * event, at the bar's first use), so the bar's flight can be crossfaded from the swing and back into the reach, which one
+   * action cannot be into itself. True where the twin stands (made now or before); false without the clip.
+   */
+  twinClip(clip: string, name: string): boolean {
+    if (this.actions.has(name)) return true;
+    const src = this.actions.get(clip)?.getClip();
+    if (!src) return false;
+    this.actions.set(name, this.mixer.clipAction(new THREE.AnimationClip(name, src.duration, src.tracks)));
+    return true;
+  }
+
   /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */
   armSource(): string {
     const shot = this.upperShot && !this.additive.has(this.upperShot.getClip().name.replace(/^(upper|lower):/, '')) ? this.upperShot : null;

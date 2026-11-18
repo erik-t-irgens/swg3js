@@ -257,7 +257,7 @@ ok(method(player, '  private aimGrappleArm(rig: CharacterRig): void {').includes
 // The lean on the wire (§3.15): the whole turn and the leaned origin go while `leanSends`, the one rule the hook keeps.
 const net = method(main, '  private stepNet(dt: number, frameAt: number): void {');
 // (The world editor's return point stands for the hidden body ahead of both, and is held by `editorWiring.test.ts`.)
-ok(net.includes('const leans = !p.aboard && !p.eva && p.grapple.leanSends;') && net.includes(': leans ? p.leanedAt(leanedAt) : p.worldPos;') && /const at = (edRet \? leanedAt\.set\(edRet\.x, edRet\.y, edRet\.z\) : )?leans \? p\.leanedAt\(leanedAt\) : p\.worldPos;/.test(net), "stepNet sends while the hook says the lean goes out, from the origin the leaning figure is drawn at");
+ok(net.includes('const leans = !p.aboard && !p.eva && p.grapple.leanSends;') && net.includes(': leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.worldPos;') && /const at = (edRet \? leanedAt\.set\(edRet\.x, edRet\.y, edRet\.z\) : )?leans \? p\.leanedAt\(leanedAt\) : p\.bar\.onBar && !p\.aboard \? p\.bar\.peerPlace\(leanedAt\) : p\.worldPos;/.test(net), "stepNet sends while the hook says the lean goes out, from the origin the leaning figure is drawn at");
 ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3)') && net.includes("this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)],") && /sendState\(\{[^\n]*\bq,/.test(net), 'and puts the whole turn in the state while it does, with that origin as the place');
 // The receiver: the glide of a peer's turn is `peerTurn.ts`'s, which the node test runs over a let-go at the wire's rate.
 const remotes = read('../../../src/net/remotePlayers.ts');

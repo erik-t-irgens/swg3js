@@ -53,7 +53,9 @@ import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
 import { ClimbCamFollow } from './climbCam.ts';
-import { driveDropClip, driveHangClips, type HangClipState } from './hangClips.ts';
+import { driveBarClips, driveDropClip, driveHangClips, releaseBarClip, type HangClipState } from './hangClips.ts';
+import { BarSwing, type BarWorld } from './barSwing.ts';
+import { BAR_CLIP, BAR_CLIP_NAMES, BAR_FLIGHT_NAME, measureBarFlight, measureBarTable, type BarFlightTable, type BarSwingTable } from '../anim/barClips.ts';
 import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
 import { BraceIn, Crowd, HandBrace } from './brace.ts';
 import { hostileSides } from '../combat/targets.ts';
@@ -537,6 +539,20 @@ export class Player {
    */
   readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly ledgeIn = new LedgeIn();
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on', src/player/barSwing.ts): a bar grabbed with the use key after the move (`senseBar`,
+   * before the ledges'), and while it holds the body the swing's own frame in place of the movement (`barFrame`), its clip by the
+   * pendulum's angle (src/player/hangClips.ts's `driveBarClips`) and the figure drawn with its hands on the bar. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly bar = new BarSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Phase 3: the bar's clip measured off this rig (`measureBarTable`), once a rig, and the rig it was measured off. */
+  private barTable: BarSwingTable | null = null;
+  private barTableRig: CharacterRig | null = null;
+  /** Phase 3, maker B: the flight's part of the clip measured off the same rig (`measureBarFlight`). */
+  private barFlight: BarFlightTable | null = null;
+  /** Phase 3: whether the rig's root was last drawn by the bar (`applyBarRoot`), so the next frame off it puts the root back. */
+  private barRooted = false;
   /**
    * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
    * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
@@ -1121,6 +1137,8 @@ export class Player {
     this.wall.reset('stood elsewhere');
     this.brace.reset();
     this.limbs.reset();
+    // (Climbing II, phase 3: nor a bar.)
+    this.bar.reset('stood elsewhere');
   }
 
   /**
@@ -1251,6 +1269,31 @@ export class Player {
         this.wallRooted = false;
       }
     }
+    // Climbing II, phase 3: on a bar, the figure drawn where its clip's hands are on the bar and turned about its own left so its
+    // hips stand at the swing's angle, and after a let-go eased back onto the body (never under `climb.bars` 'off').
+    if (rig && (this.barRooted || this.bar.offset)) {
+      if (this.bar.offset) this.applyBarRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.barRooted = false;
+      }
+    }
+  }
+
+  /** Phase 3: the rig's root put where the bar draws the figure against the body (its offset, the world's frame, into the group's) and turned about its own left. */
+  private applyBarRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const B = this.bar;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x = B.offX * c - B.offZ * s;
+    rig.root.position.y += B.offY;
+    rig.root.position.z = B.offX * s + B.offZ * c;
+    rig.root.quaternion.setFromAxisAngle(AXIS_X, B.tilt);
+    this.barRooted = true;
   }
 
   /** The rig's root put where the climb draws the figure against the body (its offset, the world's frame, into the group's) and leant into the face about its own left. */
@@ -1282,6 +1325,7 @@ export class Player {
     // flight) lets go of the ledge outright. (The hang's own frame lets go of the feet and the lag itself.)
     if (this.ledge.holding) this.ledge.reset('off the feet');
     if (this.wall.holding) this.wall.reset('off the feet');
+    if (this.bar.holding) this.bar.reset('off the feet');
     if (this.brace.busy) {
       this.brace.reset();
       this.limbs.reset();
@@ -2892,6 +2936,12 @@ export class Player {
     }
     this.eva = false;
 
+    // Climbing II, phase 3: on a bar (`BarSwing`), the swing has the body in place of the movement. Never under `climb.bars`
+    // 'off', where nothing ever holds.
+    if (this.bar.holding) {
+      this.barFrame(dt, input, cam, world);
+      return;
+    }
     // Wave 4: hanging from a ledge, or carried through one of its one-offs (`LedgeHang`): the ledge has the body in place
     // of the movement. Never under `climb.ledges` 'before', where nothing ever holds.
     if (this.ledge.holding) {
@@ -3321,6 +3371,11 @@ export class Player {
     // face feels for one to climb, so walking free casts nothing), worked out in place (no number crosses a call).
     const askH = moveX * moveX + moveZ * moveZ;
     this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
+    // Climbing II, phase 3: a bar grabbed with the use key (`BarSwing.sense`), before the ledges (a bar is never a lip).
+    if (this.senseBar(dt, input, move, wasGrounded, atControls)) {
+      this.barFrame(dt, input, cam, world);
+      return;
+    }
     if (this.senseLedge(dt, input, move, wasGrounded, atControls)) {
       this.hangFrame(dt, input, cam, world);
       return;
@@ -3329,6 +3384,12 @@ export class Player {
     if (this.senseWall(dt, input, move, wasGrounded, atControls)) {
       this.wallFrame(dt, input, cam, world);
       return;
+    }
+    // Climbing II, phase 3: the bar's refusal ("No room to hang from the bar here.") said only now, when neither a lip nor a
+    // wall took the press in the same frame (`senseBar` drops one they took).
+    if (this.bar.said) {
+      this.onLedgeWords?.(this.bar.said);
+      this.bar.said = '';
     }
     // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
     // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
@@ -3642,7 +3703,7 @@ export class Player {
 
   /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
   get climbHolds(): boolean {
-    return this.ledge.holding || this.wall.holding;
+    return this.ledge.holding || this.wall.holding || this.bar.holding;
   }
 
   /** The move's own collision groups (as the frame's `filter`). */
@@ -3695,11 +3756,124 @@ export class Player {
    * few times a second): on foot, nothing else holding the body, a lip in the hands' reach or a climbable face ahead.
    */
   climbReach(): boolean {
+    this.reachBar = false;
     if (CLIMB_TUNE.grab !== 'use' || this.mounted || this.piloting || this.aboard || this.noclip || this.swimming || this.climbHolds || this.grapple.out || this.eva || this.hp <= 0) return false;
     const li = this.fillLedgeIn(0, null, null, false);
     li.busy = false;
     const w = this.physics.world as unknown as LedgeWorld;
-    return this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li);
+    // (Climbing II, phase 3: a bar in reach with room under it, `climb.bars` 'on', first: the ledges pass a bar. Maker B: and
+    // whether it was a bar, kept for the action bar's word, "grab".)
+    this.reachBar = this.bar.canGrab(this.physics.world as unknown as BarWorld, this, li);
+    return this.reachBar || this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li);
+  }
+
+  /** Climbing II, phase 3 (maker B): whether the last `climbReach` found a bar (the action bar's "grab" for its "climb"). */
+  reachBar = false;
+
+  /**
+   * Climbing II, phase 3: after the move, a bar grabbed with the use key (`BarSwing.sense`): not swimming, on the rope or in its
+   * flight, thrown, dead, at a ship's controls, prone, in a wall move or a Force jump's rise, as the ledges' grab. True where the
+   * bar took the body.
+   */
+  private senseBar(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.bars !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    // (A refusal the last frame's lip or wall took is never said: the update says one only once neither took the press.)
+    this.bar.said = '';
+    const took = this.bar.sense(this.physics.world as unknown as BarWorld, this, li);
+    if (!took) return false;
+    this.takenByBar();
+    return true;
+  }
+
+  /** A bar grabbed: as a lip's (`takenByLedge`), the fall ends with no harm and the air's and the slope's memories are put down. */
+  private takenByBar(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.bar.heading;
+    this.hangClips.posePlaying = '';
+    // (Maker B: the health the bar's frames measure a blow against.)
+    this.barHp = this.hp;
+  }
+
+  /** Climbing II, phase 3 (maker B): the health at the last frame on a bar (a blow since then of `climb.barKnock` or more knocks the body off). */
+  private barHp = 0.5;
+
+  /**
+   * Phase 3: a frame on a bar (`BarSwing.step`) in place of the movement, as a hang's (`hangFrame`): the speed classes put down,
+   * what is in the hands kept as a hang keeps it, the swing stepped on the physics' own coming steps (`Physics.stepsAhead`), the
+   * bar's clip by the swing's angle, and the figure placed with its hands on the bar.
+   */
+  private barFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    const B = this.bar;
+    // Maker B: a blow taken since the last frame on the bar, hard enough, knocks the body off (`BarSwing.knock`); and the water
+    // under the body, which ends a flight off the bar (the swim's own surface and depth; none indoors or aboard).
+    if (this.hp < this.barHp) B.knock(this.barHp - this.hp);
+    this.barHp = this.hp;
+    if (!this.aboard && !this.inside) {
+      const flat = world.waterColumnAt(this.pos.x, this.pos.z);
+      B.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
+    } else B.swimLine = Number.NEGATIVE_INFINITY;
+    B.steps = this.physics.stepsAhead(dt);
+    B.behind = this.physics.behind;
+    B.step(this.physics.world as unknown as BarWorld, this, li);
+    this.setCrouchCollider(false);
+    // (Maker B: the fall's memory at the flight's top while flying off a bar and the frame it ends, else the body's feet.)
+    this.jka.holdApex(B.apexY);
+    this.grounded = false;
+    if (B.holding) this.heading = B.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animateBar(dt);
+    this.placeVisual();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Phase 3: the bar's clip measured off the rig once (`measureBarTable`), the figure's place for the swing, and the clip on the rig. */
+  private animateBar(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.barTableRig !== rig) {
+      const T = measureBarTable(rig);
+      if (T) {
+        this.barTable = T;
+        this.barTableRig = rig;
+        // Maker B: the flight's twin of the clip and its hips' table, once a rig.
+        rig.twinClip(BAR_CLIP_NAMES[BAR_CLIP], BAR_FLIGHT_NAME);
+        this.barFlight = measureBarFlight(rig);
+      }
+    }
+    this.bar.flight = this.barTableRig === rig ? this.barFlight : null;
+    this.bar.placeFigure(this.barTableRig === rig ? this.barTable : null, rig.root.scale.y, this.pos);
+    driveBarClips(rig, this.bar, dt, this.hangClips);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
   }
 
   /**
@@ -3752,6 +3926,9 @@ export class Player {
     driveDropClip(this.rig, this.ledge, dt, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released);
     // Wave 4, item B: and the wall's (its drawn lean and offset eased out after a let-go, the jump off's turn round).
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
+    // Climbing II, phase 3: and the bar's (a let-go's held clip let go of where nothing else did, the drawn offset eased out).
+    releaseBarClip(this.rig, this.bar);
+    this.bar.tick(dt);
   }
 
   /**
