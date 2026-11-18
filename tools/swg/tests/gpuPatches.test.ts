@@ -44,6 +44,11 @@ const RECORDED: Record<string, string> = {
   'three.webgpu.js Renderer._renderTransparents': '64f4b9a819a7b4d3',
   'three.webgpu.js Renderer._renderScene': '71a004a6220646d7',
   'three.tsl.js NodeMaterialObserver.needsRefresh': '522d452d6589354f',
+  // The performance step's replay patch (`patchReplay.ts`): what it wraps and what its answer stands on.
+  'three.webgpu.js NodeManager.needsRefresh': '4626b6f6132104ef',
+  'three.webgpu.js Renderer._bundleNeedsUpdate': '68e9d067ae2566be',
+  'three.tsl.js NodeMaterialObserver.hasDynamicInstancing': '9b708c29c023642f',
+  'three.tsl.js NodeMaterialObserver.equals': '7b4b90afcd33a2fa',
 };
 
 const files = new Map<string, string[]>();

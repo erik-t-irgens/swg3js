@@ -143,7 +143,7 @@ import { PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, allWarmed, isPer
 import { PASS_STATES } from './passScenes.ts';
 import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
 import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
-import { LOADING_TUNE, courseCounts, loadBounded, sweepYield } from './loadingTune.ts';
+import { LOADING_TUNE, courseCounts, loadBounded, sweepYield, sweepYieldPaced } from './loadingTune.ts';
 import { cascadesUsable, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { fillRoomLightFx } from './roomLightFx.ts';
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
@@ -8624,6 +8624,17 @@ export class World {
           land(!parallel());
         }
         sliceFrom = performance.now();
+        continue;
+      }
+      // On WebGPU in play (the GPU port's performance step, `sweepPace`): a batch only lists its objects for the warm-up,
+      // which builds them on its own clock, so the Effects switch's sweep waits a frame once its listing has spent the
+      // warm-up's own in-play slice rather than after every batch of eight (at Mos Eisley's street some 960 frames, 13.5 s,
+      // for 0.8 s of the warm-up's work). Off, and on WebGL, `sweepYield` below as before.
+      if (GPU.webgpu && !behind && GPU.rt!.sweepPaceMs() > 0) {
+        if (sweepYieldPaced(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs, GPU.rt!.sweepPaceMs())) {
+          await this.nextFrame();
+          sliceFrom = performance.now();
+        }
         continue;
       }
       if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {

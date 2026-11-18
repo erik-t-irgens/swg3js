@@ -380,8 +380,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(startText.includes("import { carriesReport, STAYS } from './carries.ts';") && startText.includes('stays: { ...STAYS },'), 'start.ts: the report says what stays and the tune checks what the copies carry');
     const l = lines('src/main.ts');
     const back = l.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
-    // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries.
-    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined) ? rt.tune({ ...o, scene: this.scene })'));
+    // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries, and the performance step
+    // its draw switches after that.
+    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene })'));
     ok(back > 0 && ask > back && ask - back < 6, "main.ts: gpu() asks for the carries' check only after its WebGL return");
     const warm = readFileSync(join(SRC, 'core', 'gpu', 'patchWarm.ts'), 'utf8');
     ok(warm.includes("if (o.name === 'flora stand-in' && o.receiveShadow !== true) {"), 'patchWarm.ts: the flora stand-ins are told to receive as the batches do, inside the warm patch');
@@ -485,6 +486,42 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const l = lines('src/world/portalRender.ts');
     const at = l.indexOf('if (GPU.webgpu) return this.drawPortalsGpu(meshes, n, camera, from, depthTest, restore);');
     ok(at > 0 && l[at + 1] === 'const m = this.portalMat;' && l[at + 2] === 'if (restore) {', 'portalRender.ts: the doorways are drawn as they were on WebGL after the WebGPU guard');
+  }
+  // The performance step: the frame report and the draw switches. Its modules are under src/core/gpu/ and reached only
+  // through start.ts (section 2 holds that the WebGL graph loads none of them); the console's two new words are read only
+  // after the helper's WebGL answer has returned, and the switches are installed only by the WebGPU runtime.
+  {
+    for (const p of ['framePerf.ts', 'drawCost.ts', 'patchReplay.ts', 'shadowCull.ts']) ok(existsSync(join(SRC, 'core', 'gpu', p)), `the performance step's ${p} is under src/core/gpu/`);
+    const m = lines('src/main.ts');
+    const gl = m.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
+    const rtAt = m.indexOf('const rt = GPU.rt!;', gl);
+    const perfAt = m.findIndex((x) => x.startsWith('if (o?.perf) return rt.perf('));
+    const tunedAt = m.findIndex((x) => x.startsWith('const tuned = o && (') && x.includes('|| o.draw)'));
+    ok(gl > 0 && rtAt === gl + 1 && perfAt > rtAt && perfAt - rtAt < 4 && tunedAt > perfAt && tunedAt - perfAt < 4, "main.ts: gpu({ perf }) and gpu({ draw }) are read only after the helper's WebGL answer has returned, through the WebGPU runtime");
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes('readDrawSwitches();') && startText.includes('installShadowCull(renderer);') && startText.includes('registerDrawPerfSwitches(registerPerfSwitch);') && startText.includes('draw: drawCostReport(),'), 'start.ts: the WebGPU runtime reads, installs, registers and reports the draw switches');
+    const patchesText = readFileSync(join(SRC, 'core', 'gpu', 'patches.ts'), 'utf8');
+    ok(patchesText.includes("else if (e.name === 'replay') installReplayPatch(renderer);"), 'patches.ts: the replay patch is installed with the others, on the WebGPU renderer');
+    // Nothing outside src/core/gpu/ reaches any of the four (section 3 holds the import graph; this names them).
+    const all: string[] = [];
+    const walkAll = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walkAll(p);
+        else if (CODE.test(n) && !n.endsWith('.d.ts')) all.push(p);
+      }
+    };
+    walkAll(SRC);
+    const outside = all.filter((f) => !inGpuDir(f)).flatMap((f) => readFileSync(f, 'utf8').split(/\r?\n/).filter((x) => /\b(import|from)\b/.test(x) && /(framePerf|drawCost|patchReplay|shadowCull)(\.ts)?['"]/.test(x)).map((x) => `${rel(f)}: ${x.trim()}`));
+    ok(outside.length === 0, `nothing outside src/core/gpu/ imports the performance step's modules: ${outside.join('; ')}`);
+    // The performance step's `sweepPace` (maker B): the sweep's WebGPU guard reads the pace through the runtime alone, and
+    // the WebGL path's own line follows the guarded block exactly as e6d1e1f had it after the batch's `continue`.
+    const w = lines('src/world/world.ts');
+    const g = w.flatMap((x, i) => (x === 'if (GPU.webgpu && !behind && GPU.rt!.sweepPaceMs() > 0) {' ? [i] : []));
+    ok(g.length === 1, `world.ts: the sweep's pace is asked behind GPU.webgpu once (${g.length})`);
+    ok(w[g[0] + 1] === 'if (sweepYieldPaced(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs, GPU.rt!.sweepPaceMs())) {' && w[g[0] + 2] === 'await this.nextFrame();' && w[g[0] + 3] === 'sliceFrom = performance.now();' && w[g[0] + 4] === '}' && w[g[0] + 5] === 'continue;' && w[g[0] + 6] === '}', 'world.ts: the guarded block paces the batch and goes on to the next');
+    ok(w[g[0] + 7] === 'if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {' && w[g[0] + 8] === 'await this.nextFrame();' && w.filter((x) => x === 'if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {').length === 1, "world.ts: the WebGL path's own sweepYield line follows the WebGPU block, there once, as it was");
+    ok(startText.includes('return DRAW_COST.sweepPace ? WARM_TUNE.sliceInPlayMs : 0;'), 'start.ts: the runtime answers the pace from the switch and the warm-up\'s in-play slice');
   }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');

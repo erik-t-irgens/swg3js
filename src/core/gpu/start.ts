@@ -39,6 +39,10 @@ import { GROUND_GPU_STATS } from './gpuGround.ts';
 import { groundSelfTestGpu, horizonSelfTestGpu, type HorizonSelfTestInput } from './gpuGroundSelfTest.ts';
 import { chainRuntime } from './gpuChainPasses.ts';
 import { INLINE, inlineReport, installInline } from './inlineOutput.ts';
+import { gpuFramePerf } from './framePerf.ts';
+import { DRAW_COST, drawCostReport, drawSwitchesNow, isDrawSwitch, readDrawSwitches, registerDrawPerfSwitches, setDrawSwitch } from './drawCost.ts';
+import { installShadowCull } from './shadowCull.ts';
+import { registerPerfSwitch } from '../perf.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -128,13 +132,19 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   // The Effects-off picture drawn the way WebGL draws it (step 6, item 5): every material's output tone-mapped and encoded
   // onto the canvas, before any material is built.
   installInline(renderer, LOOKS_AT_LOAD.inline);
-  // The four private patches (item 8), each only where three is the revision it was written for.
+  // The performance step's switches (`drawCost.ts`), read before the patches that hold two of them.
+  readDrawSwitches();
+  // The four private patches (item 8), and the performance step's replay, each only where three is the revision it was
+  // written for.
   applyPatches(renderer);
+  // The performance step's culling of non-casters in a shadow pass, on three's drawing pipeline.
+  installShadowCull(renderer);
+  registerDrawPerfSwitches(registerPerfSwitch);
   const forcedOff = new Map<string, string>();
   const standIns = makeStandIns();
   // The frame's counters: draws and triangles read off three's own (never reset by the game's passes), and the pipelines
   // three holds, with those made while no loading screen was up counted apart.
-  const frame = { draws: 0, triangles: 0, pipelines: 0, madeInPlay: 0, lastDraws: 0, lastTris: 0, skipped: 0 };
+  const frame = { draws: 0, triangles: 0, pipelines: 0, madeInPlay: 0, lastDraws: 0, lastTris: 0, skipped: 0, ended: 0 };
   const pipelinesNow = (): number => renderer._pipelines?.caches?.size ?? 0;
   let errors = 0;
   let lastError = '';
@@ -238,10 +248,21 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         INLINE.on = o.inline && INLINE.applied;
         out.inline = inlineReport();
       }
+      // The performance step's switches (`drawCost.ts`), live.
+      const d = o.draw as Record<string, unknown> | undefined;
+      if (d && typeof d === 'object') {
+        const said: Record<string, boolean> = {};
+        for (const [k, v] of Object.entries(d)) if (isDrawSwitch(k) && typeof v === 'boolean') said[k] = setDrawSwitch(k, v);
+        out.draw = said;
+      }
       if (typeof o.dynamicHint === 'boolean') out.dynamicHint = setUsageHint((o.scene as THREE.Object3D | undefined) ?? null, o.dynamicHint);
       // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
       if (o.carries === true) out.carries = carriesReport(renderer, (o.scene as THREE.Object3D | undefined) ?? null);
       return out;
+    },
+    sweepPaceMs() {
+      // The performance step's `sweepPace`: the warm-up's own in-play slice of listing a frame, else nought (step 6's frame a batch).
+      return DRAW_COST.sweepPace ? WARM_TUNE.sliceInPlayMs : 0;
     },
     makeSun(scene: THREE.Scene, camera: THREE.PerspectiveCamera, o: GpuSunOptions) {
       sunNow = makeSun(renderer, scene, camera, o);
@@ -256,6 +277,9 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     forced(name: string, why: string) {
       if (!forcedOff.has(name)) forcedOff.set(name, why);
     },
+    perf(o) {
+      return gpuFramePerf(renderer, { ended: () => frame.ended, cascadeNodes: () => ((sunNow?.node as Any)?._shadowNodes ?? []) as Any[], switches: drawSwitchesNow }, o);
+    },
     horizonSelfTest(o: HorizonSelfTestInput) {
       return horizonSelfTestGpu(renderer, o);
     },
@@ -264,6 +288,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     },
     endFrame(loading: boolean) {
       loadingNow = loading;
+      frame.ended++;
       const r = renderer.info.render;
       // The draws as they rose this frame; the triangles the game's own frame zeroes as it begins drawing.
       frame.draws = r.drawCalls - frame.lastDraws;
@@ -308,6 +333,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
           pipelinesMade: { byDrawInPlay: WARM_STATS.drawMadeInPlay, byDrawBehindScreen: WARM_STATS.drawMadeBehind, aheadInPlay: WARM_STATS.asyncInPlay, aheadBehindScreen: WARM_STATS.asyncBehind, lastByDrawInPlay: [...WARM_STATS.lastInPlay], forSelfTests: WARM_STATS.selfTestMade },
         },
         patches: patchReport(),
+        // The performance step: the frame's draws issued for less of the main thread, each behind its switch.
+        draw: drawCostReport(),
         bundles: bundles.report(),
         dynamicHint: {
           kept: USAGE_HINT.kept,

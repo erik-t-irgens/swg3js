@@ -3520,12 +3520,14 @@ class App {
        * `{ carries: true }` checks what three's node copies carry of the scene's materials (step 4: the person keys, the
        * emissive splits, unlit, decals, flip-books and scrolls, the stencil reference), and `stays` says what is step 3's still.
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown> }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGL; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
+        // The frame report on WebGPU (the performance step): a promise of the main thread's sections, the calls a frame and the card's time.
+        if (o?.perf) return rt.perf(o.perf === true ? {} : o.perf).then((r) => ({ ...r, view: { pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } }));
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true || o.inline !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene }) : undefined;
         return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), effectsSwitch: { ...this.world.gpuSwitchLast, does: "an Effects switch in play lists for the new target what is made ready while it is under way, then walks the scene for what stood after its sweep until a walk finds nothing (step 6's fixer)" }, ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
       },
       /**

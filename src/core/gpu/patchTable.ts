@@ -16,6 +16,9 @@
 //           encoder is given one that only notes what was asked, and each bundle is run on the pass with the reference
 //           its own materials carry now (one reference a bundle, which the portal renderer's passes are), after the pass's
 //           opaque draws and before its blended ones.
+// And a fifth, the performance step's own (`drawCost.ts`, its switch `swg.gpu.draw.replay` rather than a patch switch):
+//   replay  a bundle's replay asks three whether a render object needs refreshing only where the answer could be other than
+//           "nothing", once its last full replay found none in need and nothing it depends on has moved since.
 
 /** One method of three's: its class, its name, and the build file its class ships in. */
 export interface ThreeMethod {
@@ -29,7 +32,7 @@ export interface ThreeMethod {
 
 export interface PatchEntry {
   /** The patch's name: the console's word for it and the key of its switch. */
-  name: 'shadow' | 'still' | 'warm' | 'stencil';
+  name: 'shadow' | 'still' | 'warm' | 'stencil' | 'replay';
   /** The file under `src/core/gpu/` that holds it. */
   file: string;
   /** What it does, in a line, for the console. */
@@ -97,6 +100,22 @@ export const PATCH_TABLE: readonly PatchEntry[] = [
       { cls: 'WebGPUBackend', method: 'draw', file: 'three.webgpu.js' },
     ],
   },
+  {
+    name: 'replay',
+    file: 'patchReplay.ts',
+    does: "a render bundle's replay asks three whether a render object needs refreshing only where the answer could be other than nothing, once its last full replay found none in need and nothing it depends on has moved",
+    replaces: [
+      // Each wrapped on the live renderer and called whole: neither is copied.
+      { cls: 'Renderer', method: '_renderBundle', file: 'three.webgpu.js' },
+      { cls: 'NodeManager', method: 'needsRefresh', file: 'three.webgpu.js' },
+    ],
+    relies: [
+      { cls: 'Renderer', method: '_bundleNeedsUpdate', file: 'three.webgpu.js' },
+      { cls: 'NodeMaterialObserver', method: 'needsRefresh', file: 'three.tsl.js' },
+      { cls: 'NodeMaterialObserver', method: 'hasDynamicInstancing', file: 'three.tsl.js' },
+      { cls: 'NodeMaterialObserver', method: 'equals', file: 'three.tsl.js' },
+    ],
+  },
 ];
 
 /** The private fields and methods each patch reaches on a live renderer, checked before it is applied (`patchApplies`). */
@@ -105,6 +124,7 @@ export const PATCH_NEEDS: Readonly<Record<PatchEntry['name'], readonly string[]>
   still: ['_nodes._createNodeBuilderState'],
   warm: ['_createObjectPipeline', '_objects.get', '_geometries.updateForRender', '_nodes.updateForRender', '_bindings.updateForRender', '_pipelines.getForRender', 'backend.createRenderPipeline'],
   stencil: ['backend.beginBundle', 'backend.finishBundle', 'backend.addBundle', 'backend.finishRender', 'backend.get', '_renderTransparents'],
+  replay: ['_renderBundle', '_bundleNeedsUpdate', '_bundles.get', 'backend.get', '_nodes.needsRefresh', 'getRenderTarget', 'getOutputRenderTarget', 'getCanvasTarget', 'getMRT'],
 };
 
 /**

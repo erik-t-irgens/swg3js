@@ -107,6 +107,17 @@ export function sweepYield(built: number, elapsedMs: number, behindScreen: boole
   return built > 0 || elapsedMs >= sliceMs;
 }
 
+/**
+ * The GPU port's performance step (`sweepPace`, on WebGPU alone): a batch of the sweep builds nothing on the main thread
+ * there, it only lists its objects for the warm-up, which builds them on its own clock (`patchWarm.ts`), so in play the
+ * sweep waits a frame once `paceMs` of listing has gone by since its last wait, never after every batch. With `paceMs`
+ * nought (WebGL, and the switch off) and behind a screen it is `sweepYield` itself.
+ */
+export function sweepYieldPaced(built: number, elapsedMs: number, behindScreen: boolean, sliceMs: number, paceMs: number): boolean {
+  if (paceMs > 0 && !behindScreen) return elapsedMs >= paceMs;
+  return sweepYield(built, elapsedMs, behindScreen, sliceMs);
+}
+
 /** What a race start must do before its countdown: nothing, or a course curtain, with the first reason that holds. */
 export interface CurtainNeed {
   need: 'none' | 'course';

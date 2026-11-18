@@ -149,6 +149,12 @@ export interface GpuRuntime {
   compiledSince(mark: number): Promise<void>;
   /** The console's switches (`__debug.gpu({ bundles, patches, warm })`): answers what they came to. */
   tune(o: Record<string, unknown>): Record<string, unknown>;
+  /**
+   * The performance step's `sweepPace` (`gpu/drawCost.ts`): the milliseconds of listing a sweep in play (the Effects switch's)
+   * spends before it waits a frame, the warm-up's own in-play slice; nought with the switch off, where it waits after every
+   * batch as step 6's did (`World.sweepBatches`, `sweepYieldPaced`).
+   */
+  sweepPaceMs(): number;
   /** three's `WebGPURenderer`, initialised, on the WebGPU backend; typed as the classic renderer the game is written to. */
   readonly renderer: THREE.WebGLRenderer;
   readonly standIns: GpuStandIns;
@@ -173,6 +179,11 @@ export interface GpuRuntime {
   look(o: Record<string, unknown>): Record<string, number | boolean>;
   /** After each frame is drawn: the frame's counters taken, and whether a loading screen was up (pipelines made in play). */
   endFrame(loading: boolean): void;
+  /**
+   * The frame report on WebGPU (the performance step, `gpu/framePerf.ts`): the main thread's sections with the sun's cascades
+   * timed apart, the WebGPU calls a frame and three's own steps by kind, and the card's time where asked (`{ gpu: true }`).
+   */
+  perf(o: { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }): Promise<Record<string, unknown>>;
   /** The console's helpers that reach under three's WebGL renderer, made to answer in words (`consoleWords.ts`); once, at boot. */
   wrapConsole(debug: Record<string, unknown>): void;
   /** A thing forced off on WebGPU, named for the report (once each). */
