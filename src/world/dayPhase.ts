@@ -7,7 +7,7 @@ import { rand3 } from './weatherSchedule.ts';
 /**
  * The salt the phase is hashed with. Invented, and chosen rather than picked out of the air: a hash of two
  * numbers spreads them no better than chance, and the first one tried put two of the game's planets at the
- * same hour to within half a second of a twelve-minute day. This one leaves the closest pair of the
+ * same hour to within half a second of the client's twelve-minute day (five seconds of today's 7,716-second one). This one leaves the closest pair of the
  * thirteen suns the planet list actually has about a fortieth of a day apart, which the clock's test
  * measures over that list so that a planet added later is noticed rather than quietly colliding.
  */

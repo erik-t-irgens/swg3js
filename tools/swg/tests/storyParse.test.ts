@@ -62,7 +62,7 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
 // ---- spans ------------------------------------------------------------------------------------------
 {
   const s = cleanSpan({ gameHours: 1 });
-  ok(typeof s !== 'string' && s.ms === 30000 && s.clock === 'world' && s.words === '1 game hour' && GAME_HOUR_MS === 30000, 'a game hour is the game\'s 720-second day over 24: thirty real seconds, on the world clock by default');
+  ok(typeof s !== 'string' && s.ms === GAME_HOUR_MS && s.clock === 'world' && s.words === '1 game hour' && GAME_HOUR_MS === GAME_DAY_MS / 24, `a game hour is the game's own day over 24: ${GAME_HOUR_MS / 1000} real seconds, on the world clock by default`);
   const mixed = cleanSpan({ seconds: 30, realHours: 2, clock: 'played' });
   ok(typeof mixed !== 'string' && mixed.ms === 30000 + 7200000 && mixed.clock === 'played' && mixed.words === '2 hours and 30 seconds', 'units mix, and the played clock is kept');
   ok(typeof cleanSpan({}) === 'string' && typeof cleanSpan({ seconds: -1 }) === 'string' && typeof cleanSpan({ seconds: 1, minutes: 2 }) === 'string' && typeof cleanSpan({ gameDays: 1e6 }) === 'string', 'no unit, a negative one, an unknown one and a span past a year are refused');

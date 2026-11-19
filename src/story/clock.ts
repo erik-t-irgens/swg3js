@@ -1,19 +1,20 @@
 // How long things take in a story, and on which clock. Pure, nothing imported.
 //
 // **Units.** An author writes `seconds`, `realHours`, `gameHours` or `gameDays`, and may mix them in one
-// span. A game day is the game's own 720 seconds, so a game hour is 30 real seconds and a 72-hour deadline
-// is 36 real minutes written in game hours, or three days written in real ones: the author picks per
-// timer. Every time a book holds is shared-clock milliseconds (the server's clock, or
+// span. A game day is the game's own 7,716 seconds (90 minutes of daylight since 2026-11-18; the client's was 720), so a
+// game hour is 321.5 real seconds and a 72-hour deadline is about 6.4 real hours written in game hours, or three days
+// written in real ones: the author picks per timer. Every time a book holds is shared-clock milliseconds (the server's clock, or
 // `Date.now()` with no server) and never the frame's own clock, which stops while a panel is open.
 //
 // **Two clocks.** `world`, the default, runs while the character is logged off: harsh, and on tone. A
 // span on `played` counts only while the character is in the world, so its step keeps the time it has
 // left while the character is away (`StepRec.remaining`) and starts counting again on the way back in.
 //
-// What is the game's: the 720-second day. Everything else here is ours.
+// What is the game's: the day's length, `GAME_DAY_SECONDS` in `src/world/sharedClock.ts`, kept equal here (a test holds
+// them). Everything else here is ours.
 
 /** The game's own day, in real milliseconds. */
-export const GAME_DAY_MS = 720000;
+export const GAME_DAY_MS = 7716000;
 export const GAME_HOUR_MS = GAME_DAY_MS / 24;
 export const REAL_HOUR_MS = 3600000;
 export const REAL_DAY_MS = 86400000;

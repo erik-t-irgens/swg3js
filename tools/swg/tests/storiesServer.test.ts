@@ -176,7 +176,8 @@ if (typeof WebSocket === 'undefined') {
   const { emptyBook } = await import('../../../src/story/book.ts');
   const { PLANETS } = await import('../../../src/data/planets.ts');
   const { hourOfDay, planetPhase } = await import('../../../src/world/dayPhase.ts');
-  const { dayFraction } = await import('../../../server/clock.mjs');
+  const { DAY_MS, dayFraction } = await import('../../../server/clock.mjs');
+  const { GAME_HOUR_MS } = await import('../../../src/story/clock.ts');
   const dir = mkdtempSync(join(tmpdir(), 'swg-stories-server-'));
   // A set of the test's own: one job on Naboo, whose layout centre the server is not told.
   const own = join(dir, 'story');
@@ -621,7 +622,9 @@ if (typeof WebSocket === 'undefined') {
     const granted = e.step('test:timer', 'tick')!.at;
     e.close();
     await settle();
-    keeper.admin('clock', { ms: 62000 });
+    // Past the tick's thirty seconds and the one game hour after it, with two seconds to spare, and inside
+    // the race's minute.
+    keeper.admin('clock', { ms: 30000 + GAME_HOUR_MS + 2000 });
     await settle();
     const e2 = await open('Wedge', 'c-e', { key: a.key, counter: 1 });
     e2.sync(1, 0, 1, 1);
@@ -629,7 +632,7 @@ if (typeof WebSocket === 'undefined') {
     const tick = e2.step('test:timer', 'tick');
     const later = e2.step('test:timer', 'later');
     ok(tick?.state === 'done' && later?.state === 'done' && e2.step('test:timer', 'race')?.state === 'active', 'an offline character\'s deadlines are settled at its claim: the timer and the wait done, the race begun');
-    ok(!!tick && !!later && tick.at === granted + 30000 && later.at === granted + 30000 + 30000, `in the order they fell, each stamped with its own deadline (${tick?.at && tick.at - granted} and ${later?.at && later.at - granted} ms after the grant)`);
+    ok(!!tick && !!later && tick.at === granted + 30000 && later.at === granted + 30000 + GAME_HOUR_MS, `in the order they fell, each stamped with its own deadline (${tick?.at && tick.at - granted} and ${later?.at && later.at - granted} ms after the grant)`);
     keeper.admin('clock', { ms: null });
     await settle();
 
@@ -641,7 +644,7 @@ if (typeof WebSocket === 'undefined') {
     // browser draws Tatooine's sky at, known with no browser saying it. Worked out here the same way, clear of
     // the end of an hour so the two cannot fall either side of it.
     const tat = PLANETS.find((p) => p.id === 'tatooine')!;
-    const dayMs = Number(hail.dayMs) || 720000;
+    const dayMs = Number(hail.dayMs) || DAY_MS;
     const phaseMs = planetPhase(tat.sky.sunAzimuth, tat.sky.sunElevation) * dayMs;
     const hourMs = dayMs / 24;
     const intoHour = (((Date.now() + phaseMs) % hourMs) + hourMs) % hourMs;

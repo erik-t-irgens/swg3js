@@ -52,8 +52,13 @@ export const CLOCK_LIMITS = {
   maxDayMs: 24 * 60 * 60 * 1000,
 };
 
-/** The game's own day, in seconds: twelve minutes, the one number of the day that is not ours. */
-export const GAME_DAY_SECONDS = 720;
+/**
+ * The game's own day, in seconds. The client ran a twelve-minute day (720 s); on 2026-11-18 the owner asked for an hour
+ * and a half of daylight with the client's split kept (`DAY_NIGHT_SPLIT`, 70% day), so the whole day is 7,716 s: 90 minutes
+ * of day and 38.6 of night, and a game hour of exactly 321.5 s. Its partner on the server is `DAY_MS` (`server/clock.mjs`),
+ * and the story's game day is `GAME_DAY_MS` (`src/story/clock.ts`); the three move together.
+ */
+export const GAME_DAY_SECONDS = 7716;
 
 export type ClockState = 'off' | 'shared' | 'adrift';
 
@@ -422,6 +427,7 @@ export interface ClockKnob {
   gapSeconds?: number;
   phase?: number;
   phaseSpread?: number;
+  fastDaySeconds?: number;
   pingSeconds?: number;
   samples?: number;
   easeMsPerSecond?: number;
@@ -431,7 +437,7 @@ export interface ClockKnob {
   weatherEaseMaxMs?: number;
   release?: boolean;
   /**
-   * How long the whole day is, in seconds, or null for the game's own twelve minutes. With no server
+   * How long the whole day is, in seconds, or null for the game's own day (`GAME_DAY_SECONDS`). With no server
    * the day is this browser's to set; with one it is the server's, and only the world's admin may set
    * it, for everybody at once -- a browser running a day of its own length beside it would have its sun
    * somewhere else from everybody's.
@@ -443,7 +449,7 @@ export interface ClockKnob {
  * The whole day's length set from the console; the sentence to say back. With no server it is set
  * here: the day is walked by `dt / length`, so a new length bends the sun's pace from the next frame and
  * the hour it stands at never jumps; and a server met later keeps this length as this build's own and
- * gives it back when it goes, exactly as it keeps the twelve minutes now. While the shared clock is in
+ * gives it back when it goes, exactly as it keeps the game's own day now. While the shared clock is in
  * use (a server answering, or one that has gone and left its offset in force) the length is the
  * server's: the world's admin asks the server for it (`adminDay`), which anchors the day where it stands
  * and tells everybody, and anybody else is refused in words.
@@ -478,19 +484,25 @@ export interface DayTune {
   gapSeconds: number;
   /** How much of a day the planets' phases are spread over. */
   phaseSpread: number;
+  /**
+   * How long a whole day takes with the fast-forward key held, in real seconds, whatever the day's length: 8, the
+   * client's twelve-minute day at ninety times, which is what the key always did. Held to it rather than to ninety times
+   * the day, which on the 7,716-second day would take 86 s to run a day through.
+   */
+  fastDaySeconds: number;
 }
 
 /**
  * The day's own invented numbers, kept beside the clock's so that one knob reaches both. Four times
  * the day's rate is about as fast as the sun can move without being watched moving, and a quarter
- * of it is slow enough to be waited for without standing still; a hundredth of a day is 7.2 seconds
- * of a twelve-minute day, which is more than any drift between two machines and less than anything
- * worth calling a correction; thirty times the rate puts the worst correction there is (half a day,
- * by the shorter way) right in twelve seconds, which is visible and brief, where easing it at four
- * would be a minute and a half of a racing sun; a second of frames away is far longer than any
+ * of it is slow enough to be waited for without standing still; a hundredth of a day is 77 seconds
+ * of the 7,716-second day (7.2 of the client's twelve minutes), which is more than any drift between two machines and less
+ * than anything worth calling a correction; thirty times the rate puts the worst correction there is (half a day, by the
+ * shorter way) right in about two minutes of today's day (twelve seconds of the client's), which happens only when a server
+ * is first heard from in play, where easing it at four would be a quarter of an hour of a racing sun; a second of frames away is far longer than any
  * stall and far shorter than a tab switch; a whole day of spread is simply "anywhere".
  */
-export const dayTune: DayTune = { easeMax: 4, snapAt: 0.01, catchUp: 30, minRate: 0.25, gapSeconds: 1, phaseSpread: 1 };
+export const dayTune: DayTune = { easeMax: 4, snapAt: 0.01, catchUp: 30, minRate: 0.25, gapSeconds: 1, phaseSpread: 1, fastDaySeconds: 8 };
 
 export function clockKnob(opts?: ClockKnob): Record<string, unknown> {
   let said = '';
@@ -502,6 +514,7 @@ export function clockKnob(opts?: ClockKnob): Record<string, unknown> {
     if (opts.minRate !== undefined && Number.isFinite(opts.minRate)) dayTune.minRate = Math.max(0, Math.min(1, opts.minRate));
     if (opts.gapSeconds !== undefined && Number.isFinite(opts.gapSeconds)) dayTune.gapSeconds = Math.max(0, opts.gapSeconds);
     if (opts.phaseSpread !== undefined && Number.isFinite(opts.phaseSpread)) dayTune.phaseSpread = Math.max(0, opts.phaseSpread);
+    if (opts.fastDaySeconds !== undefined && Number.isFinite(opts.fastDaySeconds)) dayTune.fastDaySeconds = Math.max(0.5, opts.fastDaySeconds);
     if (opts.pingSeconds !== undefined && Number.isFinite(opts.pingSeconds)) CLOCK_TUNE.pingSeconds = Math.max(1, opts.pingSeconds);
     if (opts.samples !== undefined && Number.isFinite(opts.samples)) CLOCK_TUNE.samples = Math.max(1, Math.round(opts.samples));
     if (opts.easeMsPerSecond !== undefined && Number.isFinite(opts.easeMsPerSecond)) CLOCK_TUNE.easeMsPerSecond = Math.max(0, opts.easeMsPerSecond);

@@ -50,6 +50,7 @@ import type { PayOrder, StoryEvent } from '../../../src/story/quests.ts';
 import { cleanView, questWaypointId } from '../../../src/story/view.ts';
 import { placementKey, storyObjectSnippet, toGame as placementToGame, type PlacementRow } from '../../../src/story/placements.ts';
 import { textOf } from '../../../src/story/text.ts';
+import { GAME_HOUR_MS } from '../../../src/story/clock.ts';
 import { StoryWatch, type WatchPlace } from '../../../src/world/storyWatch.ts';
 import { STAND_TUNE, StoryStands } from '../../../src/world/storyStands.ts';
 import { pickShown } from '../../../src/ui/tracker.ts';
@@ -541,13 +542,15 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
     g.tick();
   }
   ok(g.stepOf('test:timer', 'tick')?.state === 'done' && g.stepOf('test:timer', 'later')?.state === 'active', 'forty seconds of the frame loop\'s ticks: the thirty-second timer was swept done, and the wait after it runs');
-  ok(line('later')?.limit === undefined && line('later')?.deadline === T0 + 60000, 'a wait is no time limit either');
-  for (let i = 0; i < 25; i++) {
+  // The wait is one game hour of the game's own day, after the tick's thirty seconds.
+  const later = T0 + 30000 + GAME_HOUR_MS;
+  ok(line('later')?.limit === undefined && line('later')?.deadline === later, 'a wait is no time limit either');
+  while (g.clock.now < later + 5000) {
     g.clock.now += 1000;
     g.clock.wall += 1000;
     g.tick();
   }
-  ok(g.stepOf('test:timer', 'race')?.state === 'active' && line('race')?.limit === true && line('race')?.deadline === T0 + 120000, 'and the goto after it runs against a time limit, which its line says');
+  ok(g.stepOf('test:timer', 'race')?.state === 'active' && line('race')?.limit === true && line('race')?.deadline === later + 60000, 'and the goto after it runs against a time limit, which its line says');
 }
 
 // ---- a step waiting on a death the player is credited with: the kill detector watches for it ---------------------------
@@ -659,7 +662,8 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.tick();
   const rec = g.q('test:timer')!;
   ok(rec.state === 'failed' && rec.outcome === 'late' && g.said.includes('Failed: TEST: clocks (late)'), 'two hours away: the timer, the wait and the time limit after them have all run out, and the job ended late, which the message line names');
-  ok(rec.steps.tick.at === T0 + 30000 && rec.steps.later.at === T0 + 60000 && rec.steps.race.at === T0 + 120000 && rec.ended === T0 + 120000, 'each settled in the order it fell, at its own time, never when anybody looked');
+  const later = T0 + 30000 + GAME_HOUR_MS;
+  ok(rec.steps.tick.at === T0 + 30000 && rec.steps.later.at === later && rec.steps.race.at === later + 60000 && rec.ended === later + 60000, 'each settled in the order it fell, at its own time, never when anybody looked');
 }
 
 // ---- the change counter moves only for changes made here -------------------------------------------------------
