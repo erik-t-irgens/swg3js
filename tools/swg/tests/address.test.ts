@@ -5,11 +5,15 @@
 //
 // Everything here is synthetic: made-up addresses. Run: node tools/swg/tests/address.test.ts
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { addressKept, DROPPED_SWITCHES } from '../../../src/core/address.ts';
-import { GPU, readRendererSwitch } from '../../../src/core/gpuSwitch.ts';
+
+// The renderer's switch is the WebGPU port's (`src/core/gpuSwitch.ts`); the WebGL release has none, and this test runs on
+// both, so the switch is read only where it is there.
+const SWITCH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'src', 'core', 'gpuSwitch.ts');
+const gpuSwitch = existsSync(SWITCH) ? await import('../../../src/core/gpuSwitch.ts') : null;
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -57,10 +61,13 @@ const text = (rel: string) => readFileSync(join(REPO, rel), 'utf8').replace(/\r\
   ok(addressKept(link.search) === link.search, 'and the game leaves that link exactly as the launcher wrote it');
   // The renderer's switch is read at boot from the address as typed, before the game writes it, and a typed renderer
   // stays: the switch reads the same after the old words come off.
-  readRendererSwitch('?planet=naboo&renderer=webgl&class=jedi');
-  const before = `${GPU.asked}/${GPU.how}`;
-  readRendererSwitch(addressKept('?planet=naboo&renderer=webgl&class=jedi'));
-  ok(before === 'webgl/address' && `${GPU.asked}/${GPU.how}` === before, `the renderer's switch reads the same address with or without them (${before})`);
+  if (gpuSwitch) {
+    const { GPU, readRendererSwitch } = gpuSwitch;
+    readRendererSwitch('?planet=naboo&renderer=webgl&class=jedi');
+    const before = `${GPU.asked}/${GPU.how}`;
+    readRendererSwitch(addressKept('?planet=naboo&renderer=webgl&class=jedi'));
+    ok(before === 'webgl/address' && `${GPU.asked}/${GPU.how}` === before, `the renderer's switch reads the same address with or without them (${before})`);
+  } else console.log('--   no renderer switch on this branch (the WebGL release): its check is skipped');
   // The server and the session read their own switches by name.
   ok(/new URLSearchParams\(location\.search\)\.get\('server'\)/.test(text('src/net/net.ts')) && /\.get\('word'\)/.test(text('src/net/session.ts')), 'the server and its word are read by their own names');
   const server = ['server/relay.mjs', 'server/identity.mjs', 'server/wire.mjs'].map(text).join('\n');
