@@ -1,8 +1,8 @@
-// The GPU port's step 3, off: with the renderer switch at WebGL (the default) nothing of the WebGPU side is loaded, and
+// The GPU port's step 3, off: with the renderer switch at WebGL (`?renderer=webgl`; WebGPU is the default since 2026-11-18) nothing of the WebGPU side is loaded, and
 // every site it guards keeps the line it had as the WebGL branch.
 //
 //  1. the switch (`src/core/gpuSwitch.ts`): read once; `?renderer=` on the address first, then
-//     `localStorage['swg.renderer']`, else WebGL; a word other than the two is no choice; a storage that throws is the
+//     `localStorage['swg.renderer']`, else WebGPU; a word other than the two is no choice; a storage that throws is the
 //     default; reading it never sets `GPU.webgpu` (only the boot does, once WebGPU has started);
 //  2. the WebGL boot's module graph: every static value import followed from `src/main.ts` reaches nothing under
 //     `src/core/gpu/` and no `three/webgpu`, `three/tsl` or `CSMShadowNode`, and the one module of the port it does load,
@@ -51,19 +51,19 @@ const ok = (cond: unknown, msg: string): void => {
     };
   };
   const cases: { search: string; kept: string | null | 'throw'; asked: string; how: string }[] = [
-    { search: '', kept: null, asked: 'webgl', how: 'default' },
+    { search: '', kept: null, asked: 'webgpu', how: 'default' },
     { search: '?renderer=webgpu', kept: null, asked: 'webgpu', how: 'address' },
     { search: '?planet=naboo&renderer=webgpu&class=jedi', kept: 'webgl', asked: 'webgpu', how: 'address' },
     { search: '?renderer=webgl', kept: 'webgpu', asked: 'webgl', how: 'address' },
     { search: '?renderer=vulkan', kept: 'webgpu', asked: 'webgpu', how: 'storage' },
     { search: '', kept: 'webgl', asked: 'webgl', how: 'storage' },
-    { search: '', kept: 'WebGPU', asked: 'webgl', how: 'default' },
-    { search: '', kept: 'throw', asked: 'webgl', how: 'default' },
+    { search: '', kept: 'WebGPU', asked: 'webgpu', how: 'default' },
+    { search: '', kept: 'throw', asked: 'webgpu', how: 'default' },
   ];
   for (const c of cases) {
     store(c.kept);
     const m = await fresh();
-    ok(m.GPU.read === false && m.GPU.asked === 'webgl' && m.GPU.webgpu === false, 'the switch starts at WebGL, unread');
+    ok(m.GPU.read === false && m.GPU.asked === 'webgpu' && m.GPU.webgpu === false, 'the switch starts at WebGPU, unread');
     m.readRendererSwitch(c.search);
     ok(m.GPU.asked === c.asked && m.GPU.how === c.how, `switch ${JSON.stringify(c)}: read ${m.GPU.asked} from ${m.GPU.how}`);
     ok(m.GPU.webgpu === false && m.GPU.rt === null && m.GPU.refused === null, 'reading the switch never starts WebGPU (only the boot does)');

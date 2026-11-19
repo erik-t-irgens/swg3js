@@ -1,6 +1,6 @@
 // Which renderer the game draws with, read once at boot and held for the session (the GPU port's step 3).
 //
-// `?renderer=webgpu` on the address, else `localStorage['swg.renderer']` ('webgpu' or 'webgl'), else WebGL. No Graphics
+// `?renderer=webgpu` on the address, else `localStorage['swg.renderer']` ('webgpu' or 'webgl'), else WebGPU (the owner's call of 2026-11-18: the port is the trunk and starts on WebGPU; `?renderer=webgl` is the old renderer). No Graphics
 // row: the branch is not for players yet, and the README names the switch. Read once, before the first frame, by
 // `readRendererSwitch` (the boot); every site that draws differently on WebGPU asks `GPU.webgpu` and nothing else --
 // never `navigator.gpu` on its own.
@@ -233,7 +233,7 @@ export interface GpuFrameStats {
 
 export const GPU = {
   /** What the switch asked for. */
-  asked: 'webgl' as RendererChoice,
+  asked: 'webgpu' as RendererChoice,
   /** Where it was read from. */
   how: 'default' as SwitchSource,
   /** True once the game draws on WebGPU: the one flag every site asks. Set before the first frame, never changed. */
@@ -246,7 +246,7 @@ export const GPU = {
   rt: null as GpuRuntime | null,
 };
 
-/** The switch, read once: the address, then this browser's storage, then WebGL. */
+/** The switch, read once: the address, then this browser's storage, then WebGPU. */
 export function readRendererSwitch(search: string = typeof location === 'undefined' ? '' : location.search): void {
   if (GPU.read) return;
   GPU.read = true;

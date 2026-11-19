@@ -3521,7 +3521,7 @@ class App {
        * emissive splits, unlit, decals, flip-books and scrolls, the stencil reference), and `stays` says what is step 3's still.
        */
       gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown> }) => {
-        const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGL; read once at boot" };
+        const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         // The frame report on WebGPU (the performance step): a promise of the main thread's sections, the calls a frame and the card's time.
