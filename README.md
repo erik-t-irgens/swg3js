@@ -101,7 +101,7 @@ For a player who does not want Node, git or a command line: one Windows program,
 
 Everything the launcher keeps is in `%LOCALAPPDATA%\swg3js\` (the downloaded game, its settings and its logs) except the converted content, which is wherever you put it. **Check for updates** fetches a newer version while it runs, and **Quit** stops it. The launcher's own workings are in `tools/launcher/README.md`.
 
-For **Claude Code in VS Code**: `CLAUDE.md` at the repo root is the handoff, read automatically at the start of a session, with what the project is, the rules, the architecture, what took a long time to learn, where things stand and what comes next; `.claude/launch.json` starts the dev server from the extension. Ask it to read `CLAUDE.md` and `docs/ASSETS.md` before anything else.
+For **Claude Code in VS Code**: `CLAUDE.md` at the repo root is the handoff, read automatically at the start of a session, with what the project is, the rules and the architecture; what took a long time to learn is in `docs/lessons/`, one file an area, and where things stand is `docs/STATUS.md`; `.claude/launch.json` starts the dev server from the extension. Ask it to read `CLAUDE.md` and `docs/ASSETS.md` before anything else.
 
 ## What exists today (v0.3)
 
@@ -1073,7 +1073,9 @@ src/
   ui/        HUD, menus, galaxy map, loading screen, character select and creator
   main.ts    app wiring, game loop, the __debug helpers
 server/            the multiplayer server: the socket, the clock, the world it keeps and who each player is
-CLAUDE.md          the handoff for Claude Code: rules, architecture, lessons learned, what is next
+CLAUDE.md          the handoff for Claude Code: rules and architecture
+docs/lessons/      what took a long time to learn, one file an area
+docs/STATUS.md     where things stand, pass by pass
 ```
 
 ## Converting your own SWG install
