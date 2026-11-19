@@ -49,7 +49,8 @@ function after(src: string, marker: string, n = 2000): string {
   // The HUD's on-foot block, the old screen and the nameplate stand down while the editor is on.
   ok(main.includes('if (!this.editor?.on) this.hud.draw();'), "the on-foot overlay is not drawn while the editor is on");
   ok(main.includes('this.showBodyBlock(!condition && !this.editor?.on);'), "the body's block stands down");
-  ok(main.includes('if (simulate && this.settings.hudNameplate && !this.editor?.on) {'), 'and the nameplate does');
+  // (The hide key's `!hudOff` stands in the same condition since the port's pass 1: hidden, the plate goes too.)
+  ok(main.includes('if (simulate && !hudOff && this.settings.hudNameplate && !this.editor?.on) {'), 'and the nameplate does');
 }
 
 {

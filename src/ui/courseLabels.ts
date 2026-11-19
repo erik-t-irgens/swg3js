@@ -123,6 +123,20 @@ export class CourseLabels {
     }
   }
 
+  /**
+   * The interface shown again after the hide key (`App.setHudHidden`, which skipped `frame` while it was off): each
+   * label's place and fade let go, so the next `frame` writes them afresh from this camera, and whether it stands taken
+   * from the element itself, so a label the camera has left behind since is taken down on that frame.
+   */
+  refresh(): void {
+    for (const it of this.items) {
+      it.sx = Number.NaN;
+      it.sy = Number.NaN;
+      it.op = Number.NaN;
+      it.on = it.el.style.display === 'block';
+    }
+  }
+
   /** Off the page. */
   dispose(): void {
     this.root.remove();

@@ -10,7 +10,8 @@
 //   3. the third wave's other user, a family of another world lent in play: the editor's paint brush asks the game
 //      (`lendGround`), the game asks the curtain over `World.lendInPlay`, and nothing else of the game lends in play;
 //   4. the minimap kept clear of the editor's window (Map-maker I's open item): the window docks under the display's
-//      top-left block by the very sum the help block stands by, only while the minimap shows.
+//      top-left block by the very sum hud.css states for the block (the help block stood by it until the port's pass 1),
+//      only while the minimap shows.
 //
 // Run: node tools/swg/tests/editorCurtain.test.ts
 import assert from 'node:assert/strict';
@@ -138,10 +139,12 @@ function method(text: string, head: string): string {
 {
   const win = readFileSync(join(REPO, 'src/ui/editorWindow.ts'), 'utf8');
   const hud = readFileSync(join(REPO, 'src/ui/hud.css'), 'utf8');
-  const help = /#hud\.minimap-on \.help \{ top: calc\(12px \+ (\d+)px \* var\(--hud-scale\)\); \}/.exec(hud);
+  // The block's height with the minimap up, as hud.css states it over its minimap rules (`hudMath.test.ts` adds the
+  // sum up again from both stylesheets and holds the window's rule to it). The help block's own rule stated it until
+  // the help panel went with the hide key (the port's pass 1).
+  const stated = /everything it then\s*\n?\s*\* holds, all of it on the HUD scale:[\s\S]*?rounded\s*\n?\s*\*?\s*up to (\d+)\./.exec(hud);
   const dock = /#hud\.minimap-on ~ \.ed-panel \{ top: calc\((\d+)px \+ (\d+)px \* var\(--hud-scale\)\); max-height: calc\(100vh - (\d+)px - (\d+)px \* var\(--hud-scale\)\); \}/.exec(win);
-  ok(!!help && !!dock && dock[2] === help[1] && dock[4] === help[1] && Number(dock[1]) === 12 + 8 && Number(dock[3]) > Number(dock[1]), `while the minimap shows, the editor's window docks under the top-left block by the very sum the help block stands by (12 + ${help?.[1]} on the HUD scale, and a gap of 8), no taller than what is left; with the minimap off the window's own place (the selector asks for \`minimap-on\`)`);
-  const css = /const EDITOR_WINDOW_CSS = `([\s\S]*?)`;/.exec(win)?.[1] ?? '';
+  ok(!!stated && !!dock && dock[2] === stated[1] && dock[4] === stated[1] && Number(dock[1]) === 12 + 8 && Number(dock[3]) > Number(dock[1]), `while the minimap shows, the editor's window docks under the top-left block by the very sum hud.css states for it (12 + ${stated?.[1]} on the HUD scale, and a gap of 8), no taller than what is left; with the minimap off the window's own place (the selector asks for \`minimap-on\`)`);  const css = /const EDITOR_WINDOW_CSS = `([\s\S]*?)`;/.exec(win)?.[1] ?? '';
   ok(!/#hud\.minimap-on (\.|#)(?!help)[^{]*\{/.test(css.replace(/#hud\.minimap-on ~ \.ed-panel/g, '')), "and nothing of the minimap's own block is restyled by the editor");
 }
 

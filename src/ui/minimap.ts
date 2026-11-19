@@ -356,6 +356,23 @@ export class Minimap {
   }
 
   /**
+   * The interface shown again after the hide key (`App.setHudHidden`), which skipped every `update` while it was off: the
+   * drawing and the coordinates (with their wait) are let go, so the next `update` draws the circle and writes the pair
+   * afresh from where you are now; whether it stands is taken from the element itself, so a world left while hidden (a
+   * planet for space, where it stands aside) is stood aside on that frame. Turning the record over instead was tried and
+   * was wrong exactly then: the turned record then agreed with the new world and nothing was written. The world's name
+   * and the city's line are written when told, hidden or not, so they are not touched.
+   */
+  refresh(): void {
+    this.clock.reset();
+    this.drawnWith = null;
+    this.locX = Number.NaN;
+    this.locZ = Number.NaN;
+    this.locAt = Number.NEGATIVE_INFINITY;
+    this.shown = !this.root.hidden;
+  }
+
+  /**
    * The world's name over the top of the circle, told wherever the corner's own name is told (a world
    * arrived in, a jump carried across). One write, and none for the name already there.
    */

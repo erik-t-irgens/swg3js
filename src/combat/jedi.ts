@@ -92,12 +92,6 @@ export class JediKit implements Kit {
   readonly slots: KitSlot[] = [];
   /** The power behind each of those slots, in the same order, so neither test below has to search for it by name. */
   private readonly slotPowers: PowerDef[] = [];
-  readonly help = [
-    '<b>LMB</b> saber swing (hold to chain, direction keys pick the swing) · <b>RMB</b> hold to block: the stance comes up and bolts are turned away · <b>LMB+RMB</b> kata · <b>R</b> throw the saber (staff: kick) · <b>K</b> style (fast, medium, strong, dual, staff) · <b>L</b> saber on/off',
-    '<b>Jump</b> + direction + <b>LMB</b> flip and jump attacks · <b>Ctrl</b> + forward + <b>LMB</b> lunge or spin · <b>Jump</b> beside a wall: wall run (strafe + forward) or wall flip (strafe) · <b>Jump</b> at a wall: run up and flip back · back + <b>Jump</b>: backflip',
-    '<b>1</b> to <b>6</b> the Force powers in the slots: the inventory\'s Force tab (<b>I</b>) picks which; a tap power fires on the key, a hold power lasts while it is down, a toggle until the key again',
-    'Bolts are only turned away while the block is held, back where you look; at the top defence rank the block holds through a swing',
-  ];
   readonly resource: Resource = { label: 'Force', value: 100, max: 100 };
   speedActive = false;
   lightningActive = false;

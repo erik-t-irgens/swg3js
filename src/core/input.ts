@@ -23,7 +23,9 @@ export type Action =
   | 'ship'
   | 'switchClass'
   | 'map'
-  | 'help'
+  // The hide key: everything drawn over the world taken off the screen and stopped writing, and back again. It took the
+  // help panel's key and its place in the table when that panel went (the port's pass 1).
+  | 'hideHud'
   | 'inventory'
   | 'spawner'
   | 'freeLook'
@@ -168,7 +170,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   ship: ['KeyP'],
   switchClass: ['KeyC'],
   map: ['KeyM'],
-  help: ['KeyH'],
+  // H, the owner's choice: the help panel's key until that panel went. While the world editor is on H is its key list
+  // (`editorKeys`) and this is not read at all. A choice a player kept for the old `help` names nothing now and is
+  // dropped on load (`chosenBindings`), as the four old placing keys were.
+  hideHud: ['KeyH'],
   inventory: ['KeyI'],
   spawner: ['KeyB'],
   freeLook: ['AltLeft', 'AltRight'],
@@ -263,7 +268,7 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   editorBody: ['KeyN'],
   editorHold: ['Pause'],
   // The editor's editing keys: C the class switch's, V the kneel's and the roll's, the arrows the four emotes', 1 to 6 the
-  // ability slots' and G and H the emote wheel's and the help's (every one of which the editor mutes while it is on), and
+  // ability slots' and G and H the emote wheel's and the hide key's (every one of which the editor mutes while it is on), and
   // Page Up, Page Down, the brackets, the backslash, End, Home and 7 to 9, which nothing else reads. None holds Ctrl.
   editorScale: ['KeyC'],
   editorNeighbour: ['KeyV'],

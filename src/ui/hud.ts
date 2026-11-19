@@ -6,32 +6,22 @@ import { HUD_SIZES, barBand, breathRow, clamp01, distanceWords as metreWords, ma
 import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 
 /**
- * The help block's common lines, as actions rather than letters. The block used to spell ten key
- * letters into its own text, which went wrong the moment any of them was rebound; now the words are
- * here and every letter comes from the bindings, so the block follows a rebind like the cells do.
- * `%s` takes the next action's key in turn.
+ * The class `#ui` wears while the hide key has the interface off the screen (`App.setHudHidden`). Not `hidden`: the
+ * page's own `.hidden` is `display: none !important` on whatever wears it, which on `#ui` would take the menus, the
+ * loading screen and the chat line down with the display. `hud.css` says what it hides and what stays.
  */
-const HELP_LINES: readonly { text: string; actions: readonly string[]; move?: boolean }[] = [
-  { text: 'move · mouse look · wheel zoom · %s jump · %s run · %s walk', actions: ['jump', 'speedUp', 'walk'], move: true },
-  // The class switch is the developer's now (a character learns rather than switches), so the block leaves it out;
-  // the Controls page still lists it as such.
-  { text: '%s mount and dismount · %s fast-forward time', actions: ['mount', 'fastForward'] },
-  { text: '%s map · %s inventory · %s spawner · %s help · %s noclip · %s debug menu · Esc frees the mouse', actions: ['map', 'inventory', 'spawner', 'help', 'noclip', 'debugMenu'] },
-  { text: 'placing a building or a prop: hold %s and move the mouse to turn it, hold %s to raise it', actions: ['placeTurn', 'placeLift'] },
-  { text: 'grapple: %s fire and let go · hold %s reel in · hold %s reel out · %s boost off · hold %s haul in · move keys sway', actions: ['grappleFire', 'reelIn', 'reelOut', 'grappleBoost', 'grappleHaul'] },
-  { text: 'Esc → Controls rebinds every one of these, and the display follows at once', actions: [] },
-];
+export const HUD_HIDDEN_CLASS = 'ui-hidden';
 
 /**
- * The four words in the corner strip, as actions rather than letters. The strip used to spell M, I,
- * B and H into its own markup, which went wrong the moment any of the four was rebound — the same
- * fault the help block had, four lines above it in the same file.
+ * The words in the corner strip, as actions rather than letters. The strip used to spell M, I, B and
+ * H into its own markup, which went wrong the moment any of them was rebound. The fourth word, Help,
+ * went with the help panel (the port's pass 1, where H became the hide key): what a key does is the
+ * Controls page's to say, and what a number slot does is its cell's hover name.
  */
 const HINT_ACTIONS: readonly { action: string; word: string }[] = [
   { action: 'map', word: 'Map' },
   { action: 'inventory', word: 'Inventory' },
   { action: 'spawner', word: 'Spawner' },
-  { action: 'help', word: 'Help' },
 ];
 
 /**
@@ -186,7 +176,7 @@ export interface HandSource {
 const LIVE: Hud[] = [];
 
 /**
- * The bindings changed: every display puts the new keys on its cells and in its help. Called by
+ * The bindings changed: every display puts the new keys on its cells and in its corner strip. Called by
  * whoever rebinds — one line in the Controls page. Nothing breaks without it: the cells notice a
  * changed binding at the four-times-a-second tick anyway, and this only makes it immediate.
  */
@@ -207,6 +197,9 @@ interface SlotCell {
   cool: number;
   coolDrawn: number;
 }
+
+/** What a hand cell holds after `refresh`: nothing the rack hands over is this, so the next read writes the hand afresh. */
+const NOT_READ: HandItem = {};
 
 /** One of the two hands. */
 interface HandCell {
@@ -238,7 +231,7 @@ interface BodyBar {
 /**
  * The slow half of the head-up display: the planet block, the clock and the frame rate, the weather
  * note, the on-foot bars, the number slots with the keys you have bound, what is in each hand, the
- * crosshair and its charge, the prompt, the hurt fade, the help block and the mouse-free line. The
+ * crosshair and its charge, the prompt, the hurt fade and the mouse-free line. The
  * flight display -- the reticle, the aim circle and the target's bracket -- is `ShipHud`'s, drawn on
  * the same overlay canvas; nothing here knows about flying.
  *
@@ -265,10 +258,9 @@ export class Hud {
   /** What that line holds, kept here rather than read back off the element. */
   private weatherNoteText = '';
   private readonly clock: HTMLElement;
-  /** The corner strip: four words whose letters come from the bindings, like the help block's. */
+  /** The corner strip: three words whose letters come from the bindings. */
   private readonly hint: HTMLElement;
   private hintText = '';
-  private readonly className: HTMLElement;
   /** The body block, whose standing down is how this file knows the player is at a ship's controls. */
   private readonly bottom: HTMLElement;
   private readonly hp: BodyBar;
@@ -281,7 +273,7 @@ export class Hud {
    * the body block, above the health bar, and that is a choice rather than an accident. The block is
    * anchored at the bottom of the screen and grows upward, so a row put in at the top moves nothing
    * that is already on the screen: the health bar, the class pool, the ability cells and the hands
-   * all stay exactly where they were, and only the class's name above them is pushed up. A row put in
+   * all stay exactly where they were, and only the block's own top moves up. A row put in
    * under the pool would have shifted both bars upward the moment you went under, which is the worst
    * possible time to move what someone is watching.
    *
@@ -313,7 +305,6 @@ export class Hud {
   private staminaTired = false;
   private readonly slotsEl: HTMLElement;
   private readonly hands: HandCell[] = [];
-  private readonly help: HTMLElement;
   /** The plain dot, which stands in for the drawn crosshair until the overlay is attached. */
   private readonly crosshair: HTMLElement;
   private readonly chargeEl: HTMLElement;
@@ -332,8 +323,6 @@ export class Hud {
   /** The saber cell's own word, and what it says now: a cell that reads "off" with the blade out is worse than one that says nothing. */
   private saberCostEl: HTMLElement | null = null;
   private saberCostText = '';
-  /** The class's own help lines, kept so the block can be written again when a key changes. */
-  private kitHelp: readonly string[] = [];
   /**
    * What was last written, in the steps of `HUD_TUNE`. `NaN` is "nothing written yet", because it is
    * the one value that is never equal to itself: -1 is a number a health that has gone below zero
@@ -369,6 +358,8 @@ export class Hud {
   private hurtDrawn = NaN;
   private lastFps = performance.now();
   private frames = 0;
+  /** The quarter-second lines are written on the next frame whatever the clock says (`refresh`, the interface shown again). */
+  private tickNow = false;
   /** DOM writes counted for `__debug`: this second so far, and the last full second. */
   private writes = 0;
   private byDesign = 0;
@@ -409,7 +400,6 @@ export class Hud {
         <div class="loc"></div>
         <div class="hud-nearby"></div>
       </div>
-      <div class="panel help hidden"></div>
       <div class="panel top-right">
         <div class="clock"></div>
         <div class="fps"></div>
@@ -421,7 +411,6 @@ export class Hud {
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
-        <div class="class-name"></div>
         <div class="hud-body">
           <div class="hud-brow breath-row" hidden>
             <div class="hud-bar breath"><div class="fill"></div></div>
@@ -457,7 +446,6 @@ export class Hud {
     this.weatherNote = q('.weather-note');
     this.clock = q('.clock');
     this.hint = q('.hint');
-    this.className = q('.class-name');
     this.bottom = q('.bottom');
     this.hp = { fill: q('.hud-bar.hp > .fill'), ghost: q('.hud-bar.hp > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: 0 };
     this.hpText = q('.hp-val');
@@ -473,7 +461,6 @@ export class Hud {
     this.staminaFill = q('.hud-bar.stamina > .fill');
     this.staminaText = q('.stamina-val');
     this.slotsEl = q('.slots');
-    this.help = q('.help');
     this.crosshair = q('.crosshair');
     this.chargeEl = q('.charge');
     this.chargeFill = q('.charge .fill');
@@ -512,7 +499,7 @@ export class Hud {
     this.byDesign++;
   }
 
-  /** Where the keys on the cells come from. The cells and the help block take them at once. */
+  /** Where the keys on the cells come from. The cells and the corner strip take them at once. */
   setInput(input: HudBindings): void {
     this.input = input;
     this.refreshKeys(true);
@@ -563,14 +550,14 @@ export class Hud {
   }
 
   /**
-   * The class in play: its name, its number slots with the keys you have bound, its help. A rebuild
-   * of the row, so every write here is counted apart as one that is meant to happen -- counted where
-   * each one is made, so the figure is the number and not an estimate of it.
+   * The kit in play: its number slots with the keys you have bound. A rebuild of the row, so every
+   * write here is counted apart as one that is meant to happen -- counted where each one is made, so
+   * the figure is the number and not an estimate of it. The kit's name is not written anywhere: the
+   * class words left the screen in the port's pass 1 (a character will learn rather than be a class).
    */
   setKit(kit: Kit): void {
-    this.className.textContent = kit.name;
     this.slotsEl.innerHTML = '';
-    this.byDesign += 2;
+    this.byDesign += 1;
     this.jedi = kit.id === 'jedi';
     this.slots.length = 0;
     for (const s of kit.slots) {
@@ -606,8 +593,6 @@ export class Hud {
     // The cell's word is the blade's state, not a label: it said "off" with the blade lit before.
     this.saberCostEl = saber.querySelector<HTMLElement>('.cost');
     this.saberCostText = 'off';
-    this.kitHelp = kit.help;
-    this.writeHelp();
     // A new kit's bars and charge are written again whatever they held for the last one.
     this.hp.cur = NaN;
     this.hpTextDrawn = NaN;
@@ -635,9 +620,95 @@ export class Hud {
     this.writes += 2;
   }
 
-  toggleHelp(): void {
-    this.help.classList.toggle('hidden');
-    this.byDesign++;
+  /**
+   * A frame with the interface hidden (the hide key, `App.setHudHidden`): nothing is written and nothing is
+   * compared, and the second the writes are counted in is still closed on time, so `stats` reads the hidden
+   * second's own count -- 0 -- rather than whatever the last shown second wrote. Called in `update`'s place.
+   */
+  rest(): void {
+    const now = performance.now();
+    // The frame-rate line's own clock is kept moving too, so its first reading after the interface comes back is
+    // the frames of that quarter second and not one frame over the whole time it was hidden.
+    this.lastFps = now;
+    this.frames = 0;
+    this.roll(now);
+  }
+
+  /**
+   * The interface shown again after the hide key: every "write only when changed" record let go, so the next
+   * `update` writes every value afresh from what is true now -- a bar that moved while hidden shows where it
+   * is, a cooldown that ran out shows ready, the hands show what is in them, and the quarter-second lines
+   * (the clock, the frame rate, `/loc`) are written on that first frame rather than up to a quarter second
+   * later. Nothing is written here; the frame after does the writing, and it is one burst, not a steady cost.
+   * The kit's row itself (its cells and their marks) is the kit's and was written when it was set, hidden or
+   * not, so it is not rebuilt. Every value record (a number, a word) is let go; every two-state record (a row
+   * up or down, a cell lit or not) is taken from the element itself, which is the one record that cannot be
+   * wrong, so the next frame writes whatever differs from the page. Turning a two-state record over instead
+   * is wrong exactly when the truth changed while hidden: the turned record then agrees with the new truth and
+   * nothing is written.
+   */
+  refresh(): void {
+    this.tickNow = true;
+    this.nearbyText = '\u0000';
+    this.hpTextDrawn = Number.NaN;
+    this.resTextDrawn = Number.NaN;
+    this.resLabelDrawn = '';
+    this.refreshBar(this.hp);
+    this.refreshBar(this.res);
+    this.resShown = !this.resRow.hidden;
+    this.breathShown = !this.breathRowEl.hidden;
+    this.breathCur = Number.NaN;
+    this.breathTextDrawn = Number.NaN;
+    this.breathLabelDrawn = '';
+    this.breathBandDrawn = '\u0000';
+    this.staminaOn = !hasClass(this.staminaRowEl, 'gone');
+    this.staminaShown = !hasClass(this.staminaRowEl, 'off');
+    this.staminaCur = Number.NaN;
+    this.staminaTextDrawn = Number.NaN;
+    this.staminaTired = hasClass(this.staminaBar, 'warn');
+    for (const cell of this.slots) {
+      cell.lit = hasClass(cell.root, 'active');
+      cell.ready = hasClass(cell.root, 'ready');
+      cell.coolDrawn = Number.NaN;
+      cell.code = '\u0000';
+    }
+    this.saberLit = this.saberEl ? hasClass(this.saberEl, 'active') : false;
+    this.saberCostText = '';
+    this.chargeShown = !this.chargeEl.hidden;
+    this.chargeDrawn = Number.NaN;
+    // A blow taken while hidden is not flashed after the fact: the fade is put at its end, and the next frame
+    // writes the fade's element clear whatever it last wore.
+    if (this.hurtLevel > 0) this.hurtLevel = 1e-6;
+    this.hurtDrawn = Number.NaN;
+    for (const hand of this.hands) {
+      hand.item = NOT_READ;
+      hand.label = '\u0000';
+      hand.glyph = '\u0000';
+    }
+    this.promptText = '\u0000';
+    this.weatherNoteText = '\u0000';
+    this.hintText = '';
+  }
+
+  /**
+   * One bar let go for `refresh`: its fill and ghost written again from the next share. A ghost that was easing
+   * down when the interface went is snapped back behind its fill on that frame (`ageBar` with a moment left),
+   * rather than walked down long after the blow that moved it.
+   */
+  private refreshBar(bar: BodyBar): void {
+    bar.cur = Number.NaN;
+    bar.ghostAt = Number.NaN;
+    if (!bar.snap) bar.ghostFor = 1e-9;
+  }
+
+  /** The second the writes are counted in, closed when it is a second old. */
+  private roll(now: number): void {
+    if (now - this.windowStart < 1000) return;
+    this.lastWrites = this.writes;
+    this.lastByDesign = this.byDesign;
+    this.writes = 0;
+    this.byDesign = 0;
+    this.windowStart = now;
   }
 
   /**
@@ -739,10 +810,10 @@ export class Hud {
   }
 
   /**
-   * Put the keys that are bound now on the cells, and in the help block. Called when the bindings
+   * Put the keys that are bound now on the cells, and in the corner strip. Called when the bindings
    * change — at once through `hudBindingsChanged`, and in any case at the display's own
    * four-times-a-second tick, so a rebind reaches the cells whether or not whoever rebound said so.
-   * `always` writes the help block even when no cap moved, which is what a fresh input wants.
+   * `always` writes the corner strip even when no cap moved, which is what a fresh input wants.
    */
   refreshKeys(always = false): void {
     let moved = false;
@@ -754,26 +825,10 @@ export class Hud {
       this.writes++;
       moved = true;
     }
-    if (moved || always) {
-      this.writeHelp();
-      this.writeHint();
-    }
+    if (moved || always) this.writeHint();
   }
 
-  /** The help block: the common lines with the keys that are bound now, then the class's own. */
-  private writeHelp(): void {
-    let html = '';
-    for (const line of HELP_LINES) {
-      let i = 0;
-      const text = line.text.replace(/%s/g, () => `<b>${esc(keyLabel(this.codeOf(line.actions[i++] ?? '')))}</b>`);
-      html += `<div>${line.move ? `<b>${esc(this.moveKeys())}</b> ` : ''}${text}</div>`;
-    }
-    for (const l of this.kitHelp) html += `<div>${l}</div>`;
-    this.help.innerHTML = html;
-    this.byDesign++;
-  }
-
-  /** The corner strip, with the keys that are bound now. Written with the help block and never in a frame. */
+  /** The corner strip, with the keys that are bound now. Written when a key changes and never in a steady frame. */
   private writeHint(): void {
     let html = '';
     for (const h of HINT_ACTIONS) {
@@ -798,13 +853,6 @@ export class Hud {
     if (root) setVar(root, '--hud-ghost', `${seconds}s`);
   }
 
-  /** The four movement keys as one cap, "WASD" while they are still the defaults. */
-  private moveKeys(): string {
-    let s = '';
-    for (const a of ['forward', 'left', 'back', 'right']) s += keyLabel(this.codeOf(a));
-    return s;
-  }
-
   // -------------------------------------------------------------------------------------------
   // The frame.
 
@@ -820,9 +868,10 @@ export class Hud {
     this.frames++;
     const now = performance.now();
     const acc = (now - this.lastFps) / 1000;
-    if (acc >= 0.25) {
+    if (acc >= 0.25 || this.tickNow) {
+      this.tickNow = false;
       this.lastFps = now;
-      this.fps.textContent = `${Math.round(this.frames / acc)} fps`;
+      this.fps.textContent = `${acc > 0 ? Math.round(this.frames / acc) : 0} fps`;
       this.loc.textContent = `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`;
       this.clock.textContent = clock;
       this.frames = 0;
@@ -833,13 +882,7 @@ export class Hud {
       this.readHands();
       this.syncGhost();
     }
-    if (now - this.windowStart >= 1000) {
-      this.lastWrites = this.writes;
-      this.lastByDesign = this.byDesign;
-      this.writes = 0;
-      this.byDesign = 0;
-      this.windowStart = now;
-    }
+    this.roll(now);
     // The nameplate over a creature's head says what you are looking at; with one, the corner says
     // where you are and nothing else, and an empty name is how the game asks for that. The name is
     // asked for at its own rate (`HUD_WIRING.nearbyHz`), so this compares and almost never writes.
@@ -1272,6 +1315,15 @@ export class Hud {
 function setVar(el: { style?: { setProperty?: (name: string, value: string) => void } }, name: string, value: string): void {
   const style = el.style;
   if (style && typeof style.setProperty === 'function') style.setProperty(name, value);
+}
+
+/**
+ * Whether an element wears a class, read off the element (`refresh`'s two-state records). A stand-in for the page
+ * in a test need not have `contains`, where the answer is simply no, as `bodyHidden` reads it.
+ */
+function hasClass(el: { classList?: { contains?: (name: string) => boolean } }, name: string): boolean {
+  const list = el.classList;
+  return !!list && typeof list.contains === 'function' ? list.contains(name) : false;
 }
 
 /** A cell's key-cap element. Built into the cell's own markup, so it is always there. */
@@ -1780,13 +1832,41 @@ export class Roster {
   update(): void {
     const from = this.source;
     if (!this.holding && from !== NO_SOURCE) this.set(from());
-    const now = performance.now();
-    if (now - this.windowStart >= 1000) {
-      this.lastWrites = this.writes;
-      this.writes = 0;
-      this.windowStart = now;
-    }
+    this.roll();
     this.place();
+  }
+
+  /**
+   * A frame with the interface hidden (the hide key): nothing is pulled or written, and the second the writes are
+   * counted in is still closed on time, so `stats` reads the hidden second's own 0. Called in `update`'s place.
+   */
+  rest(): void {
+    this.roll();
+  }
+
+  /**
+   * The interface shown again: every row's "written when changed" record let go, so the next `update` writes each
+   * row standing afresh -- its name, its column and its bar -- from the group as it is now; its three marks are taken
+   * from the row's own classes, as the display's two-state records are (`Hud.refresh` says why).
+   */
+  refresh(): void {
+    for (const row of this.rows) {
+      row.name = '\u0000';
+      row.atMode = -1;
+      row.atNum = AT_RESET;
+      row.health = AT_RESET;
+      row.leader = hasClass(row.root, 'leader');
+      row.you = hasClass(row.root, 'you');
+      row.away = hasClass(row.root, 'away');
+    }
+  }
+
+  private roll(): void {
+    const now = performance.now();
+    if (now - this.windowStart < 1000) return;
+    this.lastWrites = this.writes;
+    this.writes = 0;
+    this.windowStart = now;
   }
 
   /** The same two counts the rest of the display answers with, filled in place. */

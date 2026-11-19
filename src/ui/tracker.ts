@@ -262,6 +262,31 @@ export class Tracker {
     return this.lastWrites;
   }
 
+  /**
+   * The interface shown again after the hide key (`App.setHudHidden`, which stood the tracker aside with `show` false):
+   * every line's "written when changed" record let go, so the next `update` writes the note, the documents, the titles
+   * and each line's words and value afresh. Whether each element stands is taken from the element itself, which is the
+   * one record here that cannot be wrong, and the block's own standing is written again by the `show` it is next handed.
+   */
+  refresh(): void {
+    this.noteNow = '\u0000';
+    this.noteShown = !this.note.hidden;
+    for (const d of this.docEls) {
+      d.textNow = '\u0000';
+      d.shown = !d.root.hidden;
+    }
+    for (const b of this.blocks) {
+      b.titleNow = '\u0000';
+      b.shown = !b.root.hidden;
+      for (const l of b.lines) {
+        l.textNow = '\u0000';
+        l.valueNow = '\u0000';
+        l.shown = !l.root.hidden;
+        l.done = l.root.classList.contains('done');
+      }
+    }
+  }
+
   private count(n = 1): void {
     this.writes += n;
   }

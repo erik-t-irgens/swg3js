@@ -283,7 +283,7 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   // The way out to the select screen, where no frame runs: taken down outright.
   mm.showCity('Theed');
   mm.standDown();
-  ok(!mm.showing && mm.root.hidden && !hudRoot.classList.contains('minimap-on') && city.className === 'hud-city', 'stood down, it is hidden, the help block has its place back and the name is gone');
+  ok(!mm.showing && mm.root.hidden && !hudRoot.classList.contains('minimap-on') && city.className === 'hud-city', 'stood down, it is hidden, the block below has its place back and the name is gone');
   picture = null;
   mm.update(view);
   ok(!mm.showing, 'and a world with no picture never brings it up');

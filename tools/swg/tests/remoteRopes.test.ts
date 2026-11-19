@@ -483,12 +483,15 @@ ok(Object.keys(GRAPPLE_TUNE).length < 128 && !Object.hasOwn(GRAPPLE_TUNE, 'peerL
     let perFrame = best.scavenges > 0 ? Infinity : Math.max(0, best.made) / FRAMES;
     if (process.env.RR_ALLOC_CHILD) console.log(`RR_ALLOC ${perFrame}`);
     else {
-      // The cleanest of up to five processes, as `raceAllocOwn.ts` takes the cleanest of its. About one process in four
-      // measured 16 B a frame, every window of it alike: the sampling heap profiler named three's `Quaternion.length`,
-      // which the dart's `setFromUnitVectors` reaches through its `normalize` and which, left out of the frame's compiled
-      // code in that process, hands its length back boxed. That is three's code and the compiler's choice per process
-      // (written out in line instead, the frame boxed elsewhere in every process), so a process that boxes is run again
-      // rather than the watcher's arithmetic bent round it; one that boxes in five processes running is the fault.
+      // The cleanest of up to five processes, as `raceAllocOwn.ts` takes the cleanest of its. Before pass 1's wave 1 two
+      // processes in three or more measured 16 B a frame, every window of it alike: the bend's `dir.set(...)` in
+      // `layRope`, run on few of its calls by the time the compiler read the counts (the sections above lay thousands of
+      // one-point ropes first), stayed a call and took a worked-out number over boxed; and under load three's
+      // `Quaternion.length`, reached from the dart's turn through `normalize`, was left out of a filled frame the same
+      // way. `layRope`, `layDart` and `resolve` now write those components out and the dart's turn is `turnFromUnit`
+      // (docs/lessons/grapple.md), and none of 24 fresh processes boxed after. Which calls a compile builds in is still
+      // the compiler's choice per process, so a process that boxes is run again rather than the measure bent round it;
+      // one that boxes in five processes running is the fault.
       let tries = 1;
       for (; tries < 5 && !(perFrame < 1); tries++) {
         const child = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url)], { env: { ...process.env, RR_ALLOC_CHILD: '1' }, encoding: 'utf8' });
