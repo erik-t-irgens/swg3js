@@ -507,7 +507,7 @@ export function calendarOf(v: unknown, bad: (path: string, message: string) => v
   };
   const text = typeof o.text === 'string' && o.text.trim() ? o.text.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : null;
   if (o.text !== undefined && !text) bad('/text', 'a calendar\'s text is words');
-  const day = o.day === undefined || o.day === 'game' ? 720000 : o.day === 'real' ? 86400000 : (bad('/day', 'a calendar\'s day is "game" (the game\'s 720 seconds) or "real"'), 720000);
+  const day = o.day === undefined || o.day === 'game' ? 7716000 : o.day === 'real' ? 86400000 : (bad('/day', 'a calendar\'s day is "game" (the game\'s 7,716 seconds) or "real"'), 7716000);
   const format = typeof o.format === 'string' && o.format.trim() ? o.format.slice(0, 120) : 'Day {day}, year {year}';
   return { text, epoch: num(o.epoch, 0, '/epoch'), dayMs: day, yearDays: Math.max(1, Math.floor(num(o.yearDays, 365, '/yearDays', 1))), firstYear: Math.floor(num(o.firstYear, 0, '/firstYear')), format };
 }

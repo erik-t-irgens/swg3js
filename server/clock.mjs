@@ -1,4 +1,4 @@
-// The world's clock. Today every browser runs its own twelve-minute day from wherever it happened
+// The world's clock. Today every browser runs its own day from wherever it happened
 // to start, so one player can be at noon while another is at dusk on the same planet. The server
 // holds one clock instead, hands it out in the hail and answers a ping with it, and each browser
 // works its time of day out from that rather than from its own start.
@@ -7,10 +7,10 @@
 // the only outside thing it touches is the `now` it is given, which the tests hand in.
 
 /**
- * A day is 720 seconds, which is what the game's own day cycle has always run at
+ * A day is 7,716 seconds, the game's own (`GAME_DAY_SECONDS`, 90 minutes of daylight since 2026-11-18; the client ran 720)
  * (`DayCycle.dayLengthSeconds`). It is not ours; the knob that changes it is.
  */
-export const DAY_MS = 720000;
+export const DAY_MS = 7716000;
 
 /** The fraction of a day, 0 at midnight and 0.5 at noon, for a clock reading and a planet's phase. */
 export function dayFraction(clockMs, phaseMs = 0, dayMs = DAY_MS) {

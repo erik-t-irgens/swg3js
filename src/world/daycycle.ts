@@ -26,7 +26,7 @@ export function phaseFor(azimuth: number, maxElevation: number): number {
 /** Time of day in [0, 1): 0 is midnight, 0.5 is noon. */
 export class DayCycle {
   time = 0.36;
-  /** The whole day, in seconds: the game's twelve minutes, a server's own, or `__debug.day({ length })` with none. */
+  /** The whole day, in seconds: the game's own (`GAME_DAY_SECONDS`), a server's own, or `__debug.day({ length })` with none. */
   dayLengthSeconds = GAME_DAY_SECONDS;
   /** This planet's place in the shared day, in days. */
   phase = 0;
@@ -108,7 +108,8 @@ export class DayCycle {
     this.lastWallAt = wallNow;
     const shared = this.held || fast || this.paused ? null : sharedClock.timeOfDay(this.dayLengthSeconds, this.phase);
     // Paused, the step is nought: the time is whatever was last written, and stays it.
-    const step = this.paused ? 0 : (dt / this.dayLengthSeconds) * (fast ? 90 : 1);
+    // The fast-forward key runs a whole day in `dayTune.fastDaySeconds` whatever the day's length.
+    const step = this.paused ? 0 : fast ? dt / dayTune.fastDaySeconds : dt / this.dayLengthSeconds;
     if (shared === null) this.time = (this.time + step) % 1;
     else if (!(dt > 0) || stopped) {
       // No time passed, or none of it was drawn: the world is being set up behind a loading screen,

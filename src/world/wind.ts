@@ -357,10 +357,10 @@ export function setWindArm(o: { master: boolean; wind: boolean; devils: boolean;
 class WindDay implements DevilDay {
   now = 0.36;
   t = 0.5;
-  length = 720.5;
+  length = 7716.5;
   shared = false;
   constructor() {
-    this.length = 720;
+    this.length = 7716;
   }
 }
 export const WIND_DAY: DevilDay & { shared: boolean } = new WindDay();
@@ -376,7 +376,7 @@ export function writeWindDay(visible: number, length: number, sharedCount: numbe
   const shared = Number.isFinite(sharedCount);
   WIND_DAY.shared = shared;
   WIND_DAY.now = shared ? sharedCount - Math.floor(sharedCount) : visible;
-  WIND_DAY.length = length > 0 ? length : 720;
+  WIND_DAY.length = length > 0 ? length : 7716;
 }
 
 // ---------------------------------------------------------------------------------------------- the uniform

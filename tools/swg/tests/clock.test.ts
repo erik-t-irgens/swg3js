@@ -9,8 +9,9 @@
 // With no server configured every one of these paths must be exactly what was there before, so the
 // first block checks the day against its old formula step for step.
 import assert from 'node:assert/strict';
-import { CLOCK_LIMITS, CLOCK_TUNE, SharedClock, dayTune, setOwnDayLength, sharedClock, sharedNote } from '../../../src/world/sharedClock.ts';
+import { CLOCK_LIMITS, CLOCK_TUNE, GAME_DAY_SECONDS, SharedClock, dayTune, setOwnDayLength, sharedClock, sharedNote } from '../../../src/world/sharedClock.ts';
 import { DAY_LIMITS, DAY_MS, WorldClock, cleanDay, dayFraction as serverDayFraction, daysAt } from '../../../server/clock.mjs';
+import { GAME_DAY_MS } from '../../../src/story/clock.ts';
 import { DayCycle, phaseFor } from '../../../src/world/daycycle.ts';
 import { STEP_SECONDS, climateFor, consoleClock, scheduledLevel, seedOf } from '../../../src/world/weatherSchedule.ts';
 import { PLANETS } from '../../../src/data/planets.ts';
@@ -24,6 +25,12 @@ const ok = (cond: boolean, msg: string) => {
 const near = (a: number, b: number, eps: number) => Math.abs(a - b) <= eps;
 /** A step in days, the short way round the clock face. */
 const shortWay = (d: number) => d - Math.floor(d + 0.5);
+/**
+ * Frames of a sixtieth of a second in a share of the game's own day. The day's tune is in shares of
+ * the day (`dayTune`), so how long a drift or a correction takes to settle grows with the day; the
+ * waits below are the shares they were in seconds of the client's twelve-minute day.
+ */
+const dayFrames = (share: number) => Math.round(GAME_DAY_SECONDS * share * 60);
 
 /** A day with no planet behind it, at a known phase. */
 function freshDay(phase = 0): DayCycle {
@@ -36,6 +43,12 @@ function freshDay(phase = 0): DayCycle {
 // below counts from a real moment rather than from a small round number.
 const EPOCH = 1_700_000_000_000;
 
+// --- the game's own day is one number in three places ---
+ok(
+  GAME_DAY_SECONDS * 1000 === DAY_MS && GAME_DAY_SECONDS * 1000 === GAME_DAY_MS,
+  `the browser's, the server's and the story's game day are one length (${GAME_DAY_SECONDS} s, ${DAY_MS} ms, ${GAME_DAY_MS} ms)`,
+);
+
 // --- no server: nothing changed ---
 {
   let wall = EPOCH;
@@ -47,25 +60,25 @@ const EPOCH = 1_700_000_000_000;
   for (let i = 0; i < 600; i++) {
     wall += dt * 1000;
     day.update(dt, false);
-    mirror = (mirror + dt / 720) % 1;
+    mirror = (mirror + dt / GAME_DAY_SECONDS) % 1;
   }
-  ok(near(day.time, mirror, 1e-12), 'with no server the day is the old formula to the last bit');
+  ok(near(day.time, mirror, 1e-12), "with no server the day is the old formula, the step over the game's own day, to the last bit");
   const held = day.time;
   day.update(0, false);
   ok(day.time === held, 'a zero step moves nothing when there is no server');
   for (let i = 0; i < 60; i++) {
     wall += dt * 1000;
     day.update(dt, true);
-    mirror = (mirror + (dt / 720) * 90) % 1;
+    mirror = (mirror + dt / dayTune.fastDaySeconds) % 1;
   }
   ok(near(day.time, mirror, 1e-12), 'the fast-forward key still runs the day ninety times over');
   // Frames away change nothing either: with nobody to follow there is nothing to be put right to.
   wall += 120_000;
   const before = day.time;
   day.update(dt, false);
-  ok(near(day.time, (before + dt / 720) % 1, 1e-12), 'and a tab that was hidden simply carries on from where it was');
+  ok(near(day.time, (before + dt / GAME_DAY_SECONDS) % 1, 1e-12), 'and a tab that was hidden simply carries on from where it was');
   ok(sharedNote() === '', 'and nothing is said in the display about a clock nobody is sharing');
-  ok(sharedClock.timeOfDay(720, 0) === null, 'there is no shared time of day to be had');
+  ok(sharedClock.timeOfDay(GAME_DAY_SECONDS, 0) === null, 'there is no shared time of day to be had');
   ok(sharedClock.now() === wall, 'the shared clock is the wall clock exactly');
   ok(sharedClock.walkSeconds() === wall / 1000, "and so is the weather's reading of it");
 }
@@ -345,6 +358,8 @@ const EPOCH = 1_700_000_000_000;
   ok(day.time === target(), 'a step with no time in it sets the day outright: the sky is right before the loading screen lifts');
 
   // A small drift: the day hurries, never faster than its allowance, and lands on the shared time.
+  // The drift is a share of the day and so is the wait for it: a seventy-second of the day to land
+  // from behind, a forty-eighth to come back from ahead.
   const drift = dayTune.snapAt * 0.5;
   const dt = 1 / 60;
   const d2 = freshDay(0);
@@ -354,7 +369,7 @@ const EPOCH = 1_700_000_000_000;
   let last = d2.time;
   let maxStep = 0;
   let wentBack = false;
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < dayFrames(1 / 72); i++) {
     wall += dt * 1000;
     d2.update(dt, false);
     const moved = shortWay(d2.time - last);
@@ -363,7 +378,7 @@ const EPOCH = 1_700_000_000_000;
     last = d2.time;
   }
   ok(!wentBack, 'catching up, the sun never runs backwards');
-  ok(maxStep <= (dt / 720) * dayTune.easeMax + 1e-12, 'and never faster than its allowance');
+  ok(maxStep <= (dt / GAME_DAY_SECONDS) * dayTune.easeMax + 1e-12, 'and never faster than its allowance');
   ok(near(d2.time, target(), 1e-9), 'and it lands on the shared time');
 
   // Ahead of the shared clock: the sun dawdles, and still never runs backwards -- and never stands
@@ -375,7 +390,7 @@ const EPOCH = 1_700_000_000_000;
   last = d3.time;
   wentBack = false;
   let minStep = 1;
-  for (let i = 0; i < 900; i++) {
+  for (let i = 0; i < dayFrames(1 / 48); i++) {
     wall += dt * 1000;
     d3.update(dt, false);
     const moved = shortWay(d3.time - last);
@@ -384,7 +399,7 @@ const EPOCH = 1_700_000_000_000;
     last = d3.time;
   }
   ok(!wentBack, 'running ahead, the sun slows rather than winding back');
-  ok(minStep >= (dt / 720) * dayTune.minRate - 1e-12, 'and dawdles rather than standing still');
+  ok(minStep >= (dt / GAME_DAY_SECONDS) * dayTune.minRate - 1e-12, 'and dawdles rather than standing still');
   ok(near(d3.time, target(), 1e-9), 'and it comes back onto the shared time');
 }
 
@@ -420,15 +435,15 @@ const EPOCH = 1_700_000_000_000;
   wall += dt * 1000;
   d6.update(dt, false);
   const jump = Math.abs(shortWay(d6.time - before));
-  ok(jump > 0 && jump <= (dt / 720) * dayTune.catchUp + 1e-12, 'a server first heard from while playing moves the sun no faster than its allowance');
+  ok(jump > 0 && jump <= (dt / GAME_DAY_SECONDS) * dayTune.catchUp + 1e-12, 'a server first heard from while playing moves the sun no faster than its allowance');
   const aim = () => sharedClock.timeOfDay(d6.dayLengthSeconds, d6.phase) as number;
   let frames = 1;
-  while (frames < 60 * 60 && !near(shortWay(aim() - d6.time), 0, 1e-6)) {
+  while (frames < dayFrames(1 / 12) && !near(shortWay(aim() - d6.time), 0, 1e-6)) {
     wall += dt * 1000;
     d6.update(dt, false);
     frames++;
   }
-  ok(frames < 60 * 20, `and it is on the shared time again within seconds (${(frames / 60).toFixed(1)} s)`);
+  ok(frames < dayFrames(1 / 36), `and it is on the shared time again within a thirty-sixth of the day (${(frames / 60).toFixed(1)} s)`);
   sharedClock.none();
 }
 
@@ -441,45 +456,45 @@ const EPOCH = 1_700_000_000_000;
   const day = freshDay(0);
   day.update(0, false);
   const dt = 1 / 60;
-  // A whole second on the key, which is a fifth of the day at ninety times over -- not the single
-  // frame that no rule could tell from an ordinary one.
+  // A whole second on the key, ninety seconds of the day at ninety times over and so past the snap --
+  // not the single frame that no rule could tell from an ordinary one.
   for (let i = 0; i < 60; i++) {
     wall += dt * 1000;
     day.update(dt, true);
   }
   ok(day.fast && sharedNote() !== '', 'the fast day says in the display that it is not the shared one');
-  const ahead = Math.abs(shortWay(day.time - (sharedClock.timeOfDay(720, 0) as number)));
+  const ahead = Math.abs(shortWay(day.time - (sharedClock.timeOfDay(GAME_DAY_SECONDS, 0) as number)));
   ok(ahead > dayTune.snapAt, 'and a second on the key really does leave the day far from the shared one');
   // Letting the key go hands the day back: by the shorter way round, no faster than its allowance,
-  // and over in seconds rather than in one frame across the whole sky.
+  // and over in a small share of the day rather than in one frame across the whole sky.
   let last = day.time;
   let worst = 0;
   let frames = 0;
-  while (frames < 60 * 60 && !near(shortWay((sharedClock.timeOfDay(720, 0) as number) - day.time), 0, 1e-6)) {
+  while (frames < dayFrames(1 / 12) && !near(shortWay((sharedClock.timeOfDay(GAME_DAY_SECONDS, 0) as number) - day.time), 0, 1e-6)) {
     wall += dt * 1000;
     day.update(dt, false);
     worst = Math.max(worst, Math.abs(shortWay(day.time - last)));
     last = day.time;
     frames++;
   }
-  ok(!day.fast && worst <= (dt / 720) * dayTune.catchUp + 1e-12, 'letting the key go hands the day back without ever moving the sun across the sky in one frame');
-  ok(frames < 60 * 20, `and it settles onto the shared time again within seconds (${(frames / 60).toFixed(1)} s)`);
+  ok(!day.fast && worst <= (dt / GAME_DAY_SECONDS) * dayTune.catchUp + 1e-12, 'letting the key go hands the day back without ever moving the sun across the sky in one frame');
+  ok(frames < dayFrames(1 / 36), `and it settles onto the shared time again within a thirty-sixth of the day (${(frames / 60).toFixed(1)} s)`);
   ok(sharedNote() === '', 'with nothing left to say about it');
 
   // A time set by hand holds the day until it is handed back.
   day.time = 0.123;
   wall += dt * 1000;
   day.update(dt, false);
-  ok(day.held && near(day.time, 0.123 + dt / 720, 1e-9), 'a time set from the console is kept, and runs on by itself');
+  ok(day.held && near(day.time, 0.123 + dt / GAME_DAY_SECONDS, 1e-9), 'a time set from the console is kept, and runs on by itself');
   ok(sharedNote() !== '', 'and the display says the day is not the shared one');
   day.release();
   frames = 0;
-  while (frames < 60 * 60 && !near(shortWay((sharedClock.timeOfDay(720, 0) as number) - day.time), 0, 1e-6)) {
+  while (frames < dayFrames(1 / 12) && !near(shortWay((sharedClock.timeOfDay(GAME_DAY_SECONDS, 0) as number) - day.time), 0, 1e-6)) {
     wall += dt * 1000;
     day.update(dt, false);
     frames++;
   }
-  ok(!day.held && frames > 0 && frames < 60 * 20, `handed back, it walks to the shared time rather than jumping to it (${(frames / 60).toFixed(1)} s)`);
+  ok(!day.held && frames > 0 && frames < dayFrames(1 / 36), `handed back, it walks to the shared time rather than jumping to it (${(frames / 60).toFixed(1)} s)`);
   ok(sharedNote() === '', 'and the display goes quiet');
   sharedClock.none();
 }
@@ -497,7 +512,7 @@ const EPOCH = 1_700_000_000_000;
   sharedClock.hail(wall);
   ok(!day.held, 'and a server greeting the browser afterwards is where the shared day starts');
   day.update(0, false);
-  ok(near(day.time, sharedClock.timeOfDay(720, 0) as number, 1e-12), 'so the day follows it rather than silently refusing to');
+  ok(near(day.time, sharedClock.timeOfDay(GAME_DAY_SECONDS, 0) as number, 1e-12), 'so the day follows it rather than silently refusing to');
   day.time = 0.9;
   day.update(dt, false);
   ok(day.held, 'a time set while a server is there still holds it');
@@ -511,18 +526,18 @@ const EPOCH = 1_700_000_000_000;
   sharedClock.wall = () => wall;
   sharedClock.none();
   const day = freshDay(0);
-  ok(day.dayLengthSeconds === 720, "the day is this build's own length until a server says otherwise");
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, "the day is this build's own length until a server says otherwise");
   sharedClock.hail(wall, 1_800_000);
-  ok(day.dayLengthSeconds === 1800, 'a server running a longer day is believed');
+  ok(day.dayLengthSeconds === 1800, 'a server running a day of its own length is believed');
   day.update(0, false);
   ok(near(day.time, sharedClock.timeOfDay(1800, 0) as number, 1e-12), 'and the day is worked out at that length');
   sharedClock.none();
-  ok(day.dayLengthSeconds === 720, "with the server gone for good, this build's own length is back");
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, "with the server gone for good, this build's own length is back");
   sharedClock.hail(wall, 0.5);
-  ok(day.dayLengthSeconds === 720, 'a length that cannot be true is ignored');
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, 'a length that cannot be true is ignored');
   sharedClock.none();
   sharedClock.hail(wall, CLOCK_LIMITS.maxDayMs * 100);
-  ok(day.dayLengthSeconds === 720, 'and so is one so long the sun would never move again');
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, 'and so is one so long the sun would never move again');
   sharedClock.none();
 }
 
@@ -560,7 +575,7 @@ const EPOCH = 1_700_000_000_000;
   const server = new WorldClock({ epoch: EPOCH, now: () => wall });
   sharedClock.hail(wall, DAY_MS);
   day.update(0, false);
-  const was = sharedClock.timeOfDay(720, 0) as number;
+  const was = sharedClock.timeOfDay(DAY_MS / 1000, 0) as number;
   ok(near(was, server.dayFraction(0), 1e-9), 'with a server the browser reads the server\'s own hour');
   const weatherWas = sharedClock.walkSeconds();
   const hand = server.setDay(1_800_000);
@@ -576,7 +591,7 @@ const EPOCH = 1_700_000_000_000;
   ok(near(sharedClock.timeOfDay(1800, 0) as number, server.dayFraction(0), 1e-9), 'and ninety seconds later the browser and the server still agree on the hour');
   sharedClock.none();
   sharedClock.dayWord(60_000, wall, 0.5);
-  ok(day.dayLengthSeconds === 720, 'with no server a day word is nobody\'s and changes nothing');
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, 'with no server a day word is nobody\'s and changes nothing');
 }
 
 // --- the console's day length with a server: the admin asks, anybody else is told ---
@@ -593,9 +608,9 @@ const EPOCH = 1_700_000_000_000;
   };
   const said = setOwnDayLength(600);
   ok(asked === 600 && said === 'asked the server for a 600 s day', 'the admin\'s console asks the server rather than setting it here');
-  ok(day.dayLengthSeconds === 720, 'and nothing changes here until the server\'s word comes back');
+  ok(day.dayLengthSeconds === DAY_MS / 1000, 'and nothing changes here until the server\'s word comes back');
   sharedClock.adminDay = () => null;
-  ok(/admin/.test(setOwnDayLength(600)) && day.dayLengthSeconds === 720, 'anybody else is told in words whose it is');
+  ok(/admin/.test(setOwnDayLength(600)) && day.dayLengthSeconds === DAY_MS / 1000, 'anybody else is told in words whose it is');
   sharedClock.adminDay = null;
   sharedClock.none();
   ok(/now 600 s/.test(setOwnDayLength(600)) && day.dayLengthSeconds === 600, 'and with no server the console sets it here exactly as it always did');
@@ -615,7 +630,7 @@ const EPOCH = 1_700_000_000_000;
   let closest = 1 - (phases[phases.length - 1] - phases[0]);
   for (let i = 1; i < phases.length; i++) closest = Math.min(closest, phases[i] - phases[i - 1]);
   ok(suns.length > 5, `the planet list has suns enough to tell (${suns.length})`);
-  ok(closest > 0.005, `and the two closest of them are a fair way apart (${(closest * 720).toFixed(1)} s of a 720 s day)`);
+  ok(closest > 0.005, `and the two closest of them are a fair way apart (${(closest * GAME_DAY_SECONDS).toFixed(1)} s of a ${GAME_DAY_SECONDS} s day)`);
 }
 
 // --- the game hour a story asks about, worked out on the server, is the hour the browser's sky is at ---
@@ -631,10 +646,10 @@ const EPOCH = 1_700_000_000_000;
   let agree = 0;
   let tried = 0;
   for (let step = 0; step < 48; step++) {
-    serverNow += 15_000 + step * 7;
+    serverNow += DAY_MS / 48 + step * 7;
     for (const p of PLANETS) {
       const world = p.zones?.length ? p.zones[0].pack : p.id;
-      const browser = hourOfDay(c.timeOfDay(720, phaseFor(p.sky.sunAzimuth, p.sky.sunElevation)) ?? -1);
+      const browser = hourOfDay(c.timeOfDay(DAY_MS / 1000, phaseFor(p.sky.sunAzimuth, p.sky.sunElevation)) ?? -1);
       tried++;
       if (worlds.hourOf(world) === browser) agree++;
     }

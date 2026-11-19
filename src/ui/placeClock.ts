@@ -13,7 +13,7 @@ export const PLACE_CLOCK_TUNE = {
   /**
    * The slider's step, in minutes of the day. Five is fine enough that a drag reads as continuous on
    * a bar a couple of hundred pixels wide (288 steps over the day) and coarse enough that a played day
-   * moves the thumb about once every two and a half seconds of a twelve-minute day.
+   * moves the thumb about once every 27 seconds of the 7,716-second day (two and a half of the client's twelve minutes).
    */
   stepMinutes: 5,
   /**

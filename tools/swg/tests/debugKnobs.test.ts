@@ -287,7 +287,7 @@ function body(text: string, signature: string): string {
   day.time = 0.3;
   day.release();
   frames(1);
-  ok(day.dayLengthSeconds === GAME_DAY_SECONDS && GAME_DAY_SECONDS === 720, "16: the day is the game's own twelve minutes to begin with");
+  ok(day.dayLengthSeconds === GAME_DAY_SECONDS, "16: the day is the game's own length to begin with");
   const t0 = day.time;
   const said = clockKnob({ length: 3600 }).said as string;
   ok(day.dayLengthSeconds === 3600 && said.includes('3600'), `16: with no server it is set from the console (${said})`);
@@ -297,7 +297,7 @@ function body(text: string, signature: string): string {
   frames(60 * 60);
   ok(Math.abs(day.time - t1 - 60 / 3600) < 1e-6, `16: a minute of frames is a sixtieth of an hour-long day (${(day.time - t1).toFixed(5)})`);
   const report = clockKnob() as { day: { lengthSeconds: number; gameLengthSeconds: number } };
-  ok(report.day.lengthSeconds === 3600 && report.day.gameLengthSeconds === 720, "16: the knob reports the length in force beside the game's own");
+  ok(report.day.lengthSeconds === 3600 && report.day.gameLengthSeconds === GAME_DAY_SECONDS, "16: the knob reports the length in force beside the game's own");
   for (const bad of [0, 0.5, CLOCK_LIMITS.maxDayMs / 1000 + 1, Number.NaN, Number.POSITIVE_INFINITY]) setOwnDayLength(bad);
   ok(day.dayLengthSeconds === 3600 && setOwnDayLength(0).includes('between'), '16: a length that cannot be a day is refused in words and changes nothing');
 
@@ -310,7 +310,7 @@ function body(text: string, signature: string): string {
   ok(setOwnDayLength(60).includes("server's") && day.dayLengthSeconds === 1800, '16: still refused with the server gone and its offset kept, since the day is still its');
   sharedClock.none();
   ok(day.dayLengthSeconds === 3600, '16: told there is no server, the length set before it came is this browser\'s own again');
-  ok(clockKnob({ length: null }).said === `a day is the game's own ${GAME_DAY_SECONDS} s again` && day.dayLengthSeconds === 720, "16: and null puts the game's own back");
+  ok(clockKnob({ length: null }).said === `a day is the game's own ${GAME_DAY_SECONDS} s again` && day.dayLengthSeconds === GAME_DAY_SECONDS, "16: and null puts the game's own back");
   const sharedSrc = src('world/sharedClock.ts');
   ok(/if \(sharedClock\.shared\) \{/.test(body(sharedSrc, 'export function setOwnDayLength(seconds: number | null): string')), '16: the refusal is the shared clock in use, which covers a server gone adrift as well as one answering');
 }
