@@ -5,6 +5,7 @@ import './world/stencilRef.ts';
 import * as THREE from 'three';
 import { reversedOpaqueSort, reversedTransparentSort } from './core/reversedSort.ts';
 import { REVERSED_DEPTH, projectedBehind } from './core/depthMode.ts';
+import { addressKept } from './core/address.ts';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
 import './ui/hud.css';
@@ -223,7 +224,7 @@ import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
-import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
+import { distanceWords, Hud, HUD_HIDDEN_CLASS, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
 import { BIG_SHIP_TURN, bigShipTurnShare, HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -1118,6 +1119,9 @@ interface AirDebugOptions {
 }
 
 /** The fields `__debug.air({ view })` shows. */
+/** The kit a character is made with: the creator offers no class (the port's pass 1), and C switches it for testing. */
+const NEW_CHARACTER_KIT: ClassId = 'jedi';
+
 const AIR_VIEWS = ['dust', 'velocity', 'obstacles', 'height', 'response', 'colour', 'medium', 'light', 'shape', 'tint', 'offsets', 'dents', 'inscatter', 'clear', 'smokeField', 'fogField', 'smokeTint', 'bands', 'carry', 'class', 'flow', 'liquid', 'gusts'] as const;
 /** The fifth wave's views drawn by the liquids themselves: the current on the water, the crust's carry on the lava. */
 const AIR_LIQUID_VIEWS = ['current', 'crust'] as const;
@@ -8492,6 +8496,7 @@ class App {
        * the last full second that were not by design — the number to look for is 0, and the 4 Hz
        * clock, `/loc` and frame-rate lines are counted apart as `byDesign`.
        *
+       * `{ hidden: true }` hides the interface as the hide key (H) does and `{ hidden: false }` shows it again;
        * `{ overlay: false }` turns the canvas off for a baseline and `{ overlay: true }` back on;
        * `{ scale: 1.25 }` and `{ dpr: 2 }` try the size and the sharper canvas at once (they move the
        * live settings, and are saved only if the menu is then touched); `{ boxes: true }` outlines
@@ -8508,7 +8513,7 @@ class App {
        * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
        * is a write that is meant to happen.
        */
-      hud: (opts: { overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
+      hud: (opts: { hidden?: boolean; overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
         const S = this.settings;
         let sized = false;
         // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
@@ -8557,6 +8562,8 @@ class App {
           sized = true;
         }
         if (sized) this.applyHudSettings();
+        // The hide key's own switch, as H sets it (`setHudHidden`): for a tab nobody can press a key in.
+        if (typeof opts.hidden === 'boolean') this.setHudHidden(opts.hidden);
         if (typeof opts.overlay === 'boolean') this.overlay.setEnabled(opts.overlay);
         if (typeof opts.boxes === 'boolean') this.overlay.setBoxes(opts.boxes);
         if (opts.flight) this.shipHud.tune(opts.flight);
@@ -8596,6 +8603,10 @@ class App {
         const L = this.hudLayout;
         const s = this.promptState;
         return {
+          // Whether the hide key has the interface off the screen; while it does, `writes`, `byDesign` and the
+          // roster's and the plate's counts read the hidden second's own 0 once a whole second has passed.
+          hidden: this.hudHidden,
+          rosterWrites: this.roster.stats().writes,
           // `ops` is the canvas's own count of everything drawn through it, the display's strokes
           // included, and is the figure the budget is written against; `shapes` is the display's own
           // count of the calls it made, which is a different unit and is reported beside, not added.
@@ -9770,7 +9781,7 @@ class App {
       /** The gallery world: how many mannequins are up and the animation slot nearest the player; `gallery(10)` widens the range they wake in (metres). */
       gallery: (range?: number) => {
         if (range !== undefined) RANGE.wake = Math.max(1, range);
-        return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : 'not on the gallery planet (?planet=gallery)';
+        return this.world.gallery ? { ...this.world.gallery.status(), nearest: this.world.gallery.nearest(this.player.pos) } : "not on the gallery planet (__debug.travel('gallery') goes there)";
       },
       /**
        * What each menu holds from SOE's final files (publishes 55 to 59, `src/ui/lateReport.ts`): every pack the game has
@@ -12227,7 +12238,9 @@ class App {
     const chatUi = new ChatUi(this.ui, {
       groups,
       say: (speaker, text, colour) => (speaker ? this.messages.spatial(speaker, text, colour) : this.messages.note(text)),
-      project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
+      // A head the hide key has taken off the screen with the rest is a head out of view: the bubble stands down
+      // once and waits, written nothing, until the interface is back (`setHudHidden`).
+      project: (x, y, z, out) => !this.hudHidden && this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       meAt: (out) => groups.meAt(out),
       // Not in a conversation either, which is no panel: the line would open hidden behind it, unfocused,
@@ -12260,7 +12273,8 @@ class App {
         if (this.map.open) this.toggleMap();
         return this.tradeAsk?.(id, name) ?? 'trading is not wired here';
       },
-      project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
+      // As the chat's bubbles: a chevron over a far member stands down while the hide key has the interface off.
+      project: (x, y, z, out) => !this.hudHidden && this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       // Where the eye is and which way it looks, out of the camera's own matrix: column 3 is where it
       // stands and column 2 negated is where it looks, as the nameplates already read it.
@@ -12927,7 +12941,9 @@ class App {
       this.select.show(loadCharacters());
     };
     this.creatorBar.onTab = (id) => this.showCreatorTab(id);
-    this.creatorBar.onCreate = (name, cls, planet) => void this.finishCreation(name, cls, planet).catch((err) => console.warn('creator', err));
+    // No class is chosen in the creator any more (the port's pass 1): a new character is made with the Jedi kit, and C
+    // still switches the kit for testing.
+    this.creatorBar.onCreate = (name, planet) => void this.finishCreation(name, NEW_CHARACTER_KIT, planet).catch((err) => console.warn('creator', err));
     this.menu = new Menu(this.ui, this.input, this.settings);
     draggable(this.menu.root, '.menu-panel', '.menu-nav', 'menu');
     this.menu.net = {
@@ -13114,8 +13130,10 @@ class App {
     // with no cloning facility near): the overlay's people and herds who pick a fight keep clear of it.
     this.world.arrivalPoint = () => this.spawn;
     this.appearanceUi.onSpecies = (id) => void this.switchCharacter(id);
-    const params = new URLSearchParams(location.search);
-    this.setClass(params.get('class') === 'bounty_hunter' ? 'bounty_hunter' : 'jedi');
+    // The Jedi kit until a character is chosen: the chosen character's own saved kit then decides (`play`), and the
+    // address's old `?class=` no longer picks one. This call also takes an old link's planet, zone and class off the
+    // address (`updateUrl`).
+    this.setClass('jedi');
     this.select.show(loadCharacters());
     // Where the character stands is written back now and then, and when the page goes.
     window.addEventListener('pagehide', () => this.savePlace(true));
@@ -15178,7 +15196,8 @@ class App {
     // Both counters go to nothing on a frame that draws nothing, the canvas's own and the display's
     // shape count: left at the last flying frame's, the console would say the overlay was busy over
     // an open panel, the map or the death card, which is the one thing it is meant to prove it is not.
-    if (!simulate || !o.begin()) {
+    // The interface hidden by the hide key is such a frame too: taken off once, then nothing.
+    if (!simulate || this.hudHidden || !o.begin()) {
       o.idle();
       this.shipHud.idle();
       this.feedback.idle();
@@ -17397,7 +17416,8 @@ class App {
     const p = this.player;
     const flown = p.mounted ?? p.piloting;
     const flying = !!flown?.spec.ship && flown.airborne;
-    const show = S.hudTracker && this.inWorld && !this.dying && (!flying || S.hudTrackerInFlight);
+    // Down while the hide key has the interface off the screen: the tracker's own way of standing aside, one write.
+    const show = S.hudTracker && this.inWorld && !this.dying && !this.hudHidden && (!flying || S.hudTrackerInFlight);
     let held = '';
     const remoteWhy = this.remoteJobs.active ? this.remoteJobs.waits() : null;
     const waits =
@@ -19535,10 +19555,17 @@ class App {
     }
   }
 
+  /**
+   * The address as the game keeps it: `planet`, `zone` and `class` taken off where an old link carries them, and every
+   * other switch left exactly as it was typed (`addressKept`) -- `?renderer=` among them, so a reload draws with the same
+   * renderer, and `?server=`, `?word=` and `?norevz`, which the old address dropped at the first arrival. The select
+   * screen chooses the character, and its record its world and its kit, so the address names neither. Written only when
+   * it changes, which after the first call is never.
+   */
   private updateUrl(): void {
-    if (!this.world.planet) return;
-    const zone = this.zone ? `&zone=${this.zone}` : '';
-    history.replaceState(null, '', `?planet=${this.world.planet.id}${zone}&class=${this.kit.id}`);
+    const next = addressKept(location.search);
+    if (next === location.search) return;
+    history.replaceState(history.state, '', `${location.pathname}${next}${location.hash}`);
   }
 
   /** The zone of a multi-terrain planet the player is in, when the planet has zones. */
@@ -22932,6 +22959,41 @@ class App {
       tune: { ...TRACK_TUNE },
       words,
     };
+  }
+
+  /** Whether the hide key has the interface off the screen (`setHudHidden`). Not kept: a reload shows it. */
+  private hudHidden = false;
+
+  /**
+   * The hide key (H, `hideHud`, rebindable): everything drawn over the world off the screen, and back. `#ui` wears
+   * `ui-hidden`, and the stylesheet hides every child of it but the windows (`hud.css`): the display, its overlay canvas,
+   * the minimap, the nameplates, the waypoints' labels, the prompt, the bar of things to press, a ship's instruments, the
+   * corner strip, the message line and the crosshair all go; the menus and panels, the map, the loading screen, the
+   * travel curtain, the death card, the conversation, the chat line and the editor's window stay. While it is hidden
+   * the frame writes none of what it hides (each piece's `rest` closes its second of writes, so the counters read the
+   * hidden second's own 0); shown again, every piece's "written when changed" records are let go (`refresh`, `clear`)
+   * so the next frame writes everything afresh from what is true now. Marks drawn in the world itself (a waypoint's
+   * beam, a target's ring, the placing ghost) are the picture and stay. Hidden stays hidden through travel, a jump, a
+   * death and a cloning, until the key again or a reload; the world editor coming on shows it (H is its key list).
+   */
+  private setHudHidden(on: boolean): void {
+    if (on === this.hudHidden) return;
+    this.hudHidden = on;
+    this.ui.classList.toggle(HUD_HIDDEN_CLASS, on);
+    if (on) return;
+    this.hud.refresh();
+    this.minimap.refresh();
+    this.shipHud.refresh();
+    this.roster.refresh();
+    this.tracker.refresh();
+    this.raceHud.refresh();
+    this.runBlockKey.tenths = Number.NaN;
+    this.courseLabels?.refresh();
+    // These two have a reset of their own already, the one a travel uses: everything off and forgotten, and drawn
+    // again by the same frame.
+    this.plates.clear();
+    this.waypointHud.clear();
+    this.promptLive = false;
   }
 
   /**
@@ -35865,7 +35927,12 @@ class App {
         if (input.pressedAction('inventory') && !jumpBusy) this.toggleInventory();
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
-        if (input.pressedAction('help')) this.hud.toggleHelp();
+        // The hide key (H): everything drawn over the world off the screen and not written, and back again
+        // (`setHudHidden`). Not read while the world editor is on, where H is the editor's key list; and the editor
+        // coming on shows the interface again, since its window and marks are drawn there and H could not bring it back.
+        if (this.editor?.on) {
+          if (this.hudHidden) this.setHudHidden(false);
+        } else if (input.pressedAction('hideHud')) this.setHudHidden(!this.hudHidden);
         // The map's Waypoints and Group tabs, held back while a jump has the controls or a shuttle has the
         // passenger, as the map is: the map's teleport would end either. Group does nothing while no
         // server holds a group for this browser.
@@ -36063,7 +36130,8 @@ class App {
         aim.dy = aimLook.y;
         aim.dz = aimLook.z;
       }
-      this.hud.setWeatherNote(this.heldNote());
+      // Not while the hide key has the interface off the screen (`setHudHidden`): it is written afresh when it comes back.
+      if (!this.hudHidden) this.hud.setWeatherNote(this.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       // While the world editor flies, the character is its body's return point, never the camera: the followers wait by
       // it, and nothing targets it, as nothing targets noclip.
@@ -36175,7 +36243,11 @@ class App {
       // on any frame that is not simulated, rather than waiting for the next gather: a row of things
       // you cannot press, standing over the death card, is exactly the fault to avoid.
       perf.begin(SEC.hud);
-      if (!simulate) {
+      // The hide key has the interface off the screen (`setHudHidden`): the bar and the plate go once, as on a frame that
+      // is not simulated, and nothing below writes the screen's interface (each piece's `rest` closes its second of
+      // writes instead) until it is shown again, when every piece is written afresh.
+      const hudOff = this.hudHidden;
+      if (!simulate || hudOff) {
         if (this.promptLive) {
           this.promptLive = false;
           this.actions.clear();
@@ -36261,7 +36333,7 @@ class App {
       prompt = this.jumpPrompt(S8.lift) ?? prompt;
       // A passenger's own line goes over both, whatever the setting: when it lifts off, and where it has landed.
       prompt = this.ride?.promptLine() ?? prompt;
-      this.hud.setPrompt(prompt);
+      if (!hudOff) this.hud.setPrompt(prompt);
       // Mouse flight's display (seated or at a bridge's controls, in flight, Alt not held): the aim circle, the ring and the
       // cursor, in pixels, at this frame's field of view. The cursor is the hull's (about its nose, from the pilot's eye), so
       // the circle is drawn where the boresight lands on this camera's screen at the guns' range, and the cursor where its
@@ -36321,9 +36393,9 @@ class App {
       const racing = !flying ? this.racedHull() : null;
       if (racing) this.fillRaceNumbers(racing, racing.race!, this.flightView);
       const aimed = flownShip;
-      this.shipHud.setFlight((flying || !!racing) && this.settings.hudArcs ? this.flightView : null);
+      if (!hudOff) this.shipHud.setFlight((flying || !!racing) && this.settings.hudArcs ? this.flightView : null);
       const showTarget = aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed);
-      this.shipHud.setTarget(showTarget && this.settings.hudTargetBlock ? this.targetHud(aimed) : null);
+      if (!hudOff) this.shipHud.setTarget(showTarget && this.settings.hudTargetBlock ? this.targetHud(aimed) : null);
       // The target effects stand on the target while it is shown, and follow it; out of the ship they go.
       if (!aimed?.spec.ship) this.targetFx.select(null, false, null);
       this.targetFx.update();
@@ -36335,8 +36407,11 @@ class App {
       const condition = (fight || raceCond) && this.settings.hudShipCondition ? (fight ?? raceCond) : null;
       // The parts are watched whether the block is drawn or not, so a part going down still says so
       // in words with the block switched off; the last argument is what draws it.
-      if (raceCond) this.shipHud.setStatus(this.raceStatus, null, raceCond, !!condition, false);
-      else this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
+      // Hidden, the parts are not watched either: a part that went down is said the frame the interface is back.
+      if (!hudOff) {
+        if (raceCond) this.shipHud.setStatus(this.raceStatus, null, raceCond, !!condition, false);
+        else this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
+      }
       // The body's own bars and the class's slot row stand down while the ship's condition is in their
       // place: a health bar that cannot change in flight read as a second, broken one.
       // And while the world editor is on, whose own bar stands in their place.
@@ -36348,7 +36423,8 @@ class App {
         this.landNoteSaid = landNote;
         if (landNote) this.messages.note(landNote);
       }
-      this.shipHud.update(dt);
+      if (hudOff) this.shipHud.rest();
+      else this.shipHud.update(dt);
       // The damage feedback, after this frame's last camera move and after the flight display has
       // worked out where the reticle sits. It is handed the camera's three axes as nine plain
       // numbers, so nothing of three's reaches that file, and the middle it ticks: the flight
@@ -36372,7 +36448,8 @@ class App {
       // The group's roster: it takes the list from the group module itself and writes only what has
       // changed — eight rows of number comparisons, nothing allocated, and nothing written at all
       // while nobody has moved.
-      this.roster.update();
+      if (hudOff) this.roster.rest();
+      else this.roster.update();
       // The line's write counter is a lifetime total; it is sampled here into the per-second rate the
       // other two displays report. Nothing is allocated, and the sample is taken once a second.
       this.lineWriteWindow += rawDt;
@@ -36411,12 +36488,16 @@ class App {
       // The stamina's row (the speed classes), up while the pool is not full and for a moment after: nothing is written
       // while it is down, and with the classes not in force for the body the row is not in the block at all.
       const staminaPool = player.staminaPool;
-      this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);
-      this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
-      // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
-      this.stepMinimap();
+      if (hudOff) this.hud.rest();
+      else {
+        this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);
+        this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
+      }
+      // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not. (Its second
+      // of writes closes when it is read, so a hidden one reads its own 0 with no call.)
+      if (!hudOff) this.stepMinimap();
       // The climbing course's labels, only while a course stands (nothing at all otherwise).
-      this.courseLabels?.frame(this.cam.camera);
+      if (!hudOff) this.courseLabels?.frame(this.cam.camera);
       // A real-elevation world's map picture made a few rows a frame (Map-maker II's eighth wave), nothing on any other world.
       this.stepMadeMap();
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The
@@ -36427,7 +36508,7 @@ class App {
       // The switch is asked here rather than left to the plates' own first line, so that with the
       // plate off nothing at all is done for it: the world's list is a kept array, but building the
       // argument list to be declined is the one place an "off" switch would not turn something off.
-      if (simulate && this.settings.hudNameplate && !this.editor?.on) {
+      if (simulate && !hudOff && this.settings.hudNameplate && !this.editor?.on) {
         const pm = this.cam.camera.matrixWorld.elements;
         this.plateEye.set(pm[12], pm[13], pm[14]);
         this.plateDir.set(-pm[8], -pm[9], -pm[10]);

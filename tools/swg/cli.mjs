@@ -6986,7 +6986,7 @@ switch (cmd) {
     console.log(lodSummaryLine('gallery', galleryModels));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     writeFloors(outDir, galleryModels.map((m) => m.id));
-    console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; play it with ?planet=gallery`);
+    console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; go there in the game with __debug.travel('gallery')`);
     printEffectSummary();
     break;
   }

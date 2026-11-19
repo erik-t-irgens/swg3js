@@ -1346,12 +1346,82 @@ export class ShipHud {
     this.lockAge += dt;
     if (typeof window !== 'undefined' && (window.innerWidth !== this.place.w || window.innerHeight !== this.place.h)) this.relayout(false);
     this.updateBars(dt);
-    // The writes of the last second, for the console: in a steady frame the number to look for is 0.
+    this.rollWrites();
+  }
+
+  /** The writes of the last second, for the console: in a steady frame the number to look for is 0. */
+  private rollWrites(): void {
     if (this.clock - this.writesAt >= 1) {
       this.writesAt = this.clock;
       this.writesLast = this.writes - this.writesMark;
       this.writesMark = this.writes;
     }
+  }
+
+  /**
+   * A frame with the interface hidden (the hide key, `App.setHudHidden`), in `update`'s place and in place of the three
+   * setters: nothing is written or compared, and the second the writes are counted in is still closed on time, so
+   * `report` reads the hidden second's own 0. That second is kept on the page's clock in milliseconds, as the rest of the
+   * display keeps its own, and not on the flight display's clock of seconds, which stands still while it is hidden: a
+   * sum of fractions there was the one thing a hidden frame did that could make a number (measured, `hudHide.test.ts`).
+   * The rates and the lock's closing run on that clock and are let go on the way back (`refresh`).
+   */
+  rest(): void {
+    const now = performance.now();
+    if (now - this.restAt < 1000) return;
+    this.restAt = now;
+    this.writesLast = this.writes - this.writesMark;
+    this.writesMark = this.writes;
+  }
+
+  /** When `rest` last closed a second, on the page's clock (ms); nought until it first does, as the display's own window starts. */
+  private restAt = 0;
+
+  /**
+   * The interface shown again: every "written when changed" record of the three blocks let go, so the next frame's
+   * setters write the condition block, the speed and the target afresh from the hull as it is now. Every value record
+   * is let go; every two-state record (a block up, a pip low) is taken from the element itself, so the next frame writes
+   * whatever differs from the page (`Hud.refresh` says why it is not turned over). What the parts were last seen doing
+   * (`wasDown`) is kept: it is the watch that says a part went down, not a record of the page, and letting it go would
+   * say again every part that is already down.
+   */
+  refresh(): void {
+    this.condShown = this.cond.style.display === 'flex';
+    this.layersShown = this.layerRows.length ? this.layerRows[0].style.display !== 'none' : true;
+    this.hullPctShown = -1;
+    for (const pip of this.pips) {
+      pip.shown = pip.root.style.display === 'block';
+      pip.share = -1;
+      pip.warm = pip.root.classList.contains('low');
+      pip.down = pip.root.classList.contains('down');
+      pip.hot = pip.root.classList.contains('hot');
+    }
+    for (let i = 0; i < this.bars.length; i++) this.refreshBar(this.bars[i]);
+    for (let i = 0; i < this.targetBars.length; i++) this.refreshBar(this.targetBars[i]);
+    this.speedVisible = this.speedEl.style.display === 'block';
+    this.speedShown = -1;
+    this.wingShown = -1;
+    this.speedAt = -Infinity;
+    this.targetShown = this.targetEl.style.display === 'flex';
+    this.targetAt = -Infinity;
+    this.targetRangeShown = -1;
+    this.targetNameShown = '\u0000';
+    this.targetKindShown = '\u0000';
+    this.targetClass = '';
+    this.targetX = Number.NaN;
+    this.targetY = Number.NaN;
+  }
+
+  /**
+   * One bar let go for `refresh`: its fill and ghost written again from the next share, its dash state written outright,
+   * and an ease or a flash that was running when the interface went ended on the next frame rather than played late.
+   */
+  private refreshBar(bar: Bar): void {
+    bar.cur = -1;
+    bar.ghostAt = Number.NaN;
+    bar.dashOn = bar.root.classList.contains('none');
+    if (bar.ghostFor > 0) bar.ghostFor = 1e-9;
+    if (bar.flash > 0) bar.flash = 1e-9;
   }
 
   /** Every block gone (the world left, or the game is not simulating). */

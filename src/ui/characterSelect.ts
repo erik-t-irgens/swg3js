@@ -19,7 +19,7 @@ import type { Character } from '../player/character.ts';
 import { DEFAULT_SABER_COLOR } from '../player/player.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { installIcons } from './hudIcons.ts';
-import { agoWords, classGlyph, classWords, cleanName, initialIndex, keyAction, NAME_MAX, placeWords, safeColour, slotsFor, stepIndex, type Slot } from './selectModel.ts';
+import { agoWords, classGlyph, cleanName, initialIndex, keyAction, NAME_MAX, placeWords, safeColour, slotsFor, stepIndex, type Slot } from './selectModel.ts';
 
 /** The figure the game hands back for a character: its own rig, dressed, and the idle it stands in. */
 export interface SelectFigure {
@@ -125,7 +125,7 @@ export class CharacterSelect {
         </div>
         <footer class="cs-foot">
           <div class="cs-keys"><b>↑ ↓</b> choose · <b>Enter</b> play · <b>F2</b> rename · <b>Delete</b> delete</div>
-          <div class="cs-controls"><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom (all the way in: first person) · <b>Space</b> jump · <b>Ctrl</b> crouch · <b>Shift</b> walk · <b>LMB</b> attack · <b>RMB</b> block or rapid fire · <b>I</b> inventory · <b>B</b> spawner · <b>M</b> galaxy map · <b>H</b> help · <b>Esc</b> release mouse</div>
+          <div class="cs-controls"><b>WASD</b> move · <b>Mouse</b> look · <b>Wheel</b> zoom (all the way in: first person) · <b>Space</b> jump · <b>Ctrl</b> crouch · <b>Shift</b> walk · <b>LMB</b> attack · <b>RMB</b> block or rapid fire · <b>I</b> inventory · <b>B</b> spawner · <b>M</b> galaxy map · <b>H</b> hide the interface · <b>Esc</b> release mouse</div>
         </footer>
       </div>`;
     parent.appendChild(this.root);
@@ -251,7 +251,7 @@ export class CharacterSelect {
           <svg class="ic cs-entry-ic" aria-hidden="true"><use href="#${classGlyph(c.class)}"/></svg>
           <span class="cs-entry-text">
             <span class="cs-entry-name"><span class="cs-entry-label">${escapeHtml(c.name)}</span>${blade ? `<i class="cs-swatch" title="saber colour" style="background-color:${blade}"></i>` : ''}</span>
-            <span class="cs-entry-line">${escapeHtml(prettySpecies(c.species))} · ${classWords(c.class)}</span>
+            <span class="cs-entry-line">${escapeHtml(prettySpecies(c.species))}</span>
             <span class="cs-entry-line muted">${escapeHtml(where.line)}${where.fresh ? ' · new' : ''} · ${agoWords(c.played, now)}</span>
           </span>
         </button>`;
@@ -417,7 +417,6 @@ export class CharacterSelect {
     const blade = safeColour(c.saber?.color);
     const rows: [string, string][] = [
       ['Species', escapeHtml(prettySpecies(c.species))],
-      ['Class', classWords(c.class)],
       ['Where', `${escapeHtml(where.world)}${where.within ? ` <span class="muted">· ${escapeHtml(where.within)}</span>` : ''}${where.fresh ? ' <span class="muted">· not yet stood there</span>' : ''}`],
       ['Created', c.created ? dateWords(c.created) : '<span class="muted">not recorded</span>'],
       ['Last played', c.played ? `${agoWords(c.played, Date.now())} <span class="muted">· ${dateWords(c.played)}</span>` : '<span class="muted">never</span>'],
@@ -432,7 +431,6 @@ export class CharacterSelect {
         <h2 class="cs-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</h2>
         <button class="cs-rename" type="button" data-act="rename" title="Rename (F2)"><svg class="ic" aria-hidden="true"><use href="#ic-pencil"/></svg><span>Rename</span></button>
       </div>
-      <div class="cs-classline"><svg class="ic" aria-hidden="true"><use href="#${classGlyph(c.class)}"/></svg><span>${classWords(c.class)}</span></div>
       <dl class="cs-facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
     // The weapons' own names come from the rack, which may still be arriving: the ids stand until they do.
     const held = c.held;

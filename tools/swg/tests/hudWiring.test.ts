@@ -223,8 +223,9 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   }
   // The plate's switch is asked before the call, not inside it: an "off" switch that still builds the
   // argument list turns nothing off.
-  // (Nor while the world editor flies: the hidden body has nothing under the crosshair to name.)
-  ok(/if \(simulate && this\.settings\.hudNameplate(?: && !this\.editor\?\.on)?\) \{/.test(main), 'the plates are not tracked at all with the plate switched off');
+  // (Nor while the world editor flies: the hidden body has nothing under the crosshair to name. Nor while the hide key has
+  // the interface off the screen, since the port's pass 1: `!hudOff`.)
+  ok(/if \(simulate(?: && !hudOff)? && this\.settings\.hudNameplate(?: && !this\.editor\?\.on)?\) \{/.test(main), 'the plates are not tracked at all with the plate switched off');
   // The long line is written only while the game is simulating. Half of its branches read the
   // eighth-of-a-second struct, which is emptied on the frame the game stops, and half read the
   // player directly: written over a panel the line would disagree with itself.

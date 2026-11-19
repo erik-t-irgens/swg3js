@@ -115,11 +115,11 @@ const KEY = 'swg3js.bindings';
   ok(kept.jump?.join() === 'KeyK' && kept.emote1?.join() === 'KeyJ' && !Object.hasOwn(kept, 'journal'), 'an unrelated rebind keeps the jump and the emote, and does not write the emptied journal down');
   input.assignKey('emote1', ['KeyH'], 'KeyH');
   ok(input.bindings.emote1.join() === 'KeyH' && input.bindings.journal.join() === 'KeyJ', 'the emote moved off J gives the journal J back at once');
-  ok(!input.bindings.help.includes('KeyH'), 'while the help, on its default, gives H up to the emote that took it');
+  ok(!input.bindings.hideHud.includes('KeyH'), 'while the hide key, on its default, gives H up to the emote that took it');
   const after = new Input(canvas);
-  ok(after.bindings.journal.join() === 'KeyJ' && after.bindings.emote1.join() === 'KeyH' && !after.bindings.help.includes('KeyH'), 'and a reload gives back exactly that');
+  ok(after.bindings.journal.join() === 'KeyJ' && after.bindings.emote1.join() === 'KeyH' && !after.bindings.hideHud.includes('KeyH'), 'and a reload gives back exactly that');
   input.assignKey('emote1', ['ArrowUp'], 'ArrowUp');
-  ok(input.bindings.help.join() === 'KeyH', 'the emote back on its own key gives the help H back too: nobody chose to take it off');
+  ok(input.bindings.hideHud.join() === 'KeyH', 'the emote back on its own key gives the hide key H back too: nobody chose to take it off');
 }
 
 // --- the Controls page takes a key from another action -------------------------------------------------------
@@ -141,8 +141,8 @@ const KEY = 'swg3js.bindings';
   ok(input.bindings.jump.join() === 'KeyX' && input.bindings.emote2.length === 0, 'and X taken on for the jump leaves the emote, which the player had chosen, with none');
   ok(new Input(canvas).bindings.emote2.length === 0, 'which it keeps across a reload');
   // Backspace on an action's last key.
-  input.assignKey('help', [], null);
-  ok(input.bindings.help.length === 0 && new Input(canvas).bindings.help.length === 0, "Backspace on an action's last key leaves it with none, for good");
+  input.assignKey('hideHud', [], null);
+  ok(input.bindings.hideHud.length === 0 && new Input(canvas).bindings.hideHud.length === 0, "Backspace on an action's last key leaves it with none, for good");
   // Keys two defaults share on purpose.
   store.clear();
   const shared = new Input(canvas);

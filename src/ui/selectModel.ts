@@ -96,14 +96,11 @@ export function keyAction(code: string, onEmpty: boolean, repeat: boolean): Sele
   }
 }
 
-/** A class in words. */
-export function classWords(cls: string): string {
-  return cls === 'jedi' ? 'Jedi' : cls === 'bounty_hunter' ? 'Bounty Hunter' : cls ? cls.replace(/_/g, ' ') : 'no class';
-}
-
 /**
- * The mark a class wears in the list, from the interface's own sheet: the lightsaber for a Jedi and
- * the blaster for a Bounty Hunter, the two things each class is known by.
+ * The mark a character wears in the list, from the interface's own sheet: the lightsaber for the Jedi
+ * kit and the blaster for the Bounty Hunter's, the two things each is known by. The class's name is
+ * never written on the screen (the port's pass 1: the class words went, a character will learn rather
+ * than be a class); the mark is a picture of what is in the hand.
  */
 export function classGlyph(cls: string): string {
   return cls === 'jedi' ? 'ic-saber' : cls === 'bounty_hunter' ? 'ic-blaster' : 'ic-system';

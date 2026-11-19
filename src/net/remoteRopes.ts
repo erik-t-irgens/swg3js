@@ -304,7 +304,11 @@ export class RemoteRopes implements PeerWatcher {
     for (let i = 0; i < r.frames; i++) {
       const index = r.frameIndex[i];
       if (index >= r.count || !pose(r.frameId[i], posePos, poseQuat)) continue;
-      local.set(r.frameLocal[3 * i], r.frameLocal[3 * i + 1], r.frameLocal[3 * i + 2]).applyQuaternion(poseQuat).add(posePos);
+      // (By its components, never handed to `set`, as in `layRope`: this call is rare until a rope rides a vehicle.)
+      local.x = r.frameLocal[3 * i];
+      local.y = r.frameLocal[3 * i + 1];
+      local.z = r.frameLocal[3 * i + 2];
+      local.applyQuaternion(poseQuat).add(posePos);
       d[3 * index] = local.x;
       d[3 * index + 1] = local.y;
       d[3 * index + 2] = local.z;
@@ -426,10 +430,27 @@ export class RemoteRopes implements PeerWatcher {
     ribbon.screenH = screenH;
     ribbon.lay(r.drawn, r.count, hand, camera);
     // Bitten in along the way the rope comes to it: from the next point toward it, or from the hand.
+    // (The dart's place and its way are written by their components, never handed to `set`. Whether the compiler builds
+    // a call into this method depends on how often the call ran compared with the method, counted at the moment the
+    // method is compiled. A frequency under its cut leaves the call a call, however small the callee. In
+    // remoteRopes.test the bend's `dir.set` was rare while seven thousand frames of one-point ropes ran before the
+    // allocation check, and it ran every frame after. In three processes of four it stayed a call, and the anchor's x
+    // less the bend's crossed it as a fresh number, 16 bytes a frame. A rope with bends after a spell of straight ones
+    // is the same in play.)
     const d = r.drawn;
-    r.dart!.position.set(d[0], d[1], d[2]);
-    if (r.count > 1) dir.set(d[0] - d[3], d[1] - d[4], d[2] - d[5]);
-    else dir.set(d[0] - hand.x, d[1] - hand.y, d[2] - hand.z);
+    const at = r.dart!.position;
+    at.x = d[0];
+    at.y = d[1];
+    at.z = d[2];
+    if (r.count > 1) {
+      dir.x = d[0] - d[3];
+      dir.y = d[1] - d[4];
+      dir.z = d[2] - d[5];
+    } else {
+      dir.x = d[0] - hand.x;
+      dir.y = d[1] - hand.y;
+      dir.z = d[2] - hand.z;
+    }
   }
 
   /**
@@ -521,19 +542,37 @@ export class RemoteRopes implements PeerWatcher {
     ribbon.slack = 0;
     ribbon.screenH = screenH;
     ribbon.lay(a, 1, hand, camera);
-    r.dart!.position.set(a[0], a[1], a[2]);
-    if (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > 1e-6) dir.set(v[0], v[1], v[2]);
-    else dir.set(a[0] - hand.x, a[1] - hand.y, a[2] - hand.z);
+    // (By their components, never handed to `set`: see `layRope`.)
+    const at = r.dart!.position;
+    at.x = a[0];
+    at.y = a[1];
+    at.z = a[2];
+    if (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > 1e-6) {
+      dir.x = v[0];
+      dir.y = v[1];
+      dir.z = v[2];
+    } else {
+      dir.x = a[0] - hand.x;
+      dir.y = a[1] - hand.y;
+      dir.z = a[2] - hand.z;
+    }
   }
 
-  /** The dart turned to point along `dir`, made unit in line (three's `normalize` hands its length across a call). */
+  /**
+   * The dart turned to point along `dir`, made unit in line (three's `normalize` hands its length across a call). The
+   * turn itself is `setFromUnitVectors(AXIS_Z, dir)` written out (`turnFromUnit`) and handed over in a kept array:
+   * three's own form reaches `dot` and `length`, which hand their answers back across a call and are too big for the
+   * compiler to always build into a frame it has already filled. With eight processes running at once, two of
+   * remoteRopes.test's seventy-two left `length` out and boxed 16 bytes a frame.
+   */
   private pointDart(dart: THREE.Mesh): void {
     const dl = Math.sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     if (dl > 1e-6) {
       dir.x /= dl;
       dir.y /= dl;
       dir.z /= dl;
-      dart.quaternion.setFromUnitVectors(AXIS_Z, dir);
+      turnFromUnit(AXIS_Z, dir, dartTurn);
+      dart.quaternion.fromArray(dartTurn);
     }
     dart.visible = true;
   }
@@ -614,6 +653,57 @@ export class RemoteRopes implements PeerWatcher {
     }
     return { ropes, made: this.made, spare: this.spares.length, peerLead: PEER_ROPE_TUNE.peerLead };
   }
+}
+
+/** The dart's turn as `turnFromUnit` last wrote it (x, y, z, w), handed to its quaternion whole. */
+const dartTurn = new Float64Array(4);
+
+/**
+ * The turn from the unit `from` to the unit `to`, into `out` (x, y, z, w): three's `Quaternion.setFromUnitVectors`
+ * and the `normalize` it ends with, step for step in their order, so the numbers are the same to the bit. Nothing is
+ * handed back: the dart's frame calls this.
+ */
+function turnFromUnit(from: THREE.Vector3, to: THREE.Vector3, out: Float64Array): void {
+  const fx = from.x;
+  const fy = from.y;
+  const fz = from.z;
+  const tx = to.x;
+  const ty = to.y;
+  const tz = to.z;
+  let x: number;
+  let y: number;
+  let z: number;
+  let w = fx * tx + fy * ty + fz * tz + 1;
+  if (w < 1e-8) {
+    // Opposite ways: half a turn about an axis square to `from`, as three picks it.
+    w = 0;
+    if (Math.abs(fx) > Math.abs(fz)) {
+      x = -fy;
+      y = fx;
+      z = 0;
+    } else {
+      x = 0;
+      y = -fz;
+      z = fy;
+    }
+  } else {
+    x = fy * tz - fz * ty;
+    y = fz * tx - fx * tz;
+    z = fx * ty - fy * tx;
+  }
+  const l = Math.sqrt(x * x + y * y + z * z + w * w);
+  if (l === 0) {
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 1;
+    return;
+  }
+  const k = 1 / l;
+  out[0] = x * k;
+  out[1] = y * k;
+  out[2] = z * k;
+  out[3] = w * k;
 }
 
 /** The top of the tree a node hangs in: the scene, when it is in one. */

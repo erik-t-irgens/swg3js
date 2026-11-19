@@ -179,6 +179,15 @@ export class RaceHud {
     this.writes++;
   }
 
+  /**
+   * The interface shown again after the hide key (`App.setHudHidden`, which took the block down as any frame that
+   * draws nothing does): every field's words let go, so the next `block` writes each afresh, its standing with it.
+   */
+  refresh(): void {
+    for (const k of Object.keys(this.fields) as (keyof RaceHud['fields'])[]) this.fields[k].text = '\u0000';
+    this.splitTone = '\u0000';
+  }
+
   /** No run and nothing laid: the block goes, once. */
   hideBlock(): void {
     this.roll();

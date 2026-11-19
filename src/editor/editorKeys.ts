@@ -115,7 +115,7 @@ export const EDITOR_MUTES: readonly Action[] = [
   'mount',
   'ship',
   'switchClass',
-  'help',
+  'hideHud',
   'spawner',
   'freeLook',
   'target',

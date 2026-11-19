@@ -127,11 +127,6 @@ export class BountyHunterKit implements Kit {
   readonly slots: KitSlot[] = [];
   /** The gadget behind each of those slots, in the same order, so nothing has to search for it by name. */
   private readonly slotGadgets: GadgetDef[] = [];
-  readonly help = [
-    '<b>LMB</b> fire: from the hip it scatters, aimed it flies true · <b>RMB</b> hold to aim, the camera in close · <b>Middle mouse</b> or <b>Q</b> the gun\'s other trigger: a pistol\'s or sniper\'s charge, a rifle\'s rapid fire, a bowcaster\'s bouncing bolt, a repeater\'s concussive ball, a flechette\'s mines, a launcher\'s homing rocket, an ion blast, a fireball, a ball of lightning, a sonic pulse, an acid spray',
-    'Each kind of gun handles its own way: a flame thrower is a cone of flame that burns on, a lightning rifle a bolt held on what is ahead that jumps to what stands near, a slugthrower a fast slug that drops over distance, a crossbow an arc, carbonite a freezing bolt · <b>K</b> pistol or rifle · <b>V</b> kneel and <b>Z</b> prone',
-    '<b>1</b> to <b>6</b> the gadgets in the slots: the inventory\'s Skills tab (<b>I</b>) picks which: the grenades (thermal, fragmentation, proton, Imperial, cryoban, glop, poison, the bug bomb), the trip mine, the det pack, the stim pack, and bare hands (punches on <b>LMB</b>, kicks on <b>RMB</b>)',
-  ];
   readonly resource: Resource | null = null;
   /** Last gun change, for the HUD. */
   gunNote = '';

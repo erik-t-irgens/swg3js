@@ -122,7 +122,6 @@ export interface Kit {
    * that read it asked for a new one on each turn of the loop.
    */
   readonly slots: KitSlot[];
-  readonly help: string[];
   /** The pool the abilities draw on, shown as the second bar; a kit without one shows none. */
   readonly resource: Resource | null;
   slotActive(index: number): boolean;

@@ -77,11 +77,6 @@ b { color: var(--accent); font-weight: 600; }
 .loc { margin-top: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
 .fps { font-family: ui-monospace, Menlo, monospace; }
 .hint { color: var(--muted); }
-/* The help block stands under the top-left block: its top (12), the planet's name (16 on the panel's
-   line height of 1.45, 23.2) and the `/loc` line (3 and 14.5), 52.7 rounded up to 53; then the nearby
-   line on the HUD scale (3 of padding and 1.45em of 10, 17.5). With the minimap up the rule in hud.css takes over.
-   `hudMath.test.ts` adds these up again from both files. */
-.help { top: calc(53px + 17.5px * var(--hud-scale)); left: 12px; color: var(--muted); font-size: 10px; max-width: 320px; }
 
 .bottom { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .force-bar { position: relative; width: 240px; height: 12px; background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--panel-border); border-radius: 8px; overflow: hidden; }
@@ -203,7 +198,6 @@ b { color: var(--accent); font-weight: 600; }
 .bar.res .fill { background: var(--ramp-pool); }
 .bar .text { position: absolute; inset: 0; text-align: center; font-size: 10.5px; line-height: 14px; letter-spacing: 0.08em; text-shadow: 0 1px 2px var(--void); }
 .bottom { gap: 6px; }
-.class-name { font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
 .crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 90%, transparent), 0 0 0 1px color-mix(in srgb, var(--void) 50%, transparent); }
 /* A charging shot or power: a bar filling under the crosshair. */
 .charge { position: absolute; left: 50%; top: 50%; width: 60px; height: 4px; margin: 14px 0 0 -30px; background: color-mix(in srgb, var(--void) 50%, transparent); border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent); border-radius: 2px; overflow: hidden; }
@@ -622,8 +616,8 @@ b { color: var(--accent); font-weight: 600; }
 #start .cs-name-input { flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; font: inherit; font-size: 18px; color: var(--text); background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--accent); border-radius: 4px; outline: none; }
 #start .cs-name-help { flex: 1 1 100%; font-size: 11px; color: var(--muted); }
 #start .cs-name-help.warn { color: var(--warn); }
-#start .cs-classline { display: flex; align-items: center; gap: 6px; margin: 4px 0 12px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
-#start .cs-classline .ic { font-size: 18px; }
+/* The class line under the name went with the class words (the port's pass 1); the facts keep the gap it left below the name. */
+#start .cs-name-row + .cs-facts { margin-top: 12px; }
 #start .cs-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 14px; margin: 0; font-size: 13px; }
 #start .cs-facts dt { padding-top: 2px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 #start .cs-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
@@ -652,7 +646,7 @@ b { color: var(--accent); font-weight: 600; }
   #start .cs-entry-name { font-size: 13.5px; }
   #start .cs-entry-line.muted { display: none; }
   #start .cs-foot, #start .sub, #start .cs-hint { display: none; }
-  #start .cs-classline { margin: 2px 0 8px; }
+  #start .cs-name-row + .cs-facts { margin-top: 8px; }
   #start .cs-facts { gap: 4px 12px; font-size: 12px; }
   #start .cs-play { padding: 8px 22px; font-size: 14px; }
   #start .cs-go, #start .cs-confirm { padding: 8px 12px; }

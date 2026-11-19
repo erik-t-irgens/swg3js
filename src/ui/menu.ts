@@ -91,7 +91,7 @@ const ACTION_LABELS: Record<Action, string> = {
   ship: 'Ship menu (in a ship)',
   switchClass: 'Switch class (developer)',
   map: 'Map',
-  help: 'Help',
+  hideHud: 'Hide the interface, and show it again',
   inventory: 'Inventory',
   spawner: 'Spawner',
   freeLook: 'Free look (riding)',

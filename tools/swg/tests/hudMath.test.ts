@@ -169,13 +169,15 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   }
   ok(drift.length === 0, `every size hud.css states again is the one in HUD_SIZES${drift.length ? `: ${drift.join('; ')}` : ''}`);
 
-  // The help block's place states the top-left block's height again, inside a sum. The block wears no
-  // plate: it is the planet's name and the `/loc` line, which stand aside while the minimap is up, and
-  // the "nearby" line at its foot, which is always there at a fixed height. With the minimap up it is
-  // the circle, the city name's margin and line, and the wrap's own margin, all on the HUD scale, and
-  // then the nearby line. Both sums are added up again here from the two stylesheets and measured from
-  // the block's own top, so a change to any term that is not carried into the sum is caught -- at the
-  // top of the scale range a sum that is a few pixels short lays the help block over the circle.
+  // The top-left block's height with the minimap up is stated again, inside a sum, by what docks under the block: the
+  // world editor's window (`#hud.minimap-on ~ .ed-panel` in editorWindow.ts), at the block's top, the sum and a gap of 8.
+  // The block wears no plate: with the minimap up it is the circle, the city name's margin and line, and the wrap's own
+  // margin, all on the HUD scale, and then the "nearby" line, which is always there at a fixed height. The sum is added
+  // up again here from the two stylesheets and measured from the block's own top, so a change to any term that is not
+  // carried into the sum is caught -- at the top of the scale range a sum that is a few pixels short docks the window
+  // over the circle. (The help block stood by the same sum, and by a second one for the minimap off -- the planet's name
+  // and the `/loc` line -- until it went with the help panel in the port's pass 1, when H became the hide key; nothing
+  // docks under the block with the minimap off, so that second sum went with it, and the help block's rules must be gone.)
   const blockOf = (text: string, selector: string): string => {
     const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\\]\\\\#]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(text);
     return m ? m[1] : '';
@@ -186,6 +188,7 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   };
   const plain = (block: string, prop: string): number => Number(new RegExp(`(?:^|;|\\s)${prop}\\s*:\\s*([0-9.]+)px`).exec(block)?.[1] ?? Number.NaN);
   const style = readFileSync(join(here, '..', '..', '..', 'src', 'style.css'), 'utf8');
+  const win = readFileSync(join(here, '..', '..', '..', 'src', 'ui', 'editorWindow.ts'), 'utf8');
   const city = blockOf(css, '.hud-city');
   const cityEm = Number(/(?:^|;|\s)height\s*:\s*([0-9.]+)em/.exec(city)?.[1]);
   const cityLine = cityEm * scaled(city, 'font-size');
@@ -194,17 +197,11 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   // Its gap is padding: a margin there would collapse into the wrap's own and the sum would be out.
   const nearbyLine = scaled(nearby, 'padding-top') + nearbyEm * scaled(nearby, 'font-size');
   const wrapAdds = scaled(blockOf(css, '.hud-minimap'), 'height') + scaled(city, 'margin-top') + cityLine + scaled(blockOf(css, '.hud-minimap-wrap'), 'margin-bottom');
-  // The block's own top, and the two lines that stand in it without the minimap: each a line of the
-  // panel's own line height at its font's size.
   const blockTop = plain(blockOf(style, '.top-left'), 'top');
-  const lineHeight = Number(/(?:^|;|\s)line-height\s*:\s*([0-9.]+)\s*;/.exec(blockOf(style, '.panel'))?.[1]);
-  const nameLine = plain(blockOf(style, '.planet-name'), 'font-size') * lineHeight;
-  const locBlock = blockOf(style, '.loc');
-  const locLine = plain(locBlock, 'margin-top') + plain(locBlock, 'font-size') * lineHeight;
-  const helpRule = /#hud\.minimap-on \.help\s*\{\s*top:\s*calc\(\s*([0-9.]+)px\s*\+\s*([0-9.]+)px\s*\*\s*var\(--hud-scale\)\s*\)/.exec(css);
+  const dockRule = /#hud\.minimap-on ~ \.ed-panel \{ top: calc\(\s*([0-9.]+)px\s*\+\s*([0-9.]+)px\s*\*\s*var\(--hud-scale\)\s*\);/.exec(win);
   // The sum with the minimap up leaves the block's own name and `/loc` lines out, which is right only
-  // while the stylesheet hides them then: without that rule the world's name stands twice and the help
-  // block lies over both lines. So the rule the sum counts on is a checked term of it.
+  // while the stylesheet hides them then: without that rule the world's name stands twice and what
+  // docks under the block lies over both lines. So the rule the sum counts on is a checked term of it.
   const hiding = /((?:#hud\.minimap-on \.(?:planet-name|loc)\s*,?\s*)+)\{([^}]*)\}/g;
   const hidden = new Set<string>();
   for (const m of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(hiding)) {
@@ -214,15 +211,11 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   ok(hidden.has('planet-name') && hidden.has('loc'), `with the minimap up the block's own name and /loc lines are hidden and take no room (${[...hidden].join(', ') || 'neither'})`);
   const onTerm = wrapAdds + nearbyLine;
   ok(
-    Number.isFinite(onTerm) && !!helpRule && Number(helpRule[1]) === blockTop && Number(helpRule[2]) >= onTerm && Number(helpRule[2]) - onTerm < 1,
-    `with the minimap up the help block stands under the block's top, the whole wrap and the nearby line on the HUD scale (${helpRule ? `${helpRule[1]} + ${helpRule[2]}` : 'no rule'} against ${blockTop} + ${onTerm.toFixed(1)})`,
+    Number.isFinite(onTerm) && Number.isFinite(blockTop) && !!dockRule && Number(dockRule[1]) === blockTop + 8 && Number(dockRule[2]) >= onTerm && Number(dockRule[2]) - onTerm < 1,
+    `with the minimap up the editor's window docks under the block's top and a gap of 8, the whole wrap and the nearby line on the HUD scale (${dockRule ? `${dockRule[1]} + ${dockRule[2]}` : 'no rule'} against ${blockTop} + 8 + ${onTerm.toFixed(1)})`,
   );
-  const helpOff = /(?:^|;|\s)top\s*:\s*calc\(\s*([0-9.]+)px\s*\+\s*([0-9.]+)px\s*\*\s*var\(--hud-scale\)\s*\)/.exec(blockOf(style, '.help'));
-  const offBase = blockTop + nameLine + locLine;
-  ok(
-    Number.isFinite(offBase) && Number.isFinite(nearbyLine) && !!helpOff && Number(helpOff[1]) >= offBase && Number(helpOff[1]) - offBase < 1 && Number(helpOff[2]) >= nearbyLine && Number(helpOff[2]) - nearbyLine < 1,
-    `without it, under the block's top, the planet's name and the /loc line, and the nearby line on the HUD scale (${helpOff ? `${helpOff[1]} + ${helpOff[2]}` : 'no rule'} against ${offBase.toFixed(1)} + ${nearbyLine.toFixed(1)})`,
-  );
+  const live = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(!/(?:^|\n|\}|,)\s*(?:#hud\.minimap-on\s+)?\.help\b/.test(live(style)) && !/(?:^|\n|\}|,)\s*(?:#hud\.minimap-on\s+)?\.help\b/.test(live(css)), "and the help block's own rules are gone from both stylesheets, with the block (the port's pass 1)");
   ok(/(?:^|;|\s)line-height\s*:\s*1\.3em/.test(city) && /white-space:\s*nowrap/.test(city), "and the city's line is one line of fixed height, so a name coming and going never moves the panel");
   ok(/(?:^|;|\s)line-height\s*:\s*[0-9.]+em/.test(nearby) && /white-space:\s*nowrap/.test(nearby), 'nor does the nearby line, a name coming or going');
   ok(/#hud \.top-left\s*\{[^}]*background:\s*none[^}]*border:\s*0[^}]*padding:\s*0[^}]*backdrop-filter:\s*none/.test(css), 'and the block wears no plate');

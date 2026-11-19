@@ -5,7 +5,8 @@
 // Everything here is synthetic: made-up records and a made-up list of worlds. Nothing is read from the
 // game's files and no page is built.
 import assert from 'node:assert/strict';
-import { agoWords, classGlyph, classWords, cleanName, initialIndex, keyAction, NAME_MAX, placeWords, safeColour, slotsFor, stepIndex, type PlaceDef } from '../../../src/ui/selectModel.ts';
+import * as selectModel from '../../../src/ui/selectModel.ts';
+import { agoWords, classGlyph, cleanName, initialIndex, keyAction, NAME_MAX, placeWords, safeColour, slotsFor, stepIndex, type PlaceDef } from '../../../src/ui/selectModel.ts';
 import { readFileSync } from 'node:fs';
 
 let checks = 0;
@@ -88,8 +89,10 @@ const rec = (id: string, played: number, extra: Record<string, unknown> = {}) =>
   ok(agoWords(now - 30 * 3_600_000, now) === 'yesterday', 'a day');
   ok(agoWords(now - 5 * 86_400_000, now) === '5 days ago', 'days');
   ok(agoWords(now + 60_000, now) === 'just now', 'a clock that has gone back is not a time in the future');
-  ok(classWords('jedi') === 'Jedi' && classWords('bounty_hunter') === 'Bounty Hunter', 'the two classes by their names');
-  ok(classGlyph('jedi') === 'ic-saber' && classGlyph('bounty_hunter') === 'ic-blaster', 'and their marks');
+  // The class words went in the port's pass 1: nothing here puts a class's name into words any more (`classWords` is
+  // gone), and the list's mark is what is in the hand. `classWords.test.ts` holds the screens themselves to it.
+  ok(!('classWords' in selectModel), 'no class is put into words: the rule that named a class is gone');
+  ok(classGlyph('jedi') === 'ic-saber' && classGlyph('bounty_hunter') === 'ic-blaster', "each kit's mark, the saber and the blaster");
   const sheet = readFileSync(new URL('../../../src/ui/hud.svg', import.meta.url), 'utf8');
   ok([classGlyph('jedi'), classGlyph('bounty_hunter'), classGlyph('someone')].every((id) => sheet.includes(`id="${id}"`)), 'every class mark is one the sheet draws');
   ok(safeColour('#3aa0ff') === '#3aa0ff' && safeColour('#ABC') === '#ABC', 'a hex saber colour goes into the page');

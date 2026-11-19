@@ -46,6 +46,27 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* --- the hide key (H) ------------------------------------------------------------------------------
+ * `#ui` wears `ui-hidden` (`HUD_HIDDEN_CLASS`, `App.setHudHidden`) and every child of the interface layer
+ * goes but the windows: the display and its overlay canvas, the minimap (inside the display), the
+ * nameplates, the waypoints' labels, the prompt, the bar of things to press, a ship's instruments, the
+ * message line, the roster, the jobs followed, the damage numbers, the corner strip and the crosshair
+ * all go. What stays is what was opened to be used or what replaces the world: every panel and the map
+ * (`.overlay`, the select screen among them), the loading screen, the travel curtain, the death card,
+ * a conversation, the emote wheel, the debug menu, a trade's window, the creator's bar and its place
+ * row, the chat line, a group's question, and the world editor's window, bar and chip. A child added
+ * later goes with the display unless it is named here. Hidden by `visibility` rather than taken out
+ * of the layout, as a conversation hides the rest (`#ui.talking`), so nothing is laid out again or
+ * resized by it and a canvas keeps its backing store. The words over heads and the chevrons over far
+ * members are inside two of the kept roots, and go on their own. `hudHide.test.ts` holds the list. */
+#ui.ui-hidden > :not(.overlay):not(#loading):not(#fade):not(#death):not(#talk):not(#emote-wheel):not(.dbg-root):not(.trade-root):not(#creator-bar):not(#place-hint):not(#place-bar):not(.chat-root):not(.group-root):not(.ed-panel):not(#editor-bar):not(#edit-chip) {
+  visibility: hidden !important;
+}
+#ui.ui-hidden .chat-bubbles,
+#ui.ui-hidden .group-marks {
+  visibility: hidden !important;
+}
+
 /* --- the overlay canvas ---------------------------------------------------------------------------
  * The first child of `#ui`, so every panel draws over it. It never takes the pointer. */
 #hud-overlay {
@@ -691,9 +712,9 @@
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
 }
 /* The nearest living thing's name while the plate over a head is off: the block's last line, of fixed
- * height whether it holds a name or not, so a name coming and going never moves the help block. Its gap
- * above is padding, not margin: a margin would collapse into the minimap's wrap's own and the sum the
- * help block is placed by would be three pixels out. */
+ * height whether it holds a name or not, so a name coming and going never moves what docks under the
+ * block. Its gap above is padding, not margin: a margin would collapse into the minimap's wrap's own and
+ * the block's sum would be three pixels out. */
 .hud-nearby {
   height: 1.45em;
   line-height: 1.45em;
@@ -704,8 +725,8 @@
   color: var(--ink);
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
 }
-/* One line of fixed height, so a name coming and going never moves the panel, and the help block below
- * can be placed by arithmetic: 1.3em of 13px is 16.9px at scale 1. */
+/* One line of fixed height, so a name coming and going never moves the panel, and what docks below the
+ * block can be placed by arithmetic: 1.3em of 13px is 16.9px at scale 1. */
 .hud-city {
   height: 1.3em;
   line-height: 1.3em;
@@ -719,12 +740,12 @@
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
   opacity: 0;
 }
-/* With the minimap up the help block stands under the top-left block's top (12, `.top-left` in style.css)
- * and everything the block then holds, all of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`),
- * the city name's margin (3) and line (16.9), the wrap's own margin (6), and the nearby line's padding (3)
- * and line (14.5), 211.4 rounded up to 212. The block's own name and `/loc` lines are hidden then and take
- * no room. `hudMath.test.ts` adds these up again from both files. */
-#hud.minimap-on .help { top: calc(12px + 212px * var(--hud-scale)); }
+/* With the minimap up the top-left block is its top (12, `.top-left` in style.css) and everything it then
+ * holds, all of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the city name's margin (3) and
+ * line (16.9), the wrap's own margin (6), and the nearby line's padding (3) and line (14.5), 211.4 rounded
+ * up to 212. The block's own name and `/loc` lines are hidden then and take no room. The world editor's
+ * window docks under that sum (`#hud.minimap-on ~ .ed-panel` in `editorWindow.ts`), and `hudMath.test.ts`
+ * adds it up again from both stylesheets. (The help block stood by it until the hide key took its key.) */
 
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {
