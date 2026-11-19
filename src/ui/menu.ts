@@ -13,6 +13,7 @@ import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
 import { shapeDetailTopKm } from '../world/horizon/shapeWindow.ts';
+import { MOVE_TUNE } from '../anim/moveTune.ts';
 
 // The Interface page's knobs and the rebind note live in `hudPage.ts` so that a node test can read
 // them without a browser; they are theirs to change and everything else's to import from here. The
@@ -56,6 +57,17 @@ export interface EmoteSource {
   choices(): { clip: string; label: string }[];
   slots(): (string | null)[];
   set(index: number, clip: string | null): void;
+}
+
+/**
+ * What the Controls page says an action does: its own words, but the speed-up's as `move.vault` stands (Climbing II, phase 6, the
+ * review's round): a sprint (under 'run' any run) into a low obstacle vaults it or dives over it and into a waist-high ledge clambers
+ * onto it; under 'off', its other setting, nothing vaults and the words are the base commit's.
+ */
+function actionLabel(a: Action): string {
+  if (a !== 'speedUp' || MOVE_TUNE.vault === 'off') return ACTION_LABELS[a];
+  const into = MOVE_TUNE.vault === 'run' ? 'running or sprinting into' : 'sprinting into';
+  return `Run, tap again to sprint (${into} a low obstacle: vault it or dive over it; into a waist-high ledge: clamber onto it; vehicle: boost)`;
 }
 
 const ACTION_LABELS: Record<Action, string> = {
@@ -727,7 +739,7 @@ export class Menu {
         const codes = this.input.bindings[a];
         const cell = (slot: number) => `<button class="key${codes[slot] ? '' : ' empty'}" data-action="${a}" data-slot="${slot}">${keyName(codes[slot] ?? '')}</button>`;
         const changed = codes.join() !== DEFAULT_BINDINGS[a].join();
-        return `<div class="key-row${changed ? ' changed' : ''}"><span class="key-label">${ACTION_LABELS[a]}</span>${cell(0)}${cell(1)}</div>`;
+        return `<div class="key-row${changed ? ' changed' : ''}"><span class="key-label">${actionLabel(a)}</span>${cell(0)}${cell(1)}</div>`;
       })
       .join('');
   }

@@ -58,7 +58,8 @@ resetClimbTune();
   ok(/\n  climbing_a_rope_1: \{ loop: true, ground: false \},/.test(table), "the import's table has its row: a loop with nothing under its feet (loaded by name, so not marked `use`)");
   ok(POLE_IDS.length === 1 && POLE_IDS[0] === POLE_CLIMB && POLE_CLIP_NAME === `mx_${POLE_CLIMB}`, 'the pole asks the pack for it by its rig name, made once');
   const pack = readFileSync(join(REPO, 'src', 'anim', 'mixamoPack.ts'), 'utf8');
-  ok(pack.includes('...BAR_IDS, ...ROPE_IDS].concat(POLE_IDS),'), "and the game's pack asks for it after the ropes' (`browserIo`'s `also`)");
+  // (Climbing II, phase 6: the vaults' clips after it.)
+  ok(pack.includes('...BAR_IDS, ...ROPE_IDS].concat(POLE_IDS, VAULT_IDS),'), "and the game's pack asks for it after the ropes' (`browserIo`'s `also`)");
 }
 
 /** The game's rig with the pole's clip, posed (the tests' figure), and its table measured off it as the player's `animatePole` does. */

@@ -6,7 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
-import { moveBefore, moveSmoothBefore, moveSmooth2Before, moveSmooth3Before } from './moveTune.ts';
+import { MOVE_TUNE, moveBefore, moveSmoothBefore, moveSmooth2Before, moveSmooth3Before } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -924,9 +924,37 @@ export const CLIMB_ROPELOOK_ALSO: (() => void)[] = [];
 
 /** The rope chain round's switches at their other setting (phase 5's rope, `6e59ce8`). */
 export function climbRopeLookBefore(): void {
+  // (`6e59ce8` had none of phase 6's either: put back first, so the round's own words below win where a switch is shared.)
+  climbVaultsBefore();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_ROPELOOK_BEFORE)) t[k] = v;
   for (const f of CLIMB_ROPELOOK_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 6 (vaults and clambers): every switch it adds, at its other setting (the climbing and the body as the rope chain
+ * round shipped them, `5333b88`: a run meets an obstacle as it always did). Each key names its table, `move.` the body's
+ * (`MOVE_TUNE`, src/anim/moveTune.ts, where the vault lives) and `climb.` the climbing's; a later maker of the round adds its own here
+ * (`CLIMB_VAULTS_ALSO` for one outside both), so one call puts the whole round back; `climbRopeLookBefore` calls it first, so every
+ * older round's chain of puts back holds.
+ */
+export const CLIMB_VAULTS_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (what is vaulted, what is clambered).
+  'move.vault': 'off',
+};
+
+/** A later maker's own puts back (a switch outside both tables), run after the round's own. */
+export const CLIMB_VAULTS_ALSO: (() => void)[] = [];
+
+/** Phase 6's switches at their other setting (the rope chain round's climbing and body, `5333b88`). */
+export function climbVaultsBefore(): void {
+  const climb = CLIMB_TUNE as unknown as Record<string, unknown>;
+  const move = MOVE_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_VAULTS_BEFORE)) {
+    if (k.startsWith('move.')) move[k.slice(5)] = v;
+    else if (k.startsWith('climb.')) climb[k.slice(6)] = v;
+  }
+  for (const f of CLIMB_VAULTS_ALSO) f();
 }
 
 /**

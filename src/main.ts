@@ -947,6 +947,8 @@ function wayBackNowhere(back: WayBack): boolean {
 const thrownAt = new THREE.Vector3();
 /** Where a figure leaning into the grapple's rope is drawn from, for the state that carries its whole turn. */
 const leanedAt = new THREE.Vector3();
+/** Climbing II, phase 6: a vaulting figure's hips in the world, for the state that carries its flight's nearest pose. */
+const vaultHips = new THREE.Vector3();
 /** Where the view looks, for the head that follows it; written once a frame and never made. */
 const headLook = new THREE.Vector3();
 /** Scratch for putting a walker out of a hull another player flies: where that hull is, and what it is doing. */
@@ -17973,10 +17975,16 @@ class App {
     // turn it hears is upright and its own glide has caught up with it. Every relay keeps `q` and every browser already
     // slerps a figure to it, so this needs no restart.
     const leans = !p.aboard && !p.eva && p.grapple.leanSends;
+    // Climbing II, phase 6 (maker B, item 4): over an obstacle the wire carries the vault's nearest pose (`Vault.wireState`): in its
+    // flight the falling loop, stood with its feet under this figure's hips (`Vault.peerPlace`), so the others see it go over where
+    // this one does; its speed the one it runs with, which the vault holds while the body is placed on the clip's own path. (The
+    // editor's return point below wins, written over it.)
+    const vaultWire = p.vault.wireState();
+    const vaultAt = this.vaultPeerAt(leanedAt);
     // While the world editor flies, the player is where its body was kept (the return point), hidden (`j`): the server
     // measures creature keeping, a group's reach and a duel's from the body, never from the camera.
     const edRet = this.editor?.returnPlace ?? null;
-    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.rope.onRope && !p.aboard ? p.rope.peerPlace(leanedAt) : p.pole.onPole && !p.aboard ? p.pole.peerPlace(leanedAt) : p.worldPos;
+    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : vaultAt ? vaultAt : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.rope.onRope && !p.aboard ? p.rope.peerPlace(leanedAt) : p.pole.onPole && !p.aboard ? p.pole.peerPlace(leanedAt) : p.worldPos;
     // (Climbing II, phase 3, maker B: hanging from a bar the place is where a free hang's hands would be on the grip, and the
     // rig's state the free hang's, so another player's game, which has no bar's swing on the wire, stands the nearest pose it
     // has, its hands on the bar; in the flight off it the body's own place and the falling loop's state. Phase 4, maker B: on a
@@ -18046,7 +18054,23 @@ class App {
     // in that vehicle's own frame. Never while hidden: a figure nobody is shown has no rope to be seen with.
     const rope = hidden ? null : this.ropeForWire(now);
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading), s: p.mounted ? 'seated' : (vaultWire ?? rig?.describe().state ?? 'idle'), v: n2(p.vault.holding ? p.vault.speed : Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+  }
+
+  /**
+   * Climbing II, phase 6 (maker B, item 4): where the wire stands this player while a vault's flight goes over as the falling loop
+   * (`Vault.wireState` 'air'): its feet under the figure's hips, never through the obstacle (`Vault.peerPlace`), written into `out`;
+   * null otherwise (aboard a hull's rooms the body's place is the hull's frame, and goes as it always did). The state sent and the
+   * console's `move().vault.wire` both ask it.
+   */
+  private vaultPeerAt(out: THREE.Vector3): THREE.Vector3 | null {
+    const p = this.player;
+    const hips = p.vault.wireState() === 'air' && !p.aboard ? (p.rig?.bone('root') ?? null) : null;
+    // (The review's round: out of the flight, the figure's own way where the capsule is kept off the obstacle, raised or held back:
+    // `Vault.unride`, the place the chase follows; the body's own place otherwise.)
+    if (!hips) return !p.aboard && (p.vault.rideY !== 0 || p.vault.holdBack !== 0) ? p.vault.unride(out.copy(p.worldPos)) : null;
+    hips.getWorldPosition(vaultHips);
+    return p.vault.peerPlace(out, vaultHips.x, vaultHips.y, vaultHips.z);
   }
 
   /**
@@ -29025,6 +29049,9 @@ class App {
       // Climbing II's smoothness round, item 4: the pace by height (wearing the crouch's clips, the shares toward the crouch's
       // and the crawl's speeds), whether the duck laid the body down, the times it laid it down and got it up, the roof probe's words.
       pace: { rule: MOVE_TUNE.duckPace, crouch: p.duck.crouch, toCrouch: n(p.duck.toCrouch), toCrawl: n(p.duck.toCrawl), lyingForRoof: p.duck.lying, laid: p.duck.laid, rose: p.duck.rose, roof: S.roofSaid || null },
+      // Climbing II, phase 6: the vault (`move.vault`): under way or not, its clip and clock, what the last obstacle met came to
+      // (its verdict, its top over the feet, its depth, its face's distance), the last one taken, and the counts.
+      vault: { rule: MOVE_TUNE.vault, ...p.vault.report(), wire: { state: p.vault.wireState(), at: this.vaultPeerAt(new THREE.Vector3())?.toArray().map((v) => Number(v.toFixed(3))) ?? null } },
       tune: { ...MOVE_TUNE },
     };
   }

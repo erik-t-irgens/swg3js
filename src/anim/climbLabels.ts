@@ -5,6 +5,7 @@
 
 import type { CoursePiece } from './climbCourse.ts';
 import { CLIMB_TUNE } from './climbTune.ts';
+import { MOVE_TUNE } from './moveTune.ts';
 
 export interface PieceLabel {
   /** One short line: what the piece is. */
@@ -80,7 +81,11 @@ export function pieceLabel(p: CoursePiece): PieceLabel {
   if (p.kind === 'obstacle' && n.dir === 'duck') return { title: `Beam ${m(n.under)} over the floor`, what: 'Walk and run under it with only the move keys: you should duck on your own' };
   if (p.kind === 'obstacle' && n.dir === 'tunnel') return { title: `Tunnel ${m(n.under)} high`, what: 'Go through crouched, with only the move keys' };
   if (p.kind === 'obstacle' && n.dir === 'crawl') return { title: `Slab ${m(n.under)} over the floor`, what: 'Go under it lying down, with only the move keys' };
-  if (p.kind === 'obstacle') return { title: `${id.startsWith('clamber') ? 'Clamber' : 'Vault'}: ${id.replace(/^(obstacle|clamber)-/, '')} m (phase 6)`, what: 'Vaults and clambers come with phase 6' };
+  // (Climbing II, phase 6, maker B: under `move.vault` 'off', its other setting, the base commit's words, nothing vaulted.)
+  if (p.kind === 'obstacle' && MOVE_TUNE.vault === 'off') return { title: `${id.startsWith('clamber') ? 'Clamber' : 'Vault'}: ${id.replace(/^(obstacle|clamber)-/, '')} m (phase 6)`, what: 'Vaults and clambers come with phase 6' };
+  if (p.kind === 'obstacle' && id.startsWith('clamber')) return { title: `Clamber: ${m(n.height)} ledge`, what: 'Sprint at it (Shift again, W held): you clamber onto it and run on; let go of the sprint first and you stand up on it' };
+  if (p.kind === 'obstacle' && typeof n.height === 'number' && n.height > MOVE_TUNE.vaultHigh) return { title: `Vault: ${id.replace(/^obstacle-/, '')} m, too high`, what: 'Too high to vault: a sprint meets it as a wall, as before' };
+  if (p.kind === 'obstacle') return { title: `Vault: ${id.replace(/^obstacle-/, '')} m`, what: 'Sprint at it (Shift again, W held): a vault, or a dive and roll over a long low one; a walk or a run stops at it' };
   if (p.kind === 'run' && id === 'tower') return { title: 'The tower: everything in one climb', what: 'Shimmy, hop up twice, hop across, wall climb, hop down, round the corner, drop' };
   if (p.kind === 'run') return { title: 'The run: everything in a line', what: 'Run the line start to end' };
   if (p.kind === 'room') return { title: `Climb up where it only nearly fits (${id.replace(/^room-/, '')})`, what: 'Grab and climb up W: it should climb short or say why not' };

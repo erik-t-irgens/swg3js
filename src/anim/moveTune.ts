@@ -87,6 +87,50 @@ export interface MoveTune {
    * Smoothness II's (the class the keys ask, the capsule shrunk to whatever the room allows down to `duckMost`).
    */
   duckClip: 'clearance' | 'one';
+  /**
+   * Climbing II, phase 6 (the owner: "great for when sprinting to automatically clamber over obstacles that are appropriate"):
+   * 'sprint' a body sprinting into something still whose top it can go over vaults it (or dives over a long low one), and onto a
+   * waist-high ledge clambers (src/player/vault.ts); 'run' the same for any run, the sprint among them; 'off' today's (a run
+   * meets an obstacle as it always did).
+   */
+  vault: 'sprint' | 'run' | 'off';
+  /** A top at least this high over the feet is vaulted (the brief's start, 0.5: what the step-up's own 0.5 m climbs is no vault). */
+  vaultLow: number;
+  /** A top at most this high over the feet is vaulted (the brief's start, 1.25: about the hips' height, the clips' own hands stand 0.85 and 0.97 m up). */
+  vaultHigh: number;
+  /** A top must end with ground beyond within this far past its face to be vaulted; deeper, it is a ledge (the brief's start, 2 m). */
+  vaultFar: number;
+  /**
+   * Past this depth a top no higher than `diveHigh` is dived over (`jump_over`) rather than vaulted, metres (ours, 1.0: the hand
+   * vaults' own figures clear their own top over a metre of depth and dip into it past that, measured).
+   */
+  vaultDeep: number;
+  /** The highest top a dive is taken over, metres over the feet (ours, 1.25: `vaultHigh`'s own, since the dive's figure clears 1.6 m over 1.5 m of depth, measured). */
+  diveHigh: number;
+  /** A ledge's top at least this high over the feet is clambered onto (the brief's start, 0.8: about the waist). */
+  clamberLow: number;
+  /** A ledge's top at most this high over the feet is clambered onto; higher, the face is a wall, as today (the brief's start, 1.4). */
+  clamberHigh: number;
+  /** A vault's hand plants this far in from the near edge of the top (ours, 0.25: a hand's breadth or two, as the clips' own; held to half the depth). */
+  vaultHandIn: number;
+  /** A clamber's hand lands this far in past the face (ours, 0.27: the clip's own, measured, so its feet come down where it put them). */
+  clamberHandIn: number;
+  /** A vault's feet come down at least this far past the far side, metres; its flight is stretched to reach it (ours, 0.3: a foot's length). */
+  vaultLand: number;
+  /**
+   * A vault's clip is played at the speed the body came with over its own run-in, held to these (ours, 0.8 and 1.8: at the sprint's
+   * 7 m/s `jumping`'s run-in asks 1.86, `jumping_1`'s 2.2; past the most, the body slows to the clip while it vaults).
+   */
+  vaultRateLeast: number;
+  vaultRateMost: number;
+  /** How long the run crossfades into a vault, and the vault back out into the run, seconds (ours, 0.15: about the speed classes' own fade between two paces). */
+  vaultBlend: number;
+  /** A face met further off square than this across the ground is no vault: it is run past or into, as today (ours, 40 degrees). */
+  vaultAngle: number;
+  /** The room a vault needs over the top it goes over, metres (ours, 0.9: the vaults' heads stand at most 0.82 m over their own top, measured, and a hand's breadth). */
+  vaultRoom: number;
+  /** The ground beyond a vault may stand this far under the feet; deeper is a drop, not a vault (ours, 1.0 m). */
+  vaultDrop: number;
 }
 
 export const MOVE_TUNE: MoveTune = {
@@ -110,6 +154,23 @@ export const MOVE_TUNE: MoveTune = {
   proneMin: 'opening',
   proneSkin: 0.05,
   duckClip: 'clearance',
+  vault: 'sprint',
+  vaultLow: 0.5,
+  vaultHigh: 1.25,
+  vaultFar: 2,
+  vaultDeep: 1,
+  diveHigh: 1.25,
+  clamberLow: 0.8,
+  clamberHigh: 1.4,
+  vaultHandIn: 0.25,
+  clamberHandIn: 0.27,
+  vaultLand: 0.3,
+  vaultRateLeast: 0.8,
+  vaultRateMost: 1.8,
+  vaultBlend: 0.15,
+  vaultAngle: 40,
+  vaultRoom: 0.9,
+  vaultDrop: 1,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -135,6 +196,23 @@ export const MOVE_RANGES: Record<string, { min: number; max: number }> = {
   riseAt: { min: 0.75, max: 1.6 },
   headSkin: { min: 0, max: 0.2 },
   proneSkin: { min: 0, max: 0.5 },
+  // Phase 6: a vault's tops from the step-up's own height to a little over the head's; its reach to the clamber's least.
+  vaultLow: { min: 0.3, max: 1.2 },
+  vaultHigh: { min: 0.5, max: 1.8 },
+  vaultFar: { min: 0.3, max: 4 },
+  vaultDeep: { min: 0.2, max: 4 },
+  diveHigh: { min: 0.3, max: 1.8 },
+  clamberLow: { min: 0.3, max: 1.4 },
+  clamberHigh: { min: 0.6, max: 1.8 },
+  vaultHandIn: { min: 0.05, max: 1 },
+  clamberHandIn: { min: 0.05, max: 1 },
+  vaultLand: { min: 0, max: 1.5 },
+  vaultRateLeast: { min: 0.3, max: 1.5 },
+  vaultRateMost: { min: 0.8, max: 3 },
+  vaultBlend: { min: 0, max: 0.6 },
+  vaultAngle: { min: 5, max: 85 },
+  vaultRoom: { min: 0.3, max: 2 },
+  vaultDrop: { min: 0, max: 4 },
 };
 
 /** The table's choices and the words each takes. */
@@ -145,6 +223,7 @@ export const MOVE_CHOICES: Readonly<Record<string, readonly string[]>> = {
   duckHead: ['clear', 'before'],
   proneMin: ['opening', 'today'],
   duckClip: ['clearance', 'one'],
+  vault: ['sprint', 'run', 'off'],
 };
 
 /** Every switch of the round at its other setting: the body's shape as `12ae8ad` shipped it. */

@@ -75,6 +75,29 @@ export const MOVE_GROUPS: DialGroup[] = [
       choice('duckClip', "The duck's crouch", 'clearance: the highest crouch clip that clears, the sneak walk last; one: the one crouch walk, as before.'),
     ],
   },
+  {
+    title: 'Vaults and clambers (Climbing II, phase 6)',
+    note: "sprint: sprinting into something still whose top is between the vault's least and most over the feet, with room over it and ground beyond it within its reach, vaults it (the clip whose hand meets the top), or dives over a long low one; into a waist-high ledge deeper than that, with room on it, clambers onto it, cut into the run while the sprint is held. run: the same for any run. off: today's, a run meets an obstacle as it always did.",
+    dials: [
+      choice('vault', 'Vaults and clambers', "sprint: while sprinting; run: any run; off is today's."),
+      dial('vaultLow', 'A vault from a top this high', 0.01, 'm', "The brief's 0.5: what the step-up's own 0.5 m climbs is no vault."),
+      dial('vaultHigh', 'A vault up to a top this high', 0.01, 'm', "The brief's 1.25: about the hips; the clips' own hands stand 0.85 and 0.97 m up, and the figure is lifted or lowered by the difference."),
+      dial('vaultFar', 'Ground beyond it within', 0.05, 'm', "The brief's 2: a top that goes on further than this past its face is a ledge, clambered onto where it is waist high."),
+      dial('vaultDeep', 'Dived over past this depth', 0.05, 'm', "Ours: 1.0, the hand vaults' own figures clear their own top over a metre of depth and dip into it past that, measured."),
+      dial('diveHigh', 'A dive over a top up to', 0.01, 'm', "Ours: 1.25, the vault's own most: the dive's figure clears 1.6 m over 1.5 m of depth, measured."),
+      dial('clamberLow', 'A clamber onto a top from', 0.01, 'm', "The brief's 0.8: about the waist."),
+      dial('clamberHigh', 'A clamber onto a top up to', 0.01, 'm', "The brief's 1.4; higher, the face is a wall, as today."),
+      dial('vaultHandIn', "A vault's hand in from the edge", 0.01, 'm', "Ours: 0.25, a hand's breadth or two, as the clips' own; never past half the depth."),
+      dial('clamberHandIn', "A clamber's hand in from the edge", 0.01, 'm', "Ours: 0.27, the clip's own, measured, so its feet come down where it put them."),
+      dial('vaultLand', 'Feet down past the far side', 0.01, 'm', "Ours: 0.3, a foot's length; the flight is stretched to reach it where the obstacle is deeper than the clip's own."),
+      dial('vaultRateLeast', 'Clip played at the least', 0.05, 'x', "Ours: 0.8. The clip is played at the speed the body came with over its own run-in."),
+      dial('vaultRateMost', 'Clip played at the most', 0.05, 'x', "Ours: 1.8: at the sprint's 7 m/s `jumping` asks 1.86, `jumping_1` 2.2; past it the body slows to the clip while it vaults."),
+      dial('vaultBlend', 'Crossfade in and out', 0.01, 's', "Ours: 0.15, about the speed classes' own fade between two paces."),
+      dial('vaultAngle', 'Met no further off square than', 1, 'deg', "Ours: 40; at a glance it is run past or into, as today."),
+      dial('vaultRoom', 'Room over the top', 0.05, 'm', "Ours: 0.9: the vaults' heads stand at most 0.82 m over their own top, measured, and a hand's breadth."),
+      dial('vaultDrop', 'Ground beyond no deeper than', 0.05, 'm', "Ours: 1.0; deeper is a drop, not a vault."),
+    ],
+  },
 ];
 
 export const MOVE_DIALS: DialSet = { helper: 'move', groups: MOVE_GROUPS, shipped: readDials(MOVE_GROUPS) };

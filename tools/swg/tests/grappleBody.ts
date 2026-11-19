@@ -28,6 +28,7 @@ import { RopeCurve } from '../../../src/player/ropeCurve.ts';
 import { ChainRibbon, drawChained } from '../../../src/player/ropeChainDraw.ts';
 import type { HangingRope } from '../../../src/player/hangingRope.ts';
 import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleWorld } from '../../../src/player/poleClimb.ts';
+import { VAULT_PACE_RUN, VAULT_PACE_SPRINT, Vault, VaultIn, type VaultWorld } from '../../../src/player/vault.ts';
 import type { CharacterRig } from '../../../src/player/rig.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
 import { CLIMB_TUNE } from '../../../src/anim/climbTune.ts';
@@ -251,6 +252,16 @@ export class TestBody implements GrappleBody {
   readonly pole = new PoleClimb({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   /** The frames the pole held the body for. */
   poleFrames = 0;
+  /** Climbing II, phase 6: the vaults (`move.vault`), stepped in the player's own places: the vault in place of the movement, its sense after the move, after the wall's. */
+  readonly vault = new Vault({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
+  readonly vaultIn = new VaultIn();
+  /** The frames the vault held the body for. */
+  vaultFrames = 0;
+  /**
+   * Phase 6: the sprint, as the speed classes would have it (this body has none: its pace is the run's, Shift walks): a test sets
+   * it, with the sprint's share of the run on `speedScale`, and the vault reads the sprint's pace (and, held with W, a clamber's cut).
+   */
+  sprinting = false;
   /** The frames the climb held the body for. */
   wallFrames = 0;
   /** The move was cut short across the ground (the player's `wallBlocked`). */
@@ -443,6 +454,7 @@ export class TestBody implements GrappleBody {
     this.bar.reset('stood elsewhere');
     this.rope.reset('stood elsewhere');
     this.pole.reset('stood elsewhere');
+    this.vault.reset('stood elsewhere');
     this.body.setTranslation({ x, y, z }, true);
     this.body.setNextKinematicTranslation({ x, y, z });
     // The feedback round, items 3 and 4: stood up fresh, standing (the player's `reset`).
@@ -646,7 +658,7 @@ export class TestBody implements GrappleBody {
     if (this.hooks) g.stepKeys(input, this, this.mutes, this.fireNow);
     // Climbing II: the use key, as the game's dispatch hands it (here nothing else takes it, so every press is the climb's),
     // held while it is held, and let go while the hands already hold something (the game mutes the key then).
-    const climbHolds = this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding || this.pole.holding;
+    const climbHolds = this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding || this.pole.holding || this.vault.holding;
     if (!climbHolds && input.pressedAction('mount')) this.climbAsk.press();
     this.climbAsk.hold(!climbHolds && input.held('mount'));
     // Climbing II, phase 3: on a bar, the swing has the body in place of the movement (the player's `barFrame`).
@@ -672,6 +684,11 @@ export class TestBody implements GrappleBody {
     // Wave 4, item B: on a wall, the climb has the body in place of the movement (the player's `wallFrame`).
     if (this.wall.holding) {
       this.wallFrame(dt);
+      return;
+    }
+    // Climbing II, phase 6: over an obstacle, the vault has the body in place of the movement (the player's `vaultFrame`).
+    if (this.vault.holding) {
+      this.vaultFrame(dt, true);
       return;
     }
     let mx = 0;
@@ -866,6 +883,8 @@ export class TestBody implements GrappleBody {
     this.rope.tick(dt);
     // Phase 5: and the pole's (the player's `ledgeClocks`: a let-go's offset eased out).
     this.pole.tick(dt);
+    // Phase 6: and the vault's (the player's `ledgeClocks`: no rig here, so no clip to let go of; the drawn offset eased out).
+    this.vault.tick(dt);
     // Wave 4, item B: the move cut short across the ground (the player's own lines).
     const askH = moveX * moveX + moveZ * moveZ;
     this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
@@ -921,6 +940,28 @@ export class TestBody implements GrappleBody {
       if (this.wall.sense(this.physics.world as unknown as LedgeWorld, this, li, this.stamina)) {
         this.takenByWall();
         this.wallFrame(dt);
+        return;
+      }
+    }
+    // Climbing II, phase 6: an obstacle met on the run vaulted, dived over or clambered onto (the player's `senseVault`), the body's
+    // pace the sprint's where a test says it sprints (`sprinting`), else the run's (this body's own, Shift walking) moving.
+    if (MOVE_TUNE.vault !== 'off') {
+      const vi = this.vaultIn;
+      vi.dt = dt;
+      vi.vx = this.vel.x;
+      vi.vz = this.vel.z;
+      vi.grounded = this.grounded;
+      vi.busy = (this.hooks && (g.out || g.released)) || this.jka.inSpecialJump || this.jka.rolling;
+      // (Maker B, item 3: the brief's own "never", as the player's lines; this body has no vehicle, no noclip and no space.)
+      if (this.swimming || crouching || this.duck.crouch || this.prone || this.kneeling || this.placingHand) vi.busy = true;
+      vi.self = this.body;
+      vi.pace = !moving ? 0 : this.sprinting ? VAULT_PACE_SPRINT : walking ? 1 : VAULT_PACE_RUN;
+      vi.sprintHeld = false;
+      vi.scale = this.ledgeScale;
+      vi.filter = this.filter;
+      if (this.vault.sense(this.physics.world as unknown as VaultWorld, this, vi)) {
+        this.takenByVault();
+        this.vaultFrame(dt, false);
         return;
       }
     }
@@ -1188,6 +1229,34 @@ export class TestBody implements GrappleBody {
     this.jka.holdApex(P.apexY);
     this.grounded = false;
     if (P.holding) this.heading = P.heading;
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+    this.input.endFrame();
+    this.beforeStep?.(dt);
+    this.physics.step(dt);
+  }
+
+  /** A vault begun, as the player's `takenByVault`: the air's and the slope's memories put down, the body facing its travel. */
+  private takenByVault(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.slope.reset();
+    this.grounded = false;
+    this.heading = this.vault.heading;
+  }
+
+  /** A frame of the vault (the player's `vaultFrame`): its clock run (`advance` false the frame it began), the body placed, then the physics. */
+  private vaultFrame(dt: number, advance: boolean): void {
+    this.vaultFrames++;
+    const V = this.vault;
+    const vi = this.vaultIn;
+    vi.dt = dt;
+    vi.sprintHeld = this.sprinting && this.input.held('forward');
+    V.step(this, vi, advance);
+    // (The review's round: the capsule crouched while the vault keeps it off the obstacle, as the player's.)
+    this.setCrouchCollider(V.crouchedNow);
+    this.jka.holdApex(this.pos.y);
+    this.grounded = !V.holding;
+    this.heading = V.heading;
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     this.input.endFrame();
     this.beforeStep?.(dt);

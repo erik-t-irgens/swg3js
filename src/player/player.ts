@@ -55,6 +55,8 @@ import { WallClimb } from './wallClimb.ts';
 import { ClimbCamFollow } from './climbCam.ts';
 import { driveBarClips, driveDropClip, driveHangClips, driveRopeClips, releaseBarClip, releaseRopeClip, type HangClipState } from './hangClips.ts';
 import { drivePoleClips, releasePoleClip } from './hangClips.ts';
+import { driveVaultClips, releaseVaultClip } from './hangClips.ts';
+import { Vault, VaultIn, type VaultWorld } from './vault.ts';
 import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleWorld } from './poleClimb.ts';
 import { measurePoleTable } from '../anim/poleClips.ts';
 import type { RopeTable } from '../anim/ropeClips.ts';
@@ -614,6 +616,17 @@ export class Player {
   /** Phase 5: whether the rig's root was last drawn by the pole (`applyPoleRoot`), and whether the pole put the hands and feet on it last frame. */
   private poleRooted = false;
   private poleLimbs = false;
+  /**
+   * Climbing II, phase 6 (`move.vault`, src/player/vault.ts): sprinting (or, under 'run', running) into an obstacle the rules take,
+   * the body is vaulted or dived over it or clambered onto it after the move (`senseVault`, after the use key's grabs and the wall
+   * climb), and while the vault holds the body its own frame in place of the movement (`vaultFrame`), its clip on the rig by the
+   * vault's clock (src/player/hangClips.ts's `driveVaultClips`), the figure drawn on the clip's own path against the body
+   * (`applyVaultRoot`). The grapple's harness steps the very same calls in the same places.
+   */
+  readonly vault = new Vault({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
+  /** Phase 6: the vault's frame record (kept), and whether the rig's root was last drawn by the vault (`applyVaultRoot`). */
+  private readonly vaultIn = new VaultIn();
+  private vaultRooted = false;
   /**
    * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
    * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
@@ -1219,6 +1232,8 @@ export class Player {
     this.rope.reset('stood elsewhere');
     // (Phase 5: nor a pole.)
     this.pole.reset('stood elsewhere');
+    // (Phase 6: nor a vault.)
+    this.vault.reset('stood elsewhere');
   }
 
   /**
@@ -1234,6 +1249,9 @@ export class Player {
 
   /** The place the chase follows with no climbing's ease (wave 3's own): the drawn body's height, else the capsule's place. */
   private rawFollowAt(): THREE.Vector3 {
+    // (Climbing II, phase 6, the review's round: over an obstacle the capsule is kept off it, raised or held back; the chase follows
+    // the figure's own way, as it did before the capsule was, `Vault.unride`. Nought outside a vault.)
+    if (this.vault.rideY !== 0 || this.vault.holdBack !== 0) return this.vault.unride(this.followPoint.copy(this.worldPos));
     const lag = this.drawn.offset;
     if (LOCO_TUNE.stairs.camera !== 'smooth' || lag === 0) return this.worldPos;
     const out = this.followPoint.copy(this.worldPos);
@@ -1254,7 +1272,9 @@ export class Player {
    * it, until caught. Nothing at all under 'before' or with no climb (the follow stays off and the chase reads the body).
    */
   stepClimbCam(dt: number): void {
-    const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds;
+    // (Climbing II, phase 6, maker B: never over an obstacle. A vault's run goes on after it, and the eased follow trails a body
+    // running on by its ease times its speed until the body stops; the chase follows the body through a vault as a run's does.)
+    const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds && !this.vault.holding;
     const p = this.rawFollowAt();
     const F = this.camFollow;
     // The followed place's own speed (the frame before), so a follow begun on a body flying at a lip goes on at its pace.
@@ -1384,6 +1404,27 @@ export class Player {
         this.poleRooted = false;
       }
     }
+    // Climbing II, phase 6: over an obstacle, the figure drawn on its clip's own path against the body, and after its end eased back
+    // onto the body (never under `move.vault` 'off').
+    if (rig && (this.vaultRooted || this.vault.offset)) {
+      if (this.vault.offset) this.applyVaultRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        this.vaultRooted = false;
+      }
+    }
+  }
+
+  /** Phase 6: the rig's root put where the vault draws the figure against the body (along its front, in the group's own frame, and up). */
+  private applyVaultRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const V = this.vault;
+    rig.root.position.x = 0;
+    rig.root.position.y += V.offY;
+    rig.root.position.z = V.offFwd;
+    this.vaultRooted = true;
   }
 
   /** Phase 5: the rig's root put where the pole draws the figure against the body (its offset, the world's frame, into the group's). */
@@ -1479,6 +1520,7 @@ export class Player {
     if (this.bar.holding) this.bar.reset('off the feet');
     if (this.rope.holding) this.rope.reset('off the feet');
     if (this.pole.holding) this.pole.reset('off the feet');
+    if (this.vault.holding) this.vault.reset('off the feet');
     if (this.brace.busy) {
       this.brace.reset();
       this.limbs.reset();
@@ -3124,6 +3166,12 @@ export class Player {
       this.wallFrame(dt, input, cam, world);
       return;
     }
+    // Climbing II, phase 6: over (or onto) an obstacle (`Vault`), the vault has the body in place of the movement. Never under
+    // `move.vault` 'off', where nothing ever vaults.
+    if (this.vault.holding) {
+      this.vaultFrame(dt, input, cam, true);
+      return;
+    }
 
     const g = world.planet.gravity;
     const terrain = world.terrain;
@@ -3567,6 +3615,13 @@ export class Player {
       this.wallFrame(dt, input, cam, world);
       return;
     }
+    // Climbing II, phase 6: sprinting (or running, under 'run') into an obstacle the rules take, vaulted, dived over or clambered
+    // onto from this very frame (`Vault.sense`, after everything the use key takes), its clock begun where this frame's move left
+    // the body (the frame's own step is the movement's, so the vault's first frame runs nothing of it).
+    if (this.senseVault(dt, atControls)) {
+      this.vaultFrame(dt, input, cam, false);
+      return;
+    }
     // Climbing II, phase 3: the bar's refusal ("No room to hang from the bar here.") said only now, when neither a lip nor a
     // wall took the press in the same frame (`senseBar` drops one they took).
     if (this.bar.said) {
@@ -3895,6 +3950,9 @@ export class Player {
 
   /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
   get climbHolds(): boolean {
+    // (Climbing II, phase 6, maker B: and over an obstacle, its hands on it: the fight's keys and the use key muted, the hook
+    // refused, no emote; the chase camera's ease is not a vault's, `stepClimbCam`.)
+    if (this.vault.holding) return true;
     // (Climbing II, phase 5: and on a pole.)
     if (this.pole.holding) return true;
     return this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding;
@@ -4159,6 +4217,93 @@ export class Player {
     P.limbsFor(lp, rig, toPhys);
     if (show) lp.place(rig, null, toPhys);
     this.poleLimbs = show;
+  }
+
+  /**
+   * Climbing II, phase 6 (`move.vault`, maker A's items 1 and 2): after the move, an obstacle met on the run vaulted, dived over or
+   * clambered onto (`Vault.sense`): the body's pace the speed classes' own (the class picked this frame while they rule a way asked,
+   * else none); not on the grapple's rope or in its flight, thrown, dead, at a ship's controls, in a Jedi Academy special jump or
+   * roll, or aboard a hull's rooms; and (maker B's item 3) never while the placing hand holds something, swimming, crouched (by the
+   * key or the duck), prone, kneeling, on a vehicle, in noclip or adrift in space (`vi.busy`), nor into something that moves (the
+   * vault's own `moverIn`, which leaves the body's own capsule out: `vi.self`). True where the vault took the body.
+   */
+  private senseVault(dt: number, atControls: boolean): boolean {
+    if (MOVE_TUNE.vault === 'off') return false;
+    const vi = this.vaultIn;
+    vi.dt = dt;
+    vi.vx = this.vel.x;
+    vi.vz = this.vel.z;
+    vi.grounded = this.grounded;
+    vi.busy = this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.jka.inSpecialJump || this.jka.rolling || this.aboard !== null;
+    // (Maker B, item 3: the brief's own "never".)
+    if (this.swimming || this.crouching || this.duck.crouch || this.prone || this.kneeling || this.mounted !== null || this.piloting !== null || this.noclip || this.eva || (this.handPlacing?.() ?? false)) vi.busy = true;
+    vi.self = this.body;
+    vi.pace = this.loco.rules && this.loco.moves ? this.loco.cls : 0;
+    vi.sprintHeld = false;
+    vi.scale = this.ledgeScale();
+    vi.filter = this.moveFilter();
+    if (!this.vault.sense(this.physics.world as unknown as VaultWorld, this, vi)) return false;
+    this.takenByVault();
+    return true;
+  }
+
+  /** A vault begun: as a pole's grab (`takenByPole`), the air's and the slope's memories put down, the body facing its travel. */
+  private takenByVault(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.grounded = false;
+    this.heading = this.vault.heading;
+    this.hangClips.posePlaying = '';
+  }
+
+  /**
+   * Phase 6: a frame of the vault (`Vault.step`) in place of the movement: the speed keys not read (as on a ledge or a pole: they are
+   * read once a frame, by the movement) and nothing planned, what is in the hands kept as a hang keeps it, the vault's clock run
+   * (`advance` false the frame it began: the movement already moved the body), its clip on the rig by that clock and the figure
+   * placed; at its end the body is the movement's again, on the ground, running on.
+   */
+  private vaultFrame(dt: number, input: Input, cam: ThirdPersonCamera, advance: boolean): void {
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const V = this.vault;
+    const vi = this.vaultIn;
+    vi.dt = dt;
+    // The sprint still held (the class the vault was begun at past the run, Shift, which holds it, still down, and forward held):
+    // a clamber's cut reads it.
+    vi.sprintHeld = this.loco.asked > 3 && input.held('speedUp') && input.held('forward');
+    V.step(this, vi, advance);
+    // (The review's round: the capsule crouched while the vault keeps it off the obstacle, raised onto its top or held at its face.)
+    this.setCrouchCollider(V.crouchedNow);
+    this.jka.holdApex(this.pos.y);
+    this.grounded = !V.holding;
+    this.heading = V.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = V.holding ? V.speed : Math.sqrt(this.vel.x * this.vel.x + this.vel.z * this.vel.z);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    const rig = this.rig;
+    if (rig) {
+      driveVaultClips(rig, V, dt, this.hangClips);
+      this.group.updateMatrixWorld(true);
+      rig.twistTorso(0, 0);
+    }
+    this.placeVisual();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
   }
 
   /** Climbing II, phase 4: a rope in reach with room under it (`climb.ropes` 'on'): `climbReach`'s last ask (a rope is no collider: nothing else is it). */
@@ -4569,6 +4714,10 @@ export class Player {
    * held, let go of in the flight, or reached for), the engine's own collider; null for none (every bar a wall to the camera).
    */
   barCamera(): RAPIER.Collider | null {
+    // (Climbing II, phase 6, the review's round: the obstacle vaulted over, while the vault holds the body and as its offset eases
+    // out, by the same rule: `Vault.cameraCollider`.)
+    const vaulted = this.vault.offset ? this.vault.cameraCollider() : null;
+    if (vaulted) return vaulted;
     // (Climbing II, phase 5: the pole the hands hold, and maker B's the pole jumped off while the jump flies, by the same rule:
     // `PoleClimb.cameraCollider`.)
     if (this.pole.holding) return this.pole.cameraCollider() as unknown as RAPIER.Collider | null;
@@ -4656,6 +4805,9 @@ export class Player {
     // Phase 5: and the pole's (its clip's preference let go of where nothing else did, the drawn offset eased out).
     releasePoleClip(this.rig, this.pole);
     this.pole.tick(dt);
+    // Phase 6: and the vault's (a vault let go of under way lets go of its clip, the drawn offset eased out after its end).
+    releaseVaultClip(this.rig, this.vault);
+    this.vault.tick(dt);
   }
 
   /**

@@ -76,7 +76,7 @@ fresh();
   ok(ROPE_IDS.length === 7 && ROPE_IDS.every((id) => id in want && ROPE_CLIP_NAMES[id] === `mx_${id}`) && ROPE_SWING_TWIN === `mx_${ROPE_SWING}~2`, 'the ropes ask the pack for all seven by their rig names, made once, and the swing\'s twin by a name of its own');
   const pack = readFileSync(join(REPO, 'src', 'anim', 'mixamoPack.ts'), 'utf8');
   // (Phase 5 asks for the pole's clip after them: `.concat(POLE_IDS)`.)
-  ok(/also: \[\.\.\.moreClips\(\), \.\.\.STAIR_IDS, \.\.\.LEDGE_IDS, \.\.\.WALL_IDS, \.\.\.BAR_IDS, \.\.\.ROPE_IDS\](\.concat\(POLE_IDS\))?,/.test(pack), "and the game's pack asks for them beside the bars' (`browserIo`'s `also`)");
+  ok(/also: \[\.\.\.moreClips\(\), \.\.\.STAIR_IDS, \.\.\.LEDGE_IDS, \.\.\.WALL_IDS, \.\.\.BAR_IDS, \.\.\.ROPE_IDS\](\.concat\(POLE_IDS(, VAULT_IDS)?\))?,/.test(pack), "and the game's pack asks for them beside the bars' (`browserIo`'s `also`, the poles' and the vaults' after them)");
   ok(Math.abs(ROPE_TIMES.swingFrom - 32 / 30) < 1e-12 && Math.abs(ROPE_TIMES.swingTo - 61 / 30) < 1e-12 && Math.abs(ROPE_TIMES.landKnee - 40 / 30) < 1e-12 && Math.abs(ROPE_TIMES.landWaist - 28 / 30) < 1e-12, "the swing's window is the owner's frame 32 to the clip's last, the let-goes his frames");
 }
 

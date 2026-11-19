@@ -262,7 +262,7 @@ for (const d of DRIVES) {
   const step = main.indexOf('player.stepClimbCam(dt);\n      this.cam.blockOut = player.climbCamOut;');
   const orbit = main.indexOf('this.cam.update(input, player.followAt, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);');
   ok(step > 0 && orbit > step && orbit - step < 400, 'the frame steps the follow and hands the camera its letting out just before the orbit is placed');
-  ok(player.includes('if (this.camFollow.on && this.camStepped === this.frameNo) return this.followEased.set(this.camFollow.x, this.camFollow.y, this.camFollow.z);') && player.includes('    this.frameNo++;') && player.includes("const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds;"), 'the chase follows the eased point only on a frame it was stepped, and only while a climb holds the body or after until caught');
+  ok(player.includes('if (this.camFollow.on && this.camStepped === this.frameNo) return this.followEased.set(this.camFollow.x, this.camFollow.y, this.camFollow.z);') && player.includes('    this.frameNo++;') && player.includes("const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds && !this.vault.holding;"), 'the chase follows the eased point only on a frame it was stepped, and only while a climb holds the body (never a vault, phase 6) or after until caught');
   ok(player.includes('    this.camFollow.reset();\n    this.camLastOk = false;'), 'a body stood somewhere fresh starts the follow afresh');
 }
 resetClimbTune();

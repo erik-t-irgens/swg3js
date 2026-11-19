@@ -22,6 +22,7 @@ import { WALL_IDS } from './wallClips.ts';
 import { BAR_IDS } from './barClips.ts';
 import { ROPE_IDS } from './ropeClips.ts';
 import { POLE_IDS } from './poleClips.ts';
+import { VAULT_IDS } from './vaultClips.ts';
 import { ALIGN_SHIPPED, type AlignFlags } from './mixamoMap.ts';
 import { clipName, clipSlug, decodeMxa, readPackIndex, type ClipData, type PackClipRow, type PackIndex } from './mxaFile.ts';
 
@@ -491,8 +492,8 @@ export function browserIo(deps: {
     // Wave 2b's rows' clips, which the committed index does not mark `use` (marking them is a reimport, which waits on the owner),
     // wave 3's stair clips, and wave 4's ledge clips (src/anim/ledgeClips.ts) and wall clips (src/anim/wallClips.ts).
     // (And Climbing II, phase 3's bar clip, src/anim/barClips.ts, phase 4's rope clips, src/anim/ropeClips.ts, and phase 5's
-    // pole clip, src/anim/poleClips.ts.)
-    also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS, ...BAR_IDS, ...ROPE_IDS].concat(POLE_IDS),
+    // pole clip, src/anim/poleClips.ts; and phase 6's vault and clamber clips, src/anim/vaultClips.ts.)
+    also: [...moreClips(), ...STAIR_IDS, ...LEDGE_IDS, ...WALL_IDS, ...BAR_IDS, ...ROPE_IDS].concat(POLE_IDS, VAULT_IDS),
     now: () => performance.now(),
   };
 }

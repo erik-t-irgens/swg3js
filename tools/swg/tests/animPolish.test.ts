@@ -306,6 +306,10 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
   // ledges' own text (the put-back where nothing holds the pole).
   const POLE_ROOT = ['rig.root.position.x = P.offX * c - P.offZ * s;', 'rig.root.position.y += P.offY;', 'rig.root.position.z = P.offX * s + P.offZ * c;'];
   const poleRoot: string[] = [];
+  // Climbing II, phase 6: the vault's own two (its figure's offset along its front and up, in the group's own frame), beside its
+  // three noughts, which read as the ledges' own text (the put-back where nothing vaults, and the across it never offsets).
+  const VAULT_ROOT = ['rig.root.position.y += V.offY;', 'rig.root.position.z = V.offFwd;'];
+  const vaultRoot: string[] = [];
   const s2Root: string[] = [];
   const writers: string[] = [];
   const walk = (dir: string) => {
@@ -317,17 +321,18 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
         const own = rel === 'src/player/rig.ts' ? '|\\bthis\\.root' : '';
         const write = new RegExp(`(\\brig\\??\\.root${own})\\.position(\\.[xyz])?\\s*([-+*/]?=(?!=)|\\.(set|setX|setY|setZ|copy|add|sub|addScaledVector|multiplyScalar|lerp|applyMatrix4|applyQuaternion)\\()`);
         text(rel).split('\n').forEach((line, i) => {
-          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : S2_ROOT.includes(line.trim()) ? s2Root : BAR_ROOT.includes(line.trim()) ? barRoot : ROPE_ROOT.includes(line.trim()) ? ropeRoot : POLE_ROOT.includes(line.trim()) ? poleRoot : writers).push(`${rel}:${i + 1}`);
+          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : S2_ROOT.includes(line.trim()) ? s2Root : BAR_ROOT.includes(line.trim()) ? barRoot : ROPE_ROOT.includes(line.trim()) ? ropeRoot : POLE_ROOT.includes(line.trim()) ? poleRoot : VAULT_ROOT.includes(line.trim()) ? vaultRoot : writers).push(`${rel}:${i + 1}`);
         });
       }
     }
   };
   walk('src');
   const rigTs = text('src/player/rig.ts');
-  ok(wave4Root.length === 16 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 13 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's sixteen writers of a rig's root are the ledges' own lines and the wall's two noughts and the bar's (phase 3), the rope's (phase 4) and the pole's (phase 5), and nothing else (${wave4Root.join(', ')})`);
+  ok(wave4Root.length === 19 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 16 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's nineteen writers of a rig's root are the ledges' own lines and the wall's two noughts and the bar's (phase 3), the rope's (phase 4), the pole's (phase 5) and the vault's three (phase 6), and nothing else (${wave4Root.join(', ')})`);
   ok(barRoot.length === 3 && barRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 3's own three, the bar's figure's offset, in the player alone (${barRoot.join(', ')})`);
   ok(ropeRoot.length === 3 && ropeRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 4's own three, the rope's figure's offset, in the player alone (${ropeRoot.join(', ')})`);
   ok(poleRoot.length === 3 && poleRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 5's own three, the pole's figure's offset, in the player alone (${poleRoot.join(', ')})`);
+  ok(vaultRoot.length === 2 && vaultRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 6's own two, the vault's figure's offset, in the player alone (${vaultRoot.join(', ')})`);
   ok(s2Root.length === 1 && s2Root[0].startsWith('src/player/player.ts:'), `Smoothness II's one: the duck's push across taken back, in the player alone (${s2Root.join(', ')})`);
   ok(wave4bRoot.length === 3 && wave4bRoot.every((w) => w.startsWith('src/player/player.ts:')), `and the wall's own three, in the player alone (${wave4bRoot.join(', ')})`);
   ok(wave3Root.length === 4 && wave3Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 2 && wave3Root.filter((w) => w.startsWith('src/player/footIk.ts:')).length === 2, `wave 3's four writers of a rig's root are its own lines and nothing else (${wave3Root.join(', ')})`);

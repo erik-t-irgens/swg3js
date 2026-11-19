@@ -18,6 +18,8 @@ import type { RopeSwing } from './ropeSwing.ts';
 import { ROPE_CLIMB, ROPE_CLIP_NAMES, ROPE_HANG, ROPE_MODE_CLIMB as MODE_CLIMB, ROPE_MODE_SWING as MODE_SWING, ROPE_TIMES } from '../anim/ropeClips.ts';
 import type { PoleClimb } from './poleClimb.ts';
 import { POLE_CLIP_NAME } from '../anim/poleClips.ts';
+import type { Vault } from './vault.ts';
+import { MOVE_TUNE } from '../anim/moveTune.ts';
 
 /** Climbing II, phase 3 (maker B): how long the bar's landing fades in from the flight's pose, seconds (a mechanic: the clip's own two frames). */
 export const BAR_LAND_FADE = 0.06;
@@ -259,6 +261,38 @@ export function drivePoleClips(rig: CharacterRig, P: PoleClimb, dt: number, st: 
 export function releasePoleClip(rig: CharacterRig | null, P: PoleClimb): void {
   if (!P.ended || !rig) return;
   rig.prefer('hangFree', null);
+}
+
+/**
+ * Climbing II, phase 6 (`move.vault`): a vault's (a dive's, a clamber's) clip on the rig for this frame and the rig stepped by `dt`:
+ * begun held (its rate nought) at the time the vault starts it, crossfaded in from the run over `move.vaultBlend`, put each frame
+ * at the vault's own clock (`Vault.t`, through the rig's own `overrideSeekAt`: no number handed across a call), the run's state
+ * under it as the speed classes last left it; at its end crossfaded into the run (`blendOut`, the run picked up at its nearest
+ * phase), or into standing where a clamber was played whole. The clip's name is the vault's own, made once (`VAULT_CLIP_NAMES`).
+ */
+export function driveVaultClips(rig: CharacterRig, V: Vault, dt: number, st: HangClipState): void {
+  const fade = MOVE_TUNE.vaultBlend;
+  if (V.startClip) rig.play(V.clipName, { from: V.t, fadeIn: fade, hold: true, timeScale: 0, keepWeight: true });
+  if (V.holding) {
+    rig.overrideSeekAt = V.t;
+    rig.overrideSeekNow(V.clipName);
+  } else if (V.ended && rig.overrideName === V.clipName) {
+    st.hangFade.fade = fade;
+    if (!V.runOn) rig.setState('idle', 0, null, st.hangFade);
+    rig.blendOut(fade);
+  }
+  rig.update(dt);
+}
+
+/**
+ * Phase 6: off the vault (the player's `ledgeClocks`, every frame of the movement, before the vault's own `tick`): a vault let go of
+ * under way by a path that never ran its own end (stood elsewhere, off the feet) still has its held clip on the rig, which is let go
+ * of here into whatever the body does now (only while that clip is the one playing; nothing otherwise).
+ */
+export function releaseVaultClip(rig: CharacterRig | null, V: Vault): void {
+  if (!V.dropped) return;
+  V.dropped = false;
+  if (rig && rig.overrideName === V.clipName) rig.yieldOverride(MOVE_TUNE.vaultBlend);
 }
 
 /**
