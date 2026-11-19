@@ -421,7 +421,7 @@ import { remoteRopes } from './net/remoteRopes.ts';
 import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
-import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
+import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
@@ -5229,9 +5229,15 @@ class App {
         this.breakFrames = on;
         return this.breakFrames;
       },
-      look: (yaw: number, pitch: number) => {
+      look: (yaw: number, pitch?: number) => {
+        // Numbers only: `look()` with nothing in it once set the yaw to undefined, the heading followed it to NaN, and
+        // the save that came after kept the character out of the world.
+        if (typeof yaw !== 'number' || !Number.isFinite(yaw) || (pitch !== undefined && (typeof pitch !== 'number' || !Number.isFinite(pitch)))) {
+          return 'look(yaw, pitch) takes the turn and the tilt in radians, for example look(0, -0.2); the pitch may be left off';
+        }
         this.cam.yaw = yaw;
-        this.cam.pitch = pitch;
+        if (pitch !== undefined) this.cam.pitch = pitch;
+        return `yaw ${yaw}, pitch ${this.cam.pitch}`;
       },
       zoom: (distance: number) => {
         this.cam.distance = distance;
@@ -18491,6 +18497,9 @@ class App {
 
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
+    // A place saved broken (a heading that went NaN is written as null) is mended before anything reads it, and written
+    // back mended, so one bad save cannot keep a character out of the world.
+    if (mendPlace(c)) upsertCharacter(c);
     this.current = c;
     // A hairstyle still loading for whoever stood here before is not this character's.
     this.dropHairChanges();
@@ -19509,7 +19518,7 @@ class App {
       c.planet = keptThere.id;
       c.zone = keptThere.zones?.find((z) => z.pack === kept.pack)?.id;
       c.pos = [Number(kept.x.toFixed(2)), Number(kept.y.toFixed(2)), Number(kept.z.toFixed(2))];
-      c.heading = Number(p.heading.toFixed(3));
+      if (Number.isFinite(p.heading)) c.heading = Number(p.heading.toFixed(3));
       c.played = Date.now();
       upsertCharacter(c);
       return;
@@ -19527,8 +19536,11 @@ class App {
     }
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
-    c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
-    c.heading = Number((edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading).toFixed(3));
+    // Never a NaN into the record: JSON writes it as null, and a null place kept the character out of the world. A place
+    // that is not finite leaves the last good one standing.
+    if (Number.isFinite(at.x) && Number.isFinite(at.y) && Number.isFinite(at.z)) c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
+    const heading = edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading;
+    if (Number.isFinite(heading)) c.heading = Number(heading.toFixed(3));
     c.played = Date.now();
     upsertCharacter(c);
   }

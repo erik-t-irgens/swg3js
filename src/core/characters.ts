@@ -121,6 +121,27 @@ export interface SavedCharacter {
   rev?: number;
 }
 
+/**
+ * A record's place made fit to stand in, in place: a `pos` that is not three finite numbers is taken off (the character
+ * then arrives at the world's own arrival point), and a `heading` that is not a finite number becomes 0 (facing north).
+ * JSON writes a NaN as `null`, so a heading that once went NaN (`__debug.look()` with nothing in it did that) came back
+ * as `null`, passed every "is it there" test and stopped the next arrival with `null.toFixed`. Returns whether anything
+ * was mended. Pure: it touches only the record handed to it.
+ */
+export function mendPlace(c: { pos?: unknown; heading?: unknown }): boolean {
+  let mended = false;
+  const p = c.pos;
+  if (p !== undefined && !(Array.isArray(p) && p.length === 3 && p.every((v) => typeof v === 'number' && Number.isFinite(v)))) {
+    delete c.pos;
+    mended = true;
+  }
+  if (c.heading !== undefined && !(typeof c.heading === 'number' && Number.isFinite(c.heading))) {
+    c.heading = 0;
+    mended = true;
+  }
+  return mended;
+}
+
 export function loadCharacters(): SavedCharacter[] {
   try {
     const raw = localStorage.getItem(KEY);
