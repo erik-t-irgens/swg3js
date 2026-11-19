@@ -3,8 +3,8 @@
 //
 // The fix round's item, and the fault it found by reading the code: the creator opened on a captured
 // hour "held, so the day does not walk off it", but a hand write only took the day off the shared
-// clock -- with no server it went on running at a game hour every thirty seconds from the moment the
-// place was shown. `DayCycle.paused` is what really stops it, and the one thing that must never
+// clock -- with no server it went on running at the day's own rate, a game hour every game hour, from
+// the moment the place was shown. `DayCycle.paused` is what really stops it, and the one thing that must never
 // happen is a pause carried out of the creator into a played world, which would stop that world's sun
 // and take it off the clock everybody shares.
 //
@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DayCycle } from '../../../src/world/daycycle.ts';
-import { sharedClock } from '../../../src/world/sharedClock.ts';
+import { GAME_DAY_SECONDS, sharedClock } from '../../../src/world/sharedClock.ts';
 import { PLACE_CLOCK_TUNE, capturedAt, clockText, hourOfTime, hourTicks, snapHour, thumbMoved, wrapHour } from '../../../src/ui/placeClock.ts';
 import { hourLabel } from '../../../src/world/scenePlaces.ts';
 
@@ -43,11 +43,11 @@ const dt = 1 / 60;
 
   // What the creator did before: a hand write and nothing else. The day walked off the hour.
   day.time = 18 / 24;
-  for (let i = 0; i < 60 * 30; i++) {
+  for (let i = 0; i < Math.round((GAME_DAY_SECONDS / 24) * 60); i++) {
     wall += dt * 1000;
     day.update(dt, false);
   }
-  ok(near(day.time * 24, 19, 0.01), `a hand write alone does not stop the day: thirty seconds later it is an hour on (${(day.time * 24).toFixed(2)})`);
+  ok(near(day.time * 24, 19, 0.01), `a hand write alone does not stop the day: a game hour later (${GAME_DAY_SECONDS / 24} s) it is an hour on (${(day.time * 24).toFixed(2)})`);
 
   // What it does now.
   day.paused = true;
@@ -131,7 +131,8 @@ const dt = 1 / 60;
       writes++;
     }
   }
-  // A minute of a twelve-minute day is two hours, which is twenty-four steps of five minutes.
+  // A minute of a twelve-minute day (the client's, quicker than the game's own, so that a minute crosses
+  // many steps) is two hours, which is twenty-four steps of five minutes.
   ok(writes >= 23 && writes <= 26, `a minute of a running day writes the thumb ${writes} times, not 3600`);
   ok(thumbMoved(23.95, 0.05) === true && thumbMoved(23.99, 0.01) === false, 'the step is measured the short way round midnight');
   ok(thumbMoved(Number.NaN, 5), 'the first write always goes');

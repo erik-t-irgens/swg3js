@@ -526,7 +526,7 @@ const ADMIN = option('admin', process.env.SWG_ADMIN ?? '');
 const FRIENDLY_FIRE = flag('friendly-fire') || flag('ff');
 // Whether the day's length was named on the command line. Named, it stands for the run over whatever
 // the admin last set; not named, the admin's last word stands, and a world nobody ever changed keeps the
-// game's own twelve minutes.
+// game's own day (`DAY_MS`).
 const DAY_GIVEN = Number(option('day', '')) > 0;
 const DAY = DAY_GIVEN ? Number(option('day', '')) * 1000 : DAY_MS;
 // The owner's own story set: the folder named, or `story-private/` beside the checkout when there is one. Never

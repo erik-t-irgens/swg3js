@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanName, cleanNumber, cleanPing, cleanSettle, cleanState, cleanWord } from '../../../server/wire.mjs';
 import { Rooms, roomKey, roomLabel } from '../../../server/rooms.mjs';
 import { DAY_MS, WorldClock, dayFraction } from '../../../server/clock.mjs';
+import { GAME_DAY_SECONDS } from '../../../src/world/sharedClock.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -203,7 +204,7 @@ const claim = (extra: Record<string, unknown> = {}) => ({ t: 'claim', player: 'a
 
 // --- 9: the world clock ----------------------------------------------------------------------------
 {
-  ok(DAY_MS === 720000, '9: a day is the game\'s own 720 seconds');
+  ok(DAY_MS === GAME_DAY_SECONDS * 1000, `9: a day is the game's own ${GAME_DAY_SECONDS} seconds, the browser's own day`);
   ok(dayFraction(0, 0) === 0 && Math.abs(dayFraction(DAY_MS / 2, 0) - 0.5) < 1e-9, '9: half a day in is noon');
   ok(dayFraction(DAY_MS * 3.25, 0) === 0.25, '9: the day comes round again');
   ok(Math.abs(dayFraction(0, DAY_MS / 4) - 0.25) < 1e-9, '9: a planet\'s own phase moves its day, so they are not all at noon together');
@@ -216,7 +217,7 @@ const claim = (extra: Record<string, unknown> = {}) => ({ t: 'claim', player: 'a
   ok(Math.abs(clock.dayFraction(0) - 0.5) < 1e-9, '9: and the time of day follows it');
   const hand = clock.hand();
   ok(hand.now === DAY_MS / 2 && hand.epoch === 400 && hand.dayMs === DAY_MS, `9: the hail carries the clock, the epoch and the length of a day (${JSON.stringify(hand)})`);
-  ok(/clock .* world .* a day is 720 s/.test(clock.describe()), `9: and it says so plainly in the log (${clock.describe()})`);
+  ok(new RegExp(`clock .* world .* a day is ${DAY_MS / 1000} s`).test(clock.describe()), `9: and it says so plainly in the log (${clock.describe()})`);
 }
 
 console.log(`\n${checks} checks passed`);

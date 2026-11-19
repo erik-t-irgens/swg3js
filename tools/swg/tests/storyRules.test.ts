@@ -22,7 +22,7 @@ import { loadSet, stableText, type StorySet } from '../../../src/story/set.ts';
 import { raise, raisersFor } from '../../../src/story/signals.ts';
 import { questWaypointId, viewHash, viewOf } from '../../../src/story/view.ts';
 import { seedRoll } from '../../../src/story/seed.ts';
-import { GAME_DAY_MS, REAL_DAY_MS } from '../../../src/story/clock.ts';
+import { GAME_DAY_MS, GAME_HOUR_MS, REAL_DAY_MS } from '../../../src/story/clock.ts';
 import { readStorySet } from '../../../server/storySet.mjs';
 
 let checks = 0;
@@ -149,16 +149,19 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
 // ---- test:timer: clocks, a limit that fails into onFail, and deadlines settled in order -----------------
 {
   const h = hostOf();
+  // The tick's thirty seconds, then one game hour of the game's own day, then the race's minute.
+  const later = T0 + 30000 + GAME_HOUR_MS;
+  const raceEnd = later + 60000;
   h.grant('test:timer', at(T0));
   ok(stepOf(h, 'test:timer', 'tick')?.deadline === T0 + 30000 && nextDeadline(h.book, LIB) === T0 + 30000, 'a thirty-second timer runs out thirty seconds on, on the shared clock');
   ok(h.sweep(at(T0 + 29999)).ch.length === 0, 'a millisecond before, the sweep does nothing');
   h.sweep(at(T0 + 30000));
-  ok(stepOf(h, 'test:timer', 'tick')?.state === 'done' && stepOf(h, 'test:timer', 'later')?.deadline === T0 + 60000, 'on the second it is done, and the one game-hour wait runs thirty real seconds');
+  ok(stepOf(h, 'test:timer', 'tick')?.state === 'done' && stepOf(h, 'test:timer', 'later')?.deadline === later, `on the second it is done, and the one game-hour wait runs a game hour, ${GAME_HOUR_MS / 1000} real seconds`);
   const wl = h.view(at(T0 + 30000)).quests.find((x) => x.id === 'test:timer')!.lines.find((l) => l.step === 'later')!;
-  ok(wl.text === 'Come back after 1 game hour' && wl.deadline === T0 + 60000, 'a wait with no line of its author\'s says how long, and carries its deadline');
-  h.sweep(at(T0 + 60000));
-  ok(stepOf(h, 'test:timer', 'race')?.deadline === T0 + 120000 && stableText(stepOf(h, 'test:timer', 'race')?.place) === stableText([3000, -3960]), 'then the race begins with its minute');
-  h.sweep(at(T0 + 120000));
+  ok(wl.text === 'Come back after 1 game hour' && wl.deadline === later, 'a wait with no line of its author\'s says how long, and carries its deadline');
+  h.sweep(at(later));
+  ok(stepOf(h, 'test:timer', 'race')?.deadline === raceEnd && stableText(stepOf(h, 'test:timer', 'race')?.place) === stableText([3000, -3960]), 'then the race begins with its minute');
+  h.sweep(at(raceEnd));
   const rec = q(h, 'test:timer')!;
   ok(stepOf(h, 'test:timer', 'race')?.state === 'failed' && stepOf(h, 'test:timer', 'slow')?.state === 'done' && rec.state === 'failed' && rec.outcome === 'late', 'out of time, the goto fails into its onFail, which ends the quest as the named failure it declares');
   // The same, all while away: settled at load, in order, each at its own time.
@@ -166,14 +169,14 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   away.grant('test:timer', at(T0));
   const loaded = away.load(at(T0 + 10 * 3600000));
   const r2 = q(away, 'test:timer')!;
-  ok(stepOf(away, 'test:timer', 'tick')?.at === T0 + 30000 && stepOf(away, 'test:timer', 'later')?.at === T0 + 60000 && stepOf(away, 'test:timer', 'race')?.at === T0 + 120000, 'ten hours away: every deadline is settled at load, each stamped with when it fell due, not when anybody looked');
-  ok(r2.state === 'failed' && r2.ended === T0 + 120000 && loaded.notes.filter((n) => n.k === 'failed').length === 1, 'and the quest ended when its last deadline ran out');
+  ok(stepOf(away, 'test:timer', 'tick')?.at === T0 + 30000 && stepOf(away, 'test:timer', 'later')?.at === later && stepOf(away, 'test:timer', 'race')?.at === raceEnd, 'ten hours away: every deadline is settled at load, each stamped with when it fell due, not when anybody looked');
+  ok(r2.state === 'failed' && r2.ended === raceEnd && loaded.notes.filter((n) => n.k === 'failed').length === 1, 'and the quest ended when its last deadline ran out');
   ok(settleDeadlines(away.book, LIB, T0 + 20 * 3600000).ch.length === 0 && dueList(away.book, LIB).length === 0, 'with nothing left to fall due, settling again does nothing');
   // In time, the other way.
   const fast = hostOf();
   fast.grant('test:timer', at(T0));
-  fast.sweep(at(T0 + 60000));
-  fast.event({ k: 'arrive', world: 'tatooine', p: [3001, -3961] }, at(T0 + 70000));
+  fast.sweep(at(later));
+  fast.event({ k: 'arrive', world: 'tatooine', p: [3001, -3961] }, at(later + 10000));
   ok(q(fast, 'test:timer')?.state === 'done' && q(fast, 'test:timer')?.outcome === 'done', 'reached inside the minute, it ends done');
 }
 

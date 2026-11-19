@@ -28,6 +28,7 @@ import { openStore } from '../../../server/store.mjs';
 import { Purses, PURSE_TUNING } from '../../../server/purse.mjs';
 import { Ledger } from '../../../server/ledger.mjs';
 import { STORY_TUNING, Stories, lazyBatch } from '../../../server/stories.mjs';
+import { GAME_HOUR_MS } from '../../../src/story/clock.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -178,7 +179,7 @@ for (let i = 4; i <= 5; i++) both({ k: 'kill', who: 'womprat', social: 'rat', np
 // Clocks: a timer, a game hour, then a time limit run out into its failure.
 grant('test:timer');
 pass(31000);
-pass(31000);
+pass(GAME_HOUR_MS + 1000);
 pass(61000);
 // An arrival at a place relative to where the job was taken, then at a room.
 both({ k: 'world', world: 'tatooine' });
