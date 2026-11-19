@@ -36,7 +36,7 @@ import { SlopeRule } from './slopeRule.ts';
 import { StepUp } from './stepUp.ts';
 import { SwimSink } from '../anim/swimSink.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { CROUCH, STAND, isStairPick } from '../anim/locoTable.ts';
+import { CROUCH, CROUCH_BACK, CROUCH_CLIPS, STAND, clipOfId, isStairPick } from '../anim/locoTable.ts';
 import { FELL_UNDER } from '../world/fellOut.ts';
 import { FootIk, stairFeetOf } from './footIk.ts';
 import { StairSense } from './stairSense.ts';
@@ -44,10 +44,33 @@ import { ClimbAsk, LedgeHang, LedgeIn, climbTakesUseFirst, type LedgeWorld } fro
 import { LimbPlace } from './limbPlace.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { MOVE_TUNE, shapeRulesOn } from '../anim/moveTune.ts';
-import { BodyShape, CROUCH_TALL, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { BodyShape, CROUCH_TALL, DEEP_SHARE, LYING, STAND_TALL, ShapeIn, type ShapeWorld } from './bodyShape.ts';
+import { BodySpheres, measureSpheres, sphereSourceOf, SPHERES_TRUNK, type SphereWorld } from './bodySpheres.ts';
+import { clearClimb, settleClimb } from './climbClear.ts';
+import { STILL_FLAGS } from './stairSense.ts';
+import { DuckPace, lieOn, paceOn } from './duckPace.ts';
 import { ledgeClipName } from '../anim/ledgeClips.ts';
 import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
+import { ClimbCamFollow } from './climbCam.ts';
+import { driveBarClips, driveDropClip, driveHangClips, driveRopeClips, releaseBarClip, releaseRopeClip, type HangClipState } from './hangClips.ts';
+import { drivePoleClips, releasePoleClip } from './hangClips.ts';
+import { driveVaultClips, releaseVaultClip } from './hangClips.ts';
+import { Vault, VaultIn, type VaultWorld } from './vault.ts';
+import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleWorld } from './poleClimb.ts';
+import { measurePoleTable } from '../anim/poleClips.ts';
+import type { RopeTable } from '../anim/ropeClips.ts';
+import { BarSwing, type BarWorld } from './barSwing.ts';
+import { ROPE_GRAB, ROPE_HANG, RopeSwing, type RopeWorld } from './ropeSwing.ts';
+import type { HangingRope } from './hangingRope.ts';
+import { RopeChains, type ChainAsk, type ChainWorld } from './ropeChain.ts';
+import { RopeCurve } from './ropeCurve.ts';
+import { ChainRibbon, chainRopeCarrier, drawChained, followHookLook } from './ropeChainDraw.ts';
+import { FLORA_WIND } from '../world/floraSway.ts';
+import { WATER_WIND_FULL } from '../world/water.ts';
+import { ROPE_CLIP_NAMES, ROPE_SWING, ROPE_SWING_TWIN, measureRopeTables, type RopeTables } from '../anim/ropeClips.ts';
+import { measureRopeLandTables, type RopeLandTables } from '../anim/ropeClips.ts';
+import { BAR_CLIP, BAR_CLIP_NAMES, BAR_FLIGHT_NAME, measureBarFlight, measureBarTable, type BarFlightTable, type BarSwingTable } from '../anim/barClips.ts';
 import { WALL_CLIP_NAMES, wallClipName } from '../anim/wallClips.ts';
 import { BraceIn, Crowd, HandBrace } from './brace.ts';
 import { hostileSides } from '../combat/targets.ts';
@@ -89,6 +112,27 @@ const WALK_SPEED = 2.0;
 const JUMP_HEIGHT = 1.4;
 /** Depth at which the head is under and looking down dives. */
 const DIVE_DEPTH = 1.9;
+
+/**
+ * Smoothness II, item 4, after its review: the crouch's own head is read off these clips (`Player.measureDeep`): the
+ * crouched walk by class (Alt, nothing, Shift), backing up, and the crouch's own still and moving states where they are a
+ * crouch's. The plain crouched walk names when the pack is in. Samples a clip: enough that a cycle's top is within a few
+ * millimetres. No number of feel.
+ */
+const DEEP_MAIN = clipOfId('crouched_walking');
+const DEEP_SAMPLES = 48;
+/** For a rig whose crouch clips cannot be read: the live read waits this long at the deepest (the crouch's crossfade done), seconds. */
+const DEEP_SETTLE = 0.4;
+function deepClipsOf(rig: CharacterRig): string[] {
+  const out: string[] = [];
+  for (const id of CROUCH_CLIPS) if (id) out.push(clipOfId(id));
+  out.push(clipOfId(CROUCH_BACK));
+  for (const s of ['crouch', 'crouchWalk', 'crouchWalkBack'] as const) {
+    const c = rig.stateClip(s);
+    if (c && /crouch|sneak/i.test(c)) out.push(c);
+  }
+  return out;
+}
 const dive = new THREE.Vector3();
 const SWING_TIME = 0.45;
 
@@ -125,6 +169,14 @@ const handPos = new THREE.Vector3();
 const grappleDrawnHand = new THREE.Vector3();
 const grappleDartAt = new Float64Array(3);
 const grappleDartDir = new THREE.Vector3();
+/** Climbing II, phase 4: a rope's end, as the hook's ribbon takes its free span's (`drawRopes`). */
+const ropeEnd = { x: 0, y: 0, z: 0 };
+/** The rope chain round: a held rope's drawn hands read off the rig (stepRopeChains), two joints at a time. */
+const chainHandA = new THREE.Vector3();
+const chainHandB = new THREE.Vector3();
+/** Phase 4, maker B: the posed ankles in the rig root's frame (`plantRopeFeet`). */
+const ropePlantA = new THREE.Vector3();
+const ropePlantB = new THREE.Vector3();
 /** The grapple's look (wave 2): the lean as a turn, the rope point's lift it turns, and the arm's turn and way in the figure's own frame. */
 const grappleLeanQ = new THREE.Quaternion();
 const grappleLift = new THREE.Vector3();
@@ -508,8 +560,73 @@ export class Player {
    * wall after the figure is placed (`src/player/limbPlace.ts`, which maker B's bracing asks through `setHand`). The
    * grapple's harness steps the very same calls in the same places.
    */
-  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  readonly ledge = new LedgeHang({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly ledgeIn = new LedgeIn();
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on', src/player/barSwing.ts): a bar grabbed with the use key after the move (`senseBar`,
+   * before the ledges'), and while it holds the body the swing's own frame in place of the movement (`barFrame`), its clip by the
+   * pendulum's angle (src/player/hangClips.ts's `driveBarClips`) and the figure drawn with its hands on the bar. The grapple's
+   * harness steps the very same calls in the same places.
+   */
+  readonly bar = new BarSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Phase 3: the bar's clip measured off this rig (`measureBarTable`), once a rig, and the rig it was measured off. */
+  private barTable: BarSwingTable | null = null;
+  private barTableRig: CharacterRig | null = null;
+  /** Phase 3, maker B: the flight's part of the clip measured off the same rig (`measureBarFlight`). */
+  private barFlight: BarFlightTable | null = null;
+  /** Phase 3: whether the rig's root was last drawn by the bar (`applyBarRoot`), so the next frame off it puts the root back. */
+  private barRooted = false;
+  /**
+   * Climbing II, phase 4 (`climb.ropes` 'on', src/player/ropeSwing.ts): a rope grabbed with the use key after the move (`senseRope`,
+   * after the bars'), and while it holds the body the swing's own frame in place of the movement (`ropeFrame`), its clips by the
+   * swing (src/player/hangClips.ts's `driveRopeClips`) and the figure drawn with its hands on the rope. The grapple's harness steps
+   * the very same calls in the same places. Its ropes are stood by `addRope` (the course's, the console's) and drawn by `drawRopes`.
+   */
+  readonly rope = new RopeSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Phase 4: the rope's clips measured off this rig (`measureRopeTables`), once a rig, and the rig they were measured off. */
+  private ropeTables: RopeTables | null = null;
+  private ropeTablesRig: CharacterRig | null = null;
+  /** Maker B: the let-go's clips measured off the same rig (`measureRopeLandTables`), and the health at the last frame on the rope (a blow since then of `climb.barKnock` or more knocks the body off). */
+  private ropeLandTables: RopeLandTables | null = null;
+  private ropeHp = 0.5;
+  /** Maker B: whether the last `climbReach` found a rope (the action bar's "grab" for its "climb", as a bar's). */
+  reachRope = false;
+  /** Phase 4: whether the rig's root was last drawn by the rope (`applyRopeRoot`). */
+  private ropeRooted = false;
+  /** Phase 4: the scene the ropes' ribbons hang in (the player's own). */
+  private readonly ropeScene: THREE.Scene;
+  /**
+   * The rope chain round (`climb.ropeLook` 'chain', src/player/ropeChain.ts): every rope's drawn shape a chain stepped on the
+   * physics' own steps (written at the top of the update, `ropeChains.steps`) and laid in `drawRopes`, the held rope's chain pinned
+   * at the drawn hands. Its world is the planet's (the one this player was made with, never a ship's rooms'); nothing of it feeds back.
+   */
+  readonly ropeChains = new RopeChains();
+  /** The physics the chains are stepped by and query (the planet's: `physics` is a ship's rooms' while aboard). */
+  private readonly chainPhysics: Physics;
+  /**
+   * Climbing II, phase 5 (`climb.poles` 'on', src/player/poleClimb.ts): a pole grabbed with the use key after the move (`sensePole`,
+   * after the ropes'), and while it holds the body the climb's own frame in place of the movement (`poleFrame`), its clip by the way
+   * climbed (src/player/hangClips.ts's `drivePoleClips`), the figure drawn with its mean grip on the pole and its hands and feet put
+   * on it (`placePoleLimbs`). The grapple's harness steps the very same calls in the same places.
+   */
+  readonly pole = new PoleClimb({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Phase 5: the pole's clip measured off this rig (`measurePoleTable`), once a rig, and the rig it was measured off. */
+  private poleTable: RopeTable | null = null;
+  private poleTableRig: CharacterRig | null = null;
+  /** Phase 5: whether the rig's root was last drawn by the pole (`applyPoleRoot`), and whether the pole put the hands and feet on it last frame. */
+  private poleRooted = false;
+  private poleLimbs = false;
+  /**
+   * Climbing II, phase 6 (`move.vault`, src/player/vault.ts): sprinting (or, under 'run', running) into an obstacle the rules take,
+   * the body is vaulted or dived over it or clambered onto it after the move (`senseVault`, after the use key's grabs and the wall
+   * climb), and while the vault holds the body its own frame in place of the movement (`vaultFrame`), its clip on the rig by the
+   * vault's clock (src/player/hangClips.ts's `driveVaultClips`), the figure drawn on the clip's own path against the body
+   * (`applyVaultRoot`). The grapple's harness steps the very same calls in the same places.
+   */
+  readonly vault = new Vault({ ray: () => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }), capsule: (h, r) => new RAPIER.Capsule(h, r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
+  /** Phase 6: the vault's frame record (kept), and whether the rig's root was last drawn by the vault (`applyVaultRoot`). */
+  private readonly vaultIn = new VaultIn();
+  private vaultRooted = false;
   /**
    * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
    * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
@@ -523,6 +640,30 @@ export class Player {
    */
   readonly shape = new BodyShape({ capsule: (h, r) => new RAPIER.Capsule(h, r), ball: (r) => new RAPIER.Ball(r), cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z) });
   private readonly shapeIn = new ShapeIn();
+  /**
+   * Climbing II, Smoothness II, items 3 and 4 (`climb.bodyClear` 'spheres', `move.duckHead` 'clear'): the figure's sixteen
+   * spheres, measured off the body's own rest mesh when a rig is attached (src/player/bodySpheres.ts): asked of what stands still
+   * after the pose while climbing and ducking, the figure pushed out of what they are in; and the drawn top over the capsule's
+   * that the duck keeps room for.
+   */
+  readonly spheres = new BodySpheres({ ball: (r) => new RAPIER.Ball(r), contact: () => new RAPIER.ShapeContact(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }) });
+  /** The frame's seconds the climb's spheres ease their push by (written by the hang's and the wall's frames). */
+  private clearDt = 0.5;
+  /** Whether the last frame's spheres were the climb's (a climb begun after anything else starts with no push). */
+  private spheresClimb = false;
+  /** Whether the duck's spheres pushed the figure's root across last frame (its across place is put back before the next). */
+  private duckPushed = false;
+  /**
+   * Smoothness II, item 4, after its review: the rig whose crouch clips have been read for the crouch's own head, and that head
+   * (the highest drawn top over the feet the crouched walks and the crouch's own clips carry, metres; NaN until read), read off
+   * the clips once a rig (`measureDeep`) so the duck knows it before the first deep duck and never from a pose still crossfading.
+   */
+  private deepRig: CharacterRig | null = null;
+  private deepClip = 0.5;
+  /** How long the duck has stood at its deepest (the live read's settle, for a rig whose crouch clips cannot be read). */
+  private deepFor = 0.5;
+  /** Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace`): what the ducked height means for the pace and the clips, and whether the duck laid the body down (src/player/duckPace.ts). */
+  readonly duck = new DuckPace();
   /** The placing hand holds something (a building or a prop being put down): the game sets it; the duck waits while it does. */
   handPlacing: (() => boolean) | null = null;
   readonly limbs = new LimbPlace(() => new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }));
@@ -745,6 +886,14 @@ export class Player {
     scene.add(group);
     markActor(group);
     this.physics = physics;
+    // The rope chain round: the chains' world, ray and near box made once, every group but the terrain's (its height is read cached).
+    this.chainPhysics = physics;
+    const chains = this.ropeChains;
+    chains.world = physics.world as unknown as ChainWorld;
+    chains.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    chains.box = new RAPIER.Cuboid(0.5, 0.5, 0.5);
+    chains.filter = groups(Group.all, Group.all & ~Group.terrain);
+    chains.ground = { at: (q: ChainAsk) => this.chainGround(q) };
     // The thrown saber: a hilt with its blade, lying flat and spinning like a boomerang.
     this.flying = new THREE.Group();
     const flyHilt = parts.hilt.clone();
@@ -871,6 +1020,13 @@ export class Player {
     this.stairMoved = 0;
     scene.add(this.ropeRibbon.mesh);
     markActor(this.ropeRibbon.mesh);
+    // (Climbing II, phase 4: the ropes' ribbons hang in the same scene, each made as its rope is stood.)
+    this.ropeScene = scene;
+    // (The rope chain round, maker B: and one strip of the chained rope's material, hidden and never laid, so every warm-up builds
+    // its program behind the loading screen and a rope stood later builds none: `chainRopeCarrier`.)
+    const carrier = chainRopeCarrier();
+    scene.add(carrier);
+    markActor(carrier);
     this.dartView = dartMesh();
     scene.add(this.dartView);
     markActor(this.dartView);
@@ -1070,6 +1226,14 @@ export class Player {
     this.wall.reset('stood elsewhere');
     this.brace.reset();
     this.limbs.reset();
+    // (Climbing II, phase 3: nor a bar.)
+    this.bar.reset('stood elsewhere');
+    // (Phase 4: nor a rope.)
+    this.rope.reset('stood elsewhere');
+    // (Phase 5: nor a pole.)
+    this.pole.reset('stood elsewhere');
+    // (Phase 6: nor a vault.)
+    this.vault.reset('stood elsewhere');
   }
 
   /**
@@ -1077,6 +1241,17 @@ export class Player {
    * the step's lag, along the figure's own up), else `worldPos` itself (the capsule's, its pop at each step and all).
    */
   get followAt(): THREE.Vector3 {
+    // Climbing II, Smoothness II, item 7 (`climb.camera` 'eased'): while a climb holds the body, and after it until caught,
+    // the eased follow stepped this frame (`stepClimbCam`); never under 'before', where it is never on.
+    if (this.camFollow.on && this.camStepped === this.frameNo) return this.followEased.set(this.camFollow.x, this.camFollow.y, this.camFollow.z);
+    return this.rawFollowAt();
+  }
+
+  /** The place the chase follows with no climbing's ease (wave 3's own): the drawn body's height, else the capsule's place. */
+  private rawFollowAt(): THREE.Vector3 {
+    // (Climbing II, phase 6, the review's round: over an obstacle the capsule is kept off it, raised or held back; the chase follows
+    // the figure's own way, as it did before the capsule was, `Vault.unride`. Nought outside a vault.)
+    if (this.vault.rideY !== 0 || this.vault.holdBack !== 0) return this.vault.unride(this.followPoint.copy(this.worldPos));
     const lag = this.drawn.offset;
     if (LOCO_TUNE.stairs.camera !== 'smooth' || lag === 0) return this.worldPos;
     const out = this.followPoint.copy(this.worldPos);
@@ -1085,6 +1260,55 @@ export class Player {
     return out;
   }
   private readonly followLift = new THREE.Vector3();
+  /** Smoothness II, item 7: the eased follow while climbing, the frame it was last stepped, the frame now, and its answer (kept). */
+  private readonly camFollow = new ClimbCamFollow();
+  private camStepped = -1;
+  private frameNo = 0;
+  private readonly followEased = new THREE.Vector3();
+
+  /**
+   * Smoothness II, item 7: a frame of the camera's follow while climbing (the game's, before it places the camera): toward the
+   * place the chase would follow (`rawFollowAt`), critically damped over `climb.camEase` while a climb holds the body and, after
+   * it, until caught. Nothing at all under 'before' or with no climb (the follow stays off and the chase reads the body).
+   */
+  stepClimbCam(dt: number): void {
+    // (Climbing II, phase 6, maker B: never over an obstacle. A vault's run goes on after it, and the eased follow trails a body
+    // running on by its ease times its speed until the body stops; the chase follows the body through a vault as a run's does.)
+    const climbing = CLIMB_TUNE.camera === 'eased' && this.climbHolds && !this.vault.holding;
+    const p = this.rawFollowAt();
+    const F = this.camFollow;
+    // The followed place's own speed (the frame before), so a follow begun on a body flying at a lip goes on at its pace.
+    const k = dt > 0 && this.camLastOk ? 1 / dt : 0;
+    const vx = (p.x - this.camLastX) * k;
+    const vy = (p.y - this.camLastY) * k;
+    const vz = (p.z - this.camLastZ) * k;
+    this.camLastX = p.x;
+    this.camLastY = p.y;
+    this.camLastZ = p.z;
+    this.camLastOk = true;
+    if (!climbing && !F.on) return;
+    // (The ask written into the follow's own fields: no number crosses a call.)
+    F.tx = p.x;
+    F.ty = p.y;
+    F.tz = p.z;
+    F.dt = dt;
+    F.climbing = climbing;
+    F.ease = CLIMB_TUNE.camEase;
+    F.bvx = vx;
+    F.bvy = vy;
+    F.bvz = vz;
+    F.stepIn();
+    this.camStepped = this.frameNo;
+  }
+  private camLastX = 0.5;
+  private camLastY = 0.5;
+  private camLastZ = 0.5;
+  private camLastOk = false;
+
+  /** Smoothness II, item 7: how long the camera, pulled in by a wall, takes to go back out this frame (seconds; nought: today's). */
+  get climbCamOut(): number {
+    return CLIMB_TUNE.camera === 'eased' && this.camFollow.on ? CLIMB_TUNE.camOut : 0;
+  }
 
   /**
    * Wave 3: how far the first-person eye is put back up after the feet's placement lowered the pelvis (`ik.eye` 'steady',
@@ -1145,6 +1369,123 @@ export class Player {
         this.wallRooted = false;
       }
     }
+    // Climbing II, phase 3: on a bar, the figure drawn where its clip's hands are on the bar and turned about its own left so its
+    // hips stand at the swing's angle, and after a let-go eased back onto the body (never under `climb.bars` 'off').
+    if (rig && (this.barRooted || this.bar.offset)) {
+      if (this.bar.offset) this.applyBarRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.barRooted = false;
+      }
+    }
+    // Climbing II, phase 4: on a rope, the figure drawn where its clip's hands are on the rope and turned about its own left so its
+    // hips stand on the rope's line, and after a let-go eased back onto the body (never under `climb.ropes` 'off').
+    if (rig && (this.ropeRooted || this.rope.offset)) {
+      // (Maker B: after a landing, the drawn lower ankle held no lower than the top while the offset eases out.)
+      if (this.rope.offset && this.rope.plantY === this.rope.plantY) this.plantRopeFeet(rig);
+      if (this.rope.offset) this.applyRopeRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.ropeRooted = false;
+      }
+    }
+    // Climbing II, phase 5: on a pole, the figure drawn where its clip's mean grip is on the pole, and after a let-go eased back
+    // onto the body (never under `climb.poles` 'off').
+    if (rig && (this.poleRooted || this.pole.offset)) {
+      if (this.pole.offset) this.applyPoleRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.poleRooted = false;
+      }
+    }
+    // Climbing II, phase 6: over an obstacle, the figure drawn on its clip's own path against the body, and after its end eased back
+    // onto the body (never under `move.vault` 'off').
+    if (rig && (this.vaultRooted || this.vault.offset)) {
+      if (this.vault.offset) this.applyVaultRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        this.vaultRooted = false;
+      }
+    }
+  }
+
+  /** Phase 6: the rig's root put where the vault draws the figure against the body (along its front, in the group's own frame, and up). */
+  private applyVaultRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const V = this.vault;
+    rig.root.position.x = 0;
+    rig.root.position.y += V.offY;
+    rig.root.position.z = V.offFwd;
+    this.vaultRooted = true;
+  }
+
+  /** Phase 5: the rig's root put where the pole draws the figure against the body (its offset, the world's frame, into the group's). */
+  private applyPoleRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const P = this.pole;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x = P.offX * c - P.offZ * s;
+    rig.root.position.y += P.offY;
+    rig.root.position.z = P.offX * s + P.offZ * c;
+    rig.root.quaternion.set(0, 0, 0, 1);
+    this.poleRooted = true;
+  }
+
+  /**
+   * Phase 4, maker B: after a landing off a rope, while its drawn offset eases out over the rig's own fade of the landing's clip
+   * into the crouch (`RopeSwing.plantY` set), the offset lifted by what the drawn lower ankle stands under the top: the posed
+   * ankles read in the rig root's own frame (its place is the frame's to come), never lowered. Two bone reads into kept vectors.
+   */
+  private plantRopeFeet(rig: CharacterRig): void {
+    const R = this.rope;
+    const a = rig.boneNamed('lAnkle');
+    const b = rig.boneNamed('rAnkle');
+    if (!a || !b) return;
+    rig.root.updateMatrixWorld(true);
+    a.getWorldPosition(ropePlantA);
+    b.getWorldPosition(ropePlantB);
+    rig.root.worldToLocal(ropePlantA);
+    rig.root.worldToLocal(ropePlantB);
+    R.ankleLow = (ropePlantA.y < ropePlantB.y ? ropePlantA.y : ropePlantB.y) * rig.root.scale.y;
+    R.plantFeet(this.pos);
+  }
+
+  /** Phase 4: the rig's root put where the rope draws the figure against the body (its offset, the world's frame, into the group's) and turned about its own left. */
+  private applyRopeRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const R = this.rope;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x = R.offX * c - R.offZ * s;
+    rig.root.position.y += R.offY;
+    rig.root.position.z = R.offX * s + R.offZ * c;
+    rig.root.quaternion.setFromAxisAngle(AXIS_X, R.tilt);
+    this.ropeRooted = true;
+  }
+
+  /** Phase 3: the rig's root put where the bar draws the figure against the body (its offset, the world's frame, into the group's) and turned about its own left. */
+  private applyBarRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const B = this.bar;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x = B.offX * c - B.offZ * s;
+    rig.root.position.y += B.offY;
+    rig.root.position.z = B.offX * s + B.offZ * c;
+    rig.root.quaternion.setFromAxisAngle(AXIS_X, B.tilt);
+    this.barRooted = true;
   }
 
   /** The rig's root put where the climb draws the figure against the body (its offset, the world's frame, into the group's) and leant into the face about its own left. */
@@ -1176,6 +1517,10 @@ export class Player {
     // flight) lets go of the ledge outright. (The hang's own frame lets go of the feet and the lag itself.)
     if (this.ledge.holding) this.ledge.reset('off the feet');
     if (this.wall.holding) this.wall.reset('off the feet');
+    if (this.bar.holding) this.bar.reset('off the feet');
+    if (this.rope.holding) this.rope.reset('off the feet');
+    if (this.pole.holding) this.pole.reset('off the feet');
+    if (this.vault.holding) this.vault.reset('off the feet');
     if (this.brace.busy) {
       this.brace.reset();
       this.limbs.reset();
@@ -1276,6 +1621,10 @@ export class Player {
     this.ragdoll.dispose();
     this.ragdoll = null;
     this.body.setEnabled(true);
+    // The ragdoll posed every bone it had a body for; the clips take the skeleton back from its rest, or a joint no clip
+    // drives (the face, the extra forearm joints the Mixamo clips leave alone) keeps the ragdoll's turn (the owner,
+    // 2026-11-17: the eyes and mouth out of the back of the head after a respawn).
+    this.rig?.retakePose();
   }
 
   /** Stand the player somewhere, keeping health and the rest as they are (stepping off a ship). */
@@ -1306,6 +1655,9 @@ export class Player {
     this.vel.set(0, 0, 0);
     this.grounded = true;
     this.hp = this.maxHp;
+    // Smoothness II, item 7: the camera's follow starts afresh on the body where it is stood.
+    this.camFollow.reset();
+    this.camLastOk = false;
     // Whole again means not alight either: health back and a fire still burning would be a body put
     // together from two different moments. It is the second of the two guards (the first is at the
     // death itself) and it covers every way a body is stood up fresh -- the respawn, an arrival, the
@@ -1350,6 +1702,8 @@ export class Player {
       this.colliderOffsetY = this.shape.offsetY;
       this.colliderCrouched = null;
     }
+    // Climbing II's smoothness round, item 4: nothing of the duck's pace carried to the new place.
+    this.duck.reset();
   }
 
   /** Launch the player into the air (used by Force Jump). */
@@ -1384,6 +1738,12 @@ export class Player {
     rig.stopOverride();
     this.group.remove(rig.root);
     this.rig = null;
+    this.spheres.use(null, []);
+    this.shapeIn.headOver = Number.NaN;
+    this.shapeIn.deepHead = Number.NaN;
+    this.deepRig = null;
+    this.deepClip = Number.NaN;
+    this.deepFor = 0;
     this.hasJkaClips = false;
     this.parts.hips.visible = true;
   }
@@ -1398,6 +1758,15 @@ export class Player {
     // What first person hides, worked out now while the character loads (the masks saved include the actor layer just set).
     rig.prepareHeadHiding();
     this.group.updateMatrixWorld(true);
+    // Climbing II, Smoothness II, items 3 and 4: the figure's spheres measured off its own body's rest mesh (an event, once a rig).
+    const sphereSrc = rig.character ? sphereSourceOf(rig.character.bodyMeshes()) : null;
+    this.spheres.use(rig, sphereSrc ? measureSpheres(sphereSrc) : []);
+    this.spheres.headHeld = 0;
+    this.shapeIn.headOver = Number.NaN;
+    this.shapeIn.deepHead = Number.NaN;
+    this.deepRig = null;
+    this.deepClip = Number.NaN;
+    this.deepFor = 0;
     const hand = rig.boneFor('rightHand');
     const fore = rig.boneFor('rightForeArm');
     const spine = rig.boneFor('spine');
@@ -1844,7 +2213,7 @@ export class Player {
     const rig = this.rig;
     if (!rig) return;
     const from = was.prone ? 'prone' : was.kneel ? 'kneeling' : was.crouch ? 'crouched' : 'standing';
-    const to = this.prone ? 'prone' : this.kneeling ? 'kneeling' : this.crouching ? 'crouched' : 'standing';
+    const to = this.prone ? 'prone' : this.kneeling ? 'kneeling' : this.crouching || this.duck.crouch ? 'crouched' : 'standing';
     if (from === to) return;
     if ((from === 'crouched' || to === 'crouched') && (moving || this.jkaMode)) return;
     const names: string[] = [];
@@ -2657,8 +3026,15 @@ export class Player {
 
   update(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
     this.world = world;
+    // Smoothness II, item 7: the frame the camera's follow is stepped against (`stepClimbCam`, `followAt`).
+    this.frameNo++;
     // What the grapple's rope may meet that moves: the vehicles this browser simulates.
     this.grappleVehicles = world.vehicles;
+    // Climbing II, phase 4: the ropes nobody holds swung by themselves (and their columns switched) once a frame, here ahead of
+    // every way out of the update, so a rope swings on whatever has the body: its own flight off it and landing, a bar, a ledge.
+    // (The rope chain round: and the planet's physics steps the frame's step takes, written for the chains `drawRopes` steps.)
+    this.ropeChains.steps = this.chainPhysics.stepsAhead(dt);
+    this.rope.tickRopes(dt);
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
       // (The speed classes are put down, as on every branch below that returns before they are planned: a sprint
@@ -2760,6 +3136,24 @@ export class Player {
     }
     this.eva = false;
 
+    // Climbing II, phase 3: on a bar (`BarSwing`), the swing has the body in place of the movement. Never under `climb.bars`
+    // 'off', where nothing ever holds.
+    if (this.bar.holding) {
+      this.barFrame(dt, input, cam, world);
+      return;
+    }
+    // Climbing II, phase 4: on a rope (`RopeSwing`), the swing has the body in place of the movement. Never under `climb.ropes`
+    // 'off', where nothing ever holds.
+    if (this.rope.holding) {
+      this.ropeFrame(dt, input, cam, world);
+      return;
+    }
+    // Climbing II, phase 5: on a pole (`PoleClimb`), the climb has the body in place of the movement. Never under `climb.poles`
+    // 'off', where nothing ever holds.
+    if (this.pole.holding) {
+      this.poleFrame(dt, input, cam, world);
+      return;
+    }
     // Wave 4: hanging from a ledge, or carried through one of its one-offs (`LedgeHang`): the ledge has the body in place
     // of the movement. Never under `climb.ledges` 'before', where nothing ever holds.
     if (this.ledge.holding) {
@@ -2770,6 +3164,12 @@ export class Player {
     // 'before', where nothing ever climbs.
     if (this.wall.holding) {
       this.wallFrame(dt, input, cam, world);
+      return;
+    }
+    // Climbing II, phase 6: over (or onto) an obstacle (`Vault`), the vault has the body in place of the movement. Never under
+    // `move.vault` 'off', where nothing ever vaults.
+    if (this.vault.holding) {
+      this.vaultFrame(dt, input, cam, true);
       return;
     }
 
@@ -2802,7 +3202,7 @@ export class Player {
     this.walkKey = walking;
     // Postures: Z toggles prone and V kneeling, on the ground; jumping, swimming or a saber swing brings the
     // body up, and a kneel also ends when you move or crouch. The game's own transitions play between them.
-    const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching };
+    const was = { prone: this.prone, kneel: this.kneeling, crouch: this.crouching || this.duck.crouch };
     const onGround = !this.mounted && !this.noclip && !this.swimming;
     // The feedback round, item 3 (`proneShape` 'lying'): going prone asks for room for the lying capsule and getting up for
     // room to stand (`proneAsk`); with the switch at 'crouch' both are today's toggles.
@@ -2821,12 +3221,20 @@ export class Player {
     // Lying, the water over the feet deeper than the body lies is water to stand up in, as the swim already stands it.
     const lyingDrowns = lyingRule && this.prone && this.waterDepth > 2 * MOVE_TUNE.lyingRadius;
     if (this.prone && (getsUp || lyingDrowns)) this.prone = lyingRule && !this.swimming ? this.proneAsk(false, input) : false;
+    // Climbing II's smoothness round, item 4: a body the duck laid down for a low roof gets up again into a crouch on its own
+    // where the room over its feet comes back and no roof ahead along its way would lay it down again; a prone the key asked
+    // for never does (`duck.lying` is only ever the duck's).
+    if (!this.prone) this.duck.lying = false;
+    else if (this.duck.lying && this.grounded && lieOn()) this.riseFromDuck(moving, move);
     if (this.kneeling && (getsUp || moving || input.held('crouch'))) this.kneeling = false;
     this.crouching = !this.swimming && !this.prone && !this.kneeling && (input.held('crouch') || (this.ledge.keepCrouched && !this.ledge.standRoom(this.physics.world as unknown as LedgeWorld, this, this.moveFilter())));
     // The feedback round, items 3 and 4: either switch on, the body's shape decides the capsule (`stepShape`); both off,
     // today's crouch rule, to the line.
     if (shapeRulesOn()) this.stepShape(dt, moving, move);
     else this.setCrouchCollider((this.crouching || this.prone || this.kneeling) && this.grounded);
+    // Item 4: what the height the shape wrote means for the pace and the clips (a body it laid down crouches no more).
+    if (paceOn()) this.stepDuckPace();
+    else if (this.duck.active) this.duck.step(STAND_TALL, false, false);
     if (this.grounded && !this.swimming) this.postureTransition(was, moving);
     // `lavaPaceNow` is what a flow has left of the walk: 1 everywhere else, and it is a factor of its
     // own rather than a write to `speedMultiplier`, which Force Speed rewrites from scratch each
@@ -2834,6 +3242,8 @@ export class Player {
     // Jedi Academy's), so the body really moves slower and the clips, which are scaled to how fast it
     // moves, slow with it.
     let speed = (walking ? WALK_SPEED : RUN_SPEED) * this.speedMultiplier * this.lavaPaceNow * (this.crouching && this.grounded ? 0.5 : 1);
+    // Item 4, without the speed classes: the duck's pace as a share of the body's own (the classes take it in their plan).
+    if (this.duck.active) speed *= (this.duck.crouch && !this.crouching && this.grounded ? 0.5 : 1) * this.duck.share;
 
     // Water: the surface here, and how deep the body sits in it. Swimming starts when the
     // chest is under; the head stays above the surface unless the player dives.
@@ -2879,7 +3289,7 @@ export class Player {
     lo.dt = dt;
     lo.mz = mz;
     lo.mx = mx;
-    lo.standing = !this.crouching && !this.prone && !this.kneeling;
+    lo.standing = !this.crouching && !this.duck.crouch && !this.prone && !this.kneeling;
     lo.grounded = this.grounded;
     lo.swimming = this.swimming;
     // Blocking or fighting, and not merely one of Jedi Academy's one-offs playing out (a Force jump's flip): a jump
@@ -2895,9 +3305,14 @@ export class Player {
     lo.sprint = this.stats.apply('move.sprint', LOCO_TUNE.speed.forward.sprint);
     lo.pool = this.staminaPool;
     lo.boost = this.speedMultiplier;
+    // Climbing II's smoothness round, item 4: the duck's pace (nought under 'before': every speed as it was).
+    lo.duckToCrouch = this.duck.toCrouch;
+    lo.duckToCrawl = this.duck.toCrawl;
     // Wave 2b: crouched and prone under the classes, the injured walk by the health's share, and the figure's scale a
-    // game clip's measured stride is scaled by.
-    lo.crouched = this.crouching;
+    // game clip's measured stride is scaled by. Item 4: ducked to `crouchAt`, the crouch's.
+    lo.crouched = this.crouching || this.duck.crouch;
+    // Smoothness III, item 3b (`move.duckClip` 'clearance'): ducked under something, the crouch whose head clears it.
+    lo.crouchCls = this.duck.crouch && !this.crouching ? this.shape.duckCls : 0;
     lo.prone = this.prone;
     lo.hpShare = this.hp / this.maxHp;
     lo.scale = this.rig ? this.rig.root.scale.y : 1;
@@ -2982,7 +3397,8 @@ export class Player {
       // With a speed class ruling the body the class's speed is the whole of it (on `speedScale`, below): no halving.
       // (A leaping saber move keeps the walk key's halving with the pace it is paired with there, as it always had.)
       c.walk = classes && !script ? false : walking;
-      c.crouch = this.crouching;
+      // Item 4: ducked to `crouchAt` the body moves crouched (Jedi Academy's duck halves its own speed; the classes' share takes it back).
+      c.crouch = this.crouching || this.duck.crouch;
       // A crouch tap on the move rolls, as the game's does, unless a swing is in its cutting part (its wind-up and return may be rolled out of).
       c.roll = input.pressedAction('crouch') && moving && !this.saber.attacking;
       c.jump = jump;
@@ -2994,6 +3410,8 @@ export class Player {
       // Crouched under the classes the movement halves the speed on the ground (Jedi Academy's duck), which the share
       // takes back, so the class's speed is the body's.
       c.speedScale = this.speedMultiplier * this.lavaPaceNow * (classes && this.loco.moves && !script ? this.loco.speed / (this.loco.posture === CROUCH && this.grounded ? JKA.speed * UNIT * JKA.duckScale : JKA.speed * UNIT) : this.paceScale(walking, mz, mx));
+      // Item 4 without the speed classes: the duck's pace as a share of the posture's own (the classes' plan took it above).
+      if (!(classes && this.loco.moves && !script) && this.duck.active) c.speedScale *= this.duck.share;
       // What progress makes of a fall and the air, each today's number until something is earned.
       const st = this.stats;
       c.fallSafeExtra = st.fallSafeExtra / UNIT;
@@ -3171,6 +3589,23 @@ export class Player {
     // face feels for one to climb, so walking free casts nothing), worked out in place (no number crosses a call).
     const askH = moveX * moveX + moveZ * moveZ;
     this.wallBlocked = askH > 1e-8 && mv.x * mv.x + mv.z * mv.z < askH * 0.36;
+    // Climbing II, phase 3: a bar grabbed with the use key (`BarSwing.sense`), before the ledges (a bar is never a lip).
+    if (this.senseBar(dt, input, move, wasGrounded, atControls)) {
+      this.barFrame(dt, input, cam, world);
+      return;
+    }
+    // Climbing II, phase 4: a rope grabbed with the use key (`RopeSwing.sense`), after the bars (a rope is no collider: nothing
+    // else could have taken it).
+    if (this.senseRope(dt, input, move, wasGrounded, atControls, cam)) {
+      this.ropeFrame(dt, input, cam, world);
+      return;
+    }
+    // Climbing II, phase 5: a pole grabbed with the use key (`PoleClimb.sense`), after the ropes and before the ledges (a pole is
+    // grabbed facing it, never climbed as a wall).
+    if (this.sensePole(dt, input, move, wasGrounded, atControls)) {
+      this.poleFrame(dt, input, cam, world);
+      return;
+    }
     if (this.senseLedge(dt, input, move, wasGrounded, atControls)) {
       this.hangFrame(dt, input, cam, world);
       return;
@@ -3179,6 +3614,29 @@ export class Player {
     if (this.senseWall(dt, input, move, wasGrounded, atControls)) {
       this.wallFrame(dt, input, cam, world);
       return;
+    }
+    // Climbing II, phase 6: sprinting (or running, under 'run') into an obstacle the rules take, vaulted, dived over or clambered
+    // onto from this very frame (`Vault.sense`, after everything the use key takes), its clock begun where this frame's move left
+    // the body (the frame's own step is the movement's, so the vault's first frame runs nothing of it).
+    if (this.senseVault(dt, atControls)) {
+      this.vaultFrame(dt, input, cam, false);
+      return;
+    }
+    // Climbing II, phase 3: the bar's refusal ("No room to hang from the bar here.") said only now, when neither a lip nor a
+    // wall took the press in the same frame (`senseBar` drops one they took).
+    if (this.bar.said) {
+      this.onLedgeWords?.(this.bar.said);
+      this.bar.said = '';
+    }
+    // (Phase 4: and the rope's, "No room to hang from the rope here.", the same way.)
+    if (this.rope.said) {
+      this.onLedgeWords?.(this.rope.said);
+      this.rope.said = '';
+    }
+    // (Phase 5: and the pole's, "No room to climb the pole here.", the same way.)
+    if (this.pole.said) {
+      this.onLedgeWords?.(this.pole.said);
+      this.pole.said = '';
     }
     // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
     // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
@@ -3492,7 +3950,12 @@ export class Player {
 
   /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
   get climbHolds(): boolean {
-    return this.ledge.holding || this.wall.holding;
+    // (Climbing II, phase 6, maker B: and over an obstacle, its hands on it: the fight's keys and the use key muted, the hook
+    // refused, no emote; the chase camera's ease is not a vault's, `stepClimbCam`.)
+    if (this.vault.holding) return true;
+    // (Climbing II, phase 5: and on a pole.)
+    if (this.pole.holding) return true;
+    return this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding;
   }
 
   /** The move's own collision groups (as the frame's `filter`). */
@@ -3500,8 +3963,11 @@ export class Player {
     return this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
   }
 
-  /** The figure's size against the human male's (its hips' rest height over his 1.002 m, times its own scale), found once a rig. */
-  private ledgeScale(): number {
+  /**
+   * The figure's size against the human male's (its hips' rest height over his 1.002 m, times its own scale), found once a rig.
+   * (Phase 4, the fixer: public, so the console's course lays the rope's landings for the figure standing, `climbTest`.)
+   */
+  ledgeScale(): number {
     return this.rig ? figureScaleOf(this.rig) : 1;
   }
 
@@ -3545,11 +4011,738 @@ export class Player {
    * few times a second): on foot, nothing else holding the body, a lip in the hands' reach or a climbable face ahead.
    */
   climbReach(): boolean {
+    this.reachBar = false;
+    this.reachRope = false;
+    this.reachPole = false;
     if (CLIMB_TUNE.grab !== 'use' || this.mounted || this.piloting || this.aboard || this.noclip || this.swimming || this.climbHolds || this.grapple.out || this.eva || this.hp <= 0) return false;
     const li = this.fillLedgeIn(0, null, null, false);
     li.busy = false;
     const w = this.physics.world as unknown as LedgeWorld;
-    return this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li);
+    // (Climbing II, phase 5: a pole in reach with room on it, `climb.poles` 'on': its grab comes before the ledges' and the wall's.
+    // Maker B: and whether it was a pole, kept for the action bar's word, "grab", as a bar's and a rope's are.)
+    this.reachPole = this.pole.canGrab(this.physics.world as unknown as PoleWorld, this, li);
+    if (this.reachPole) return true;
+    // (Climbing II, phase 3: a bar in reach with room under it, `climb.bars` 'on', first: the ledges pass a bar. Maker B: and
+    // whether it was a bar, kept for the action bar's word, "grab".)
+    this.reachBar = this.bar.canGrab(this.physics.world as unknown as BarWorld, this, li);
+    return this.reachBar || this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li) || this.ropeReach(li);
+  }
+
+  /**
+   * Climbing II, phase 5: after the move, a pole grabbed with the use key (`PoleClimb.sense`), not swimming, on the grapple's rope or
+   * in its flight, thrown, dead, at a ship's controls, prone, in a wall move or a Force jump's rise, as the ropes' grab. True where
+   * the pole took the body.
+   */
+  private sensePole(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.poles !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    this.pole.said = '';
+    if (!this.pole.sense(this.physics.world as unknown as PoleWorld, this, li)) return false;
+    this.takenByPole();
+    return true;
+  }
+
+  /** A pole grabbed: as a rope's (`takenByRope`), the fall ends with no harm and the air's and the slope's memories are put down. */
+  private takenByPole(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.pole.heading;
+    this.hangClips.posePlaying = '';
+    // (Maker B: the health the pole's frames measure a blow against.)
+    this.poleHp = this.hp;
+  }
+
+  /** Climbing II, phase 5 (maker B): the health at the last frame on a pole (a blow since then of `climb.barKnock` or more knocks the body off). */
+  private poleHp = 0.5;
+  /** Phase 5 (maker B): a bar caught in a pole's jump takes the frame's steps that flight left (`barFrame`); -1 the frame's own. */
+  private barStepsOnce = -1;
+  /** Phase 5 (maker B): the pole's catcher (`PoleCatcher`): the bars, the ledges and the climb up from its top, asked by the pole itself. */
+  private readonly poleCatch: PoleCatcher = { bar: () => this.poleCatchBar(), lip: () => this.poleCatchLip(), top: () => this.poleCatchTop() };
+
+  /**
+   * Phase 5 (maker B): the catcher's frame record: the use key handed to the climb as a hop's catch is (no key pressed), the body in
+   * the air, the way the pole looks along (`PoleClimb.wayX`, `wayZ`), a physics step's time.
+   */
+  private poleCatchIn(): LedgeIn {
+    const li = this.fillLedgeIn(POLE_STEP, null, null, false);
+    li.use = true;
+    li.busy = false;
+    li.grounded = false;
+    li.wasGrounded = false;
+    li.jumped = false;
+    li.crouchHeld = false;
+    li.moveX = this.pole.wayX;
+    li.moveZ = this.pole.wayZ;
+    return li;
+  }
+
+  /** Phase 5 (maker B): a bar in reach of a pole's jump taken by the bars' own grab (`BarSwing.sense`), its refusal never said. */
+  private poleCatchBar(): boolean {
+    if (CLIMB_TUNE.bars !== 'on') return false;
+    const took = this.bar.sense(this.physics.world as unknown as BarWorld, this, this.poleCatchIn());
+    this.bar.said = '';
+    return took;
+  }
+
+  /** Phase 5 (maker B): a lip in reach of a pole's jump taken by the ledges' own grab (`LedgeHang.sense`). */
+  private poleCatchLip(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    return this.ledge.sense(this.physics.world as unknown as LedgeWorld, this, this.poleCatchIn(), this.loco.stamina);
+  }
+
+  /** Phase 5 (maker B): a lip in reach of a pole's top climbed onto by the ledges' own climb up (`LedgeHang.climbFrom`), the pole left out. */
+  private poleCatchTop(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const li = this.poleCatchIn();
+    this.ledge.fromGrip = this.pole.gripY;
+    return this.ledge.climbFrom(this.physics.world as unknown as LedgeWorld, this, li, this.pole.pole.col as unknown as RAPIER.Collider | null);
+  }
+
+  /**
+   * Phase 5: a frame on a pole (`PoleClimb.step`) in place of the movement, as a rope's (`ropeFrame`): the speed classes put down,
+   * what is in the hands kept as a hang keeps it, the climb stepped on the physics' own coming steps (`Physics.stepsAhead`), the
+   * pole's clip by the way climbed, the figure placed with its mean grip on the pole, and its hands and feet put on it.
+   */
+  private poleFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    // (Maker B: where the view looks, the way a jump off goes; none aboard a ship's rooms, whose frame is the hull's: away from the pole.)
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
+    const P = this.pole;
+    // Maker B: a blow taken since the last frame on the pole, hard enough, knocks the body off (`PoleClimb.knock`), as off a bar; the
+    // water under the body lets go into the swim and ends a jump's flight (the swim's own surface and depth; none indoors or aboard);
+    // and the bars, the ledges and the climb up from the top are the pole's catcher.
+    if (this.hp < this.poleHp) P.knock(this.poleHp - this.hp);
+    this.poleHp = this.hp;
+    if (!this.aboard && !this.inside) {
+      const flat = world.waterColumnAt(this.pos.x, this.pos.z);
+      P.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
+    } else P.swimLine = Number.NEGATIVE_INFINITY;
+    P.catcher = this.poleCatch;
+    P.steps = this.physics.stepsAhead(dt);
+    P.behind = this.physics.behind;
+    P.step(this.physics.world as unknown as PoleWorld, this, li);
+    // Maker B: a bar or a lip caught in the jump's flight, or the climb onto a lip from the top: the pole's clip and its hands and
+    // feet let go of, and the body the bar's or the ledge's from this very frame (a bar's swing taking the steps the flight left).
+    if (P.handed !== HAND_NONE) {
+      releasePoleClip(this.rig, P);
+      this.placePoleLimbs();
+      this.poleRooted = false;
+      if (P.handed === HAND_BAR) {
+        this.takenByBar();
+        this.barStepsOnce = P.stepsLeft;
+        this.barFrame(dt, input, cam, world);
+        return;
+      }
+      this.takenByLedge();
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // (A climb up from the top the ledges refused says why, as a hang's refusal does.)
+    if (this.ledge.said) {
+      this.onLedgeWords?.(this.ledge.said);
+      this.ledge.said = '';
+    }
+    this.setCrouchCollider(false);
+    this.jka.holdApex(P.apexY);
+    this.grounded = false;
+    if (P.holding) this.heading = P.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animatePole(dt);
+    this.placeVisual();
+    this.placePoleLimbs();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Phase 5: the pole's clip measured off the rig once (`measurePoleTable`), the figure's place, and the clip on the rig. */
+  private animatePole(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.poleTableRig !== rig) {
+      const T = measurePoleTable(rig);
+      if (T) {
+        this.poleTable = T;
+        this.poleTableRig = rig;
+      }
+    }
+    this.pole.placeFigure(this.poleTableRig === rig ? this.poleTable : null, rig.root.scale.y, this.pos);
+    drivePoleClips(rig, this.pole, dt, this.hangClips);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /**
+   * Phase 5: while the hands are on a pole, its hands and feet put on it by the ledges' limb solve (`PoleClimb.limbsFor`, src/player/
+   * limbPlace.ts), the figure posed and placed; the frame after, let go of. Nothing at all while neither.
+   */
+  private placePoleLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const P = this.pole;
+    const show = P.onPole;
+    if (!show && !this.poleLimbs) return;
+    const lp = this.limbs;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    P.limbsFor(lp, rig, toPhys);
+    if (show) lp.place(rig, null, toPhys);
+    this.poleLimbs = show;
+  }
+
+  /**
+   * Climbing II, phase 6 (`move.vault`, maker A's items 1 and 2): after the move, an obstacle met on the run vaulted, dived over or
+   * clambered onto (`Vault.sense`): the body's pace the speed classes' own (the class picked this frame while they rule a way asked,
+   * else none); not on the grapple's rope or in its flight, thrown, dead, at a ship's controls, in a Jedi Academy special jump or
+   * roll, or aboard a hull's rooms; and (maker B's item 3) never while the placing hand holds something, swimming, crouched (by the
+   * key or the duck), prone, kneeling, on a vehicle, in noclip or adrift in space (`vi.busy`), nor into something that moves (the
+   * vault's own `moverIn`, which leaves the body's own capsule out: `vi.self`). True where the vault took the body.
+   */
+  private senseVault(dt: number, atControls: boolean): boolean {
+    if (MOVE_TUNE.vault === 'off') return false;
+    const vi = this.vaultIn;
+    vi.dt = dt;
+    vi.vx = this.vel.x;
+    vi.vz = this.vel.z;
+    vi.grounded = this.grounded;
+    vi.busy = this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.jka.inSpecialJump || this.jka.rolling || this.aboard !== null;
+    // (Maker B, item 3: the brief's own "never".)
+    if (this.swimming || this.crouching || this.duck.crouch || this.prone || this.kneeling || this.mounted !== null || this.piloting !== null || this.noclip || this.eva || (this.handPlacing?.() ?? false)) vi.busy = true;
+    vi.self = this.body;
+    vi.pace = this.loco.rules && this.loco.moves ? this.loco.cls : 0;
+    vi.sprintHeld = false;
+    vi.scale = this.ledgeScale();
+    vi.filter = this.moveFilter();
+    if (!this.vault.sense(this.physics.world as unknown as VaultWorld, this, vi)) return false;
+    this.takenByVault();
+    return true;
+  }
+
+  /** A vault begun: as a pole's grab (`takenByPole`), the air's and the slope's memories put down, the body facing its travel. */
+  private takenByVault(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.grounded = false;
+    this.heading = this.vault.heading;
+    this.hangClips.posePlaying = '';
+  }
+
+  /**
+   * Phase 6: a frame of the vault (`Vault.step`) in place of the movement: the speed keys not read (as on a ledge or a pole: they are
+   * read once a frame, by the movement) and nothing planned, what is in the hands kept as a hang keeps it, the vault's clock run
+   * (`advance` false the frame it began: the movement already moved the body), its clip on the rig by that clock and the figure
+   * placed; at its end the body is the movement's again, on the ground, running on.
+   */
+  private vaultFrame(dt: number, input: Input, cam: ThirdPersonCamera, advance: boolean): void {
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const V = this.vault;
+    const vi = this.vaultIn;
+    vi.dt = dt;
+    // The sprint still held (the class the vault was begun at past the run, Shift, which holds it, still down, and forward held):
+    // a clamber's cut reads it.
+    vi.sprintHeld = this.loco.asked > 3 && input.held('speedUp') && input.held('forward');
+    V.step(this, vi, advance);
+    // (The review's round: the capsule crouched while the vault keeps it off the obstacle, raised onto its top or held at its face.)
+    this.setCrouchCollider(V.crouchedNow);
+    this.jka.holdApex(this.pos.y);
+    this.grounded = !V.holding;
+    this.heading = V.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = V.holding ? V.speed : Math.sqrt(this.vel.x * this.vel.x + this.vel.z * this.vel.z);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    const rig = this.rig;
+    if (rig) {
+      driveVaultClips(rig, V, dt, this.hangClips);
+      this.group.updateMatrixWorld(true);
+      rig.twistTorso(0, 0);
+    }
+    this.placeVisual();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Climbing II, phase 4: a rope in reach with room under it (`climb.ropes` 'on'): `climbReach`'s last ask (a rope is no collider: nothing else is it). */
+  private ropeReach(li: LedgeIn): boolean {
+    if (this.rope.ropes.length === 0) return false;
+    this.viewYawInto(li);
+    // (Maker B: and whether it was a rope, kept for the action bar's word, "grab".)
+    this.reachRope = this.rope.canGrab(this.physics.world as unknown as RopeWorld, this, li);
+    return this.reachRope;
+  }
+
+  /**
+   * Climbing II, phase 4: after the move, a rope grabbed with the use key (`RopeSwing.sense`), not swimming, on the grapple's rope
+   * or in its flight, thrown, dead, at a ship's controls, prone, in a wall move or a Force jump's rise, as the bars' grab. True
+   * where the rope took the body.
+   */
+  private senseRope(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean, cam: ThirdPersonCamera): boolean {
+    if (CLIMB_TUNE.ropes !== 'on' || this.rope.ropes.length === 0) return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    // (Where the view looks: the swing's plane at a grab from a standstill.)
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
+    this.ropeViewYaw = li.viewYaw;
+    this.rope.said = '';
+    const took = this.rope.sense(this.physics.world as unknown as RopeWorld, this, li);
+    if (!took) return false;
+    this.takenByRope();
+    return true;
+  }
+
+  /** The view's yaw into the ledges' frame (`climbReach`'s ask, a few times a second: the camera the update last placed). */
+  private viewYawInto(li: LedgeIn): void {
+    li.viewYaw = this.ropeViewYaw;
+  }
+
+  /** The view's yaw the last frame on foot saw (what `climbReach`, gathered between frames, reads for a rope's plane). */
+  private ropeViewYaw = Number.NaN;
+
+  /** A rope grabbed: as a bar's (`takenByBar`), the fall ends with no harm and the air's and the slope's memories are put down. */
+  private takenByRope(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.rope.heading;
+    this.hangClips.posePlaying = '';
+    // (Maker B: the health the rope's frames measure a blow against.)
+    this.ropeHp = this.hp;
+  }
+
+  /**
+   * Phase 4: a frame on a rope (`RopeSwing.step`) in place of the movement, as a bar's (`barFrame`): the speed classes put down,
+   * what is in the hands kept as a hang keeps it, the swing stepped on the physics' own coming steps (`Physics.stepsAhead`), the
+   * rope's clips by its mode, and the figure placed with its hands on the rope.
+   */
+  private ropeFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    // Where the view looks (the swing's plane turns toward it; none aboard a ship's rooms, whose frame is the hull's).
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
+    const R = this.rope;
+    // Maker B, item 5: a blow taken since the last frame on the rope, hard enough, knocks the body off (`RopeSwing.knock`), as off
+    // a bar; and the water under the body, which lets go of the rope into the swim and ends a flight off it (the swim's own surface
+    // and depth; none indoors or aboard).
+    if (this.hp < this.ropeHp) R.knock(this.ropeHp - this.hp);
+    this.ropeHp = this.hp;
+    if (!this.aboard && !this.inside) {
+      const flat = world.waterColumnAt(this.pos.x, this.pos.z);
+      R.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
+    } else R.swimLine = Number.NEGATIVE_INFINITY;
+    R.steps = this.physics.stepsAhead(dt);
+    R.behind = this.physics.behind;
+    R.step(this.physics.world as unknown as RopeWorld, this, li);
+    this.setCrouchCollider(false);
+    // (Maker B: the fall's memory where the rope says: the flight's top while flying off it, else the feet; and a landing ended stood.)
+    this.jka.holdApex(R.apexY);
+    this.grounded = R.landedNow;
+    if (R.holding) this.heading = R.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animateRope(dt);
+    this.placeVisual();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Phase 4: the rope's clips measured off the rig once (`measureRopeTables`), the swing's twin made, the figure's place, and the clips on the rig. */
+  private animateRope(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.ropeTablesRig !== rig) {
+      const T = measureRopeTables(rig);
+      if (T) {
+        this.ropeTables = T;
+        this.ropeTablesRig = rig;
+        rig.twinClip(ROPE_CLIP_NAMES[ROPE_SWING], ROPE_SWING_TWIN);
+        // (Maker B: and the let-go's, the flight's and each landing's, once a rig.)
+        this.ropeLandTables = measureRopeLandTables(rig);
+      }
+    }
+    this.rope.landTables = this.ropeTablesRig === rig ? this.ropeLandTables : null;
+    this.rope.placeFigure(this.ropeTablesRig === rig ? this.ropeTables : null, rig.root.scale.y, this.pos);
+    driveRopeClips(rig, this.rope, dt, this.hangClips);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /**
+   * Phase 4: a rope stood (the course's, the console's): one the use key may grab, drawn as the grappling hook's rope (a ribbon
+   * of its own on the hook's one material, so it builds no program), shown while `climb.ropes` is 'on'.
+   */
+  addRope(r: HangingRope): void {
+    if (this.rope.ropes.indexOf(r) >= 0) return;
+    this.rope.add(r);
+    const ribbon = new RopeRibbon(2, 1);
+    this.ropeScene.add(ribbon.mesh);
+    markActor(ribbon.mesh);
+    r.drawn = ribbon;
+    this.ropeRibbons.set(r, ribbon);
+    // The rope chain round (maker B): and its strip as a chain (`climb.ropeLook` 'chain'), on the chained rope's one material, which
+    // the warm-up has built already (`chainRopeCarrier`): this is a geometry on it, nothing more.
+    const strip = new ChainRibbon();
+    this.ropeScene.add(strip.mesh);
+    markActor(strip.mesh);
+    this.chainRibbons.set(r, strip);
+  }
+
+  /** Phase 4: a rope taken down (let go of first where it is held), its ribbon out of the scene and its geometry disposed. */
+  removeRope(r: HangingRope): void {
+    this.rope.remove(r);
+    const ribbon = this.ropeRibbons.get(r);
+    if (ribbon) {
+      ribbon.mesh.removeFromParent();
+      ribbon.mesh.geometry.dispose();
+      this.ropeRibbons.delete(r);
+    }
+    // (The rope chain round: and its strip as a chain; the material is every chained rope's and stays.)
+    const strip = this.chainRibbons.get(r);
+    if (strip) {
+      strip.mesh.removeFromParent();
+      strip.mesh.geometry.dispose();
+      this.chainRibbons.delete(r);
+    }
+    r.drawn = null;
+  }
+
+  /** Phase 4: the ropes stood and their ribbons (the console's and the course's). */
+  private readonly ropeRibbons = new Map<HangingRope, RopeRibbon>();
+  /** The rope chain round (maker B): each rope's strip as a chain, and the one curve every rope's is laid through in turn. */
+  private readonly chainRibbons = new Map<HangingRope, ChainRibbon>();
+  private readonly ropeCurve = new RopeCurve();
+
+  /**
+   * Phase 4: the ropes laid for this frame (beside `drawGrapple`): each rope's ribbon from its anchor through the hands (while held)
+   * to its end, straight, at the angle its swing is drawn at; hidden while `climb.ropes` is 'off'. Writes kept arrays only.
+   */
+  drawRopes(camera: THREE.PerspectiveCamera, screenH: number): void {
+    const on = CLIMB_TUNE.ropes === 'on';
+    const list = this.rope.ropes;
+    // The rope chain round: the chains stepped over the frame's physics steps and laid at the frame's own time, the held rope's at
+    // the drawn hands (nothing under 'straight', which draws each rope as phase 4 did below).
+    const chained = this.stepRopeChains();
+    if (chained) followHookLook();
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i];
+      const ribbon = this.ropeRibbons.get(r);
+      if (!ribbon) continue;
+      const strip = this.chainRibbons.get(r);
+      if (!on) {
+        if (ribbon.mesh.visible) ribbon.hide();
+        if (strip && strip.mesh.visible) strip.hide();
+        continue;
+      }
+      ribbon.slack = 0;
+      ribbon.screenH = screenH;
+      // Maker B: the chain's drawn points laid as a smooth curve (each lying one lifted off its surface) and the strip turned to the
+      // view through it, on the chained rope's material (`drawChained`, the harness's draw too); the straight ribbon hidden.
+      if (chained && strip && drawChained(r, strip, this.ropeCurve, camera, screenH)) {
+        if (ribbon.mesh.visible) ribbon.hide();
+        continue;
+      }
+      if (strip && strip.mesh.visible) strip.hide();
+      ropeEnd.x = r.endX;
+      ropeEnd.y = r.endY;
+      ropeEnd.z = r.endZ;
+      ribbon.lay(r.pts, r.count, ropeEnd, camera);
+    }
+  }
+
+  /**
+   * The rope chain round: the chains' frame (`RopeChains.frame`), after the update and the physics' step: how far the frame stands
+   * past the last step, the trees' and the rain's wind, and the held rope's drawn hands (each hand's grip, its wrist and index
+   * knuckle, as the rope's tables measure the grip: the rig's, posed for this frame). True where the chains are drawn.
+   */
+  private stepRopeChains(): boolean {
+    const C = this.ropeChains;
+    const on = CLIMB_TUNE.ropeLook === 'chain' && CLIMB_TUNE.ropes === 'on';
+    C.behind = this.chainPhysics.behind;
+    const W = C.wind;
+    W.x = FLORA_WIND.x;
+    W.z = FLORA_WIND.z;
+    W.speed = FLORA_WIND.strength * WATER_WIND_FULL;
+    const R = this.rope;
+    const rig = this.rig;
+    const held = R.rope;
+    if (on && rig && held && (R.phase === ROPE_GRAB || R.phase === ROPE_HANG)) {
+      const a = rig.boneNamed('lWrist');
+      const b = rig.boneNamed('lIndex01');
+      const c = rig.boneNamed('rWrist');
+      const d = rig.boneNamed('rIndex01');
+      if (a && b && c && d) {
+        a.getWorldPosition(chainHandA);
+        b.getWorldPosition(chainHandB);
+        const H = C.hand;
+        H[0] = (chainHandA.x + chainHandB.x) / 2;
+        H[1] = (chainHandA.y + chainHandB.y) / 2;
+        H[2] = (chainHandA.z + chainHandB.z) / 2;
+        c.getWorldPosition(chainHandA);
+        d.getWorldPosition(chainHandB);
+        H[3] = (chainHandA.x + chainHandB.x) / 2;
+        H[4] = (chainHandA.y + chainHandB.y) / 2;
+        H[5] = (chainHandA.z + chainHandB.z) / 2;
+        C.hands = 2;
+        C.handsRope = held;
+      }
+    }
+    C.frame(R.ropes);
+    return on;
+  }
+
+  /**
+   * The rope chain round (maker B): how each rope is drawn for the console (`__debug.climb()`'s `ropeDrawn`): the look, and under
+   * 'chain' each strip's rings, the widest a ring was laid, the knots lifted off a surface and the hands it passes through, with the
+   * sliders that shape it. Allocates freely; never called in a frame.
+   */
+  ropeDrawReport(): Record<string, unknown> {
+    const n3 = (v: number) => +v.toFixed(3);
+    return {
+      look: CLIMB_TUNE.ropeLook,
+      width: CLIMB_TUNE.ropeWidth,
+      lift: CLIMB_TUNE.ropeLift,
+      lay: CLIMB_TUNE.ropeLay,
+      peersThisFrame: this.ropeChains.peers.count,
+      ropes: this.rope.ropes.map((r) => {
+        const s = this.chainRibbons.get(r);
+        const straight = this.ropeRibbons.get(r);
+        return { name: r.name, chainShown: !!s?.mesh.visible, straightShown: !!straight?.mesh.visible, rings: s?.rings ?? 0, widest: s ? n3(s.widest) : 0, lifted: s?.lifted ?? 0, hands: s?.hands ?? 0, handOffMm: s ? +(s.handOff * 1000).toFixed(3) : 0 };
+      }),
+    };
+  }
+
+  /** The chains' ground (`RopeChains.ground`): the terrain's cached height only (a built block's, never one that makes a block); false where none is known. */
+  private chainGround(q: ChainAsk): boolean {
+    const t = this.world?.terrain;
+    if (!t) return false;
+    const h = t.nearHeightIfCached(q.x, q.z);
+    if (h === null) return false;
+    q.h = h;
+    return true;
+  }
+
+  /** Climbing II, phase 3 (maker B): whether the last `climbReach` found a bar (the action bar's "grab" for its "climb"). */
+  reachBar = false;
+  /** Climbing II, phase 5 (maker B): whether the last `climbReach` found a pole (its word "grab" too). */
+  reachPole = false;
+
+  /**
+   * Climbing II, phase 3: after the move, a bar grabbed with the use key (`BarSwing.sense`): not swimming, on the rope or in its
+   * flight, thrown, dead, at a ship's controls, prone, in a wall move or a Force jump's rise, as the ledges' grab. True where the
+   * bar took the body.
+   */
+  private senseBar(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.bars !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    // (A refusal the last frame's lip or wall took is never said: the update says one only once neither took the press.)
+    this.bar.said = '';
+    const took = this.bar.sense(this.physics.world as unknown as BarWorld, this, li);
+    if (!took) return false;
+    this.takenByBar();
+    return true;
+  }
+
+  /** A bar grabbed: as a lip's (`takenByLedge`), the fall ends with no harm and the air's and the slope's memories are put down. */
+  private takenByBar(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.bar.heading;
+    this.hangClips.posePlaying = '';
+    // (Maker B: the health the bar's frames measure a blow against.)
+    this.barHp = this.hp;
+  }
+
+  /** Climbing II, phase 3 (maker B): the health at the last frame on a bar (a blow since then of `climb.barKnock` or more knocks the body off). */
+  private barHp = 0.5;
+
+  /**
+   * Phase 3: a frame on a bar (`BarSwing.step`) in place of the movement, as a hang's (`hangFrame`): the speed classes put down,
+   * what is in the hands kept as a hang keeps it, the swing stepped on the physics' own coming steps (`Physics.stepsAhead`), the
+   * bar's clip by the swing's angle, and the figure placed with its hands on the bar.
+   */
+  private barFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    const B = this.bar;
+    // Maker B: a blow taken since the last frame on the bar, hard enough, knocks the body off (`BarSwing.knock`); and the water
+    // under the body, which ends a flight off the bar (the swim's own surface and depth; none indoors or aboard).
+    if (this.hp < this.barHp) B.knock(this.barHp - this.hp);
+    this.barHp = this.hp;
+    if (!this.aboard && !this.inside) {
+      const flat = world.waterColumnAt(this.pos.x, this.pos.z);
+      B.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
+    } else B.swimLine = Number.NEGATIVE_INFINITY;
+    // (Climbing II, phase 5, maker B: a bar caught in a pole's jump takes the frame's steps that flight left.)
+    B.steps = this.barStepsOnce >= 0 ? this.barStepsOnce : this.physics.stepsAhead(dt);
+    this.barStepsOnce = -1;
+    B.behind = this.physics.behind;
+    B.step(this.physics.world as unknown as BarWorld, this, li);
+    this.setCrouchCollider(false);
+    // (Maker B: the fall's memory at the flight's top while flying off a bar and the frame it ends, else the body's feet.)
+    this.jka.holdApex(B.apexY);
+    this.grounded = false;
+    if (B.holding) this.heading = B.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animateBar(dt);
+    this.placeVisual();
+    // Feedback round II, item 0c: the hands on the bar while the free hang shows (never under `climb.barHang` 'swing').
+    if (CLIMB_TUNE.barHang === 'free' || this.barLimbs) this.placeBarLimbs();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Feedback round II, item 0c: whether the bar put the hands on it last frame (the frame after lets them go). */
+  private barLimbs = false;
+
+  /**
+   * Item 0c: while the free hang shows on a bar, its hands put on the bar by the ledges' limb solve (`BarSwing.limbsFor`, src/
+   * player/limbPlace.ts), the figure posed and placed; the frame after, let go of. Nothing at all while neither.
+   */
+  private placeBarLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const B = this.bar;
+    const show = B.onBar && B.freeW > 0;
+    if (!show && !this.barLimbs) return;
+    const lp = this.limbs;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    B.limbsFor(lp, rig, toPhys);
+    if (show) lp.place(rig, null, toPhys);
+    this.barLimbs = show;
+  }
+
+  /**
+   * Feedback round II, item 0a (`climb.barCamera` 'pass'): the bar the camera's block leaves out (`BarSwing.cameraCollider`: the one
+   * held, let go of in the flight, or reached for), the engine's own collider; null for none (every bar a wall to the camera).
+   */
+  barCamera(): RAPIER.Collider | null {
+    // (Climbing II, phase 6, the review's round: the obstacle vaulted over, while the vault holds the body and as its offset eases
+    // out, by the same rule: `Vault.cameraCollider`.)
+    const vaulted = this.vault.offset ? this.vault.cameraCollider() : null;
+    if (vaulted) return vaulted;
+    // (Climbing II, phase 5: the pole the hands hold, and maker B's the pole jumped off while the jump flies, by the same rule:
+    // `PoleClimb.cameraCollider`.)
+    if (this.pole.holding) return this.pole.cameraCollider() as unknown as RAPIER.Collider | null;
+    return this.bar.cameraCollider() as unknown as RAPIER.Collider | null;
+  }
+
+  /** Phase 3: the bar's clip measured off the rig once (`measureBarTable`), the figure's place for the swing, and the clip on the rig. */
+  private animateBar(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.barTableRig !== rig) {
+      const T = measureBarTable(rig);
+      if (T) {
+        this.barTable = T;
+        this.barTableRig = rig;
+        // Maker B: the flight's twin of the clip and its hips' table, once a rig.
+        rig.twinClip(BAR_CLIP_NAMES[BAR_CLIP], BAR_FLIGHT_NAME);
+        this.barFlight = measureBarFlight(rig);
+      }
+    }
+    this.bar.flight = this.barTableRig === rig ? this.barFlight : null;
+    this.bar.placeFigure(this.barTableRig === rig ? this.barTable : null, rig.root.scale.y, this.pos);
+    driveBarClips(rig, this.bar, dt, this.hangClips);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
   }
 
   /**
@@ -3590,15 +4783,31 @@ export class Player {
     this.grounded = false;
     this.heading = this.ledge.heading;
     // (Climbing II, item 7: no look-away pose carried over from a hang before.)
-    this.posePlaying = '';
+    this.hangClips.posePlaying = '';
   }
 
   /** Off the ledge: a let-go's clocks (`LedgeHang.tick`): the drop's clip handed to the falling loop, the jump off's turn round. */
   private ledgeClocks(dt: number): void {
     if (this.ledge.tick(dt)) this.heading = this.ledge.turnNow;
-    if (this.ledge.cutNow) this.rig?.yieldOverride(CLIMB_TUNE.ease);
+    // Climbing II, Smoothness II, item 1: a drop played by the owner's rule (its clip timed to the fall, held while still
+    // falling, the landing from the feet's touch, ended at once in the water or on the rope), and a let-go's cut handed to the
+    // loop that follows (src/player/hangClips.ts, which the climbing's tests drive); nothing while there is neither.
+    driveDropClip(this.rig, this.ledge, dt, this.grounded, !this.swimming && !this.grapple.attached && !this.grapple.released);
     // Wave 4, item B: and the wall's (its drawn lean and offset eased out after a let-go, the jump off's turn round).
     if (this.wall.tick(dt)) this.heading = this.wall.turnNow;
+    // Climbing II, phase 3: and the bar's (a let-go's held clip let go of where nothing else did, the drawn offset eased out).
+    releaseBarClip(this.rig, this.bar);
+    this.bar.tick(dt);
+    // Phase 4: and the rope's (its clips let go of where nothing else did, the drawn offset eased out; the ropes nobody holds are
+    // swung at the top of the update, `tickRopes`).
+    releaseRopeClip(this.rig, this.rope);
+    this.rope.tick(dt);
+    // Phase 5: and the pole's (its clip's preference let go of where nothing else did, the drawn offset eased out).
+    releasePoleClip(this.rig, this.pole);
+    this.pole.tick(dt);
+    // Phase 6: and the vault's (a vault let go of under way lets go of its clip, the drawn offset eased out after its end).
+    releaseVaultClip(this.rig, this.vault);
+    this.vault.tick(dt);
   }
 
   /**
@@ -3627,6 +4836,10 @@ export class Player {
       cam.forward(fwd);
       li.viewYaw = Math.atan2(fwd.x, fwd.z);
     }
+    this.clearDt = dt;
+    // The feedback round II (maker B, item 0f): the hips' sway stepped on the physics' own coming steps, as the bar's swing is.
+    this.ledge.steps = this.physics.stepsAhead(dt);
+    this.ledge.behind = this.physics.behind;
     this.ledge.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina);
     // The capsule the ledge's step has the body in: standing, but crouched over the top on a climb's last leg.
     this.setCrouchCollider(this.ledge.crouchedNow);
@@ -3656,36 +4869,35 @@ export class Player {
 
   /** The kept fade a hang's loop comes in with (`climb.ease`). */
   private readonly hangFade = { fade: 0.15 };
+  /** The smoothness round, item 2: a ladder's climb's rate and fade handed to the rig (kept). */
+  private readonly ladderRate = { rate: 0.5, fade: 0.15 };
 
-  /** The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself. */
+  /**
+   * The smoothness round, item 3: the head's pitch while hanging (the view's, `pitch`), turned down at the lip beneath by the
+   * drop's cue's share while it shows (`LedgeHang.headDown`); the view's otherwise, to the bit.
+   */
+  headPitchFor(pitch: number): number {
+    const L = this.ledge;
+    return L.headShare > 0 ? pitch + (L.headDown - pitch) * L.headShare : pitch;
+  }
+
+  /**
+   * The hang's clips on the rig: a one-off begun, a held one let go into the loop, the loop itself (Smoothness II moved them
+   * whole into `driveHangClips`, src/player/hangClips.ts, so the climbing's tests drive the very hand-over on the real rig).
+   */
   private animateHang(dt: number): void {
     const rig = this.rig;
     if (!rig) return;
     const L = this.ledge;
-    this.hangFade.fade = CLIMB_TUNE.ease;
-    if (L.startClip) rig.play(ledgeClipName(L.startClip), { from: L.startFrom, fadeIn: L.startFade, hold: L.holding });
-    else if (L.ended) rig.stopOverride(CLIMB_TUNE.ease);
-    // Climbing II, item 7: the reach-back pose held from the leading side's hop clip while looking away, and let go of.
-    else if (L.poseClip !== this.posePlaying) {
-      if (L.poseClip) rig.play(ledgeClipName(L.poseClip), { from: L.poseAt, fadeIn: CLIMB_TUNE.ease, hold: true, timeScale: 0 });
-      else rig.stopOverride(CLIMB_TUNE.ease);
-      this.posePlaying = L.poseClip;
-    }
-    // A one-off begun or ended takes the held pose's place: it is held again from the next frame where still looking away.
-    if (L.startClip || L.ended) this.posePlaying = '';
-    if (L.rigState) {
-      rig.prefer(L.rigState as RigState, ledgeClipName(L.rigClip));
-      rig.setState(L.rigState as RigState, 0, null, this.hangFade);
-    } else rig.setState(L.stood ? 'crouch' : 'air', 0, null, this.hangFade);
-    rig.update(dt);
+    driveHangClips(rig, L, dt, this.hangClips);
     this.group.updateMatrixWorld(true);
     // Climbing II, item 7: the spine turned toward the view while looking away (nought otherwise, every hang frame, so with
     // no look-away this is phase 1's own call to the letter: it eases the steady share and puts the clean pose back).
     rig.twistTorso(L.lookTwistNow, 0);
   }
 
-  /** The hop clip held as the look-away's pose on the rig now ('' for none). */
-  private posePlaying = '';
+  /** The hop clip held as the look-away's pose on the rig now ('' for none), and the fades handed to the rig: the hang's clips' own. */
+  private readonly hangClips: HangClipState = { posePlaying: '', hangFade: this.hangFade, ladderRate: this.ladderRate };
 
   /** The rig's root put where the ledge draws the figure against the body (its offset, the world's frame, into the group's). */
   private applyLedgeRoot(): void {
@@ -3699,7 +4911,7 @@ export class Player {
     rig.root.position.y += L.offY;
     rig.root.position.z = L.offX * s + L.offZ * c;
     // Turned with a sloping lip about its own front, on its hands (the fix round's: `climb.lipTilt`); upright otherwise.
-    if (L.tilt !== 0) L.applyTilt(rig.root);
+    if (L.tilted) L.applyTilt(rig.root);
     else rig.root.quaternion.set(0, 0, 0, 1);
     this.ledgeRooted = true;
   }
@@ -3714,8 +4926,143 @@ export class Player {
     const room = this.aboard;
     const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
     this.ledge.limbsFor(lp, rig, toPhys);
+    this.clearFigure(lp, toPhys);
     lp.filter = this.moveFilter();
     lp.place(rig, this.physics.world, toPhys);
+    this.settleFigure(lp, toPhys);
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 3 (`climb.bodyClear` 'spheres'): after the hang or the wall has lined the figure up and
+   * before the limbs' solves, the figure's spheres asked of what stands still and the figure pushed out of what they are in (a
+   * hand or the feet planted on the lip or the face allowed their contact: their spheres are not asked). Never aboard a ship's
+   * rooms (their frame turns the push); nothing under 'before'.
+   */
+  private clearFigure(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    const S = this.spheres;
+    const rig = this.rig;
+    if (CLIMB_TUNE.bodyClear !== 'spheres' || toPhys !== null || !S.ready || !rig) return;
+    if (!this.spheresClimb) S.reset();
+    this.spheresClimb = true;
+    // The held lip's outward way, or on a wall its face's (the limbs' own copy of it).
+    const onWall = this.wall.holding && !this.ledge.holding;
+    clearClimb(S, lp, rig, this.physics.world as unknown as SphereWorld, this.moveFilter(), this.clearDt, this.pos.x, this.pos.y + this.colliderOffsetY, this.pos.z, onWall ? lp.wall[3] : this.ledge.lip.nx, onWall ? lp.wall[5] : this.ledge.lip.nz);
+  }
+
+  /** Item 3, after the limbs' solves: what they took back into something pushed out at once (`settleClimb`). */
+  private settleFigure(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    const S = this.spheres;
+    const rig = this.rig;
+    if (CLIMB_TUNE.bodyClear !== 'spheres' || toPhys !== null || !S.ready || !rig) return;
+    settleClimb(S, lp, rig, this.physics.world as unknown as SphereWorld, this.moveFilter());
+  }
+
+  /**
+   * Smoothness II, items 3 and 4 on the feet, after the pose (`animate`): the drawn figure's top over the capsule's, held over
+   * the walk's bob, handed to the duck (`move.duckHead` 'clear', `ShapeIn.headOver`); and ducked under something, the figure
+   * pushed out across of anything still its spheres are in (`climb.bodyClear` 'spheres'; across only, never into its floor),
+   * eased back once out from under it. Nothing at all with both switches at 'before'.
+   */
+  /**
+   * Smoothness II, item 4, after its review: the crouch's own head off the rig's crouch clips (`deepClipsOf`, posed alone by
+   * `CharacterRig.posedHighest`, every node put back): the highest drawn top of the head, neck and chest over the rig's root
+   * (the feet). An event, once a rig, as soon as it has the plain crouched walk (the pack's clips may come in after the rig).
+   */
+  /** The console's: the crouch's own head read off its clips, cm over the feet (null until read). */
+  get crouchHeadCm(): number | null {
+    return this.deepClip === this.deepClip ? Math.round(this.deepClip * 1000) / 10 : null;
+  }
+
+  private measureDeep(rig: CharacterRig): void {
+    // (Item 3b: a rig whose crouch is not read yet wears the keys' class: no head of another rig's stands for its own.)
+    if (this.shapeIn.clipHeads[2] === this.shapeIn.clipHeads[2] && this.deepRig !== rig) this.shapeIn.clipHeads.fill(Number.NaN);
+    if (!rig.has(DEEP_MAIN)) return;
+    this.deepRig = rig;
+    const S = this.spheres;
+    const root = rig.root;
+    const measure = () => {
+      S.sample();
+      S.topOfUpper();
+      return S.topNow - root.matrixWorld.elements[13];
+    };
+    this.deepClip = rig.posedHighest(deepClipsOf(rig), DEEP_SAMPLES, measure);
+    // (Each clip's own, for the console: an event, once a rig.)
+    this.deepHeads = {};
+    for (const c of deepClipsOf(rig)) if (rig.has(c)) this.deepHeads[c] = Math.round(rig.posedHighest([c], DEEP_SAMPLES, measure) * 1000) / 10;
+    // Smoothness III, item 3b (`move.duckClip` 'clearance'): each crouched walk's own head by its class, which the duck wears by
+    // its clearance (NaN for a class the rig has no clip of: the duck then wears the keys' class, as ever); and the crouch's own
+    // idle's, for the console.
+    const heads = this.shapeIn.clipHeads;
+    heads.fill(Number.NaN);
+    for (let cls = 1; cls <= 3; cls++) {
+      const c = clipOfId(CROUCH_CLIPS[cls]);
+      if (rig.has(c)) heads[cls] = rig.posedHighest([c], DEEP_SAMPLES, measure);
+    }
+    const idle = rig.stateClip('crouch');
+    this.crouchIdleHead = idle && rig.has(idle) ? rig.posedHighest([idle], DEEP_SAMPLES, measure) : Number.NaN;
+  }
+  /** Item 3b, the console's: the crouch's own idle's head over the feet, metres (NaN until read). */
+  crouchIdleHead = Number.NaN;
+  /** The console's: each crouch clip's own head over the feet, cm (`measureDeep`'s, per clip). */
+  deepHeads: Record<string, number> = {};
+
+  private duckFigure(dt: number, rig: CharacterRig, ducked: boolean): void {
+    this.spheresClimb = false;
+    const S = this.spheres;
+    const head = MOVE_TUNE.duckHead === 'clear' && MOVE_TUNE.duck === 'on';
+    const clear = CLIMB_TUNE.bodyClear === 'spheres' && MOVE_TUNE.duck === 'on' && (ducked || this.duckPushed);
+    // (The push laid across last frame taken back: on the feet the root stands at nought across.)
+    if (this.duckPushed) {
+      rig.root.position.set(0, rig.root.position.y, 0);
+      this.duckPushed = false;
+    }
+    if (!S.ready || this.aboard !== null || (!head && !clear)) {
+      if (S.push.x !== 0 || S.push.y !== 0 || S.push.z !== 0) S.reset();
+      if (!head) {
+        this.shapeIn.headOver = Number.NaN;
+        this.shapeIn.deepHead = Number.NaN;
+      }
+      return;
+    }
+    // (The crouch's own head read off its clips once a rig, as soon as the rig has them: before the first deep duck, and never
+    // from a pose still crossfading into the crouch, which once read 1.51 m and laid the body down under every beam past it.)
+    if (head && this.deepRig !== rig) this.measureDeep(rig);
+    rig.root.updateMatrixWorld(true);
+    S.sample();
+    // (Read only standing at full height on the feet, and held while ducked: the figure's head over its standing capsule is the
+    // figure's own, and read while the capsule shrinks ahead of the pose's crouch it grew with the shrink and ran the duck down.)
+    if (head && this.shapeIn.feet && !this.prone && !this.kneeling && !this.crouching && this.shape.kind !== LYING && this.shape.tall >= STAND_TALL - 1e-3) {
+      S.headFeet = this.pos.y;
+      S.headTall = this.shape.tall;
+      S.headDt = dt;
+      S.holdHead();
+      if (S.topNow === S.topNow) this.shapeIn.headOver = S.headHeld;
+    }
+    // (And at the duck's deepest, the crouch's own or the duck's past it, the drawn top over the feet: the crouched walk's own
+    // head, which the duck cannot lower and the body lies down for under a roof it cannot pass. Read off the crouch's clips
+    // where the rig has them; else live, once the deepest has stood `DEEP_SETTLE` (the crossfade into the crouch done), and
+    // never over the standing head.)
+    const deep = head && this.shapeIn.feet && !this.prone && !this.kneeling && this.shape.kind !== LYING && (this.crouching || this.shape.share >= DEEP_SHARE || this.shape.bend > 0);
+    this.deepFor = deep ? this.deepFor + dt : 0;
+    const standing = STAND_TALL + S.headHeld;
+    if (head && this.deepClip === this.deepClip) this.shapeIn.deepHead = Math.min(this.deepClip, standing);
+    else if (deep && this.deepFor >= DEEP_SETTLE) {
+      S.headFeet = this.pos.y;
+      S.headDt = dt;
+      S.holdDeep();
+      if (S.deepHeld > 0) this.shapeIn.deepHead = Math.min(S.deepHeld, standing);
+    }
+    if (!clear) {
+      if (S.push.x !== 0 || S.push.y !== 0 || S.push.z !== 0) S.reset();
+      return;
+    }
+    S.refX = this.pos.x;
+    S.refY = this.pos.y + this.colliderOffsetY;
+    S.refZ = this.pos.z;
+    S.axX = 0;
+    S.axZ = 0;
+    S.clearOut(this.physics.world as unknown as SphereWorld, SPHERES_TRUNK, STILL_FLAGS, this.moveFilter(), dt, CLIMB_TUNE.clearEase, CLIMB_TUNE.clearMost, true);
+    this.duckPushed = S.push.x !== 0 || S.push.z !== 0;
   }
 
   // ---- wave 4, item B: the wall climb and the hands' bracing -----------------------------------------------------------------
@@ -3772,6 +5119,7 @@ export class Player {
     const li = this.fillLedgeIn(dt, input, null, false);
     const W = this.wall;
     W.step(this.physics.world as unknown as LedgeWorld, this, li, this.loco.stamina, this.ledge);
+    this.clearDt = dt;
     if (W.said) {
       this.onLedgeWords?.(W.said);
       W.said = '';
@@ -3818,7 +5166,10 @@ export class Player {
       else if (W.rigState === 'wallLeft' || W.rigState === 'wallRight') rig.prefer(W.rigState, WALL_CLIP_NAMES[W.rigClip] ?? wallClipName(W.rigClip));
       this.wallRate.rate = W.rate;
       this.wallRate.fade = CLIMB_TUNE.ease;
+      // Climbing II, Smoothness II, item 2: a clip of the climb taken up where its pose is nearest the one it fades from ('blend').
+      rig.nearestNext = CLIMB_TUNE.transitions === 'blend';
       rig.setState(W.rigState as RigState, 0, null, this.wallRate);
+      rig.nearestNext = false;
     } else rig.setState(W.stood ? 'idle' : 'air', 0, null, this.hangFade);
     rig.update(dt);
     this.group.updateMatrixWorld(true);
@@ -3839,7 +5190,9 @@ export class Player {
     const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
     lp.filter = this.moveFilter();
     this.wall.limbsFor(lp, rig, this.physics.world as unknown as LedgeWorld, toPhys);
+    this.clearFigure(lp, toPhys);
     lp.place(rig, this.physics.world, toPhys);
+    this.settleFigure(lp, toPhys);
   }
 
   /** The player's own key, kept (the crowd's `fights` asks with it: no closure a frame). */
@@ -4104,8 +5457,8 @@ export class Player {
         rig.setState(legs.state, speed, null, this.legOpts);
       } else rig.setState(moving ? 'proneMove' : 'prone', speed);
     } else if (this.kneeling) rig.setState('kneel', 0, gunUpper);
-    else if (this.crouching) {
-      // Crouched: the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
+    else if (this.crouching || this.duck.crouch) {
+      // Crouched (item 4: or ducked to `crouchAt`): the game's own loop_crouched clips unless Jedi Academy's animations are in charge.
       const swg = !this.jkaMode && !!rig.clipMatching(/^loop_crouched:speed1/);
       // The classes' crouched clips were preferred last frame and are not now (a blaster in hand, whose states the
       // classes' let-go does not reach): each state picks its own again there and then (only ever true under the classes).
@@ -4153,7 +5506,7 @@ export class Player {
     } else rig.setState(running ? 'run' : 'walk', speed, null, fo);
     // The feedback round, item 4: ducked under something, the crouch's share of the pose, laid on by the mixer (`stepDuck`).
     const ducks = MOVE_TUNE.duck === 'on' && this.shape.kind !== LYING;
-    if (ducks && this.shape.share > 0) {
+    if (ducks && this.shape.share > 0 && !this.duck.crouch) {
       rig.duckWant = this.shape.share;
       rig.duckMoving = moving;
     }
@@ -4195,6 +5548,8 @@ export class Player {
     if (duckBend > 0) pitch += (duckBend * MOVE_TUNE.duckBend * Math.PI) / 180;
     rig.twistTorso(straight ? 0 : this.torsoTwist + this.aimTwist + spineFix, pitch);
     if (duckBend > 0) rig.bendNeck((duckBend * MOVE_TUNE.duckNeck * Math.PI) / 180);
+    // Climbing II, Smoothness II, items 3 and 4: the drawn top handed to the duck, and a ducked figure out of what is beside it.
+    this.duckFigure(dt, rig, ducks && (this.shape.share > 0 || this.shape.bend > 0));
     // An imported clip posing the arms (the jump's start, a loop of the air, a landing) holds the gun wherever the clip
     // has it, so the barrel says nothing of the aim while it plays.
     this.correctAim(dt, gunUp, rig.armSource().startsWith('mx_'));
@@ -4358,9 +5713,55 @@ export class Player {
       const pt = pny > 0.1 ? Math.sqrt(this.slope.planeNx * this.slope.planeNx + this.slope.planeNz * this.slope.planeNz) / pny : 0;
       f.rise = pt > 0 ? (pt < 1 ? pt : 1) * 0.35 : 0;
       S.stepUpright(w, f, this.collider);
+      // Climbing II's smoothness round, item 4: a roof ahead too low for the deepest duck, and a lying body fits here: the
+      // duck lays the body down along its heading, to crawl under it (`BodyShape.lieAhead`, asked only under 'height'). Never
+      // where Z would refuse it (`proneAsk`, said nothing: nobody asked): with the grappling rope out, or in water deeper than
+      // the body lies, where the stand-up rule would stand it again the frame after.
+      if (S.lieAhead && !this.prone && !this.grapple.out && !this.grapple.released && !(this.waterDepth > 2 * MOVE_TUNE.lyingRadius)) {
+        this.prone = true;
+        this.kneeling = false;
+        this.duck.lying = true;
+        this.duck.laid++;
+        S.holdLying(f, this.collider);
+      }
     }
     this.colliderOffsetY = S.offsetY;
     this.colliderCrouched = null;
+  }
+
+  /**
+   * Climbing II's smoothness round, item 4, after the shape: a body the duck laid down crouches no more, and the duck's pace
+   * and clips from the height the shape wrote (`DuckPace.step`: on its feet only, the crouch key's own crouch eased on toward
+   * the crawl's in a tunnel).
+   */
+  private stepDuckPace(): void {
+    if (this.prone) this.crouching = false;
+    this.duck.step(this.shape.tall, !this.prone && this.shape.kind !== LYING && this.shapeIn.feet, this.crouching, this.shape.duckCls);
+  }
+
+  /**
+   * Item 4: a body the duck laid down gets up into a crouch (`riseAt` tall) where `BodyShape.riseClear` finds the room over its
+   * feet and no roof ahead along its way; the duck stands it the rest of the way as the room allows.
+   */
+  private riseFromDuck(moving: boolean, move: THREE.Vector3): void {
+    const S = this.shape;
+    const f = this.shapeIn;
+    f.x = this.pos.x;
+    f.y = this.pos.y;
+    f.z = this.pos.z;
+    f.heading = this.heading;
+    f.scale = this.ledgeScale();
+    f.filter = this.moveFilter();
+    f.vx = this.vel.x;
+    f.vz = this.vel.z;
+    f.moveX = moving ? move.x : 0;
+    f.moveZ = moving ? move.z : 0;
+    if (!S.riseClear(this.physics.world as unknown as ShapeWorld, f)) return;
+    this.prone = false;
+    this.duck.lying = false;
+    this.duck.rose++;
+    S.writeUpright(this.collider, this.pos.x, this.pos.y, this.pos.z, MOVE_TUNE.riseAt);
+    this.colliderOffsetY = S.offsetY;
   }
 
   /**
@@ -4489,7 +5890,7 @@ export class Player {
       handPos.applyMatrix4(hullInv);
       aim.transformDirection(hullInv);
     }
-    const blocked = room ? (a: THREE.Vector3, b: THREE.Vector3) => room.physics.cameraBlock(a, b, null, true) !== null : (a: THREE.Vector3, b: THREE.Vector3) => this.physics.cameraBlock(a, b, this.body, this.inside) !== null;
+    const blocked = room ? (a: THREE.Vector3, b: THREE.Vector3) => room.physics.cameraBlock(a, b, null, true) !== null : (a: THREE.Vector3, b: THREE.Vector3) => this.physics.cameraBlock(a, b, this.body, this.inside, this.barCamera()) !== null;
     const result = this.thrown.update(dt, handPos, aimFrom, aim, input.held('saberThrow'), blocked);
     if (result === 'caught') return;
     if (room) {

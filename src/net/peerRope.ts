@@ -58,6 +58,11 @@ export interface PeerRope {
   /** When the last state with this rope was heard (ms, `performance.now()` as the game hands it), and how many were. */
   heardAt: number;
   heard: number;
+  /**
+   * Climbing II, phase 4 (maker B): a hanging rope the player holds, not a hook's: sent as a held rope whose anchor comes twice,
+   * read here as the one anchor (drawn from it to their hand with no dart, its changes heard nowhere: src/net/remoteRopes.ts).
+   */
+  hung: boolean;
 }
 
 export function newPeerRope(): PeerRope {
@@ -73,6 +78,7 @@ export function newPeerRope(): PeerRope {
     frameLocal: new Float64Array(3 * PEER_ROPE_POINTS),
     heardAt: 0,
     heard: 0,
+    hung: false,
   };
 }
 
@@ -82,6 +88,7 @@ export function clearPeerRope(r: PeerRope): void {
   r.slack = 0;
   r.count = 0;
   r.frames = 0;
+  r.hung = false;
 }
 
 /** A finite number. */
@@ -117,6 +124,7 @@ export function readPeerRope(gr: unknown, grf: unknown, now: number, out: PeerRo
     out.vel[1] = gr[5];
     out.vel[2] = gr[6];
     out.frames = 0;
+    out.hung = false;
   } else if (kind === 1 && (gr.length - 2) % 3 === 0 && gr.length >= 5 && (gr.length - 2) / 3 <= PEER_ROPE_POINTS) {
     out.kind = 1;
     out.slack = Math.max(0, gr[1] as number);
@@ -124,6 +132,9 @@ export function readPeerRope(gr: unknown, grf: unknown, now: number, out: PeerRo
     for (let i = 0; i < 3 * out.count; i++) out.pts[i] = gr[2 + i] as number;
     out.vel[0] = out.vel[1] = out.vel[2] = 0;
     out.frames = 0;
+    // (Phase 4, maker B: a hanging rope's mark, its anchor twice and nothing else: read as the one anchor.)
+    out.hung = out.count === 2 && gr[2] === gr[5] && gr[3] === gr[6] && gr[4] === gr[7];
+    if (out.hung) out.count = 1;
     if (Array.isArray(grf) && grf.length % 6 === 0) {
       for (let i = 0; i + 5 < grf.length && out.frames < PEER_ROPE_POINTS; i += 6) {
         const k = grf[i];

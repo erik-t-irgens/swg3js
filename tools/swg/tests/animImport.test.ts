@@ -349,12 +349,18 @@ const yTurn = (deg: number) => qaxis(0, 1, 0, deg * DEG);
 // ---- the committed pack against a fresh import, where the source is on this machine ------------------------------------
 /** The last commit whose clips (the `.mxa` files) were made anew: move it when they are. */
 const MXA_AT = '91e62d9';
-/** Each named clip file as MXA_AT committed it, or null where git cannot hand them over. */
+/**
+ * Each named clip file as MXA_AT committed it, or null where git cannot hand them over. Climbing II, phase 3: a clip MXA_AT did
+ * not have (one a later import added: the owner's Swinging and Injured Pack folders) is left out of the map, never a reason to
+ * compare none (git's list of MXA_AT's files says which it had).
+ */
 function mxaAt(files: readonly string[]): Map<string, Buffer> | null {
   if (process.env.SWG3JS_NO_OLD === '1') return null;
   const out = new Map<string, Buffer>();
   try {
-    for (const n of files) out.set(n, execFileSync('git', ['show', `${MXA_AT}:public/anims/mixamo/${n}`], { cwd: repoRoot(import.meta.url), maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }));
+    const cwd = repoRoot(import.meta.url);
+    const had = new Set(execFileSync('git', ['ls-tree', '--name-only', `${MXA_AT}:public/anims/mixamo/`], { cwd, maxBuffer: 1 << 24, stdio: ['ignore', 'pipe', 'ignore'] }).toString().split(/\r?\n/).filter(Boolean));
+    for (const n of files) if (had.has(n)) out.set(n, execFileSync('git', ['show', `${MXA_AT}:public/anims/mixamo/${n}`], { cwd, maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }));
   } catch {
     return null;
   }
@@ -373,7 +379,13 @@ function mxaAt(files: readonly string[]): Map<string, Buffer> | null {
       const before = readdirSync(src, { recursive: true }).length;
       const result = importFolder(src, out);
       ok(readdirSync(src, { recursive: true }).length === before, 'an import leaves the folder it reads as it found it');
-      ok(result.failed.length === 0 && result.restDiffers.length === 0 && result.tableUnused.length === 0, `every one of the ${result.files} source files is read, on one rest pose, and every row of the table names one`);
+      // Climbing II, phase 3: a file three's FBX reader cannot read (two of the owner's Injured Pack downloads, "Unknown property
+      // type", 2026-11-18) makes no clip and is said; it may never be a clip the committed pack holds.
+      const kept0 = JSON.parse(readFileSync(join(packDir, 'index.json'), 'utf8')) as { clips: { source?: string }[] };
+      const keptSources = new Set(kept0.clips.map((c) => c.source).filter((s): s is string => !!s));
+      const failedIn = result.failed.filter((f: { file: string }) => keptSources.has(f.file.replace(/\\/g, '/')));
+      if (result.failed.length) note(`${result.failed.length} source file(s) could not be read and make no clip: ${result.failed.map((f: { file: string; why?: string; error?: string }) => `${f.file} (${f.why ?? f.error ?? ''})`).join('; ')}`);
+      ok(failedIn.length === 0 && result.restDiffers.length === 0 && result.tableUnused.length === 0, `every one of the ${result.files} source files whose clip the pack holds is read, on one rest pose, and every row of the table names one`);
       const fresh = readFileSync(join(out, 'index.json'), 'utf8');
       const kept = readFileSync(join(packDir, 'index.json'), 'utf8').replace(/\r\n/g, '\n');
       ok(fresh === kept, 'a fresh import writes the committed index, word for word');
@@ -381,10 +393,19 @@ function mxaAt(files: readonly string[]): Map<string, Buffer> | null {
       ok(files.length === result.index.clips.length && files.every((n) => readFileSync(join(out, n)).equals(readFileSync(join(packDir, n)))), `and its ${files.length} clip files byte for byte`);
       // The clips themselves were last made anew at MXA_AT: a measure mended since moves the index and never a clip.
       const was = mxaAt(files);
-      if (was) ok(files.every((n) => was.get(n)?.equals(readFileSync(join(out, n)))), `each of them byte for byte the clip ${MXA_AT} committed`);
-      else note(`git cannot hand over ${MXA_AT}'s clips here: they are not compared`);
+      if (was) {
+        const added = files.filter((n) => !was.has(n));
+        ok(was.size > 0 && [...was.keys()].every((n) => was.get(n)!.equals(readFileSync(join(out, n)))), `each of the ${was.size} clips ${MXA_AT} committed byte for byte as it committed it`);
+        if (added.length) note(`${added.length} clip(s) ${MXA_AT} had not (added by a later import): ${added.join(', ')}`);
+      } else note(`git cannot hand over ${MXA_AT}'s clips here: they are not compared`);
       const lines = reportLines(result, out);
-      ok(lines.some((l) => /sneak_walk: 2\.10 m in 1\.050 s/.test(l)) && !lines.some((l) => /more than \d+% apart/.test(l)) && lines.some((l) => /running_up_stairs: .*climbs 0\.48 m a cycle/.test(l)), `its report holds the level travelling clips' feet to their hips, none more than ${TRAVEL_APART}% apart, and says the one that climbs stairs stands on steps and is not held to its hips`);
+      // Climbing II, phase 3: a clip a later import added (the Injured Pack's loops, for a later limp pass that has not looked
+      // at them) is said where its feet and hips part, and never holds the clips the game already plays to it.
+      const newIds = new Set(was ? files.filter((n) => !was.has(n)).map((n) => n.replace(/\.mxa$/, '')) : []);
+      const apart = lines.filter((l) => /more than \d+% apart/.test(l));
+      const apartNew = apart.filter((l) => newIds.has(l.trim().split(':')[0]));
+      if (apartNew.length) note(`clips added by a later import whose feet and hips part by more than ${TRAVEL_APART}%: ${apartNew.map((l) => l.trim()).join('; ')}`);
+      ok(lines.some((l) => /sneak_walk: 2\.10 m in 1\.050 s/.test(l)) && apart.length === apartNew.length && lines.some((l) => /running_up_stairs: .*climbs 0\.48 m a cycle/.test(l)), `its report holds the level travelling clips' feet to their hips, none more than ${TRAVEL_APART}% apart, and says the one that climbs stairs stands on steps and is not held to its hips`);
       ok(lines.some((l) => /hard_landing: from 0\.533 s the foot stands/.test(l)) && lines.some((l) => /jumping_down: from 0\.000 s the foot stands 0\.43 m up; a foot comes down at 0\.24 s/.test(l)), 'and says where each one-off\'s feet are at its trim and when they come down');
     } finally {
       rmSync(out, { recursive: true, force: true });

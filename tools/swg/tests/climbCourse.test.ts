@@ -371,11 +371,11 @@ function topAt(s: CourseSolid, x: number, z: number): number {
   const at = main.indexOf('climbTest: async (');
   ok(at > 0, 'the game has `__debug.climbTest`');
   const body = main.slice(at, main.indexOf('\n      },\n', at));
-  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, extras \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor, extras \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
+  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, extras, ropeLands, ropeScale, poleTops \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor, extras, ropeLands, ropeScale, poleTops \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
   ok(body.includes('const extras = o.extras ?? true;'), "the game's command stands the owner's extra rows (the ladders and the vertical pieces) unless asked not to");
   ok(body.includes("await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');"), 'it stands them behind a short curtain (its sweep builds the one program before the screen lifts)');
   const stand = main.slice(main.indexOf('  private standClimbCourse('), main.indexOf('  private dropClimbTest('));
-  ok(stand.includes('buildCourseColliders(this.physics.world, course, frame)') && stand.includes('courseTriangles(course, frame)'), 'its colliders and its mesh are the builder\'s two answers over the same course and frame');
+  ok(stand.includes('buildCourseColliders(this.physics.world, course, frame)') && stand.includes('courseTriangles(course, frame, notRopeColumn)'), 'its colliders and its mesh are the builder\'s two answers over the same course and frame');
   ok(!/ColliderDesc|createCollider/.test(stand), 'it makes no collider of its own beside the builder\'s');
   const drop = main.slice(main.indexOf('  private dropClimbTest('), main.indexOf('  private trackById('));
   ok(/this\.physics\.removeCollider\(c\.collider\)/.test(drop) && /this\.world\.forgetMaterials\(\[s\.material\]\)/.test(drop) && /s\.material\.dispose\(\)/.test(drop) && /s\.mesh\.geometry\.dispose\(\)/.test(drop), 'taking it down removes every collider, forgets the material in the world\'s sets and disposes the mesh\'s geometry and material');

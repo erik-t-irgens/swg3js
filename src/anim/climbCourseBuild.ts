@@ -12,6 +12,7 @@
 import { Group, RAPIER, groups } from '../core/physics.ts';
 import type { ClimbCourse, CoursePiece, CourseSolid, SolidRole } from './climbCourse.ts';
 import { solidFoot } from './climbCourse.ts';
+import { courseRopes, type HangingRope } from '../player/hangingRope.ts';
 
 /** Where the course stands: its origin in the world (x, z), the heading it faces, and each piece's floor slab's top height. */
 export interface CourseFrame {
@@ -62,8 +63,9 @@ export function solidCorners(f: CourseFrame, p: CoursePiece, s: CourseSolid): { 
   const w = { x: 0, y: 0, z: 0 };
   const bottom: [number, number, number][] = [];
   const top: [number, number, number][] = [];
+  const bottoms = s.kind === 'prism' ? s.bottoms : undefined;
   foot.forEach(([x, z], i) => {
-    courseToWorld(f, p, x, y0, z, w);
+    courseToWorld(f, p, x, bottoms ? bottoms[i] : y0, z, w);
     bottom.push([w.x, w.y, w.z]);
     courseToWorld(f, p, x, tops[i], z, w);
     top.push([w.x, w.y, w.z]);
@@ -119,6 +121,19 @@ export function buildCourseColliders(world: CourseWorld, course: ClimbCourse, f:
   return out;
 }
 
+/**
+ * Climbing II, phase 4: the course's ropes, as the game's `climbTest` and the harness stand them alike: each `rope` solid a rope
+ * from its column's top (src/player/hangingRope.ts's `courseRopes`), its column's collider (the builder's, found by its piece and
+ * role) switched off while `climb.ropes` is 'on' and back on while it is 'off'. Under 'off' every collider stands as before.
+ */
+export function standCourseRopes(course: ClimbCourse, f: CourseFrame, colliders: readonly CourseCollider[]): HangingRope[] {
+  return courseRopes(
+    course.pieces,
+    (i, x, y, z, out) => courseToWorld(f, course.pieces[i], x, y, z, out),
+    (id, role) => colliders.find((c) => c.piece === id && c.role === role)?.collider ?? null,
+  );
+}
+
 /** Each role's colour (linear, 0 to 1): the floor dark, the walls light, what hangs or stands thin a colour of its own. */
 const ROLE_COLOUR: Record<SolidRole, [number, number, number]> = {
   floor: [0.22, 0.22, 0.24],
@@ -137,15 +152,17 @@ const ROLE_COLOUR: Record<SolidRole, [number, number, number]> = {
 
 /**
  * The course as one triangle list in the world (positions, flat normals, colours: every piece a shade lighter or darker
- * than its neighbour so they read apart), every face turned out of its solid.
+ * than its neighbour so they read apart), every face turned out of its solid. `keep` (Climbing II, phase 4) draws only the solids
+ * of the roles it says yes to (the game draws the rope's column apart, shown only while `climb.ropes` is 'off'); none, every one.
  */
-export function courseTriangles(course: ClimbCourse, f: CourseFrame): { positions: Float32Array; normals: Float32Array; colors: Float32Array } {
+export function courseTriangles(course: ClimbCourse, f: CourseFrame, keep?: (role: SolidRole) => boolean): { positions: Float32Array; normals: Float32Array; colors: Float32Array } {
   const pos: number[] = [];
   const nrm: number[] = [];
   const col: number[] = [];
   course.pieces.forEach((p, pi) => {
     const shade = pi % 2 === 0 ? 1 : 0.86;
     for (const s of p.solids) {
+      if (keep && !keep(s.role)) continue;
       const { bottom, top } = solidCorners(f, p, s);
       const n = bottom.length;
       let mx = 0;

@@ -17,13 +17,15 @@ import { LedgeIn, LEDGE_HANG, type LedgeWorld } from '../../../src/player/ledge.
 import { WALL_ON, type WallClimb } from '../../../src/player/wallClimb.ts';
 import { LimbPlace } from '../../../src/player/limbPlace.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
-import { resetClimbTune } from '../../../src/anim/climbTune.ts';
+import { climbSmoothBefore, resetClimbTune } from '../../../src/anim/climbTune.ts';
 import { WALL_IDS, wallClipName } from '../../../src/anim/wallClips.ts';
 import { MixamoPack } from '../../../src/anim/mixamoPack.ts';
 import { figureScaleOf } from '../../../src/player/peerHang.ts';
 import { glbSkeleton, repoRoot, speciesBodies, targetSkeleton } from './animFixtures.ts';
 
 resetClimbTune();
+// Phase 2's look-away (a braced hang looking back by turns) is its own grammar's: the smoothness round's 'cue' asks W for it.
+climbSmoothBefore();
 let scavenges = 0;
 new PerformanceObserver((l) => {
   scavenges += l.getEntries().length;

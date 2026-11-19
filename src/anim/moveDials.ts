@@ -45,6 +45,59 @@ export const MOVE_GROUPS: DialGroup[] = [
       dial('duckNeck', 'Neck bends with it', 1, 'deg', '20: the head carried down with the back, the face still ahead.'),
     ],
   },
+  {
+    title: "Ducking's pace (Climbing II, smoothness)",
+    note: "height: a ducked body slows from its walk's speed toward the crouch's as it lowers, wears the crouch's clips at their height and walks at their pace, slows on toward the crawl's past it, and where the room is too low for the deepest duck but a lying body fits it lies down and crawls, getting up again into a crouch where the room comes back. before: the feedback round's duck at the walk's own speeds and clips.",
+    dials: [
+      choice('duckPace', 'Pace by height', "before is the feedback round's duck."),
+      dial('crouchAt', "Crouch's clips at", 0.01, 'm', "1.05: the crouch's own 1.0 and the 5 cm the duck keeps over it, so a roof the crouch just passes under is walked under crouched."),
+      dial('crouchBand', 'Back to the walk past it by', 0.01, 'm', "0.05: a hand's width, so a duck holding at the crouch's height never swaps clips back and forth."),
+      dial('paceCurve', 'Pace follows the height', 0.05, '', '1: straight; over 1 it keeps the faster pace longer, under 1 slows sooner.'),
+      dial('proneUnder', 'Lies down under', 0.01, 'm', "0.8: the deepest duck's 0.75 and its 0.05 clearance, so every room the duck passes under it walks under and only a lower one is crawled."),
+      dial('proneAhead', 'Lies down this far before it', 0.05, 'm', "1.2: the lying body's half length, 0.9, and a third of a stride, so it is down before its head reaches the roof."),
+      dial('riseAt', 'Gets up where the room is', 0.01, 'm', "1.0: the crouch's own height; the duck stands it the rest of the way as the room allows."),
+    ],
+  },
+  {
+    title: "The duck's head (Climbing II, Smoothness II)",
+    note: "clear: the duck keeps the room over and ahead of the body as tall as the drawn figure's own top (its head, neck and chest spheres as the pose stands) and headSkin more, so it ducks further, and lies down sooner, until the drawn head clears what is over it. before: the smoothness round's duck, the capsule's own 5 cm.",
+    dials: [
+      choice('duckHead', 'The head clear of a low roof', "before is the smoothness round's duck."),
+      dial('headSkin', 'The head keeps under a roof by', 0.005, 'm', '0.03: a hair, so a beam just over the head is passed with the head brushing nothing.'),
+    ],
+  },
+  {
+    title: "Lying down and the duck's crouch (Climbing II, Smoothness III)",
+    note: "proneMin opening: the duck lies down only into a real opening, a gap whose floor and roof run on past the lying body's length with the skin below to spare (never at a wall, a step or a slab's side); a probe that begins inside something answers nothing and the body stands. today: the room alone, as Smoothness II left it. duckClip clearance: the duck wears the crouch clip whose head stands highest and still clears what is over it by headSkin (the sneak walk the last), its capsule shrunk to that clip's own measured head, and lies only under the sneak's head; one: the one crouch walk the duck always wore.",
+    dials: [
+      choice('proneMin', 'Lying down', 'opening: only into a real opening; today: the room alone, as before.'),
+      dial('proneSkin', 'An opening has to have to spare', 0.005, 'm', "Ours: 0.05, the duck's own clearance: a gap the lying body only scrapes through is no opening."),
+      choice('duckClip', "The duck's crouch", 'clearance: the highest crouch clip that clears, the sneak walk last; one: the one crouch walk, as before.'),
+    ],
+  },
+  {
+    title: 'Vaults and clambers (Climbing II, phase 6)',
+    note: "sprint: sprinting into something still whose top is between the vault's least and most over the feet, with room over it and ground beyond it within its reach, vaults it (the clip whose hand meets the top), or dives over a long low one; into a waist-high ledge deeper than that, with room on it, clambers onto it, cut into the run while the sprint is held. run: the same for any run. off: today's, a run meets an obstacle as it always did.",
+    dials: [
+      choice('vault', 'Vaults and clambers', "sprint: while sprinting; run: any run; off is today's."),
+      dial('vaultLow', 'A vault from a top this high', 0.01, 'm', "The brief's 0.5: what the step-up's own 0.5 m climbs is no vault."),
+      dial('vaultHigh', 'A vault up to a top this high', 0.01, 'm', "The brief's 1.25: about the hips; the clips' own hands stand 0.85 and 0.97 m up, and the figure is lifted or lowered by the difference."),
+      dial('vaultFar', 'Ground beyond it within', 0.05, 'm', "The brief's 2: a top that goes on further than this past its face is a ledge, clambered onto where it is waist high."),
+      dial('vaultDeep', 'Dived over past this depth', 0.05, 'm', "Ours: 1.0, the hand vaults' own figures clear their own top over a metre of depth and dip into it past that, measured."),
+      dial('diveHigh', 'A dive over a top up to', 0.01, 'm', "Ours: 1.25, the vault's own most: the dive's figure clears 1.6 m over 1.5 m of depth, measured."),
+      dial('clamberLow', 'A clamber onto a top from', 0.01, 'm', "The brief's 0.8: about the waist."),
+      dial('clamberHigh', 'A clamber onto a top up to', 0.01, 'm', "The brief's 1.4; higher, the face is a wall, as today."),
+      dial('vaultHandIn', "A vault's hand in from the edge", 0.01, 'm', "Ours: 0.25, a hand's breadth or two, as the clips' own; never past half the depth."),
+      dial('clamberHandIn', "A clamber's hand in from the edge", 0.01, 'm', "Ours: 0.27, the clip's own, measured, so its feet come down where it put them."),
+      dial('vaultLand', 'Feet down past the far side', 0.01, 'm', "Ours: 0.3, a foot's length; the flight is stretched to reach it where the obstacle is deeper than the clip's own."),
+      dial('vaultRateLeast', 'Clip played at the least', 0.05, 'x', "Ours: 0.8. The clip is played at the speed the body came with over its own run-in."),
+      dial('vaultRateMost', 'Clip played at the most', 0.05, 'x', "Ours: 1.8: at the sprint's 7 m/s `jumping` asks 1.86, `jumping_1` 2.2; past it the body slows to the clip while it vaults."),
+      dial('vaultBlend', 'Crossfade in and out', 0.01, 's', "Ours: 0.15, about the speed classes' own fade between two paces."),
+      dial('vaultAngle', 'Met no further off square than', 1, 'deg', "Ours: 40; at a glance it is run past or into, as today."),
+      dial('vaultRoom', 'Room over the top', 0.05, 'm', "Ours: 0.9: the vaults' heads stand at most 0.82 m over their own top, measured, and a hand's breadth."),
+      dial('vaultDrop', 'Ground beyond no deeper than', 0.05, 'm', "Ours: 1.0; deeper is a drop, not a vault."),
+    ],
+  },
 ];
 
 export const MOVE_DIALS: DialSet = { helper: 'move', groups: MOVE_GROUPS, shipped: readDials(MOVE_GROUPS) };

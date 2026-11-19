@@ -17,7 +17,8 @@
 // free shimmies' poses with their travel taken out in Mixamo. `braced_hang_shimmy` goes right and `braced_hang_shimmy_1`
 // left (the pair is a pair of directions). Of the four free idles the Parkour folder's own (`free_hang_hanging_idle`,
 // 4.7 s) is the idle; the looking-up one is not used. `braced_hang_drop` drops to its own ground 2.1 m under the lip and
-// turns round, which the world's ground never is, so the straight let-go (`braced_hang_drop_1`) is the drop.
+// turns round, which the world's ground never is, so the straight let-go (`braced_hang_drop_1`) is the drop (its first part,
+// before it turns, is a drop to a lower lip's release: Smoothness III's `DROP_PARTS`).
 // `jump_to_freehang` starts on the ground and runs 2.2 m into a free hang: the grab is the air's, so the airborne
 // `jump_to_hang` is the free grab. `idle_to_braced_hang` and `stand_to_freehang` are a standing jump up into the hang
 // (not a step down, as the brief named the first): they are the grab of a slow, standing jump.
@@ -51,6 +52,9 @@ export const LEDGE_FACTS: Readonly<Record<string, LedgeClipFacts>> = {
   braced_hang_hop_up: { dur: 1.667, loop: false, t0: 0, g0: [-0.011, 1.808, 0.347], g1: [-0.011, 2.541, 0.347], span0: 0.598, span1: 0.598, a0: 0.614, a1: 1.348, net: [0, 0.734, 0] },
   braced_hang_to_crouch: { dur: 1.133, loop: false, t0: 0, g0: [-0.017, 1.548, 0.347], g1: [-0.004, 1.845, 0.424], span0: 0.598, span1: 0.392, a0: 0.355, a1: 1.725, net: [-0.115, 1.46, 0.553] },
   braced_hang_drop_1: { dur: 0.883, loop: false, t0: 0, g0: [-0.011, 2.711, 0.347], g1: [-0.011, 1.882, 0.347], span0: 0.598, span1: 0.598, a0: 1.518, a1: 0.688, net: [0, -0.829, 0] },
+  // Climbing II, Smoothness III, item 4b: the braced drop that turns round, asked of the pack only for its first part, the
+  // release and on into the fall (`DROP_PARTS` in src/anim/climbTune.ts: a drop to a lower lip's own move).
+  braced_hang_drop: { dur: 1.667, loop: false, t0: 0, g0: [-0.011, 2.527, 0.347], g1: [-0.059, 0.908, 0.031], span0: 0.598, span1: 0.563, a0: 1.334, a1: 0.097, net: [0.295, -0.679, -0.336] },
   braced_to_free_hang: { dur: 0.933, loop: false, t0: 0, g0: [-0.011, 2.306, 0.347], g1: [-0.003, 2.319, -0.092], span0: 0.598, span1: 0.572, a0: 1.112, a1: 0.418, net: [-0.009, -0.123, 0.462] },
   jump_from_wall: { dur: 1.25, loop: false, t0: 0, g0: [-0.011, 2.01, 0.347], g1: [0.222, 1.449, -0.302], span0: 0.598, span1: -1.066, a0: 0.817, a1: 0.597, net: [-0.006, -0.103, -1.785] },
   jumping_to_hanging: { dur: 1.5, loop: false, t0: 0.25, g0: [-0.034, 1.911, 1.086], g1: [-0.011, 1.8, 0.347], span0: 0.733, span1: 0.598, a0: 1.116, a1: 0.607, net: [0.091, -0.72, 0.836] },
@@ -146,4 +150,17 @@ export const LEDGE_STEP_DOWN = 'drop_to_freehang';
 export const LEDGE_IDS: readonly string[] = Object.keys(LEDGE_FACTS);
 
 /** A clip's name on a rig (the pack's `mx_` prefix). */
-export const ledgeClipName = (id: string): string => `mx_${id}`;
+/**
+ * Climbing II, Smoothness II, item 6 (`climb.pushOff` 'jka'): the push off a wall is Jedi Academy's own rebound back off a wall,
+ * which the rig plays by its own name as it plays every Jedi Academy move.
+ */
+export const LEDGE_PUSH_OFF = 'BOTH_FORCEWALLREBOUND_BACK';
+
+/** A clip's name on the rig: the pack's `mx_` names, a Jedi Academy move's own (`BOTH_`) as it stands. */
+export const ledgeClipName = (id: string): string => (id.startsWith('BOTH_') ? id : `mx_${id}`);
+
+/**
+ * Climbing II, Smoothness III (the review's): every table clip's rig name made once, so what names a clip every frame (a ladder's
+ * cycle put at its phase, a free hop's arms, an arc's one-off put at its clock) looks it up rather than making the name anew.
+ */
+export const LEDGE_CLIP_NAMES: Readonly<Record<string, string>> = Object.fromEntries(LEDGE_IDS.map((id) => [id, ledgeClipName(id)]));

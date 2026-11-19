@@ -12,6 +12,7 @@ import { phaseAt, sharedRate, timeAtPhase, type ClipFacts } from '../anim/locoPh
 import { STAIR_WINDOWS, stairCyclesFor, type StairCycleFacts, type StairCycles } from '../anim/stairCycle.ts';
 import { ANIM_TUNE, watchJkaSpine } from '../anim/animTune.ts';
 import { applyJkaSpine, isJkaClip, rebaseJkaClips, spineRebaseFor } from '../anim/jkaSpine.ts';
+import { forgetMixerWrites, poseAtRest } from '../anim/poseReset.ts';
 
 // The Jedi Academy spine's switch moved (`__debug.anim({ tune: { jkaSpine } })`, its dial): every clip rebased so far
 // takes the keys the switch names, written in place (an event, never a frame).
@@ -167,6 +168,10 @@ export interface RigOptions {
   variants?: Record<string, { variable: string; values: string[] }>;
 }
 
+/** A keyframe track's own interpolant (three's, which its types leave out): Smoothness II's nearest phase reads a pose with it. */
+function interpOf(tr: THREE.KeyframeTrack): THREE.Interpolant {
+  return (tr as unknown as { createInterpolant(): THREE.Interpolant }).createInterpolant();
+}
 const tmpQ = new THREE.Quaternion();
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const RIGHT_AXIS = new THREE.Vector3(1, 0, 0);
@@ -632,6 +637,39 @@ export class CharacterRig {
   }
 
   /**
+   * Climbing II, Smoothness III, items 4 and 4b: the state's upper layer (`setState`'s `upper`) put `t` seconds into its clip and
+   * held there (its rate nought: the caller puts it every frame), where the layer plays `clip`: a free hop up's arms over a free
+   * hang's legs, a free ladder's cycle. Nothing otherwise.
+   */
+  upperSeek(clip: string): void {
+    const u = this.upper;
+    if (!u || this.upperName !== clip) return;
+    u.time = this.upperAt;
+    u.timeScale = 0;
+  }
+
+  /**
+   * Smoothness III, item 4b (the review's): `setTime` for a ladder's cycle every frame, the seconds read from `timeAt`, which the
+   * caller writes just before (a number handed across the call is made anew every frame).
+   */
+  setTimeNow(clip: string): void {
+    const cur = this.current;
+    if (!cur) return;
+    const name = cur.getClip().name;
+    if (name !== clip && !(name.length === clip.length + 6 && name.startsWith('lower:') && name.endsWith(clip))) return;
+    cur.time = this.timeAt;
+  }
+
+  /** `setTimeNow`'s seconds (written by the caller first). */
+  timeAt = 0.5;
+
+  /**
+   * Where `upperSeek` puts the upper layer, seconds into its clip: written by the caller just before (the review's: a number
+   * handed across the call was made anew every frame of a free hop's arms).
+   */
+  upperAt = 0.5;
+
+  /**
    * The ground speed a clip's feet were made for on this figure, m/s: a striding clip's own at the figure's size, else
    * the converter's manifest's, else null. What a caller divides the body's speed by for the rate the clip plays at.
    */
@@ -662,6 +700,49 @@ export class CharacterRig {
   /** The clip a state plays as things stand: its preference when the rig has it, else its table's first match; null with neither. */
   stateClip(state: RigState): string | null {
     return this.preferredClip(state) ?? this.findClip(STATE_CLIPS[state]) ?? null;
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 4, after its review: the highest `measure` answers with this skeleton posed by each of
+   * `clips` (those the rig has) alone, at `samples` times through it, every node put back as it stood after (a mixer of its
+   * own, let go). An event (once a rig), read off the clips' own keys and never the live pose, so a crossfade into a crouch or
+   * a fidget never moves it; NaN where the rig has none of them.
+   */
+  posedHighest(clips: readonly string[], samples: number, measure: () => number): number {
+    const named = clips.filter((c, i) => this.actions.has(c) && clips.indexOf(c) === i);
+    if (named.length === 0) return Number.NaN;
+    const nodes: THREE.Object3D[] = [];
+    this.root.traverse((o) => {
+      if (o !== this.root) nodes.push(o);
+    });
+    const kept = nodes.map((o) => ({ p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() }));
+    const mixer = new THREE.AnimationMixer(this.root);
+    let best = Number.NaN;
+    try {
+      for (const name of named) {
+        const clip = this.actions.get(name)!.getClip();
+        const act = mixer.clipAction(clip);
+        act.play();
+        for (let k = 0; k < samples; k++) {
+          mixer.setTime((clip.duration * k) / samples);
+          this.root.updateMatrixWorld(true);
+          const v = measure();
+          if (v === v && !(v <= best)) best = v;
+        }
+        act.stop();
+        mixer.uncacheAction(clip);
+      }
+    } finally {
+      mixer.stopAllAction();
+      mixer.uncacheRoot(this.root);
+      nodes.forEach((o, i) => {
+        o.position.copy(kept[i].p);
+        o.quaternion.copy(kept[i].q);
+        o.scale.copy(kept[i].s);
+      });
+      this.root.updateMatrixWorld(true);
+    }
+    return best;
   }
 
   /** The clip a state's own table gives, whatever is preferred. */
@@ -870,6 +951,206 @@ export class CharacterRig {
     return { eye: new THREE.Vector3(eye[0], eye[1], eye[2]), pelvis: new THREE.Vector3(pelvis[0], pelvis[1], pelvis[2]) };
   }
 
+  /**
+   * Climbing II, phase 3: where each of `joints` (a bone by its name, '' the skeleton's root bone) stands at each of `times` in
+   * `clip`, in the rig root's own (unscaled) frame, from the clip's own tracks (never the live pose, which this leaves as it
+   * is), three numbers a joint a time into `out` (time first: `out[(i * joints.length + j) * 3]`). False without the clip or a
+   * joint, or with a scaled node on a chain (none in the packs). An event's arithmetic, made once by its caller and kept (the
+   * bar's swing measured off its clip at its first use, src/anim/barClips.ts).
+   */
+  sampleJoints(clip: string, joints: readonly string[], times: ArrayLike<number>, out: Float64Array): boolean {
+    const action = this.actions.get(clip);
+    if (!action) return false;
+    const unit = (x: number) => Math.abs(x - 1) < 1e-4;
+    const tracks = new Map<string, THREE.KeyframeTrack>();
+    for (const t of action.getClip().tracks) tracks.set(t.name, t);
+    let rootBone: THREE.Bone | null = null;
+    for (const b of this.bones.values()) if (!(b.parent instanceof THREE.Bone)) { rootBone = b; break; }
+    type Link = { restP: Vec3; restQ: Quat; p: THREE.Interpolant | null; q: THREE.Interpolant | null };
+    const chains: Link[][] = [];
+    for (const name of joints) {
+      const joint = name === '' ? rootBone : this.boneNamed(name);
+      if (!joint) return false;
+      const chain: Link[] = [];
+      for (let o: THREE.Object3D | null = joint; o !== this.root; o = o.parent) {
+        if (!o) return false;
+        const bone = o as THREE.Bone;
+        const s = (bone.isBone ? this.restScale.get(bone) : null) ?? o.scale;
+        const sk = tracks.get(`${o.name}.scale`);
+        if (sk && sk.values.length >= 3 ? !(unit(sk.values[0]) && unit(sk.values[1]) && unit(sk.values[2])) : !(unit(s.x) && unit(s.y) && unit(s.z))) return false;
+        const p = (bone.isBone ? this.restPosition.get(bone) : null) ?? o.position;
+        const q = (bone.isBone ? this.restLocal.get(bone) : null) ?? o.quaternion;
+        const pt = tracks.get(`${o.name}.position`);
+        const qt = tracks.get(`${o.name}.quaternion`);
+        chain.push({ restP: [p.x, p.y, p.z], restQ: [q.x, q.y, q.z, q.w], p: pt ? interpOf(pt) : null, q: qt ? interpOf(qt) : null });
+      }
+      chain.reverse();
+      chains.push(chain);
+    }
+    const nj = joints.length;
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];
+      for (let j = 0; j < nj; j++) {
+        const links = chains[j].map((L) => {
+          const pv = L.p ? (L.p.evaluate(t) as ArrayLike<number>) : L.restP;
+          const qv = L.q ? (L.q.evaluate(t) as ArrayLike<number>) : L.restQ;
+          const l = Math.hypot(qv[0], qv[1], qv[2], qv[3]) || 1;
+          return { p: [pv[0], pv[1], pv[2]] as Vec3, q: [qv[0] / l, qv[1] / l, qv[2] / l, qv[3] / l] as Quat };
+        });
+        const v = chainPoint(links, [0, 0, 0]);
+        const k = (i * nj + j) * 3;
+        out[k] = v[0];
+        out[k + 1] = v[1];
+        out[k + 2] = v[2];
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Climbing II, the feedback round II (maker B: a free hop's leg kick, a free ladder's legs, `LimbPlace`'s legs laid over the
+   * pose): each of `names`' own local turn (a bone by its name) at `when[0]` seconds into `clip` (a kept array, so no number crosses the call), from the clip's own tracks (never the
+   * live pose, which this leaves as it is), four numbers a bone (x, y, z, w) into `out`; a bone the clip has no track for at its
+   * rest. The tracks' interpolants are made once a clip and a list of names (an event, kept; the list is the caller's own, kept
+   * and handed the same every frame), so a frame makes nothing. False without the clip or a bone.
+   */
+  turnsAt(clip: string, names: readonly string[], when: Float64Array, out: Float64Array): boolean {
+    const t = when[0];
+    // Kept by the clip and then by the list (a caller asking one clip for two lists in a frame, as a cued free hop's torso and
+    // legs do, must find each kept: kept by the clip alone, each ask rebuilt the other's, about 10 KB a frame).
+    const byNames = this.turnCache.get(clip);
+    let c = byNames ? (byNames.get(names) ?? null) : null;
+    if (!c) c = this.turnTracks(clip, names);
+    if (!c) return false;
+    // Each bone's keys read here, between the two about `t` (a key's own where `t` is past either end), the turn between them
+    // the shortest arc's (three's own `slerpFlat`'s arithmetic, written out: three's interpolants hand their numbers across calls
+    // and box them, a few hundred bytes a frame for a leg's nine bones).
+    const n = c.names.length;
+    for (let i = 0; i < n; i++) {
+      const T = c.times[i];
+      const V = c.values[i];
+      let x = c.rest[i * 4];
+      let y = c.rest[i * 4 + 1];
+      let z = c.rest[i * 4 + 2];
+      let w = c.rest[i * 4 + 3];
+      if (T && V && T.length > 0) {
+        const m = T.length;
+        if (!(t > T[0]) || m === 1) {
+          x = V[0];
+          y = V[1];
+          z = V[2];
+          w = V[3];
+        } else if (t >= T[m - 1]) {
+          x = V[(m - 1) * 4];
+          y = V[(m - 1) * 4 + 1];
+          z = V[(m - 1) * 4 + 2];
+          w = V[(m - 1) * 4 + 3];
+        } else {
+          // The key at or before `t`, from the last one found (a frame's `t` moves on a little), else halved for.
+          let a = c.at[i];
+          if (!(a >= 0 && a < m - 1 && T[a] <= t && t < T[a + 1])) {
+            let lo = 0;
+            let hi = m - 1;
+            while (hi - lo > 1) {
+              const mid = (lo + hi) >> 1;
+              if (T[mid] <= t) lo = mid;
+              else hi = mid;
+            }
+            a = lo;
+            c.at[i] = a;
+          }
+          const u = (t - T[a]) / (T[a + 1] - T[a]);
+          const o0 = a * 4;
+          const o1 = o0 + 4;
+          let x1 = V[o1];
+          let y1 = V[o1 + 1];
+          let z1 = V[o1 + 2];
+          let w1 = V[o1 + 3];
+          x = V[o0];
+          y = V[o0 + 1];
+          z = V[o0 + 2];
+          w = V[o0 + 3];
+          if (w !== w1 || x !== x1 || y !== y1 || z !== z1) {
+            let dot = x * x1 + y * y1 + z * z1 + w * w1;
+            if (dot < 0) {
+              x1 = -x1;
+              y1 = -y1;
+              z1 = -z1;
+              w1 = -w1;
+              dot = -dot;
+            }
+            let s0 = 1 - u;
+            let s1 = u;
+            if (dot < 0.9995) {
+              const theta = Math.acos(dot);
+              const sin = Math.sin(theta);
+              s0 = Math.sin(s0 * theta) / sin;
+              s1 = Math.sin(s1 * theta) / sin;
+            }
+            x = x * s0 + x1 * s1;
+            y = y * s0 + y1 * s1;
+            z = z * s0 + z1 * s1;
+            w = w * s0 + w1 * s1;
+          }
+        }
+      }
+      const l = Math.sqrt(x * x + y * y + z * z + w * w);
+      const k = l > 0 ? 1 / l : 1;
+      out[i * 4] = x * k;
+      out[i * 4 + 1] = y * k;
+      out[i * 4 + 2] = z * k;
+      out[i * 4 + 3] = w * k;
+    }
+    return true;
+  }
+
+  /** `turnsAt`'s tracks for a clip and a list of names, read once (an event) and kept; null without the clip or a bone. */
+  private turnTracks(clip: string, names: readonly string[]): { names: readonly string[]; times: (ArrayLike<number> | null)[]; values: (ArrayLike<number> | null)[]; rest: Float64Array; at: Int32Array } | null {
+    const action = this.actions.get(clip);
+    if (!action) return null;
+    const tracks = new Map<string, THREE.KeyframeTrack>();
+    for (const tr of action.getClip().tracks) tracks.set(tr.name, tr);
+    const times: (ArrayLike<number> | null)[] = [];
+    const values: (ArrayLike<number> | null)[] = [];
+    const rest = new Float64Array(names.length * 4);
+    for (let i = 0; i < names.length; i++) {
+      const bone = this.boneNamed(names[i]);
+      if (!bone) return null;
+      const q = this.restLocal.get(bone) ?? bone.quaternion;
+      rest[i * 4] = q.x;
+      rest[i * 4 + 1] = q.y;
+      rest[i * 4 + 2] = q.z;
+      rest[i * 4 + 3] = q.w;
+      const tr = tracks.get(`${bone.name}.quaternion`);
+      const ok = !!tr && tr.values.length === tr.times.length * 4;
+      times.push(ok ? tr!.times : null);
+      values.push(ok ? tr!.values : null);
+    }
+    const c = { names, times, values, rest, at: new Int32Array(names.length).fill(-1) };
+    let byNames = this.turnCache.get(clip);
+    if (!byNames) {
+      byNames = new Map();
+      this.turnCache.set(clip, byNames);
+    }
+    byNames.set(names, c);
+    return c;
+  }
+  /** `turnsAt`'s tracks by clip and then by the caller's own kept list of names (read once a clip and a list; an event). */
+  private readonly turnCache = new Map<string, Map<readonly string[], { names: readonly string[]; times: (ArrayLike<number> | null)[]; values: (ArrayLike<number> | null)[]; rest: Float64Array; at: Int32Array }>>();
+
+  /**
+   * Climbing II, phase 3 (maker B): a twin of `clip` under `name`, its very tracks as an action of its own (made once a rig: an
+   * event, at the bar's first use), so the bar's flight can be crossfaded from the swing and back into the reach, which one
+   * action cannot be into itself. True where the twin stands (made now or before); false without the clip.
+   */
+  twinClip(clip: string, name: string): boolean {
+    if (this.actions.has(name)) return true;
+    const src = this.actions.get(clip)?.getClip();
+    if (!src) return false;
+    this.actions.set(name, this.mixer.clipAction(new THREE.AnimationClip(name, src.duration, src.tracks)));
+    return true;
+  }
+
   /** The clip posing the arms right now: a shot on the upper body, a one-off, the upper layer, else the state clip. */
   armSource(): string {
     const shot = this.upperShot && !this.additive.has(this.upperShot.getClip().name.replace(/^(upper|lower):/, '')) ? this.upperShot : null;
@@ -1054,7 +1335,7 @@ export class CharacterRig {
    * `from` starts a one-off that many seconds into the clip (an imported landing's trim: the part of
    * it before the feet come down is skipped), and what is returned is then what is left to play.
    */
-  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false, from = 0 }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean; from?: number } = {}): number | null {
+  play(clip: string, { loop = false, fadeIn = 0.1, timeScale = 1, hold = false, upperOnly = false, from = 0, keepWeight = false }: { loop?: boolean; fadeIn?: number; timeScale?: number; hold?: boolean; upperOnly?: boolean; from?: number; keepWeight?: boolean } = {}): number | null {
     if (!this.actions.has(clip)) return null;
     // Never past the clip's own end, less a moment, so a trim set too long still shows its last pose and ends.
     const startAt = from > 0 ? Math.min(from, Math.max(0, this.actions.get(clip)!.getClip().duration - 0.02)) : 0;
@@ -1097,7 +1378,13 @@ export class CharacterRig {
       this.swingFading = was;
       if (this.current && this.current !== was) this.current.fadeOut(fadeIn);
       next.fadeIn(fadeIn);
-    } else if (was && was !== next) was.crossFadeTo(next, fadeIn, false);
+    } else if (was && was !== next) {
+      // Climbing II, Smoothness II, item 2 after its review (`keepWeight`, the hang's one-offs under `climb.transitions`
+      // 'blend'): a clip still fading in fades out from the weight it has, never from a whole one (three's fade out starts at
+      // one: a grab begun while the falling loop was three quarters in jumped it to all of it in a frame).
+      if (keepWeight && was.enabled && was.getEffectiveWeight() < 1) was.setEffectiveWeight(was.getEffectiveWeight());
+      was.crossFadeTo(next, fadeIn, false);
+    }
     else if (was === next) next.fadeIn(0);
     this.overrideUpper = false;
     this.override = next;
@@ -1107,6 +1394,149 @@ export class CharacterRig {
     this.overrideEnds = loop || hold ? Infinity : duration;
     this.overrideTime = 0;
     return duration;
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 1: the whole-body one-off playing now played at `rate` of its own rate from this frame
+   * (a timed hop's flight, a drop's fall): the climbing's clock and the pose keep one time. Nothing while none plays.
+   */
+  overrideRate(rate: number, clip: string | null = null): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && (clip === null || o.getClip().name === clip)) o.timeScale = rate;
+  }
+
+  /** Smoothness II, item 1: the whole-body one-off `clip` (when it is the one playing) put `t` seconds into its clip. */
+  overrideSeek(t: number, clip: string): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) o.time = t;
+  }
+
+  /**
+   * Smoothness III, item 1 (the review's): `overrideSeek` and `overrideRate` for a hop's move every frame, the seconds and the
+   * rate read from `overrideSeekAt` and `overrideRateAt`, which the caller writes just before: a number handed across the call was
+   * made anew every frame of every hop.
+   */
+  overrideSeekNow(clip: string): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) o.time = this.overrideSeekAt;
+  }
+
+  overrideRateNow(): void {
+    const o = this.override;
+    if (o && !this.overrideUpper) o.timeScale = this.overrideRateAt;
+  }
+
+  /** `overrideSeekNow`'s seconds and `overrideRateNow`'s rate (written by the caller first). */
+  overrideSeekAt = 0.5;
+  overrideRateAt = 0.5;
+
+  /**
+   * Smoothness II, item 1: the whole-body one-off `clip` (when it is the one playing) held past its own end for `lease` more
+   * seconds of the rig's time, the caller renewing it every frame it drives the clip (a drop played by the owner's rule): a
+   * hold its driver stops renewing (the body taken by a path that runs no drop) lets go by itself, as a one-off's end does.
+   */
+  holdOverride(clip: string, lease: number): void {
+    const o = this.override;
+    if (o && !this.overrideUpper && o.getClip().name === clip) this.overrideEnds = this.overrideTime + lease;
+  }
+
+  /** The whole-body one-off's own time now (seconds into its clip), NaN while none plays: the climbing's tests read it. */
+  overrideAt(): number {
+    const o = this.override;
+    return o && !this.overrideUpper ? o.time : Number.NaN;
+  }
+
+  /**
+   * Climbing II, Smoothness II, item 2 (`climb.transitions` 'blend'): end the whole-body one-off by crossfading it straight
+   * into the clip of the state as it stands now (never through the clip that played before the one-off), that clip started
+   * where its pose is nearest the one-off's own last pose (`nearestPhase`), over `fade` seconds. As `yieldOverride`, with the
+   * phase. Nothing while none plays.
+   */
+  blendOut(fade: number): void {
+    const ending = this.override;
+    if (!ending) return;
+    if (this.overrideUpper) {
+      this.stopOverride(fade);
+      return;
+    }
+    const state = this.state;
+    const upper = this.wantedUpper;
+    this.override = null;
+    this.current = ending;
+    this.state = null;
+    this.upperName = null;
+    if (state) this.setState(state, 0, upper, { fade });
+    const next = this.current;
+    if (next === ending) {
+      ending.fadeOut(fade);
+      return;
+    }
+    if (next) {
+      // The loop picked up where its pose is nearest the one-off's last (its own time: a fade starts the clip from nought).
+      next.time = this.nearestPhase(ending.getClip(), next.getClip());
+      ending.crossFadeTo(next, fade, false);
+    }
+  }
+
+  /**
+   * Smoothness II, item 2: a clip `setState` changes to is taken up where its pose is nearest the one it fades from (the wall
+   * climb's caller sets it before its `setState` under `climb.transitions` 'blend'; false everywhere else, as ever).
+   */
+  nearestNext = false;
+
+  /** Each pair's answer, kept (an event's arithmetic, once a pair a session): one-off clip name, a tab, the loop's. */
+  private readonly phaseCache = new Map<string, number>();
+
+  /**
+   * The time in `loop` whose pose is nearest `from`'s last frame: every joint's turn compared (the sum of the angles between
+   * the two quaternions, the hips' place by its distance at a radian a metre), at each of the loop's own keyframes. Worked out
+   * once a pair and kept.
+   */
+  nearestPhase(from: THREE.AnimationClip, loop: THREE.AnimationClip, fromTime = Number.NaN): number {
+    // At its last frame (a one-off ending: kept), or at a time of its own (a loop left part way: an event, worked out each time).
+    const atEnd = !(fromTime === fromTime);
+    const key = `${from.name}\t${loop.name}`;
+    const known = atEnd ? this.phaseCache.get(key) : undefined;
+    if (known !== undefined) return known;
+    const last = new Map<string, number[]>();
+    for (const tr of from.tracks) {
+      const vs = tr.values;
+      const n = tr.getValueSize();
+      const k = tr.times.length - 1;
+      if (k < 0) continue;
+      if (atEnd) last.set(tr.name, Array.from(vs.slice(k * n, k * n + n)));
+      else last.set(tr.name, Array.from(interpOf(tr).evaluate(fromTime) as ArrayLike<number>));
+    }
+    let times: ArrayLike<number> = [0];
+    for (const tr of loop.tracks) if (tr.times.length > times.length) times = tr.times;
+    let best = 0;
+    let bestCost = Infinity;
+    const interps = loop.tracks.map((tr) => interpOf(tr));
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];
+      let cost = 0;
+      for (let j = 0; j < loop.tracks.length; j++) {
+        const tr = loop.tracks[j];
+        const want = last.get(tr.name);
+        if (!want) continue;
+        const v = interps[j].evaluate(t) as ArrayLike<number>;
+        if (tr.getValueSize() === 4) {
+          const d = Math.abs(v[0] * want[0] + v[1] * want[1] + v[2] * want[2] + v[3] * want[3]);
+          cost += 2 * Math.acos(d > 1 ? 1 : d);
+        } else if (tr.getValueSize() === 3 && /\.position$/.test(tr.name)) {
+          const dx = v[0] - want[0];
+          const dy = v[1] - want[1];
+          const dz = v[2] - want[2];
+          cost += Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = t;
+      }
+    }
+    if (atEnd) this.phaseCache.set(key, best);
+    return best;
   }
 
   /** End a one-off clip early and fade the state clip back in. */
@@ -1196,6 +1626,10 @@ export class CharacterRig {
         // A held clip (a stance) plays once and keeps its last frame.
         next.reset().setLoop(this.hold.has(clipName!) ? THREE.LoopOnce : THREE.LoopRepeat, Infinity).setEffectiveWeight(1).play();
         next.clampWhenFinished = true;
+        // Climbing II, Smoothness II, item 2 (the wall climb's clips under `climb.transitions` 'blend', `nearestNext`): the clip
+        // taken up where its pose is nearest the one it fades from as that one stands now (never a striding pair, which keep
+        // their step).
+        if (this.nearestNext && was && !same && was.enabled && !(a && b)) next.time = this.nearestPhase(was.getClip(), next.getClip(), was.time);
         this.syncOn = false;
         if (a && b && was) {
           next.time = startAt;
@@ -1873,6 +2307,21 @@ export class CharacterRig {
       if (bone.quaternion.equals(turn.turned)) bone.quaternion.copy(turn.clean);
     }
     this.lookTurned = false;
+  }
+
+  /**
+   * Back to the clips alone after something posed the bones directly (a ragdoll): every bone on its rest and the
+   * mixer told so (`src/anim/poseReset.ts`), so the next update writes every joint the clips drive and leaves the rest
+   * at rest. The placements laid after the mixer (the limbs', the legs', the look's, the duck's neck) are let go first,
+   * so none puts back a pose from before.
+   */
+  retakePose(): void {
+    this.limbPose?.restore();
+    this.legPose?.restore();
+    this.clearLook();
+    this.duckNeckTurn.on = false;
+    poseAtRest(this.bones.values(), this.restLocal, this.restPosition, this.restScale);
+    forgetMixerWrites(this.mixer);
   }
 
   /**

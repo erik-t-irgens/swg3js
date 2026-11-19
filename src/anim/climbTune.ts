@@ -6,7 +6,7 @@
 // could be said for it, with the reason beside it.
 //
 // Pure: no three.js and nothing of the page, so the node tests move it as the console does.
-import { moveBefore } from './moveTune.ts';
+import { MOVE_TUNE, moveBefore, moveSmoothBefore, moveSmooth2Before, moveSmooth3Before } from './moveTune.ts';
 
 export interface ClimbTune {
   /**
@@ -214,6 +214,467 @@ export interface ClimbTune {
   roomBrush: number;
   /** Item 2: the least lift over the lip a lower way in is tried down to, metres (ours: nought, the climb's own skin of 0.02 still under the feet; today's lift is 0.05). */
   liftLeast: number;
+  /**
+   * Climbing II, the smoothness round, item 1 (the owner: "I can't grab any of the ledges in the chimney section you made or
+   * any ledges that are that shallow but I should be able to"): 'grab' a lip is the top edge of a face whose top runs back at
+   * least `shelfMin` before anything rises behind it, with `handRoom` clear over it at the hands, whatever stands over or
+   * behind it beyond that (a ladder's rung, a shelf with its next tier behind it, a window sill): the grab looks up a column
+   * of the face for every such edge in its reach band and takes the one nearest the hands' own height, and a hop's probe
+   * looks down a column through every top it passes and takes the one nearest the height it asks about. 'before': phase 2's
+   * (a lip with anything over its band's head is no lip; a hop's probe takes the topmost top in its column).
+   */
+  shelves: 'grab' | 'before';
+  /** Item 1: how far a top must run back from its edge before anything rises behind it, metres (the round's start, 0.12: the fingers' and a knuckle's depth). */
+  shelfMin: number;
+  /** Item 1: how much room over a top at the hands it must have, metres (the round's start, 0.15: a hand's thickness curled over it, and a little). */
+  handRoom: number;
+  /**
+   * The smoothness round, items 2 and 3 (the owner's control design of 2026-11-17): 'cue' one grammar while hanging: a way
+   * is asked by holding a key (W where the view looks: up at the wall, a side past `wayTurn`, behind past `lookStart`; A or D
+   * their own side; S down), a hold in that way at a ladder-like distance (`ladderMin` to `ladderMax`) is climbed to by the
+   * key alone, a lip further within the hop band is shown by the body (a pull-up, a lean, the reach back, the drop's hand
+   * lowered) only while the key is held, and Space commits to what is shown; with nothing shown Space jumps a little off
+   * (S with it, phase 2's down else off backward); W with nothing up climbs onto the top; a tap of the crouch key drops to
+   * the lip beneath (within `dropMost`), held past `dropHold` it lets go fully. Nothing of it goes on the action bar.
+   * 'before': phase 2's keys as they shipped.
+   */
+  hangKeys: 'cue' | 'before';
+  /** Item 2: how far the view turns from the wall before W means that side, degrees (ours: 45, half way to square: looking along the wall is a side, looking at it is up). */
+  wayTurn: number;
+  /** Item 2: a hold in the asked way at least this far from the held one is ladder-like (climbed by the key alone), metres (the round's start, 0.3: nearer is the same hold). */
+  ladderMin: number;
+  /** Item 2: and no further than this, metres (the round's start, 1.1: the course's 0.75 and 1 m ladders are ladder-like, 1.25 m and over are hops). */
+  ladderMax: number;
+  /** Item 2: how far in front of or behind the held face a lip above or below may stand for W, S and the crouch's drop, metres (ours: 0.8, the owner's shelves step 0.6 back, and a hand more). */
+  wayDepth: number;
+  /** Item 2: how far into the hop clip's coil a cued hop's pose is held, a share of the coil (the hands leave the lip about 0.35 s in; ours: half of it, a slight pull-up readying the jump). */
+  cueShare: number;
+  /** Item 2: how long a cue eases in and out, seconds (ours: 0.2, the hang's own ease and a little more, so a cue never snaps). */
+  cueEase: number;
+  /** Item 2: how far a side's cue leans the hanging body that way, degrees (ours: 8, a slight lean: the weight shifted toward the hop, a shimmy still playing under it). */
+  cueLean: number;
+  /** Item 3: how far below the hang the crouch's drop reaches for a lip beneath, metres (the round's start, 2.5). */
+  dropMost: number;
+  /** Item 3: the crouch held past this lets go fully (and is no drop to the lip beneath), seconds (the round's start, 0.25: a tap is quicker). */
+  dropHold: number;
+  /**
+   * The smoothness round, item 6 (found driving the extra rows: at a zigzag's top rung S with D took the wall's own top edge
+   * level with the hands, 0.3 m back, over the rung 1 m down the owner asked for): 'below' a side's diagonal asked with W takes
+   * only a lip over the held one, and asked with S only one under it, by at least the quarter metre the band up or down keeps
+   * (a lip level with the hands is A's or D's alone); 'before' phase 2's band, 0.3 m either way of the hands' height.
+   */
+  diagonals: 'below' | 'before';
+  /**
+   * Climbing II, Smoothness II, item 1 (the owner: "our body will be in position in time for the animation's hand-touch to the
+   * ledge ... with a natural slow-down near the top as if gravity is slowing me down"): 'timed' a hop, a grab and a step down
+   * carry the body only between their clip's own moments (src/anim/handTimes.ts: the owner's where he gave them, else the
+   * clip's measure): still on the held lip (or the ground) until the hands leave it, then through the air on a thrown body's
+   * arc (constant acceleration: a quadratic way at an even pace, lifted `flightLift` of its length, an up hop slowing to its
+   * top), on the new lip exactly as the clip's hands touch it, and still after; the clip's airborne stretch played at a rate
+   * fitted to the way (`flightRateMin` to `flightRateMax`), the figure drawn with the clip's own travel put back so its hands
+   * stay on a lip while the body is still. A let-go drop's clip is played by the owner's drops' rule (`dropRateLeast`).
+   * 'before': the smoothness round's (the body carried over the whole clip).
+   *
+   * Climbing II, Smoothness III, item 1 (the owner: "the hopping timing for free hanging left/right is determining how quickly it
+   * will take to get to the landing spot, so I'm going incredibly fast through the air ... do a near-correct physics calculation
+   * that just knows what arc would be needed to complete that naturally and the correct speed, and hold the animation until
+   * contact happens"): 'arc' a hop's flight takes the time the arc gives it, never the clip's: the body placed frame by frame on a
+   * thrown body's arc under `flightGravity`, rising `arcRise` over the higher of its two ends (a drop to a lower lip falls from
+   * rest), its time the rise's and the fall's; the clip played at its own rate before the hands leave and after they touch, and
+   * its airborne stretch fitted to the flight: slowed to `flightRateMin` and then its frames just before the touch held (eased in
+   * and out over `holdEase`) for as long as the flight lasts, sped up to `flightRateMax` at most (a flight shorter than that is
+   * flown slower, never the clip hurried). Grabs and step downs as 'timed'.
+   */
+  hopFlight: 'arc' | 'timed' | 'before';
+  /** Smoothness III, item 1: the gravity a hop's arc is worked out under, m/s^2 (the game's own on foot, Jedi Academy's 800 units: 20.32). */
+  flightGravity: number;
+  /** Item 1: how high a hop's arc rises over the higher of its two ends, metres (ours: the brief's own example, a 3 m hop taking about the time a 0.5 m rise and fall does). */
+  arcRise: number;
+  /** Item 1: how long the clip eases into and out of a held frame while it waits for the hands' contact, seconds (ours: 0.1, about three of the clip's own frames at 30 a second). */
+  holdEase: number;
+  /**
+   * Smoothness III, item 2 (the owner: "the ledge checker doesn't check to see if my body will fit from the ledge to whatever is
+   * beneath it. I clipped through the world by accidentally hopping down to one of the test track's base cubes"): 'fit' every
+   * lip a grab, a hop, a cued hop, a drop and a step along a lip would take is tested for the body that will hang there: the
+   * ground (the terrain's heightfield, which a shape test cannot find a body wholly under) and anything still under the hang,
+   * felt for with one ray from over the lip down past the hanging feet in front of its face, and the move's way checked for the
+   * ground as well as for solids; a lip whose hang meets the ground is no target (a lip within a body's hang of the ground is
+   * stood on or dropped to, never hung from). 'none': Smoothness II's (only what a shape test finds).
+   */
+  targetRoom: 'fit' | 'none';
+  /**
+   * Smoothness III, item 4b (Smoothness II's 6b; the owner: "the animation for dropping down to a lower ledge while already on a
+   * ledge seems to be repeating the left or right ledge jump animation"): 'drop' a drop to a lower lip (the crouch's tap, a cued
+   * drop, S with Space down) plays a move of its own made of two parts of the owner's table (`DROP_PARTS`): the held kind's drop
+   * clip from its start through the hands' release and on into the fall, then the catch clip for the lower hang's kind into the
+   * hang, crossfaded over `transitionBlend`, the flight between timed by item 1; 'reverse' the hop up played backward (a hop's
+   * arc reversed in time is still a fall); 'hop': Smoothness II's (the side hop toward the side it lands).
+   */
+  dropMove: 'drop' | 'reverse' | 'hop';
+  /** Item 4b: each part's start and end, seconds into its clip (the owner's table, `DROP_PARTS`, names the clips). */
+  dropParts: {
+    bracedFrom: number;
+    bracedTo: number;
+    freeFrom: number;
+    freeTo: number;
+    catchBracedFrom: number;
+    catchBracedTo: number;
+    catchFreeFrom: number;
+    catchFreeTo: number;
+  };
+  /**
+   * Smoothness III, item 4 (the owner: "I also can't hop up/down while free hanging"): 'on' a free hang hops up to a lip above
+   * past the ladder's range within `hopUp` (W, the cue and Space; W alone within the ladder's range as ever), on a move of its
+   * own from the owner's table (`FREE_HOP_PARTS`): the braced hop up's upper body, its arms' reach and pull, over the free
+   * hang's own hanging legs (his rule for hands with no wall: "use the animation's upper body, then just have the feet hang and
+   * legs sway"), timed by item 1's arc; and drops down as a braced hang does, by item 4b's drop move. 'off': Smoothness II's (a
+   * free hang hops up to nothing past the ladder's range: "a free hang has nothing to brace on to hop up").
+   */
+  freeHops: 'on' | 'off';
+  /** Item 4: the free hop up's part of its clip, seconds (the owner's table, `FREE_HOP_PARTS`, names the clip). */
+  freeHopParts: { from: number; to: number };
+  /**
+   * Smoothness III, item 4b (Smoothness II's 5b; the owner: "ladder climbing uses the wall climbing animation which is good but it
+   * has a weird repeating hitch where it's not using the whole animation and hands don't take turns grabbing the next rung or
+   * grip"): 'cycle' a ladder's climb plays the wall clip's whole cycle laid over two rungs, one hand reaching per rung in turn,
+   * its phase driven by how far the body has climbed and never restarted per rung (held where it stands between two rungs while
+   * the key is held), the clip's rate held within `ladderStretch` of its own (the body's pace from rung to rung follows from
+   * it, so a near or far rung stretches the reach rather than snapping the clip); each reaching hand eased from where the clip
+   * carries it onto its rung over the reach and held there while the other reaches. 'rung': Smoothness II's (the clip from its
+   * start at every rung).
+   */
+  ladderCycle: 'cycle' | 'rung';
+  /** Item 4b: how far a ladder's clip may be played off its own rate, a share either way (the brief's start, 0.2: ±20%). */
+  ladderStretch: number;
+  /** Item 4b: how far a free ladder's reaching hand is led out round the rungs' front at its reach's middle, metres (ours: 0.2). */
+  ladderArc: number;
+  /** Item 4b: how much of the way a reaching hand is led rather than carried by the clip at its reach's middle, a share (ours: 0.5). */
+  ladderLead: number;
+  /** Item 1: the slowest and quickest a clip's airborne stretch is played, of its own rate (ours: 0.7 and 1.5: slower is slow motion, quicker a snap). */
+  flightRateMin: number;
+  flightRateMax: number;
+  /** Item 1: how high a hop's way rises over the straight way at its middle, a share of its length (ours: the band's own 0.1, a 3 m hop rising 0.3 m). */
+  flightLift: number;
+  /** Item 1: how much of a grab's clip before its touch frame is played as the reach, when the grab is caught in the air, seconds (ours: 0.2, about the owner's grabs' own reach before their touch). */
+  grabLead: number;
+  /** Item 1, the owner's drops' rule: the slowest a drop's stretch between the hands' release and the feet's touch is played, of its own rate (ours: 0.35); a longer fall holds the stretch's last frame until the feet meet the ground. */
+  dropRateLeast: number;
+  /**
+   * Item 2 (the owner: "there's a freeze then a jump in the animation before going to the idle"): 'blend' every one-off into or
+   * out of a hang or a wall climb crossfades straight into what follows, `transitionBlend` before its own end, the loop that
+   * follows started at the phase whose pose is nearest the one-off's last; never through the clip that played before it.
+   * 'before': the smoothness round's (the one-off's last frame held, then faded through the clip before it).
+   */
+  transitions: 'blend' | 'before';
+  /** Item 2: how long a transition's crossfade is, seconds (ours: 0.25, a little more than the hang's own ease, so the loop is well under way as the one-off ends). */
+  transitionBlend: number;
+  /** Item 2's measure (`climb({ transitions: true })` and the tests): a bone faster than this many times the faster clip's own fastest is a jump (ours: 2). */
+  poseJump: number;
+  /**
+   * Item 7 (the owner: "my camera can snap around and jump quickly in some movements while climbing or shimmying around
+   * corners"): 'eased' while hanging, shimmying, hopping, climbing a wall or topping out, the camera follows the body through a
+   * critically damped follow of `camEase`, and a pull-in at a wall is let out again eased; 'before' the body's own place.
+   */
+  camera: 'eased' | 'before';
+  /** Item 7: how quickly the camera's follow catches the body, seconds (ours: 0.12, the follow settling in about a third of a second, never snapping). */
+  camEase: number;
+  /** Item 7: how long the camera, pulled in at once by a wall while climbing, takes to go back out, seconds (the race view's own 0.5). */
+  camOut: number;
+  /** Item 7's measure: a frame's change of the camera's place more than this many times the eased follow's own is a snap (ours: 3). */
+  camJump: number;
+  /**
+   * Item 8 (the owner: "when grabbing a ledge that is already at an incline or decline, my hands should grab appropriately"):
+   * 'each' each hand's target is the lip at that hand's own place along it from the grab's touch frame on, and where the lower
+   * hand cannot reach its point the body hangs lower; 'before' the grab's hands on the line through the lip's middle.
+   */
+  slopeHands: 'each' | 'before';
+  /**
+   * Item 3 (the owner: "when shimmying takes me around a corner, even a sharp corner, my body tends to phase through the wall
+   * ... using the mesh as either a collider or a guide"): 'spheres' the posed figure's sixteen spheres (src/player/bodySpheres.ts,
+   * measured off the rest mesh at load) are asked of what stands still every frame it hangs, shimmies, hops, climbs a wall or
+   * ducks, and the figure is pushed out of what they are in along its own face (a hand or a foot planted on its lip or face
+   * allowed its contact); 'before' the smoothness round's (nothing asked).
+   */
+  bodyClear: 'spheres' | 'before';
+  /** Item 3: how quickly the push eases back in once the need for it falls away, seconds (ours, 0.08: a few frames, so a corner rounded is let go of smoothly; it goes out at once). */
+  clearEase: number;
+  /** Item 3: the furthest the figure is pushed out, metres (ours, 0.3: about a forearm, past which the hands would leave the lip; a body deeper than that is the hang's own place at fault). */
+  clearMost: number;
+  /**
+   * Item 5 (the owner: "when I reach the top, my hand in the animation sometimes can reach above the topmost ledge and grab air
+   * ... dynamically grab lower or deeper in to make it grab actual wall"): 'grip' a wall climb's hand whose hold stands in air
+   * (over the top, past a side, over a hole) is moved to the nearest real grip, down the face under the top or in over the top
+   * onto its edge; 'before' the smoothness round's (a hand with no face under it left as the clip has it).
+   */
+  wallHands: 'grip' | 'before';
+  /** Item 5: how far a hand in the air may be moved to find a grip, metres (ours, 0.9: a whole arm's reach and a hand, so a climb clip's hand stretched high over a wall's top still finds the lip under it, and no further). */
+  gripSeek: number;
+  /**
+   * Item 6 (the owner: "the animation for jumping off the wall is slow and annoying ... use the JKA animation for wall grabbing
+   * ... it's shorter and pushes me back further"): 'jka' Space off a wall climb, and S with Space off a braced hang where no hop
+   * is cued, play Jedi Academy's BOTH_FORCEWALLREBOUND_BACK and push the body back off the face at Jedi Academy's own wall
+   * rebound (src/player/jkaMove.ts's `JKA.jumpOffWallSpeed` back and `JKA.wallJumpStrength` up), facing the wall as it flies; 'before'
+   * the smoothness round's jump off (`jump_from_wall`, turned round at its end).
+   */
+  pushOff: 'jka' | 'before';
+  /** Item 6: the push back off the face, a share of Jedi Academy's own (ours, 1: Jedi Academy's 5.08 m/s). */
+  pushBack: number;
+  /** Item 6: the lift with it, a share of Jedi Academy's own (ours, 1: Jedi Academy's 8.53 m/s). */
+  pushUp: number;
+  /**
+   * Climbing II, phase 3 (the owner's "a pole for swinging - swinging between perpendicular poles across a chasm like tomb
+   * raider"): 'on' a still collider that is long, level and thin (`barThin`, `barLength`) with room under it for a hanging body
+   * is a bar (src/player/barShape.ts), never a lip (the ledges' rays pass it), grabbed with E (src/player/barSwing.ts) and swung
+   * on as a pendulum; 'off' phase 3's before, where a bar is whatever the ledge search makes of a thin box (the course's bars
+   * caught free as a lip).
+   */
+  bars: 'on' | 'off';
+  /** Phase 3: a bar's cross-section is under this, metres (the brief's start, 0.12: a hand's grip round it; the course's bars are 0.07 and its free beams, 0.2 by 0.3, stay lips). */
+  barThin: number;
+  /** Phase 3: and its length at least this, metres (the brief's start, 0.8: room for both hands and a shift along it; the course's bars are 4). */
+  barLength: number;
+  /** Phase 3: the swing is a pendulum under this gravity, m/s² (ours, 20.32: the game's own on foot, Jedi Academy's 800 units, as a hop's arc is). */
+  swingGravity: number;
+  /** Phase 3: W or S held at the swing's own phase pushes it on by this, rad/s² (ours, 4: W alone pumps a still hang to the largest swing in about four swings against the damping, W and S in turn in about two). */
+  swingPump: number;
+  /** Phase 3: the swing dies away by this, a second (ours, 0.35: let go of the keys, a swing halves in about four seconds and comes to a still hang). */
+  swingDamp: number;
+  /** Phase 3: the largest swing the keys pump to, degrees either side of straight down (ours, 70: short of the clip's own front, 84, so the pose has room past it). */
+  swingMost: number;
+  /** Phase 3: how much of the body's speed at the grab is carried into the swing (ours, 1: all of it, held to the largest swing). */
+  swingCarry: number;
+  /** Phase 3: A and D move the hands along the bar at this, m/s (ours, 0.6: a slow hand over hand, about the free shimmy's own 0.39 m in 1.4 s and a little more). */
+  barShimmy: number;
+  /** Phase 3: a grab from the ground or a standing jump or a fall carries the body onto the bar over this, seconds (ours, 0.25: the ledges' own grab's eases and a little more); a running jump's is the clip's own reach, 0.13. */
+  barGrab: number;
+  /**
+   * Climbing II, phase 3 (maker B): 'fly' Space off a bar flies on the swing's own velocity and a little more (`barBoost`) in
+   * `run_and_swing`'s flight, held by the bar on the physics' own steps: a bar within the band ahead of the hands along the
+   * flight (`catchReach`, `catchSlack`) is caught into the clip's reach with the flight's speed carried into the new swing,
+   * else the clip's landing where the feet meet ground or the falling clips where they do not; 'plain' maker A's let-go, the
+   * swing's velocity handed to the movement with no boost, no catch and the falling clips.
+   */
+  barFlight: 'fly' | 'plain';
+  /** Phase 3: Space off a bar adds this along the swing's own way, m/s (ours, 1: a let-go on the forward swing then reaches a bar 2 or 3 m on; 2.5 reaches 4 m, 4 reaches 5). */
+  barBoost: number;
+  /** Phase 3: in the flight a bar is caught this far ahead of the hands along the flight's way, metres (ours, 0.6: about what the flight covers in the clip's own 0.13 s reach). */
+  catchReach: number;
+  /** Phase 3: and within this of the hands above, below and to either side, metres (ours, 0.35: a hand's span and a little, as the hops' band is forgiving). */
+  catchSlack: number;
+  /** Phase 3: a blow of at least this much health knocks the body off the bar, straight down (ours, 25: a quarter of a whole health bar; the ledges have no such rule). */
+  barKnock: number;
+  /**
+   * Climbing II, phase 4 (the owner's "rope climbing and swinging"): 'on' a rope hangs from its anchor (src/player/hangingRope.ts:
+   * no collider, drawn as the grappling hook's ribbon, free to swing), the course's `rope` piece is one, and E in reach grabs it at
+   * the height met and swings it as a pendulum from the anchor at the body's place along it (src/player/ropeSwing.ts); 'off'
+   * phase 4's before, the course's rope a still column (and nothing hangs).
+   */
+  ropes: 'on' | 'off';
+  /**
+   * Phase 4: which keys pump the swing (the owner's to choose): 'ad' A toward the view's way and D away from it, W and S climbing
+   * up and down; 'ws' the same, and W and S pump as well while the rope swings (past `ropeSwingFrom`), climbing only while it
+   * hangs still. Not a before: either reads the rope as phase 4 builds it.
+   */
+  ropeKeys: 'ad' | 'ws';
+  /** Phase 4: a rope's length, metres, every rope stood without one of its own (ours, 8: the course's, from its beam 6 m over the take-off floor to a metre over the pit's floor). */
+  ropeLength: number;
+  /** Phase 4: how far a rope gives under a hanging body at its whole length, metres (ours, 0.15: a climbing rope's couple of per cent at 8 m; a catch from a fall bounces about as much again for each metre a second it came in at). */
+  ropeGive: number;
+  /** Phase 4: W and S climb the rope at this, m/s (ours, 0.5: a climb a game can wait for, the clip a little over twice its own pace, 0.22, its holding hand still keeping its place on the rope since its phase follows the way climbed). */
+  ropeClimb: number;
+  /** Phase 4: a grab carries the body onto the rope over this, seconds (ours, 0.25: the bar's own grab's). */
+  ropeGrab: number;
+  /** Phase 4: a pump key held at the swing's own phase pushes it on by this, m/s² along the swing (ours, 4: the bar's own push at its radius, so a long rope pumps no harder than a bar). */
+  ropePush: number;
+  /** Phase 4: the swing dies away by this, a second (ours, 0.35: the bar's, a swing let alone halving in about four seconds). */
+  ropeDamp: number;
+  /** Phase 4: the largest swing the keys pump to, degrees either side of straight down (ours, 60: short of the bar's 70, a rope swung further reading as a trapeze act). */
+  ropeMost: number;
+  /** Phase 4: how much of the body's speed along the swing at the grab is carried into it (ours, 1: all of it, held to the largest swing). */
+  ropeCarry: number;
+  /** Phase 4: the swing's plane turns toward the view's way at most this, degrees a second (ours, 60: a quarter turn in a second and a half, slow enough that a swing is never thrown about). */
+  ropeTurn: number;
+  /** Phase 4: a swing past this either way plays the swing's clip, under it the still hang (ours, 5 degrees: a smaller sway reads as hanging still); back to the hang under half of it. */
+  ropeSwingFrom: number;
+  /**
+   * Phase 4, item 4 (maker B): 'lips' Space lets go on the swing's velocity and, where the flight's arrival meets a lip at a
+   * landing's height, the body flies there held on the physics' own steps and lands on it by the clip the lip's height under
+   * the feet chooses (level `swinging`, knee `swing_to_land_1`, between knee and waist `swing_to_land`, waist `swing_into_wall`:
+   * src/player/ropeSwing.ts's `release`), carried up onto the top; with no lip, the plain let-go. 'plain' maker A's let-go: the
+   * swing's velocity handed to the movement, whatever is ahead.
+   */
+  ropeLand: 'lips' | 'plain';
+  /** Phase 4, item 4: a lip whose top stands under this over the feet where the flight meets it is landed on level (ours, 0.2 m: a step the level landing takes in its stride, a stair's riser). */
+  ropeLandKnee: number;
+  /** Phase 4, item 4: from this the knee landing gives way to the one between knee and waist (ours, 0.45 m: about the human male's knee, past which the knee clip's raised legs no longer clear the lip). */
+  ropeLandBetween: number;
+  /** Phase 4, item 4: from this the waist landing, the feet to the wall (ours, 0.78 m: halfway between the between clip's own lip, its lower foot rising 0.70 m onto the top, and the waist clip's, 0.86 m, both measured off the clips on the human male). */
+  ropeLandWaist: number;
+  /** Phase 4, item 4: a lip higher than this over the feet is a wall, no landing (ours, 1.1 m: the waist clip's own 0.86 and a quarter metre). */
+  ropeLandTop: number;
+  /** Phase 4, item 4: a top met from above is a level landing only this far under the feet at the let-go (ours, 0.5 m: the owner's "level with the body"; deeper, the body falls onto it as a fall does today). */
+  ropeLandBelow: number;
+  /** Phase 4, item 4: the body stands up this far in past the lip's edge (ours, 0.3 m: a foot's length over the edge past the capsule's own radius). */
+  ropeLandIn: number;
+  /** Phase 4, item 4: and goes in over the top at no more than this, m/s (ours, 2: about the let-go clips' own travel, 4.9 to 6 m over their 2 to 3 s, which the importer takes out). */
+  ropeLandWalk: number;
+  /**
+   * Feedback round II, item 0a (the owner: "When on a bar, I think that bar's geometry should not make the camera collide"):
+   * 'pass' the camera's block (`Physics.cameraBlock`, the camera's own call and the thrown saber's) leaves out the bar the hands
+   * hold, the bar just let go of for the length of the flight off it, and the bar a catch reaches for (handed to the engine's ray
+   * as its excluded collider); 'block' the ropes commit's, every bar a wall to the camera.
+   */
+  barCamera: 'pass' | 'block';
+  /**
+   * Item 0b (the owner: "it should settle into a hang much faster if I do nothing. 2-3 swings total"): 'swings' with no pump key
+   * held the swing's damping is worked out from the pendulum's own period at the body's radius on that bar, so its angle falls
+   * from where it was to under `barSettleTo` over `barSettleSwings` swings out and back (W or S held: `swingDamp`, so a swing still
+   * builds); 'damp' the ropes commit's, `swingDamp` whatever is held.
+   */
+  barSettle: 'swings' | 'damp';
+  /** Item 0b: a swing let alone settles to under this, degrees either side of straight down (the brief's start, 3: a sway too small to read as a swing). */
+  barSettleTo: number;
+  /** Item 0b: over this many swings out and back (the owner's "2-3 swings total": the brief's start, 2.5, the middle of his two to three). */
+  barSettleSwings: number;
+  /**
+   * Item 0c (the owner: "When we get to just hanging we should use the free hang animation with its shimmying and then switch back
+   * when swinging commences"): 'free' once the swing is under `barHangFrom` with no pump key held, the pose crossfades over
+   * `barHangBlend` from `run_and_swing`'s swing to the ledges' own free-hang loop, the hands on the bar by the ledges' limb solve,
+   * A and D playing the free-hang shimmy clips at the shift's own speed; a pump key, or the swing past `barHangFrom`, crossfades
+   * back to the swing played by its angle; 'swing' the ropes commit's, the swing's clip whatever the swing.
+   */
+  barHang: 'free' | 'swing';
+  /** Item 0c: the still hang's loop from a swing under this, degrees either side (the brief's start, 4: a little over where a swing let alone settles, so the loop comes in as it settles). */
+  barHangFrom: number;
+  /** Item 0c: and the crossfade between the swing's pose and the loop's (either way) over this, seconds (the brief's start, 0.3: a little more than the hang's own ease). */
+  barHangBlend: number;
+  /**
+   * Maker B, item 0d (the owner: "The cue for free hang jumping up [is] bad. It should be a very small pull up. Right now both hands
+   * move through and off what I'm grabbing and my body doesn't move up"): 'pull' while the up cue is held on a free hang the hands
+   * stay on the grip (the limbs' solve holding them), the arms bend and the body rises `freeCueRise`, eased in over `freeCueIn`
+   * and back down when the key is let go before the commit; its pose a part of the owner's table (`FREE_CUE_PARTS`, its seconds
+   * `freeCueParts`); the commit as now, from where the cue left the body. 'arms' the ropes commit's (the braced hop's arms,
+   * `FREE_HOP_PARTS.upper`, through and off the grip).
+   */
+  freeCue: 'pull' | 'arms';
+  /** Item 0d: how far the body rises in the free hang's up cue, metres on the human male (the brief's start, 0.08: "a very small pull up"). */
+  freeCueRise: number;
+  /** Item 0d: how long the rise takes to come in (and as long to go back down), seconds (the brief's start, 0.25: a slow, held pull). */
+  freeCueIn: number;
+  /**
+   * Items 0d and 0e: the parts of the owner's table's clips (`FREE_CUE_PARTS`), seconds: the up cue's pull (`pullFrom` to `pullTo`,
+   * held at the rise's share) and the free hop's leg kick (`kickFrom` to `kickTo`, timed to the hop's pull up to its hands' leave).
+   */
+  freeCueParts: { pullFrom: number; pullTo: number; kickFrom: number; kickTo: number };
+  /**
+   * Item 0e (the owner: "It seems like my body is fully stiff when I do the free hang hop up"): 'kick' under the free hop's arms,
+   * below the spine, the free hang climb's own leg kick (`FREE_CUE_PARTS.kick`, its seconds `freeCueParts.kickFrom` to `kickTo`)
+   * timed to the pull and let go of by the catch, and the sway of item 0f (`swayAmount`) on the hips and legs; 'stiff' the ropes
+   * commit's (the free hang's own legs, held as they hang).
+   */
+  freeHopLegs: 'kick' | 'stiff';
+  /**
+   * Item 0f (the owner: "and also while climbing ladders. Maybe mix in shimmying animations from free hang to give the illusion of
+   * sway"): 'sway' on a free ladder the free hang shimmy's hips and legs laid under the climb's arms, one shimmy step a reach (the
+   * ladder's cycle, `climb.ladderCycle` 'cycle'); on both ladders a lag of the hips and legs driven by the body's own acceleration,
+   * a damped pendulum on the physics' own steps (`swayAmount`, `swayHz`, `swayDamp`), a braced ladder's feet kept on the rungs;
+   * 'stiff' the ropes commit's.
+   */
+  ladderSway: 'sway' | 'stiff';
+  /** Item 0f: how much of the hips' lag is drawn (the brief's start, 1: the pendulum's own; 0 draws none, today's). */
+  swayAmount: number;
+  /** Item 0f: the lag's own swing, swings a second (the brief's start, 1.2: about a hanging body's legs). */
+  swayHz: number;
+  /** Item 0f: how quickly it settles, a share of the critical damping (the brief's start, 0.5: a stop overshoots once and settles). */
+  swayDamp: number;
+  /**
+   * Item 0g (the owner: "There's no way to jump at a ledge behind you for free hanging"): 'reach' the look-away for a free hang too
+   * (the braced one's threshold, `lookStart`, and twist, `lookTwist`; the leading hand reaching back, the trailing hand on the grip)
+   * and its jump at a ledge behind (the braced one's search, `hopBehindTo`), its move the free hang's own side hop of the leading
+   * side (the owner's table, `FREE_BEHIND_PARTS`: the braced one's hop clip has the feet on a wall a free hang has not got) held at
+   * `freeBehindParts.pose` while looking back and played on from there; 'side' the ropes commit's (a free hang looking back reads
+   * as a side).
+   */
+  freeBehind: 'reach' | 'side';
+  /** Item 0g: the free look-away's held pose and the hop's start, seconds into its clip (ours, 0.3: the braced look-away's own `lookPose`). */
+  freeBehindParts: { pose: number };
+  /**
+   * Climbing II, phase 5 (poles, the owner's "Pole climbing as well would be nice"): 'on' a still collider long, upright and thin
+   * (its cross-section under `poleThin` over a length of at least `poleLength`, src/player/barShape.ts's `poleAxisOf`: the course's
+   * `poles`) is a pole: E in reach grabs it facing it, W and S climb it up and down on `climbing_a_rope_1` (the feet on it, played
+   * backward for down) and stop at its top and its bottom, A and D turn the body round it, the view free (src/player/poleClimb.ts);
+   * the wall climb never takes one for a face. 'off' phase 5's before (the feedback round II's `5421344`), where a pole is whatever
+   * the wall climb and the ledges make of it.
+   */
+  poles: 'on' | 'off';
+  /** Phase 5: a pole is no thicker than this across, metres (the brief's start, 0.15: a thick pole or a sapling a fist can still close round; a lamp post's 0.2 is a wall). */
+  poleThin: number;
+  /** Phase 5: and at least this long, metres (the brief's start, 1.5: a pole a body hangs its whole length on, hands to feet; a short post is not climbed). */
+  poleLength: number;
+  /** Phase 5: W and S climb the pole at this, m/s (ours, 0.5: the rope's own climb, `ropeClimb`, the clip a little faster than its own pace, about 0.2, its holding hands still keeping their place since its phase follows the way climbed). */
+  poleClimb: number;
+  /** Phase 5: A and D turn the body round the pole at this, degrees a second (ours, 90: a quarter of the way round in a second, a hand-over-hand shuffle round a post, slow enough that the camera keeps up). */
+  poleTurn: number;
+  /** Phase 5: a grab carries the body onto the pole over this, seconds (ours, 0.25: the rope's own grab's, `ropeGrab`). */
+  poleGrab: number;
+  /** Phase 5: each foot's ball stands this far out from the pole's surface on its own side (the feet pinching it from its two sides), metres (ours, 0.04: about a sole's half width, so the instep, not the toes, is against the pole). */
+  poleFootSide: number;
+  /**
+   * Phase 5 (maker B, item 3): 'fly' Space jumps off the pole along the view (`polePush` across the ground, `poleJumpUp` up) in a
+   * flight on the physics' own steps that catches another pole, a bar or a lip in reach on the way as a hop does (src/player/
+   * poleClimb.ts); 'plain' maker A's let-go, straight down (which `climb.poles` 'off' never reaches either).
+   */
+  poleJump: 'fly' | 'plain';
+  /** Phase 5 (maker B): the jump off's push along the view, m/s (ours, 3: a strong shove off with the arms and the feet, about a standing long jump's carry over the flight, enough to reach a pole 2 m off, the course's). */
+  polePush: number;
+  /** Phase 5 (maker B): how high the jump off rises, metres (ours, 0.5: a small jump's, under the movement's own plain jump of 0.8, the body pushing off from a hold rather than the ground). */
+  poleJumpUp: number;
+  /**
+   * Phase 5 (maker B, item 3): 'slide' the crouch slides the body down the pole at `poleSlide`, the hands and feet sliding on it, to
+   * the ground (stood) or the pole's foot (dropped off it), the crouch again letting go at once and W stopping the slide; 'drop'
+   * maker A's let-go, straight down.
+   */
+  poleCrouch: 'slide' | 'drop';
+  /** Phase 5 (maker B): the slide down's speed, m/s (ours, 3: a fireman's slide, six times the climb's own and well under a fall's from a few metres). */
+  poleSlide: number;
+  /**
+   * Phase 5 (maker B, item 3): 'climb' W at the pole's top with a lip or a floor's edge in reach (behind the body first, then
+   * ahead, then either side) climbs onto it by the ledges' own climb up (src/player/ledge.ts's `climbFrom`); 'stop' maker A's, the
+   * climb stops at the top and nothing more.
+   */
+  poleTop: 'climb' | 'stop';
+  /**
+   * The rope chain round (the owner's ask of 2026-11-18: "the rope in our climbing pass right now is quite lackluster and is just a
+   * straight pipe on a pendulum with no physics or bend"): 'chain' each rope's drawn shape is a chain of points stepped on the
+   * physics' own steps (src/player/ropeChain.ts: pinned at its anchor, its links held to the rope's length, a gentle bend, gravity,
+   * a damping and the weather's wind as a drag, held over the ground and out of what stands still), and with a body on it the
+   * hands a moving pin, the tail swinging after the body; nothing of it feeds back into the body. 'straight' phase 5's (`6e59ce8`):
+   * drawn from the anchor through the hands to its end in a straight line at the swing's angle, as phase 4 drew it.
+   */
+  ropeLook: 'chain' | 'straight';
+  /** The rope chain: how many points a rope's chain is laid with (the brief's start, 24: a link of a third of a metre on the course's 8 m rope, a curve that reads as a curve; a whole number from 4 to 64). */
+  ropePoints: number;
+  /** The rope chain: each of the physics' steps solved in this many substeps (ours, 8: a 480th of a second, so the course's 8 m rope of 24 points hangs 1.2 cm longer than itself, where 4 hang it 4.9 cm long and 2 19 cm: each doubling a quarter of the stretch; a whole number from 1 to 16). */
+  ropeSubsteps: number;
+  /** The rope chain: two links folding are pushed back apart by this share a pass (ours, 0.1: a hemp rope's give, so it curves rather than kinks and is never stiff as a pole). */
+  ropeBend: number;
+  /** The rope chain: the chain's own motion dies away by this, a second (ours, 0.3: the free rope's own swing's, `ROPE_FREE_DAMP`, so the drawn rope settles as the rope the grab finds does). */
+  ropeChainDamp: number;
+  /** The rope chain: the wind drags the chain toward its own speed at this, a second (ours, 0.3: against the swing's own gravity, `swingGravity` 20.32, a 10 m/s gale leans a free rope about 8 degrees and a light breeze of 2 m/s under 2, so the rope moves in the wind without flying in it). */
+  ropeWind: number;
+  /** The rope chain: a point lying on something (the ground, a ledge) slides across it dying away by this, a second (ours, 10: its slide halves in a fourteenth of a second, so a tail that lands drags to a stop where it lands rather than skating on; the share a substep is worked out from the substep's own time, so the substeps slider leaves it as it is). */
+  ropeGrip: number;
+  /**
+   * The rope chain round, item 3 (maker B): how thick a rope is drawn as a chain, metres (ours, 0.04: the course's rope column is 4
+   * cm across, and at that width the strip's half is the chain's own radius, 2 cm, the very distance it is held off what it lies
+   * on, so seen edge on it never dips into it; held to at least the hook's `minPx` pixels across, as the hook's rope is, so far off
+   * it never vanishes or twinkles).
+   */
+  ropeWidth: number;
+  /** The rope chain round, item 3: a point lying on something drawn lifted this far along that surface's normal, metres (the brief's start, 0.01: a centimetre, over a depth offset, so the drawn rope never flickers into the ground or a wall). */
+  ropeLift: number;
+  /** The rope chain round, item 3: the drawn twist's lay, metres (ours, 0.14: one turn of a three-strand rope's strands in three and a half times its 4 cm thickness, a hawser's lay: a strand's band every 4.7 cm along it). */
+  ropeLay: number;
 }
 
 /**
@@ -266,7 +727,294 @@ export function climbFeedbackBefore(): void {
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_FEEDBACK_BEFORE)) t[k] = v;
   moveBefore();
+  // `12ae8ad` had none of the smoothness round's either.
+  climbSmoothBefore();
 }
+
+/**
+ * Climbing II, the smoothness round: every switch it adds to the climbing, at its other setting (the climbing as `d2d5bc4`
+ * shipped it, the feedback round's). A later maker of the round adds its own switches here (the body's beside them in
+ * `moveTune.ts`'s `MOVE_SMOOTH_BEFORE`), so one call puts the whole round back.
+ */
+export const CLIMB_SMOOTH_BEFORE: Readonly<Record<string, string>> = {
+  shelves: 'before',
+  hangKeys: 'before',
+  // Maker B's: item 6.
+  diagonals: 'before',
+};
+
+/** The smoothness round's switches at their other setting (the feedback round's climbing and body, `d2d5bc4`). */
+export function climbSmoothBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH_BEFORE)) t[k] = v;
+  moveSmoothBefore();
+  // `d2d5bc4` had none of Smoothness II's either.
+  climbSmooth2Before();
+}
+
+/**
+ * Climbing II, Smoothness II: every switch it adds to the climbing, at its other setting (the climbing as the smoothness
+ * round shipped it, `dd88180`). A later maker of the round adds its own here (the body's beside them in `moveTune.ts`), so one
+ * call puts the whole round back.
+ */
+export const CLIMB_SMOOTH2_BEFORE: Readonly<Record<string, string>> = {
+  hopFlight: 'before',
+  transitions: 'before',
+  camera: 'before',
+  slopeHands: 'before',
+  bodyClear: 'before',
+  wallHands: 'before',
+  pushOff: 'before',
+};
+
+/** Smoothness II's switches at their other setting (the smoothness round's climbing, `dd88180`), the body's (`moveTune.ts`) with them. */
+export function climbSmooth2Before(): void {
+  // (`dd88180` had none of Smoothness III's either: put back first, so Smoothness II's own words below win where a switch is shared.)
+  climbSmooth3Before();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH2_BEFORE)) t[k] = v;
+  moveSmooth2Before();
+}
+
+/**
+ * Climbing II, Smoothness III: every switch it adds to the climbing, at its other setting (the climbing as Smoothness II shipped
+ * it, `c57c0a5`). A later maker of the round adds its own here (the body's beside them in `moveTune.ts`), so one call puts the
+ * whole round back. Item 0 (no drop after topping out) is a fault mended with no switch.
+ */
+export const CLIMB_SMOOTH3_BEFORE: Record<string, string> = {
+  hopFlight: 'timed',
+  targetRoom: 'none',
+  dropMove: 'hop',
+  // Maker B's: items 4 and 4b (the free hops; the ladder's whole cycle).
+  freeHops: 'off',
+  ladderCycle: 'rung',
+};
+
+/** A later maker's own puts back (the body's switches, `moveTune.ts`), run after this round's climbing ones. */
+export const CLIMB_SMOOTH3_ALSO: (() => void)[] = [];
+// Maker B's: items 3 and 3b on the body (`move.proneMin`, `move.duckClip`).
+CLIMB_SMOOTH3_ALSO.push(moveSmooth3Before);
+
+/** Smoothness III's switches at their other setting (Smoothness II's climbing, `c57c0a5`). */
+export function climbSmooth3Before(): void {
+  // (`c57c0a5` had none of phase 3's either: put back first, so Smoothness III's own words below win where a switch is shared.)
+  climbBarsBefore();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_SMOOTH3_BEFORE)) t[k] = v;
+  for (const f of CLIMB_SMOOTH3_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 3 (bars): every switch it adds, at its other setting (the climbing as Smoothness III shipped it, `955fb04`).
+ * A later maker of the round adds its own here (`CLIMB_BARS_ALSO` for one beside the climbing's), so one call puts the whole
+ * round back; `climbSmooth3Before` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_BARS_BEFORE: Record<string, string> = {
+  bars: 'off',
+  // (Maker B: the flight off a bar, the catch and the landing; 'plain' maker A's let-go, which 'off' never reaches either.)
+  barFlight: 'plain',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the phase's climbing ones. */
+export const CLIMB_BARS_ALSO: (() => void)[] = [];
+
+/** Phase 3's switches at their other setting (Smoothness III's climbing, `955fb04`). */
+export function climbBarsBefore(): void {
+  // (`955fb04` had none of phase 4's either: put back first, so phase 3's own words below win where a switch is shared.)
+  climbRopesBefore();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_BARS_BEFORE)) t[k] = v;
+  for (const f of CLIMB_BARS_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 4 (ropes): every switch it adds, at its other setting (the climbing as phase 3 shipped it, `472c90e`). A later
+ * maker of the round adds its own here (`CLIMB_ROPES_ALSO` for one beside the climbing's), so one call puts the whole round back;
+ * `climbBarsBefore` calls it first, so every older round's chain of puts back holds. (`ropeKeys` is a choice of the round's own,
+ * not a before: under 'off' nothing reads it.)
+ */
+export const CLIMB_ROPES_BEFORE: Record<string, string> = {
+  ropes: 'off',
+  // (Maker B: the let-go maker A built, the swing's velocity handed to the movement: under 'off' nothing reads it.)
+  ropeLand: 'plain',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the phase's climbing ones. */
+export const CLIMB_ROPES_ALSO: (() => void)[] = [];
+
+/** Phase 4's switches at their other setting (phase 3's climbing, `472c90e`). */
+export function climbRopesBefore(): void {
+  // (`472c90e` had none of the feedback round II's either: put back first, so phase 4's own words below win where a switch is shared.)
+  climbFb2Before();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_ROPES_BEFORE)) t[k] = v;
+  for (const f of CLIMB_ROPES_ALSO) f();
+}
+
+/**
+ * Climbing II, the feedback round II (the owner's notes after playing the bars, 2026-11-18): every switch it adds, at its other
+ * setting (the climbing as phase 4 shipped it, `5e8f23b`). A later maker of the round adds its own here (`CLIMB_FB2_ALSO` for one
+ * beside the climbing's), so one call puts the whole round back; `climbRopesBefore` calls it first, so every older round's chain
+ * of puts back holds.
+ */
+export const CLIMB_FB2_BEFORE: Record<string, string> = {
+  // Maker A's: items 0a to 0c (the bar and the camera, a swing that settles, the free hang on a bar).
+  barCamera: 'block',
+  barSettle: 'damp',
+  barHang: 'swing',
+  // Maker B's: items 0d to 0g (the free hang's up cue, the free hop's legs, the ladders' sway, the free hang's jump behind).
+  freeCue: 'arms',
+  freeHopLegs: 'stiff',
+  ladderSway: 'stiff',
+  freeBehind: 'side',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_FB2_ALSO: (() => void)[] = [];
+
+/** The feedback round II's switches at their other setting (phase 4's climbing, `5e8f23b`). */
+export function climbFb2Before(): void {
+  // (`5e8f23b` had none of phase 5's either: put back first, so the round's own words below win where a switch is shared.)
+  climbPolesBefore();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_FB2_BEFORE)) t[k] = v;
+  for (const f of CLIMB_FB2_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 5 (poles): every switch it adds, at its other setting (the climbing as the feedback round II shipped it,
+ * `5421344`). A later maker of the round adds its own here (`CLIMB_POLES_ALSO` for one beside the climbing's), so one call puts the
+ * whole round back; `climbFb2Before` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_POLES_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (what a pole is; on the pole: the grab, the climb up and down, the turn round it).
+  poles: 'off',
+  // Maker B's: items 3 and 4 (off the pole: the jump off and its catch, the slide down, the climb onto the top). Their other
+  // settings are maker A's let-go and stop, which `poles` 'off' never reaches either.
+  poleJump: 'plain',
+  poleCrouch: 'drop',
+  poleTop: 'stop',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_POLES_ALSO: (() => void)[] = [];
+
+/** Phase 5's switches at their other setting (the feedback round II's climbing, `5421344`). */
+export function climbPolesBefore(): void {
+  // (`5421344` had none of the rope chain round's either: put back first, so phase 5's own words below win where a switch is shared.)
+  climbRopeLookBefore();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_POLES_BEFORE)) t[k] = v;
+  for (const f of CLIMB_POLES_ALSO) f();
+}
+
+/**
+ * The rope chain round (the owner's ask of 2026-11-18): every switch it adds, at its other setting (the rope as phase 5 drew it,
+ * `6e59ce8`: straight from its anchor through the hands to its end). Drawing only: the body is the same under either. A later maker
+ * of the round adds its own here (`CLIMB_ROPELOOK_ALSO` for one beside the climbing's), so one call puts the whole round back;
+ * `climbPolesBefore` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_ROPELOOK_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (the chain, and a body on it).
+  ropeLook: 'straight',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_ROPELOOK_ALSO: (() => void)[] = [];
+
+/** The rope chain round's switches at their other setting (phase 5's rope, `6e59ce8`). */
+export function climbRopeLookBefore(): void {
+  // (`6e59ce8` had none of phase 6's either: put back first, so the round's own words below win where a switch is shared.)
+  climbVaultsBefore();
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_ROPELOOK_BEFORE)) t[k] = v;
+  for (const f of CLIMB_ROPELOOK_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 6 (vaults and clambers): every switch it adds, at its other setting (the climbing and the body as the rope chain
+ * round shipped them, `5333b88`: a run meets an obstacle as it always did). Each key names its table, `move.` the body's
+ * (`MOVE_TUNE`, src/anim/moveTune.ts, where the vault lives) and `climb.` the climbing's; a later maker of the round adds its own here
+ * (`CLIMB_VAULTS_ALSO` for one outside both), so one call puts the whole round back; `climbRopeLookBefore` calls it first, so every
+ * older round's chain of puts back holds.
+ */
+export const CLIMB_VAULTS_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (what is vaulted, what is clambered).
+  'move.vault': 'off',
+};
+
+/** A later maker's own puts back (a switch outside both tables), run after the round's own. */
+export const CLIMB_VAULTS_ALSO: (() => void)[] = [];
+
+/** Phase 6's switches at their other setting (the rope chain round's climbing and body, `5333b88`). */
+export function climbVaultsBefore(): void {
+  const climb = CLIMB_TUNE as unknown as Record<string, unknown>;
+  const move = MOVE_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_VAULTS_BEFORE)) {
+    if (k.startsWith('move.')) move[k.slice(5)] = v;
+    else if (k.startsWith('climb.')) climb[k.slice(6)] = v;
+  }
+  for (const f of CLIMB_VAULTS_ALSO) f();
+}
+
+/**
+ * Item 4b: the owner's table of the parts a drop to a lower lip is made of (`climb.dropMove` 'drop'), by the held hang's kind
+ * (the release) and the lower hang's kind (the catch). Each part's seconds are sliders (`climb.dropParts`); its clip a name of
+ * the ledge clips the game asks the pack for (src/anim/ledgeClips.ts), so naming another part of another clip is one line here.
+ * The release's hands leave at the clip's own moment (src/anim/handTimes.ts: the owner's 0.35 s for `braced_hang_drop`), the
+ * catch's touch at its own (his 0.28 s for `jumping_to_hanging`); a free hang's catch is the free grab's (`jump_to_hang`, his
+ * 0.26 s, "transitions into free hanging"), since the braced catch ends braced.
+ */
+export const DROP_PARTS: Readonly<{ braced: string; free: string; catchBraced: string; catchFree: string }> = {
+  braced: 'braced_hang_drop',
+  free: 'freehang_drop',
+  catchBraced: 'jumping_to_hanging',
+  catchFree: 'jump_to_hang',
+};
+
+/**
+ * Smoothness III, item 4 (`climb.freeHops` 'on'): the owner's table of the free hop up, as `DROP_PARTS` is the drop's: the clip
+ * whose upper body plays (its seconds the sliders `climb.freeHopParts`), played over the legs of the free hang's own idle (a
+ * loop: its legs hang and sway as they do there). Its hands leave and touch at the clip's own moments (src/anim/handTimes.ts:
+ * the owner's 0.46 s and 0.78 s for `braced_hang_hop_up`), the flight between them item 1's arc. Naming another clip's arms is
+ * one line here.
+ */
+export const FREE_HOP_PARTS: Readonly<{ upper: string; legs: string }> = {
+  upper: 'braced_hang_hop_up',
+  legs: 'free_hang_hanging_idle',
+};
+
+/**
+ * The feedback round II, items 0d and 0e (maker B): the owner's table of the free hang's up cue and the free hop's legs, as
+ * `DROP_PARTS` is the drop's: `pull` the clip whose arms the up cue holds at the rise's share (its seconds `climb.freeCueParts`'s
+ * `pullFrom` to `pullTo`: until he names another, the free hang climb up's first pull, its arms bending with the hands kept on the
+ * grip and the legs still hanging; only its torso is laid, the arms then bent onto the grip by the hands' own solve; it ends at
+ * 0.2 because from 0.25 the climb's spine leans back past where the arms reach the grip from, measured off the human male: the
+ * hands 2.5 cm short of the grip at 0.25, 0.7 cm at 0.2), and `kick` the clip whose legs the free hop up lays under its arms (`kickFrom` to `kickTo`: the same climb's
+ * own leg kick, the knees drawn up from 0.15 s and the legs swung out over the top by 0.7). Naming another clip is one line here.
+ */
+export const FREE_CUE_PARTS: Readonly<{ pull: string; kick: string }> = {
+  pull: 'freehang_climb',
+  kick: 'freehang_climb',
+};
+
+/**
+ * Item 0g (maker B): the owner's table of a free hang's jump behind, by its leading side: the clip whose pose the look-away holds
+ * and whose hop is played on from it (its second `climb.freeBehindParts.pose`). The braced look-away's own (`braced_hang_hop_left`,
+ * `_right`) reads on a free hang only in its spine's turn and its hands (both of which a free hang keeps); its legs stand braced on
+ * a wall a free hang has not got (laid over the free hang's own legs, its hands come 0.6 m off the grip). Until he names another,
+ * the free hang's own side hops, whose hands start on the grip and whose body hangs under it.
+ */
+export const FREE_BEHIND_PARTS: Readonly<{ left: string; right: string }> = {
+  left: 'free_hang_hop_left',
+  right: 'free_hang_hop_right',
+};
+
+/**
+ * Item 0f (maker B): the free hang shimmy whose hips and legs a free ladder lays under its climb (one shimmy step a reach: the
+ * shimmy's whole cycle, two steps, over the climb clip's whole cycle, two reaches). One line here.
+ */
+export const LADDER_SWAY_LEGS = 'free_hang_left_shimmy';
 
 /** The hands bracing against a wall, in a tight spot, in a crowd and in space (the brief's item B, its second half). */
 export interface BraceTune {
@@ -352,6 +1100,134 @@ export const CLIMB_TUNE: ClimbTune = {
   roomRule: 'fit',
   roomBrush: 0.04,
   liftLeast: 0,
+  shelves: 'grab',
+  shelfMin: 0.12,
+  handRoom: 0.15,
+  hangKeys: 'cue',
+  wayTurn: 45,
+  ladderMin: 0.3,
+  ladderMax: 1.1,
+  wayDepth: 0.8,
+  cueShare: 0.5,
+  cueEase: 0.2,
+  cueLean: 8,
+  dropMost: 2.5,
+  dropHold: 0.25,
+  diagonals: 'below',
+  hopFlight: 'arc',
+  flightGravity: 20.32,
+  arcRise: 0.5,
+  holdEase: 0.1,
+  targetRoom: 'fit',
+  dropMove: 'drop',
+  // The owner's drops' parts (item 4b): the braced release from its start on a quarter second past its hands' release (his 0.35
+  // s), well before its feet would meet its own ground (his 0.81); the free release likewise past its measured release (0.233)
+  // and short of its feet's touch (0.533); each catch from its own start ("starts by falling/approaching the ledge") to its end.
+  dropParts: { bracedFrom: 0, bracedTo: 0.6, freeFrom: 0, freeTo: 0.45, catchBracedFrom: 0, catchBracedTo: 1.5, catchFreeFrom: 0, catchFreeTo: 2 },
+  freeHops: 'on',
+  // The free hop up's part (item 4): the braced hop up whole, its arms' coil, reach, pull and catch.
+  freeHopParts: { from: 0, to: 1.667 },
+  ladderCycle: 'cycle',
+  ladderStretch: 0.2,
+  ladderArc: 0.2,
+  ladderLead: 0.5,
+  flightRateMin: 0.7,
+  flightRateMax: 1.5,
+  flightLift: 0.1,
+  grabLead: 0.2,
+  dropRateLeast: 0.35,
+  transitions: 'blend',
+  transitionBlend: 0.25,
+  poseJump: 2,
+  camera: 'eased',
+  camEase: 0.12,
+  camOut: 0.5,
+  camJump: 3,
+  slopeHands: 'each',
+  bodyClear: 'spheres',
+  clearEase: 0.08,
+  clearMost: 0.3,
+  wallHands: 'grip',
+  gripSeek: 0.9,
+  pushOff: 'jka',
+  pushBack: 1,
+  pushUp: 1,
+  bars: 'on',
+  barThin: 0.12,
+  barLength: 0.8,
+  swingGravity: 20.32,
+  swingPump: 4,
+  swingDamp: 0.35,
+  swingMost: 70,
+  swingCarry: 1,
+  barShimmy: 0.6,
+  barGrab: 0.25,
+  barFlight: 'fly',
+  barBoost: 1,
+  catchReach: 0.6,
+  catchSlack: 0.35,
+  barKnock: 25,
+  ropes: 'on',
+  ropeKeys: 'ad',
+  ropeLength: 8,
+  ropeGive: 0.15,
+  ropeClimb: 0.5,
+  ropeGrab: 0.25,
+  ropePush: 4,
+  ropeDamp: 0.35,
+  ropeMost: 60,
+  ropeCarry: 1,
+  ropeTurn: 60,
+  ropeSwingFrom: 5,
+  ropeLand: 'lips',
+  ropeLandKnee: 0.2,
+  ropeLandBetween: 0.45,
+  ropeLandWaist: 0.78,
+  ropeLandTop: 1.1,
+  ropeLandBelow: 0.5,
+  ropeLandIn: 0.3,
+  ropeLandWalk: 2,
+  barCamera: 'pass',
+  barSettle: 'swings',
+  barSettleTo: 3,
+  barSettleSwings: 2.5,
+  barHang: 'free',
+  barHangFrom: 4,
+  barHangBlend: 0.3,
+  freeCue: 'pull',
+  freeCueRise: 0.08,
+  freeCueIn: 0.25,
+  freeCueParts: { pullFrom: 0, pullTo: 0.2, kickFrom: 0.15, kickTo: 0.7 },
+  freeHopLegs: 'kick',
+  ladderSway: 'sway',
+  swayAmount: 1,
+  swayHz: 1.2,
+  swayDamp: 0.5,
+  freeBehind: 'reach',
+  freeBehindParts: { pose: 0.3 },
+  poles: 'on',
+  poleThin: 0.15,
+  poleLength: 1.5,
+  poleClimb: 0.5,
+  poleTurn: 90,
+  poleGrab: 0.25,
+  poleFootSide: 0.04,
+  poleJump: 'fly',
+  polePush: 3,
+  poleJumpUp: 0.5,
+  poleCrouch: 'slide',
+  poleSlide: 3,
+  poleTop: 'climb',
+  ropeLook: 'chain',
+  ropePoints: 24,
+  ropeSubsteps: 8,
+  ropeBend: 0.1,
+  ropeChainDamp: 0.3,
+  ropeWind: 0.3,
+  ropeGrip: 10,
+  ropeWidth: 0.04,
+  ropeLift: 0.01,
+  ropeLay: 0.14,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -411,6 +1287,110 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   grabFreeAt: { min: 0, max: 1 },
   roomBrush: { min: 0, max: 0.15 },
   liftLeast: { min: 0, max: 0.05 },
+  shelfMin: { min: 0.02, max: 1 },
+  handRoom: { min: 0.02, max: 0.6 },
+  wayTurn: { min: 0, max: 180 },
+  ladderMin: { min: 0, max: 3 },
+  ladderMax: { min: 0, max: 3 },
+  wayDepth: { min: 0, max: 2 },
+  cueShare: { min: 0, max: 1 },
+  cueEase: { min: 0, max: 1 },
+  cueLean: { min: 0, max: 30 },
+  dropMost: { min: 0, max: 8 },
+  dropHold: { min: 0.05, max: 2 },
+  flightRateMin: { min: 0.2, max: 1 },
+  flightRateMax: { min: 1, max: 4 },
+  flightLift: { min: 0, max: 0.5 },
+  grabLead: { min: 0, max: 0.6 },
+  dropRateLeast: { min: 0.05, max: 1 },
+  transitionBlend: { min: 0, max: 1 },
+  poseJump: { min: 1, max: 10 },
+  camEase: { min: 0, max: 1 },
+  camOut: { min: 0, max: 2 },
+  camJump: { min: 1, max: 10 },
+  clearEase: { min: 0, max: 1 },
+  clearMost: { min: 0, max: 0.8 },
+  gripSeek: { min: 0, max: 1.2 },
+  pushBack: { min: 0, max: 3 },
+  pushUp: { min: 0, max: 3 },
+  flightGravity: { min: 1, max: 60 },
+  arcRise: { min: 0.05, max: 3 },
+  holdEase: { min: 0, max: 0.5 },
+  'dropParts.bracedFrom': { min: 0, max: 1.667 },
+  'dropParts.bracedTo': { min: 0, max: 1.667 },
+  'dropParts.freeFrom': { min: 0, max: 1.333 },
+  'dropParts.freeTo': { min: 0, max: 1.333 },
+  'dropParts.catchBracedFrom': { min: 0, max: 1.5 },
+  'dropParts.catchBracedTo': { min: 0, max: 1.5 },
+  'dropParts.catchFreeFrom': { min: 0, max: 2 },
+  'dropParts.catchFreeTo': { min: 0, max: 2 },
+  'freeHopParts.from': { min: 0, max: 1.667 },
+  'freeHopParts.to': { min: 0, max: 1.667 },
+  ladderStretch: { min: 0, max: 1 },
+  ladderArc: { min: 0, max: 0.6 },
+  ladderLead: { min: 0, max: 1 },
+  barThin: { min: 0.02, max: 0.4 },
+  barLength: { min: 0.2, max: 4 },
+  swingGravity: { min: 1, max: 60 },
+  swingPump: { min: 0, max: 12 },
+  swingDamp: { min: 0, max: 3 },
+  swingMost: { min: 5, max: 85 },
+  swingCarry: { min: 0, max: 1.5 },
+  barShimmy: { min: 0, max: 3 },
+  barGrab: { min: 0.02, max: 1 },
+  barBoost: { min: 0, max: 6 },
+  catchReach: { min: 0, max: 1.5 },
+  catchSlack: { min: 0.05, max: 1 },
+  barKnock: { min: 0, max: 200 },
+  ropeLength: { min: 1.5, max: 30 },
+  ropeGive: { min: 0, max: 1.5 },
+  ropeClimb: { min: 0, max: 3 },
+  ropeGrab: { min: 0.02, max: 1 },
+  ropePush: { min: 0, max: 15 },
+  ropeDamp: { min: 0, max: 3 },
+  ropeMost: { min: 5, max: 80 },
+  ropeCarry: { min: 0, max: 1.5 },
+  ropeTurn: { min: 0, max: 360 },
+  ropeSwingFrom: { min: 0.5, max: 30 },
+  ropeLandKnee: { min: 0, max: 1 },
+  ropeLandBetween: { min: 0, max: 1.5 },
+  ropeLandWaist: { min: 0, max: 2 },
+  ropeLandTop: { min: 0, max: 2.5 },
+  ropeLandBelow: { min: 0, max: 3 },
+  ropeLandIn: { min: 0, max: 1.5 },
+  ropeLandWalk: { min: 0.3, max: 8 },
+  barSettleTo: { min: 0.5, max: 30 },
+  barSettleSwings: { min: 0.5, max: 10 },
+  barHangFrom: { min: 0.5, max: 30 },
+  barHangBlend: { min: 0, max: 1.5 },
+  freeCueRise: { min: 0, max: 0.3 },
+  freeCueIn: { min: 0, max: 1 },
+  'freeCueParts.pullFrom': { min: 0, max: 3.867 },
+  'freeCueParts.pullTo': { min: 0, max: 3.867 },
+  'freeCueParts.kickFrom': { min: 0, max: 3.867 },
+  'freeCueParts.kickTo': { min: 0, max: 3.867 },
+  swayAmount: { min: 0, max: 3 },
+  swayHz: { min: 0.2, max: 4 },
+  swayDamp: { min: 0.05, max: 2 },
+  'freeBehindParts.pose': { min: 0, max: 2 },
+  poleThin: { min: 0.02, max: 0.5 },
+  poleLength: { min: 0.3, max: 10 },
+  poleClimb: { min: 0, max: 3 },
+  poleTurn: { min: 0, max: 360 },
+  poleGrab: { min: 0.02, max: 1 },
+  poleFootSide: { min: 0, max: 0.2 },
+  polePush: { min: 0, max: 8 },
+  poleJumpUp: { min: 0, max: 2 },
+  poleSlide: { min: 0.3, max: 10 },
+  ropePoints: { min: 4, max: 64 },
+  ropeSubsteps: { min: 1, max: 16 },
+  ropeBend: { min: 0, max: 1 },
+  ropeChainDamp: { min: 0, max: 5 },
+  ropeWind: { min: 0, max: 3 },
+  ropeGrip: { min: 0, max: 60 },
+  ropeWidth: { min: 0.005, max: 0.2 },
+  ropeLift: { min: 0, max: 0.1 },
+  ropeLay: { min: 0.02, max: 1 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -434,6 +1414,37 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   grabFree: ['share', 'whole'],
   roomSay: ['why', 'before'],
   roomRule: ['fit', 'strict'],
+  shelves: ['grab', 'before'],
+  hangKeys: ['cue', 'before'],
+  diagonals: ['below', 'before'],
+  hopFlight: ['arc', 'timed', 'before'],
+  targetRoom: ['fit', 'none'],
+  dropMove: ['drop', 'reverse', 'hop'],
+  freeHops: ['on', 'off'],
+  ladderCycle: ['cycle', 'rung'],
+  transitions: ['blend', 'before'],
+  camera: ['eased', 'before'],
+  slopeHands: ['each', 'before'],
+  bodyClear: ['spheres', 'before'],
+  wallHands: ['grip', 'before'],
+  pushOff: ['jka', 'before'],
+  bars: ['on', 'off'],
+  barFlight: ['fly', 'plain'],
+  ropes: ['on', 'off'],
+  ropeKeys: ['ad', 'ws'],
+  ropeLand: ['lips', 'plain'],
+  barCamera: ['pass', 'block'],
+  barSettle: ['swings', 'damp'],
+  barHang: ['free', 'swing'],
+  freeCue: ['pull', 'arms'],
+  freeHopLegs: ['kick', 'stiff'],
+  ladderSway: ['sway', 'stiff'],
+  freeBehind: ['reach', 'side'],
+  poles: ['on', 'off'],
+  poleJump: ['fly', 'plain'],
+  poleCrouch: ['slide', 'drop'],
+  poleTop: ['climb', 'stop'],
+  ropeLook: ['chain', 'straight'],
 };
 
 /**

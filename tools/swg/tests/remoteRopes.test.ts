@@ -377,6 +377,28 @@ ok(Object.keys(GRAPPLE_TUNE).length < 128 && !Object.hasOwn(GRAPPLE_TUNE, 'peerL
   ropes.dispose();
 }
 
+// ---- 7b. Climbing II, phase 4 (maker B): a hanging rope they hold, sent as its anchor twice ----
+{
+  const a = makePeer(1);
+  const ropes = new RemoteRopes();
+  const heard: string[] = [];
+  ropes.sound = (what) => void heard.push(what);
+  ropes.peerAdded(a.view as never);
+  a.scene.updateMatrixWorld(true);
+  frame(ropes, [a], 1 / 60, 0);
+  readPeerRope([1, 0, 3, 12, -2, 3, 12, -2], undefined, 100, a.view.rope);
+  frame(ropes, [a], 1 / 60, 100);
+  const { ribbon, dart } = meshesOf(a.scene);
+  const r = rings(ribbon!);
+  const hand = a.leftHand.getWorldPosition(new THREE.Vector3());
+  ok(a.view.rope.hung && !!ribbon && ribbon.visible && r[0].distanceTo(new THREE.Vector3(3, 12, -2)) < 1e-4 && r[r.length - 1].distanceTo(hand) < 1e-4, 'a hanging rope a peer holds (its anchor sent twice) is drawn from that one anchor to their drawn left hand');
+  ok(!dart || !dart.visible, 'with no dart at the anchor: nothing bit there');
+  readPeerRope(undefined, undefined, 200, a.view.rope);
+  frame(ropes, [a], 1 / 60, 200);
+  ok(heard.length === 0, `taking it and letting go of it are heard as no bite and no let-go of a hook (${heard.join(', ') || 'nothing'})`);
+  ropes.dispose();
+}
+
 // ---- 8. Nothing allocated frame after frame ----
 {
   const a = makePeer(1);

@@ -626,7 +626,11 @@ export class Physics {
     return floors;
   }
 
-  cameraBlock(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean): number | null {
+  /**
+   * (Climbing II, the feedback round II, item 0a: `excludeCollider` one collider the ray passes, the bar the body holds, handed to
+   * the engine's ray as its excluded collider, never a predicate; null, every collider as before.)
+   */
+  cameraBlock(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, excludeBody: RAPIER.RigidBody | null, inside: boolean, excludeCollider: RAPIER.Collider | null = null): number | null {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -634,7 +638,7 @@ export class Physics {
     if (len < 1e-4) return null;
     const ray = new RAPIER.Ray(from, { x: dx / len, y: dy / len, z: dz / len });
     const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
-    const hit = this.world.castRay(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, this.stillOrWall);
+    const hit = this.world.castRay(ray, len, true, undefined, filter, excludeCollider ?? undefined, excludeBody ?? undefined, this.stillOrWall);
     return hit ? hit.timeOfImpact : null;
   }
 

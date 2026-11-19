@@ -978,6 +978,16 @@ export class Character {
     return garmentMeshesOn(parts, garmentMeshesOf(this.wardrobe, this.packParts));
   }
 
+  /**
+   * Climbing II, Smoothness II, item 3: the body's own skinned meshes (every part the pack marks `body`: the body and the head,
+   * none of what is worn), whose rest vertices the figure's spheres are measured from (src/player/bodySpheres.ts).
+   */
+  bodyMeshes(): THREE.SkinnedMesh[] {
+    const out: THREE.SkinnedMesh[] = [];
+    for (const p of this.parts.values()) if (p.body) out.push(...p.meshes);
+    return out;
+  }
+
   /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */
   wornMeshes(): Set<string> {
     const out = new Set<string>();

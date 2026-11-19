@@ -32,10 +32,12 @@ import { STILL_FLAGS } from './stairSense.ts';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
 import { PALM_OFF, WALL_CLIPS, WALL_FACTS, WALL_PLANT, WALL_SIDE } from '../anim/wallClips.ts';
-import { LEDGE_FACTS, LEDGE_JUMP_OFF } from '../anim/ledgeClips.ts';
+import { LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_PUSH_OFF } from '../anim/ledgeClips.ts';
+import { JKA, UNIT } from './jkaMove.ts';
 import { LEDGE_CAPSULE, Lip, type LedgeBody, type LedgeHang, type LedgeIn, type LedgeMakers, type LedgeStamina, type LedgeWorld } from './ledge.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
 import { ClimbHolds } from './climbHolds.ts';
+import { isPoleCollider, type BarCollider } from './barShape.ts';
 
 /** Off the wall, and on it. */
 export const WALL_NONE = 0;
@@ -100,6 +102,10 @@ const GAP = 0.02;
 const UPRIGHT_SLACK = 0.035;
 /** A hand moved less than this since its last ray reads the same face, metres. */
 const SAME = 0.005;
+/** Smoothness II, item 5: the seek's step down, across and in, metres (mechanics: 3 cm, a finger's width under the 2 cm the hands are held to). */
+const GRIP_STEP = 0.03;
+/** Smoothness II, item 5: how much nearer a grip in over the top is taken to be than its distance (mechanics: 5 cm, so a top within reach wins over a face just as near, the owner's "deeper in"). */
+const GRIP_TOP_FAVOUR = 0.05;
 /** Ground under the feet within this much more than a frame's climb down ends the climb standing, metres. */
 const FOOT_GROUND = 0.06;
 /**
@@ -338,6 +344,8 @@ export class WallClimb {
     this.casts++;
     const h = world.castRayAndGetNormal(ray, this.qlen, true, STILL_FLAGS, this.qflt);
     if (!h) return false;
+    // (Climbing II, phase 5: a pole, `climb.poles` 'on', is grabbed and climbed as a pole, never as a face. Under 'off' not asked.)
+    if (CLIMB_TUNE.poles === 'on' && isPoleCollider(h.collider as unknown as BarCollider)) return false;
     const t = h.timeOfImpact;
     this.htoi = t;
     this.hx = this.qx + this.qdx * t;
@@ -346,6 +354,100 @@ export class WallClimb {
     this.hnx = h.normal.x;
     this.hny = h.normal.y;
     this.hnz = h.normal.z;
+    return true;
+  }
+
+  /** Smoothness II, item 5: whether each hand's hold is one `seekGrip` found (1), and the seeks made (the console's). */
+  private readonly handSeek = new Uint8Array(2);
+  seeks = 0;
+  /** The best grip a seek has found so far (its place, its surface's normal, how far it is from the hand). */
+  private sgx = 0.5;
+  private sgy = 0.5;
+  private sgz = 0.5;
+  private sgnx = 0.5;
+  private sgny = 0.5;
+  private sgnz = 0.5;
+  private sgd = 0.5;
+
+  /** A ray's hit (`cast`) taken as the seek's grip where it is nearer the hand at (x, y, z) than the best so far. */
+  private takeGrip(x: number, y: number, z: number, top: boolean): void {
+    const dx = this.hx - x;
+    const dy = this.hy - y;
+    const dz = this.hz - z;
+    // A grip in over the top is the nearest wherever the top is within reach (the owner's "grab ... deeper in").
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - (top ? GRIP_TOP_FAVOUR : 0);
+    if (!(d < this.sgd)) return;
+    this.sgd = d;
+    this.sgx = this.hx;
+    this.sgy = this.hy;
+    this.sgz = this.hz;
+    this.sgnx = this.hnx;
+    this.sgny = this.hny;
+    this.sgnz = this.hnz;
+  }
+
+  /**
+   * Smoothness II, item 5 (`climb.wallHands` 'grip'): a hand at (x, y, z) with no face under it: the nearest real grip within
+   * `gripSeek` (scaled with the figure): down the face (a ray into it every `GRIP_STEP` lower), sideways along it either way,
+   * and in over the top (a ray down onto it a little in from the face, every step higher than the hand's own): a face's grip
+   * where the ray meets one turned toward the hand, the top's where a walkable top is met. Into `hx..`, `hnx..` as `cast`'s
+   * answer; false where none is.
+   */
+  private seekGrip(world: LedgeWorld, x: number, y: number, z: number, flt: number, s: number): boolean {
+    const most = CLIMB_TUNE.gripSeek * (s > 0.2 ? s : 1);
+    if (!(most > 0)) return false;
+    const nx = this.nx;
+    const ny = this.ny;
+    const nz = this.nz;
+    // The face's own up (the world's up less its share along the face's normal) and its across.
+    let ux = -nx * ny;
+    let uy = 1 - ny * ny;
+    let uz = -nz * ny;
+    const ul = Math.sqrt(ux * ux + uy * uy + uz * uz);
+    if (!(ul > 1e-6)) return false;
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    const ax = ny * uz - nz * uy;
+    const ay = nz * ux - nx * uz;
+    const az = nx * uy - ny * ux;
+    this.sgd = Infinity;
+    this.qflt = flt;
+    const n = Math.ceil(most / GRIP_STEP);
+    for (let i = 1; i <= n; i++) {
+      const k = (most * i) / n;
+      // Down the face, and sideways either way: a ray into the face from in front of the hand moved there.
+      for (let w = 0; w < 3; w++) {
+        const ex = w === 0 ? -ux : w === 1 ? ax : -ax;
+        const ey = w === 0 ? -uy : w === 1 ? ay : -ay;
+        const ez = w === 0 ? -uz : w === 1 ? az : -az;
+        this.qx = x + ex * k + nx * 0.3;
+        this.qy = y + ey * k + ny * 0.3;
+        this.qz = z + ez * k + nz * 0.3;
+        this.qdx = -nx;
+        this.qdy = -ny;
+        this.qdz = -nz;
+        this.qlen = 0.6;
+        if (this.cast(world) && this.hnx * nx + this.hny * ny + this.hnz * nz > 0.5) this.takeGrip(x, y, z, false);
+      }
+      // In over the top: a ray down onto it, a step in from the face and from over the hand's own height.
+      this.qx = x - nx * k;
+      this.qy = y + 0.3;
+      this.qz = z - nz * k;
+      this.qdx = 0;
+      this.qdy = -1;
+      this.qdz = 0;
+      this.qlen = 0.3 + most;
+      if (this.cast(world) && this.hny > 0.7) this.takeGrip(x, y, z, true);
+      if (this.sgd < k) break;
+    }
+    if (!(this.sgd < Infinity)) return false;
+    this.hx = this.sgx;
+    this.hy = this.sgy;
+    this.hz = this.sgz;
+    this.hnx = this.sgnx;
+    this.hny = this.sgny;
+    this.hnz = this.sgnz;
     return true;
   }
 
@@ -878,6 +980,15 @@ export class WallClimb {
   private jumpOff(b: LedgeBody): void {
     const T = CLIMB_TUNE;
     const h = this.heading;
+    // Climbing II, Smoothness II, item 6 (`climb.pushOff` 'jka'): Jedi Academy's rebound back off a wall, at its own speeds
+    // (`JKA.jumpOffWallSpeed` back, `JKA.wallJumpStrength` up, src/player/jkaMove.ts), facing the wall as it flies.
+    if (T.pushOff === 'jka') {
+      this.letGo(b, 'pushed off', this.lx * JKA.jumpOffWallSpeed * UNIT * T.pushBack, JKA.wallJumpStrength * UNIT * T.pushUp, this.lz * JKA.jumpOffWallSpeed * UNIT * T.pushBack);
+      this.startClip = LEDGE_PUSH_OFF;
+      this.startFrom = 0;
+      this.startFade = 0.06;
+      return;
+    }
     this.letGo(b, 'jumped off', this.lx * T.jumpBack, T.jumpUp, this.lz * T.jumpBack);
     this.startClip = LEDGE_JUMP_OFF;
     this.startFrom = 0;
@@ -929,6 +1040,8 @@ export class WallClimb {
   limbsFor(lp: LimbPlace, rig: LimbRig, world: LedgeWorld, toPhys: THREE.Matrix4 | null): void {
     // The hands' rays cast in the limbs' own groups (the caller writes `lp.filter` first: a number handed across a call is made).
     const flt = lp.filter;
+    // (Smoothness III, item 0: a wall keeps its spheres' push whole; only a climb up's crossfade into the stand lets it go.)
+    lp.pushKeep = 1;
     const s = this.s;
     const near = WALL_PLANT.near * s;
     const far = WALL_PLANT.far * s;
@@ -970,6 +1083,14 @@ export class WallClimb {
         hr[o + 1] = g.y;
         hr[o + 2] = g.z;
         this.handOk[side] = this.cast(world);
+        this.handSeek[side] = 0;
+        // Climbing II, Smoothness II, item 5 (`climb.wallHands` 'grip'): a hand with no face under it (over the top, past a side,
+        // over a hole) takes the nearest real grip within `gripSeek`: down the face, sideways along it, or in over the top.
+        if (!this.handOk[side] && CLIMB_TUNE.wallHands === 'grip' && this.seekGrip(world, g.x, g.y, g.z, flt, s)) {
+          this.handOk[side] = true;
+          this.handSeek[side] = 1;
+          this.seeks++;
+        }
         if (this.handOk[side]) {
           hr[o + 3] = this.hx;
           hr[o + 4] = this.hy;
@@ -993,14 +1114,20 @@ export class WallClimb {
       const fnx = handN[side * 3];
       const fny = handN[side * 3 + 1];
       const fnz = handN[side * 3 + 2];
-      // How far the grip stands off the face beyond a flat palm's, along the face's normal.
+      // How far the grip stands off the face beyond a flat palm's, along the face's normal (a grip the seek found is gripped:
+      // the hand onto it, the palm off it).
+      const seek = this.handSeek[side] === 1;
       const d = (g.x - hr[o + 3]) * fnx + (g.y - hr[o + 4]) * fny + (g.z - hr[o + 5]) * fnz - palm;
-      const plant = d <= near ? 1 : d >= far ? 0 : 1 - (d - near) / (far - near);
+      const plant = seek ? 1 : d <= near ? 1 : d >= far ? 0 : 1 - (d - near) / (far - near);
+      // Where the hand goes: onto the face under it (the grip moved along the face's normal), or a sought grip's own place.
+      const tx = seek ? hr[o + 3] + fnx * palm : g.x - fnx * d;
+      const ty = seek ? hr[o + 4] + fny * palm : g.y - fny * d;
+      const tz = seek ? hr[o + 5] + fnz * palm : g.z - fnz * d;
       if (H) {
         // On its hold until its next reach (where the clip has it on the face handed over, the hold's target and weight taken).
-        H.px = g.x - fnx * d;
-        H.py = g.y - fny * d;
-        H.pz = g.z - fnz * d;
+        H.px = tx;
+        H.py = ty;
+        H.pz = tz;
         H.plant = plant;
         H.step(side);
         lp.hand[side * 3] = H.tx;
@@ -1008,9 +1135,9 @@ export class WallClimb {
         lp.hand[side * 3 + 2] = H.tz;
         lp.handW[side] = this.hands * H.w;
       } else {
-        lp.hand[side * 3] = g.x - fnx * d;
-        lp.hand[side * 3 + 1] = g.y - fny * d;
-        lp.hand[side * 3 + 2] = g.z - fnz * d;
+        lp.hand[side * 3] = tx;
+        lp.hand[side * 3 + 1] = ty;
+        lp.hand[side * 3 + 2] = tz;
         lp.handW[side] = this.hands * plant;
       }
       lp.palmW[side] = 0;
@@ -1166,6 +1293,8 @@ export class WallClimb {
     return {
       wall: CLIMB_TUNE.wall,
       on: this.phase === WALL_ON,
+      // Smoothness II, item 5: the grips a hand over air was moved to (`wallHands` 'grip').
+      seeks: this.seeks,
       state: this.rigState || 'none',
       clip: this.rigClip || 'none',
       rate: n(this.rate),

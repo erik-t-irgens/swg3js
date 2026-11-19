@@ -291,6 +291,26 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
   // noughts above, which read as the ledges' own text.
   const WAVE4B_ROOT = ['rig.root.position.x += W.offX * c - W.offZ * s;', 'rig.root.position.y += W.offY;', 'rig.root.position.z += W.offX * s + W.offZ * c;'];
   const wave4bRoot: string[] = [];
+  // Climbing II, Smoothness II, item 3: the duck's push across taken back before the next frame lays its own (the spheres'
+  // `move` lays it through the root's parent's frame, as the ledges' anchor does, with no line of this shape).
+  const S2_ROOT = ['rig.root.position.set(0, rig.root.position.y, 0);'];
+  // Climbing II, phase 3: the bar's own three (its figure's offset, as the ledges' are), beside its two noughts, which read as the
+  // ledges' own text (the put-back where nothing swings).
+  const BAR_ROOT = ['rig.root.position.x = B.offX * c - B.offZ * s;', 'rig.root.position.y += B.offY;', 'rig.root.position.z = B.offX * s + B.offZ * c;'];
+  const barRoot: string[] = [];
+  // Climbing II, phase 4: the rope's own three (its figure's offset, as the bar's are), beside its two noughts, which read as the
+  // ledges' own text (the put-back where nothing holds the rope).
+  const ROPE_ROOT = ['rig.root.position.x = R.offX * c - R.offZ * s;', 'rig.root.position.y += R.offY;', 'rig.root.position.z = R.offX * s + R.offZ * c;'];
+  const ropeRoot: string[] = [];
+  // Climbing II, phase 5: the pole's own three (its figure's offset, as the rope's are), beside its two noughts, which read as the
+  // ledges' own text (the put-back where nothing holds the pole).
+  const POLE_ROOT = ['rig.root.position.x = P.offX * c - P.offZ * s;', 'rig.root.position.y += P.offY;', 'rig.root.position.z = P.offX * s + P.offZ * c;'];
+  const poleRoot: string[] = [];
+  // Climbing II, phase 6: the vault's own two (its figure's offset along its front and up, in the group's own frame), beside its
+  // three noughts, which read as the ledges' own text (the put-back where nothing vaults, and the across it never offsets).
+  const VAULT_ROOT = ['rig.root.position.y += V.offY;', 'rig.root.position.z = V.offFwd;'];
+  const vaultRoot: string[] = [];
+  const s2Root: string[] = [];
   const writers: string[] = [];
   const walk = (dir: string) => {
     for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
@@ -301,14 +321,19 @@ function jumpThrough(t: AnimTune, fps: number, level: number, held: number, floo
         const own = rel === 'src/player/rig.ts' ? '|\\bthis\\.root' : '';
         const write = new RegExp(`(\\brig\\??\\.root${own})\\.position(\\.[xyz])?\\s*([-+*/]?=(?!=)|\\.(set|setX|setY|setZ|copy|add|sub|addScaledVector|multiplyScalar|lerp|applyMatrix4|applyQuaternion)\\()`);
         text(rel).split('\n').forEach((line, i) => {
-          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : writers).push(`${rel}:${i + 1}`);
+          if (write.test(line)) (WAVE3_ROOT.includes(line.trim()) ? wave3Root : WAVE4_ROOT.includes(line.trim()) ? wave4Root : WAVE4B_ROOT.includes(line.trim()) ? wave4bRoot : S2_ROOT.includes(line.trim()) ? s2Root : BAR_ROOT.includes(line.trim()) ? barRoot : ROPE_ROOT.includes(line.trim()) ? ropeRoot : POLE_ROOT.includes(line.trim()) ? poleRoot : VAULT_ROOT.includes(line.trim()) ? vaultRoot : writers).push(`${rel}:${i + 1}`);
         });
       }
     }
   };
   walk('src');
   const rigTs = text('src/player/rig.ts');
-  ok(wave4Root.length === 10 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 7 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's ten writers of a rig's root are the ledges' own lines and the wall's two noughts, and nothing else (${wave4Root.join(', ')})`);
+  ok(wave4Root.length === 19 && wave4Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 16 && wave4Root.filter((w) => w.startsWith('src/player/peerHang.ts:')).length === 3, `wave 4's nineteen writers of a rig's root are the ledges' own lines and the wall's two noughts and the bar's (phase 3), the rope's (phase 4), the pole's (phase 5) and the vault's three (phase 6), and nothing else (${wave4Root.join(', ')})`);
+  ok(barRoot.length === 3 && barRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 3's own three, the bar's figure's offset, in the player alone (${barRoot.join(', ')})`);
+  ok(ropeRoot.length === 3 && ropeRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 4's own three, the rope's figure's offset, in the player alone (${ropeRoot.join(', ')})`);
+  ok(poleRoot.length === 3 && poleRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 5's own three, the pole's figure's offset, in the player alone (${poleRoot.join(', ')})`);
+  ok(vaultRoot.length === 2 && vaultRoot.every((w) => w.startsWith('src/player/player.ts:')), `phase 6's own two, the vault's figure's offset, in the player alone (${vaultRoot.join(', ')})`);
+  ok(s2Root.length === 1 && s2Root[0].startsWith('src/player/player.ts:'), `Smoothness II's one: the duck's push across taken back, in the player alone (${s2Root.join(', ')})`);
   ok(wave4bRoot.length === 3 && wave4bRoot.every((w) => w.startsWith('src/player/player.ts:')), `and the wall's own three, in the player alone (${wave4bRoot.join(', ')})`);
   ok(wave3Root.length === 4 && wave3Root.filter((w) => w.startsWith('src/player/player.ts:')).length === 2 && wave3Root.filter((w) => w.startsWith('src/player/footIk.ts:')).length === 2, `wave 3's four writers of a rig's root are its own lines and nothing else (${wave3Root.join(', ')})`);
   ok(writers.length === 2 && writers.some((w) => w.startsWith('src/player/player.ts:')) && writers.some((w) => w.startsWith('src/net/remotePlayers.ts:')) && rigTs.includes('return new CharacterRig(gltf.scene, gltf.animations, options);') && rigTs.includes('const rig = new CharacterRig(character.group, character.clips, options);') && text('src/player/character.ts').includes('readonly group = new THREE.Group();'), `nothing in the game writes a rig's root's place but the sink's two lines (${writers.join(', ')}), and a rig's root is a scene or a group made fresh at the origin: under 'before' the nought they write is the nought it already stood at, as 62143fe left it`);

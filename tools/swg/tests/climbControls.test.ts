@@ -15,7 +15,12 @@
 //     (`climb.steps`);
 // and each switch's other word is today's (the course's digest of today with every one at 'before', `climbToday.test.ts`).
 import assert from 'node:assert/strict';
-import { CLIMB_TUNE, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_TUNE, climbSmoothBefore, resetClimbTune as resetShipped, tuneClimb } from '../../../src/anim/climbTune.ts';
+/** The smoothness round's switches at their other setting throughout: this suite holds the climbing as it stood before that round (`climbSmoothBefore`). */
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmoothBefore();
+};
 import { climbCourse, lipPiece, type CoursePiece } from '../../../src/anim/climbCourse.ts';
 import { climbTakesUseFirst, LEDGE_HANG, LEDGE_MOVE } from '../../../src/player/ledge.ts';
 import { bodyAt, hop, jump, nearestLip, runCourse, runUntil, shimmy, standPiece, tap, type Stood } from './climbCourseBody.ts';

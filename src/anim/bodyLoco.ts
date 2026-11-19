@@ -99,6 +99,20 @@ export class LocoIn {
   stairAhead = 0.5;
   stairGap = 0.5;
   stairBehind = 0.5;
+  /**
+   * Climbing II's smoothness round, item 4 (`MOVE_TUNE.duckPace` 'height', src/player/duckPace.ts): a ducked body's share of
+   * the way from its standing class's speed to the crouch's (on a standing plan), and past the crouch's height the share of
+   * the way from the crouch's speed to the crawl's (on a crouched plan). Nought (the default, and every frame under 'before')
+   * leaves every speed as it was, to the bit.
+   */
+  duckToCrouch = 0.5;
+  duckToCrawl = 0.5;
+  /**
+   * Climbing II, Smoothness III, item 3b (`move.duckClip` 'clearance', src/player/bodyShape.ts `duckCls`): the crouched class the
+   * duck wears by its head's clearance under something (1 to 3), in place of the one the keys ask; nought (the default, and every
+   * frame under 'one') the keys' own, to the bit.
+   */
+  crouchCls = 0;
 }
 
 export function newLocoIn(): LocoIn {
@@ -115,6 +129,8 @@ export function newLocoIn(): LocoIn {
   f.stairAhead = Number.POSITIVE_INFINITY;
   f.stairGap = Number.POSITIVE_INFINITY;
   f.stairBehind = Number.POSITIVE_INFINITY;
+  f.duckToCrouch = 0;
+  f.duckToCrawl = 0;
   return f;
 }
 
@@ -465,6 +481,14 @@ export class BodyLoco {
         this.stepFacts = facts;
       }
     } else if (this.stairs === 0) this.step.reset();
+    // Climbing II's smoothness round, item 4: ducked under something, the class's speed eased toward the crouch's at the
+    // same class (the walk the slowest crouch, the jog the middle, the run and the sprint the quickest) by the duck's share.
+    if (f.duckToCrouch > 0 && pick !== null && this.stairs === 0) {
+      const g = dir >= 3 && dir <= 5 ? tune.crouch.back : tune.crouch.forward;
+      const c = pick.cls;
+      const to = c === 1 ? g.slow : c === 2 ? g.normal : g.fast;
+      this.speed += (to - this.speed) * f.duckToCrouch;
+    }
     this.turn = pick ? pick.turn * RAD : 0;
     // In the air too: a jump out of a sprint is still the sprint, and the fight's keys stay down through it.
     this.sprinting = pick !== null && pick.cls === SPRINT;
@@ -531,6 +555,8 @@ export class BodyLoco {
     let cls = this.walkOn ? 1 : this.asked >= RUN ? 3 : 2;
     if (this.asked > RUN && !this.walkOn) this.refused = prone ? 'no sprint prone: the quickest crawl' : 'no sprint crouched: the quickest crouch';
     if (this.walkOn && this.asked > JOG) this.refused = 'the walk key holds the slowest';
+    // Smoothness III, item 3b: ducked under something, the crouch whose head clears it (the shape's choice), whatever the keys ask.
+    if (!prone && f.crouchCls > 0) cls = f.crouchCls;
     if (this.stamina.tired && cls > 2) {
       cls = 2;
       this.refused = 'tired: not the quickest until the stamina is back';
@@ -542,6 +568,12 @@ export class BodyLoco {
     this.cls = cls;
     const g = prone ? tune.prone.forward : dir >= 3 && dir <= 5 ? tune.crouch.back : tune.crouch.forward;
     this.speed = cls === 1 ? g.slow : cls === 2 ? g.normal : g.fast;
+    // Climbing II's smoothness round, item 4: crouched and ducked past the crouch's height, eased toward the crawl's speed.
+    if (!prone && f.duckToCrawl > 0) {
+      const p = tune.prone.forward;
+      const to = cls === 1 ? p.slow : cls === 2 ? p.normal : p.fast;
+      this.speed += (to - this.speed) * f.duckToCrawl;
+    }
     this.turn = pick ? pick.turn * RAD : 0;
     this.stamina.stepPosture(f, tune, prone, cls, afloat);
     this.rules = true;

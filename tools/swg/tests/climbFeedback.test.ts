@@ -15,7 +15,12 @@
 // and the hand-overs only the game makes (main.ts's collider names, the console's report) pinned as text.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { CLIMB_FEEDBACK_BEFORE, CLIMB_TUNE, climbFeedbackBefore, resetClimbTune, tuneClimb } from '../../../src/anim/climbTune.ts';
+import { CLIMB_FEEDBACK_BEFORE, CLIMB_TUNE, climbFeedbackBefore, climbSmoothBefore, resetClimbTune as resetShipped, tuneClimb } from '../../../src/anim/climbTune.ts';
+/** The smoothness round's switches at their other setting throughout: this suite holds the climbing as it stood before that round (`climbSmoothBefore`). */
+const resetClimbTune = (): void => {
+  resetShipped();
+  climbSmoothBefore();
+};
 import { climbCourse, FACE_Z, ROOM_HEIGHT, ROOM_ROW, STAND_OFF, type CoursePiece } from '../../../src/anim/climbCourse.ts';
 import { LEDGE_CLIMB_CUT, LEDGE_FACTS, LEDGE_ROLES } from '../../../src/anim/ledgeClips.ts';
 import { LEDGE_HANG, LEDGE_MOVE, LEDGE_NONE } from '../../../src/player/ledge.ts';

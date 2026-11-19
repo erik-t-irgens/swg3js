@@ -377,6 +377,11 @@ async function measure(frame: () => void): Promise<{ made: number; scavenges: nu
   let best = { made: Infinity, scavenges: Infinity };
   for (let attempt = 0; attempt < 3; attempt++) {
     run(frame, 2000);
+    // Wall time for the optimising compiler, which works on a thread of its own (as ledgeAllocOwn.ts waits): on a loaded
+    // machine its job had not landed in one process of a dozen, three times now (0.200, 0.125 and 0.251 B a frame, the
+    // busy script's window each time, 36 of 36 clean run alone), and code not yet optimised boxes the fractions it reads.
+    // A frame that allocates once optimised still fails.
+    await new Promise<void>((r) => setTimeout(r, 25));
     (globalThis as unknown as { gc: (o?: { type: string }) => void }).gc({ type: 'minor' });
     await settle();
     scavenges = 0;

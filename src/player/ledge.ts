@@ -32,14 +32,22 @@ import * as THREE from 'three';
 import type { RAPIER } from '../core/physics.ts';
 import { STILL_FLAGS } from './stairSense.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
-import { CLIMB_TUNE } from '../anim/climbTune.ts';
+import { CLIMB_TUNE, DROP_PARTS, FREE_BEHIND_PARTS, FREE_CUE_PARTS, FREE_HOP_PARTS, LADDER_SWAY_LEGS } from '../anim/climbTune.ts';
 import { LOCO_TUNE } from '../anim/locoTune.ts';
-import { LEDGE_CLIMB_CUT, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
+import { LEDGE_CLIMB_CUT, LEDGE_CLIP_NAMES, LEDGE_FACTS, LEDGE_JUMP_OFF, LEDGE_PUSH_OFF, LEDGE_REST, LEDGE_ROLES, LEDGE_STEP_DOWN, type LedgeClipFacts, type LedgeRoles } from '../anim/ledgeClips.ts';
+import { JKA, UNIT } from './jkaMove.ts';
+import { WALL_CLIPS, WALL_FACTS, clipWall } from '../anim/wallClips.ts';
+import { handMoment } from '../anim/handTimes.ts';
+import { BarAxis, BarRoomAsk, barAxisOf, barGripNear, roomUnderBar, type BarCollider, type BarRoomWorld } from './barShape.ts';
+
+/** Climbing II, phase 3: how many bars one ray goes on past, and how far past each it starts again (a mechanic: a bar's thickness and a little). */
+const BAR_PASSES = 3;
+const BAR_PAST = 0.15;
 
 /** The little of a physics world the ledges ask (rapier's `World`). */
 export interface LedgeWorld {
   castRayAndGetNormal(ray: RAPIER.Ray, maxToi: number, solid: boolean, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.RayColliderIntersection | null;
-  intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: RAPIER.Shape, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number): RAPIER.Collider | null;
+  intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: RAPIER.Shape, filterFlags?: RAPIER.QueryFilterFlags, filterGroups?: number, filterExcludeCollider?: RAPIER.Collider): RAPIER.Collider | null;
 }
 
 /** The engine's ray and the two capsules the room checks ask with, handed in once (so this file loads under node with no engine of its own). */
@@ -47,6 +55,8 @@ export interface LedgeMakers {
   ray(): RAPIER.Ray;
   /** The standing capsule (half height, radius) and the crouched one. */
   capsule(halfHeight: number, radius: number): RAPIER.Shape;
+  /** A box (half extents): `findShelf`'s second gate, before a face met flat across the column (none handed in: no such gate). */
+  cuboid?(hx: number, hy: number, hz: number): RAPIER.Shape;
 }
 
 /** The little of a body the ledges move: its feet and its velocity (the player's `pos` and `vel`, the harness's). */
@@ -152,6 +162,13 @@ export function climbTakesUseFirst(grab: string, onFoot: boolean, grounded: bool
 
 /** The game's own gravity, m/s^2 (Jedi Academy's 800 units at 0.0254 m: the small jump off's rise is worked out against it). */
 const GRAVITY = 800 * 0.0254;
+
+/**
+ * Smoothness II, the fixer: the longest a let-go drop's clip stands held at the feet's touch while the body still falls,
+ * seconds, before it is handed to the falling loop. A backstop and no number of feel: a fall of ten seconds is about 1 km at
+ * the game's gravity, and a body that never meets the ground must never be frozen in the drop's pose for good.
+ */
+const DROP_HOLD_MOST = 10;
 
 /** What becomes of the body when a one-off ends. */
 const AFTER_HANG = 0;
@@ -496,6 +513,77 @@ class Move {
    * would meet something on the way up (more than one: never, today's path).
    */
   crouchFrom = 2;
+  /**
+   * Smoothness II, item 1 (`climb.hopFlight` 'timed'): the body carried only between the clip's hands leaving (`tL`) and
+   * touching (`tT`), clip seconds, the clip's stretch between them played at `fr` of its own rate; `rx`, `rz` the clip's own
+   * level travel a clip second (the ramp the pack took off, in the figure's frame, human male metres), put back on the figure
+   * so its hands stay on a lip while the body is still. `o0*` and `o1*` then hold the line-ups less that ramp.
+   */
+  timed = false;
+  tL = 0.5;
+  tT = 0.5;
+  /** Smoothness II, item 8: the clip second its hands touch the lip (`handMoment`'s, NaN for none), timed or not: on a sloping lip a grab's hands are wholly on it from there on. */
+  touch = 0.5;
+  fr = 0.5;
+  rx = 0.5;
+  rz = 0.5;
+  /** Smoothness II, item 2 (`climb.transitions` 'blend'): its clip already crossfaded into what follows (`LedgeHang.blendNow`). */
+  blending = false;
+  /** Smoothness III, item 0: the move's clock when its crossfade began (a climb up's drawn offset goes out with it). */
+  blendAt = 0.5;
+  /**
+   * Smoothness III, item 1 (`climb.hopFlight` 'arc'): the move flies the arc's own time, never the clip's. `F` the flight's
+   * seconds, `fly` how far into it; the clip's stretch from the leave (`tL`) to the touch (`tT`, on the move's clock) `S`, played
+   * at the steady `ar` (`hm` 0) or slowed to `flightRateMin` and held just before the touch (`hm` 1: `ta` the slow part's
+   * seconds, `he` the hold's ease); the move's clock at its end `T`. `dir` -1 for a clip played backward (`climb.dropMove`
+   * 'reverse'), its clip's length `cd` (its time is `cd` less the clock).
+   */
+  arc = false;
+  F = 0.5;
+  fly = 0.5;
+  S = 0.5;
+  ar = 0.5;
+  hm = 0;
+  ta = 0.5;
+  he = 0.5;
+  dir = 1;
+  cd = 0.5;
+  /**
+   * Smoothness III, item 4b (`climb.dropMove` 'drop'): a move of two parts of the owner's table (`DROP_PARTS`): the first part's
+   * clip from `p1From` for `d1` seconds of the move's clock, then the second's from `p2From`; whether it has switched yet. `k2*`
+   * the clip's own level travel carried across the join (the ramps' constant), `r2*` the second part's a clip second.
+   */
+  parts = 0;
+  p1From = 0.5;
+  d1 = 0.5;
+  p2Id = '';
+  p2From = 0.5;
+  switched = false;
+  k2x = 0.5;
+  k2z = 0.5;
+  r2x = 0.5;
+  r2z = 0.5;
+  /**
+   * Smoothness III, item 4 (`climb.freeHops` 'on'): a free hop up's move, whose clip plays only on the upper body, over the free
+   * hang's own hanging legs (the hang's state's upper layer, put at the move's clock: `upperSeek`), never as a whole-body one-off.
+   */
+  upper = false;
+  /**
+   * Smoothness III, item 4b (`climb.ladderCycle` 'cycle'): a ladder's climb whose clip is put at a phase of its whole cycle
+   * (seconds into it, from `ph0` at the move's start on by `phSpan` over the move), the hand that reaches this rung (0 the left,
+   * 1 the right; -1 not yet chosen) and each hand's hold where it was when the move began (`hold0`: x, y, z a hand).
+   */
+  cycle = false;
+  ph0 = 0.5;
+  phSpan = 0.5;
+  reach = 0;
+  /**
+   * Item 4b: the drawn figure's lift against the hang's line-up at the move's start and end, metres: hand over hand the reaching
+   * hand meets its rung at the clip's own furthest reach (half the clip's stride from its hands' middle: the figure lowered so
+   * going up, raised going down), the hand left on the rung behind stretching for the rest; nought where both share a rung.
+   */
+  sh0 = 0.5;
+  sh1 = 0.5;
 }
 
 /**
@@ -592,6 +680,95 @@ const LOOK_OUT = 0.6;
 const LOOK_DOWN = 0.4;
 const BAND_DEPTHS = 20;
 const BAND_CAP = 256;
+/**
+ * The smoothness round, item 1 (`climb.shelves` 'grab'), mechanics, not feel: the grab's column of rays up a face is this
+ * fine, metres (a rung 0.2 m thick is met by four); it starts this far under the band's foot (so the face under an edge at
+ * the foot is met); a ray meeting something this much further back than the last met the face no more (a face leaning back
+ * at 60 degrees moves 3 cm a ray); a shelf's depth is felt this far over its top (over a 3 cm rib or a seam); a walk down a
+ * column steps this far past a top or a way out; and looks through this many tops at most.
+ */
+const SHELF_SCAN = 0.05;
+const SHELF_BELOW = 0.1;
+const SHELF_STEP_BACK = 0.08;
+const SHELF_OVER = 0.05;
+const SHELF_OUT = 0.002;
+const SHELF_TOPS = 8;
+/**
+ * The smoothness round, item 1: how much further than a foot's length a braced hang feels for the wall under a shallow lip,
+ * metres (ours, a mechanic: a ladder's rung stands a foot's length out of its wall, 0.3 m on the course, where today's
+ * reach ends exactly at that wall and a hair of rounding decided braced or free).
+ */
+const SHELF_BRACE = 0.1;
+/** `shelfUp`: a top under the height asked about counts as this much further than it is (more than any column's window). */
+const SHELF_UP_LAST = 100;
+/**
+ * The second gate's mechanics (`flatFace`, the round's review): the box before the face stops this far short of it at the
+ * least, its length rounded up to this step, and is this wide either side of the column's line; the ray down the band stands
+ * this far behind the face. In front plus behind is under `SHELF_STEP_BACK`, so no two rays of the column can differ by a
+ * step back; behind is under `TOP_IN`.
+ */
+const FLAT_FRONT = 0.05;
+const FLAT_BOX_STEP = 0.02;
+const FLAT_HALF_WIDTH = 0.002;
+const FLAT_IN = 0.02;
+
+/** The smoothness round, item 2: the ways a hang's keys ask (`LedgeHang.way`), and what is found that way (`wayKind`). */
+export const WAY_NONE = 0;
+export const WAY_UP = 1;
+export const WAY_DOWN = 2;
+export const WAY_LEFT = 3;
+export const WAY_RIGHT = 4;
+export const WAY_BEHIND = 5;
+export const WAYK_NONE = 0;
+export const WAYK_LADDER = 1;
+export const WAYK_HOP = 2;
+export const WAYK_DROP = 3;
+/**
+ * Mechanics, not feel (the smoothness round's): a way is looked for again once the hang has moved this far from where it last
+ * looked, metres (a shimmy's look across a gap ahead); the way's vertical band looks in columns this far apart across the
+ * held lip, metres (twice the hop band's: a look made as a key goes down, which must cost a frame little; in depth it keeps the
+ * band's own step, `WAY_DEPTH_STEP`); the hop clips' coil,
+ * seconds, before their hands leave the lip (the look-away's own note: 0.35 to 0.45); a ladder's climb takes at least this
+ * long, seconds; the drop's cue lowers its hand at most this far toward the lip beneath, metres on the human male (an arm
+ * let down from the shoulder); a lip beneath stands to a side when its middle is this far along, metres, and the view to a
+ * side past this many radians; the head stands this far under the grip and out from the face, metres, and looks down at
+ * most this far, radians.
+ */
+/** The ways' and the kinds' words (the console's). */
+const WAY_WORDS: readonly string[] = ['none', 'up', 'down', 'left', 'right', 'behind'];
+const WAYK_WORDS: readonly string[] = ['none', 'ladder', 'hop', 'drop'];
+const WAY_RESEEK = 0.25;
+const WAY_GRID = 0.2;
+/**
+ * The way's vertical band in depth (in front of and behind the held face's line), metres: the hop band's own step, never
+ * `WAY_GRID`. A column takes a lip only where the lip's face stands between 0.07 m behind the column and 0.1 m in front of it
+ * with the column over the top (`shelfTop`'s window and the top ray, about 0.15 m in all): columns 0.2 m apart in depth left
+ * every lip whose face stood 0.25 to 0.3 m (and 0.45 to 0.5 m, ...) behind the held edge unfound, and the 0.3 m ones on the
+ * window's very edge, where the world's coordinates' rounding decided (the smoothness round's review: the course's chimney top
+ * found or not by where the piece stood). At 0.1 m the windows overlap by 0.05 m.
+ */
+const WAY_DEPTH_STEP = 0.1;
+/** A way's look carries on the last look's walk along the held lip only while the held face has turned less than this since (cosine of a degree: a lip that curves is walked afresh). */
+const WALK_KEEP_COS = Math.cos(Math.PI / 180);
+const CUE_COIL = 0.35;
+/**
+ * The feedback round II (maker B, item 0f): the physics' own step, seconds (`FIXED_DT` in src/core/physics.ts, which
+ * climbFb2Ledge.test.ts holds equal): the hips' sway is stepped on it, the steps the caller hands over (`LedgeHang.steps`).
+ */
+export const SWAY_STEP = 1 / 60;
+/**
+ * Item 0g: how far past the held lip's line, along the view's way, a free hang's lip behind must stand, metres on the human male
+ * (a mechanic: a free hang holds a beam whose own far face, under its hands, the behind band otherwise finds; the course's beams
+ * are 0.3 m deep, every lip behind it means is a corridor's width away).
+ */
+const FREE_BEHIND_PAST = 0.35;
+const LADDER_LEAST = 0.25;
+const DROP_REACH = 0.5;
+const DROP_SIDE = 0.1;
+const DROP_VIEW = 0.1;
+const HEAD_UNDER = 0.3;
+const HEAD_OUT = 0.35;
+const HEAD_MOST = 1.2;
 /** A hang's place pushed out where it meets something: along the lip's way out, then that way turned by these (cosine, sine pairs). */
 const ROOM_TURNS: readonly number[] = [1, 0, Math.cos(0.52), Math.sin(0.52), Math.cos(-0.52), Math.sin(-0.52), Math.cos(1.05), Math.sin(1.05), Math.cos(-1.05), Math.sin(-1.05)];
 
@@ -600,6 +777,14 @@ const TAU = Math.PI * 2;
 const HAND_NEAR = 0.1;
 /** How far behind a face's line the ray down onto its top is cast, metres: near enough the edge that a sloped top reads the lip's own height. */
 const TOP_IN = 0.05;
+/**
+ * Smoothness III, item 2 (`climb.targetRoom` 'fit', mechanics, not feel): the ground ray under a hang starts this far over the
+ * lip (over a slab's edge a few centimetres over the terrain), stands at least this far in front of the lip's face (clear of
+ * its own top), and stops this far over the hanging feet (a floor just under them is no ground in the hang), metres.
+ */
+const GROUND_OVER = 0.1;
+const GROUND_FRONT = 0.12;
+const GROUND_SKIN = 0.02;
 const HAND_FAR = 0.3;
 /**
  * A hop's hands on a lip by its share done (ours, a share of the clip rather than a measurement of it: the first sixth on
@@ -618,6 +803,11 @@ const anchorD = new THREE.Vector3();
 const REACH_SPARE = 0.001;
 const anchorP = new THREE.Vector3();
 const anchorM = new THREE.Matrix4();
+/** Smoothness II, item 8: the turn about the lip's outward line (kept), and a lower hand short by less than this (metres) is no reason to turn (a mechanic). */
+const anchorQ = new THREE.Quaternion();
+const anchorQ2 = new THREE.Quaternion();
+const anchorAx = new THREE.Vector3();
+const SLOPE_TURN_LEAST = 0.001;
 
 /** A clip's grip over its own feet at its start (its hands' height less how high its ankles stand over its ground), human male metres. */
 function hangOver(f: LedgeClipFacts): number {
@@ -685,6 +875,27 @@ export class LedgeHang {
   private readonly makers: LedgeMakers;
   private readonly shapeAt = { x: 0, y: 0, z: 0 };
   private readonly shapeRot = { x: 0, y: 0, z: 0, w: 1 };
+  /**
+   * The smoothness round's gate for `findShelf`'s column (`climb.shelves` 'grab'): a capsule lying along the reach round every
+   * ray of the column, kept by its size rounded up (four sizes, made again only when the band or the reach moves: an event), and
+   * the turn that lays it along the reach (written before every use, so it starts as fractions).
+   */
+  private readonly gateShapes: (RAPIER.Shape | null)[] = [null, null, null, null];
+  private readonly gateKeys = new Int32Array([-1, -1, -1, -1]);
+  private gateNext = 0;
+  private readonly gateRot = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
+  /** How often the gate found the column's whole reach empty and spared its rays (a count, for the console). */
+  gated = 0;
+  /**
+   * The second gate (`flatFace`, the round's review): its boxes kept by their length rounded up (eight lengths: a wall climb
+   * keeps one), the turn that lays one along the reach, and how often it found one plain face across the whole column and
+   * spared its rays (a count).
+   */
+  private readonly flatShapes: (RAPIER.Shape | null)[] = [null, null, null, null, null, null, null, null];
+  private readonly flatKeys = new Int32Array([-1, -1, -1, -1, -1, -1, -1, -1]);
+  private flatNext = 0;
+  private readonly flatRot = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
+  flatGated = 0;
   /** The last lip let go of (its edge), and how long more it is not grabbed again. */
   private regrabX = 0.5;
   private regrabY = 0.5;
@@ -707,6 +918,22 @@ export class LedgeHang {
   private qdz = 0.5;
   private qlen = 0.5;
   private qflt = 0.5;
+  /**
+   * Whether a ray that starts inside what it meets answers at once (true, the engine's solid: every ray here but one) or at
+   * its way out (the smoothness round's shelf walk, `probeShelf`, through a top it has passed).
+   */
+  private qsolid = true;
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on'): the figure's scale the last entry was handed (what a bar's room under it is asked
+   * for), how far along the ray its hit on a bar-shaped collider stands, and the kept bar and ask `barHit` reads into.
+   */
+  private barK = 0.5;
+  private bpast = 0.5;
+  private qpast = 0.5;
+  private readonly barAx = new BarAxis();
+  private readonly barAsk = new BarRoomAsk();
+  /** The shelf walk takes a top over the height it asks about before any under it (the smoothness round's look behind, which W asks: up a chimney). */
+  private shelfUp = false;
   /** The hang place worked out last (`placeFor`). */
   private bx = 0.5;
   private by = 0.5;
@@ -718,6 +945,18 @@ export class LedgeHang {
    */
   readonly rail = new Rail();
   private readonly walk = new Rail();
+  /**
+   * The smoothness round (the round's review): the last way's look along the held lip to a side that found it going on past a
+   * hop's reach, kept to be carried on by the next (`bandSide`): whether it may be, which way it walked, the hang's arc where it
+   * began, the held face's way then, and which hang it was (`hangNo`, counted at every hang begun).
+   */
+  private walkKeep = false;
+  private walkHi = false;
+  private walkArc = 0.5;
+  private walkNx = 0.5;
+  private walkNz = 0.5;
+  private walkHang = 0;
+  private hangNo = 0;
   barc = 0.5;
   /** The figure's turn about its own front with a sloping lip (radians, its left side up for a positive), eased: `lipTilt` of the slope. */
   tilt = 0.5;
@@ -798,6 +1037,12 @@ export class LedgeHang {
 
   constructor(makers: LedgeMakers) {
     this.makers = makers;
+    this.rigSeek = Number.NaN;
+    this.upperSeek = Number.NaN;
+    this.cycPh = Number.NaN;
+    this.cycSettle = 0;
+    this.cycShift = 0;
+    this.caughtFor = 0;
     this.barc = 0;
     this.tilt = 0;
     this.tiltGoal = 0;
@@ -828,6 +1073,32 @@ export class LedgeHang {
     this.seenY = Number.NaN;
     this.brushNow = 0;
     this.brushOf = -1;
+    // The smoothness round's fractions.
+    this.cue = 0;
+    this.dryDist = 0;
+    this.dryRise = 0;
+    this.seekX = Number.NaN;
+    this.seekY = Number.NaN;
+    this.seekZ = Number.NaN;
+    this.dropHeld = 0;
+    this.dropVx = 0;
+    this.dropVy = 0;
+    this.dropVz = 0;
+    this.headDown = 0;
+    this.headShare = 0;
+    this.leadShare = 0;
+    this.leanNow = 0;
+    this.rigRate = Number.NaN;
+    this.moveRate = Number.NaN;
+    this.moveSeek = Number.NaN;
+    this.dropClock = 0;
+    this.dropTL = 0;
+    this.dropTT = 0;
+    this.dropDur = 0;
+    this.dropRate = 1;
+    this.dropRateNow = Number.NaN;
+    this.dropSeek = Number.NaN;
+    this.dropHeldFor = 0;
     // Fields that will hold fractions start as one (wave 2a's lesson) and are put to nought here.
     this.dtNow = 0;
     this.goalHands = 0;
@@ -855,6 +1126,41 @@ export class LedgeHang {
     this.fadeT = 1;
     this.fadeDur = 0;
     this.s = 1;
+    this.barK = 1;
+    this.bpast = 0;
+    this.qpast = 0;
+    // The feedback round II's fractions (maker B).
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.liftExtra = 0;
+    this.liftBase = 0;
+    this.carry = 0;
+    this.carryLeave = 0;
+    this.liftShare = 0;
+    this.carryShare = 0;
+    this.legAt = 0;
+    this.legW = 0;
+    this.behind = 0;
+    this.swayX = 0;
+    this.swayY = 0;
+    this.swayZ = 0;
+    this.swayVX = 0;
+    this.swayVY = 0;
+    this.swayVZ = 0;
+    this.swHX = 0;
+    this.swHY = 0;
+    this.swHZ = 0;
+    this.swVX = 0;
+    this.swVY = 0;
+    this.swVZ = 0;
+    this.shimW = 0;
+    this.swayLead = 0;
+    this.shimAt = 0;
+  }
+
+  /** The figure is turned about its front (a sloping lip's tilt, or a side's cue leaning it: the smoothness round's). */
+  get tilted(): boolean {
+    return this.tilt !== 0 || this.leanNow !== 0;
   }
 
   /** Something holds the body (a hang, or a one-off carrying it). */
@@ -874,6 +1180,7 @@ export class LedgeHang {
     this.turnTo = Number.NaN;
     this.cutIn = 0;
     this.keepCrouched = false;
+    this.dropId = '';
   }
 
   /** The hold given up, the drawn offset left where it is (a let-go eases it out, `tick`). */
@@ -898,6 +1205,48 @@ export class LedgeHang {
     this.pendJump = false;
     this.pendForward = false;
     this.pendCrouch = false;
+    // The smoothness round: no way, cue or drop carried past the hold.
+    this.seekStale = true;
+    this.way = 0;
+    this.wayKind = 0;
+    this.cue = 0;
+    this.cueKind = 0;
+    this.dropping = false;
+    this.ladderOn = false;
+    this.headShare = 0;
+    this.leanNow = 0;
+    this.leanSide = 0;
+    // Smoothness III, item 4b: no ladder's cycle carried past the hold.
+    this.cycPh = Number.NaN;
+    this.cycHand = -1;
+    this.cycHeld = false;
+    this.cycWait = false;
+    this.cycSettle = 0;
+    this.cycShift = 0;
+    // The feedback round II (maker B): no cue's rise, legs laid under or sway carried past the hold.
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.liftExtra = 0;
+    this.carry = 0;
+    this.legId = '';
+    this.legW = 0;
+    this.shimW = 0;
+    this.swayStill();
+  }
+
+  /** Item 0f: the hips' lag put to rest (a hold begun or given up: nothing of a swing before carried). */
+  private swayStill(): void {
+    this.swayX = 0;
+    this.swayY = 0;
+    this.swayZ = 0;
+    this.swayVX = 0;
+    this.swayVY = 0;
+    this.swayVZ = 0;
+    this.swVX = 0;
+    this.swVY = 0;
+    this.swVZ = 0;
+    this.swayFed = false;
+    this.swayHave = false;
   }
 
   /** After a let-go the drawn offset eases out over this long more (seconds left, and the whole). */
@@ -922,14 +1271,18 @@ export class LedgeHang {
     ray.dir.y = this.qdy;
     ray.dir.z = this.qdz;
     this.casts++;
-    const h = world.castRayAndGetNormal(ray, this.qlen, true, STILL_FLAGS, this.qflt);
+    let h = world.castRayAndGetNormal(ray, this.qlen, this.qsolid, STILL_FLAGS, this.qflt);
+    // Climbing II, phase 3 (`climb.bars` 'on'): a bar is never a lip, so a ray that meets one goes on past it (`passBars`).
+    // Under 'off' not a line of it runs.
+    this.qpast = 0;
+    if (h !== null && CLIMB_TUNE.bars === 'on') h = this.passBars(world, h, ray);
     const o = this.hit;
     if (!h) {
       o.hit = false;
       return false;
     }
     o.hit = true;
-    o.toi = h.timeOfImpact;
+    o.toi = this.qpast + h.timeOfImpact;
     o.x = this.qx + this.qdx * o.toi;
     o.y = this.qy + this.qdy * o.toi;
     o.z = this.qz + this.qdz * o.toi;
@@ -937,6 +1290,56 @@ export class LedgeHang {
     o.ny = h.normal.y;
     o.nz = h.normal.z;
     return true;
+  }
+
+  /**
+   * Climbing II, phase 3 (`climb.bars` 'on'): a ray's hit `first` that is a bar (`barHit`) gone on past, a few times at most, to
+   * whatever stands behind; the hit that stops it, or null, with how far along the ray it was cast from kept in `qpast`. Kept out
+   * of `cast` itself, which every probe of the ledges calls, so `cast` stays about the small function it was before the bars.
+   */
+  private passBars(world: LedgeWorld, first: RAPIER.RayColliderIntersection, ray: RAPIER.Ray): RAPIER.RayColliderIntersection | null {
+    let h: RAPIER.RayColliderIntersection | null = first;
+    let past = 0;
+    let k = 0;
+    while (h !== null) {
+      this.bpast = past + h.timeOfImpact;
+      if (!this.barHit(world, h.collider as unknown as BarCollider)) break;
+      past += h.timeOfImpact + BAR_PAST;
+      if (++k > BAR_PASSES || past >= this.qlen) {
+        h = null;
+        break;
+      }
+      ray.origin.x = this.qx + this.qdx * past;
+      ray.origin.y = this.qy + this.qdy * past;
+      ray.origin.z = this.qz + this.qdz * past;
+      this.casts++;
+      h = world.castRayAndGetNormal(ray, this.qlen - past, this.qsolid, STILL_FLAGS, this.qflt);
+    }
+    this.qpast = past;
+    return h;
+  }
+
+  /**
+   * Climbing II, phase 3: whether what the ray met `bpast` along it is a bar the ledges pass (src/player/barShape.ts): bar-shaped,
+   * long enough for both hands, and with room under it for a hanging body at the grip nearest the point met (`roomUnderBar`, the
+   * grab's own test, one shape test). A bar-shaped collider with no room under it there (a rail along a wall's top, a rod at chest
+   * height over the ground) is no bar: the ray stops at it, and the ledges make of it what they make of it under 'off'.
+   */
+  private barHit(world: LedgeWorld, c: BarCollider): boolean {
+    const B = this.barAx;
+    if (!barAxisOf(c, B)) return false;
+    const A = this.barAsk;
+    A.scale = this.barK;
+    A.px = this.qx + this.qdx * this.bpast;
+    A.py = this.qy + this.qdy * this.bpast;
+    A.pz = this.qz + this.qdz * this.bpast;
+    if (!barGripNear(B, A)) return false;
+    let cap = this.shapeStand;
+    if (!cap) cap = this.shapeStand = this.makers.capsule(LEDGE_CAPSULE.stand, LEDGE_CAPSULE.r);
+    A.flags = STILL_FLAGS;
+    A.filter = this.qflt;
+    this.casts++;
+    return roomUnderBar(world as unknown as BarRoomWorld, B, A, cap);
   }
 
   /** Whether a capsule (crouched or standing) with its feet at (q) is clear of what stands still. */
@@ -955,10 +1358,61 @@ export class LedgeHang {
     at.y = this.qy + LEDGE_CAPSULE.r + half;
     at.z = this.qz;
     this.casts++;
-    const c = world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt);
+    // (Climbing II, phase 5, maker B: a climb up from a pole's top leaves the pole held out, `clearSkip`; undefined otherwise, as
+    // the argument left out always was.)
+    const c = world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt, this.clearSkip);
     this.met = c;
     return c === null;
   }
+
+  /** Climbing II, phase 5 (maker B): what a climb up's room tests leave out (the pole a climb from its top is begun on); undefined at every other time. */
+  private clearSkip: RAPIER.Collider | undefined = undefined;
+
+  /**
+   * Climbing II, phase 5 (maker B, `climb.poleTop` 'climb'): a body at a pole's top climbs onto a lip in reach the way `i.moveX`,
+   * `i.moveZ` look (src/player/poleClimb.ts's hand-over at the top): the lip found as a grab finds it (the use key's reach), taken as
+   * the hang's own (its kind, its slope, the heading facing it) and the climb up begun from where the body is, as W at a hang begins
+   * it, its room tests leaving the pole (`pole`) out. True where the climb began; false where no lip is in reach that way or the
+   * climb's own tests refuse it (its words in `said`; the ledges then hold nothing).
+   */
+  climbFrom(world: LedgeWorld, b: LedgeBody, i: LedgeIn, pole: RAPIER.Collider | null): boolean {
+    this.barK = i.scale;
+    const T = CLIMB_TUNE;
+    const grip = this.fromGrip;
+    this.fromGrip = Number.NaN;
+    if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
+    const s = i.scale;
+    const L = this.found;
+    const ahead = (T.useReach > T.reachAhead ? T.useReach : T.reachAhead) * s;
+    this.qflt = i.filter;
+    // (The reach band about the hands on the pole (`fromGrip`, the pole's grip): the feet where a body reaching up to them would
+    // stand, the band's middle under them; the body's own feet where none is given.)
+    const feet = grip === grip ? grip - ((T.reachLow + T.reachHigh) / 2 + T.gripDrop) * s : b.pos.y;
+    if (!this.findLip(world, b.pos.x, feet, b.pos.z, i.moveX, i.moveZ, (T.reachLow + T.gripDrop) * s, (T.reachHigh + T.gripDrop) * s, ahead, i.filter, false, L)) return false;
+    this.s = s;
+    this.braced = this.bracedAt(world, L, s, i.filter);
+    this.measureSlope(world, L, i.filter);
+    this.lip.copy(L);
+    this.heading = Math.atan2(-L.nx, -L.nz);
+    this.said = '';
+    this.clearSkip = pole ?? undefined;
+    try {
+      this.climbUp(world, b, i);
+    } finally {
+      this.clearSkip = undefined;
+    }
+    if (this.phase === LEDGE_NONE) return false;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.climbsFrom++;
+    return true;
+  }
+
+  /** Phase 5 (maker B): climbs begun from a pole's top (`climbFrom`), the console's and the tests'. */
+  climbsFrom = 0;
+  /** Phase 5 (maker B): the hands' height on the pole a `climbFrom` reaches about, written by its caller just before (NaN: the body's own feet). */
+  fromGrip = Number.NaN;
 
   /** The capsule shrunk all round by `brushNow` (made again only when the brush moves: an event, a climb up's). */
   private brushShape(crouched: boolean): RAPIER.Shape {
@@ -981,6 +1435,9 @@ export class LedgeHang {
    * inside what it meets (a taller block: no lip there), or the top is too steep to stand on, or the face is walkable.
    */
   private probeLip(world: LedgeWorld): boolean {
+    // The smoothness round, item 1: every top in the column, the one nearest the height asked about (a shallow lip under a
+    // ladder's next rung, a shelf's tier under the next).
+    if (CLIMB_TUNE.shelves === 'grab') return this.probeShelf(world);
     const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
     const nx = this.fnx;
     const nz = this.fnz;
@@ -1438,6 +1895,8 @@ export class LedgeHang {
   /** The rail begun again at the lip held (a hang begun), on far enough both ways that both hands and a hand's width more are on it. */
   private railStart(world: LedgeWorld): void {
     this.rail.start(this.lip);
+    // A new hang: no walk along the last lip is carried on (`walkKeep`).
+    this.hangNo++;
     this.barc = 0;
     this.handHalf(this.braced);
     const reach = this.hh + (CLIMB_TUNE.edgeAhead + RAIL_STEP) * this.s;
@@ -1494,7 +1953,8 @@ export class LedgeHang {
       // A skin over the feet (a climb ends standing on the top: touching it is no want of room).
       this.qy = this.pqy + CLIMB_SKIN;
       this.qz = this.pqz;
-      if (this.clear(world, this.pathCrouched)) continue;
+      // (Smoothness III, item 2, 'fit': a hop's way is clear of the ground as well, which a shape test cannot find a body under.)
+      if (this.clear(world, this.pathCrouched) && !(m.path !== PATH_LEGS && CLIMB_TUNE.targetRoom === 'fit' && this.pathGround(world, this.pathCrouched))) continue;
       // The feedback round ('fit', a climb up's): standing meets something on the way, so the body tucks crouched from here
       // on (the in-leg is crouched already), where a crouched one is clear.
       if (this.tuckOk && !this.pathCrouched) {
@@ -1639,6 +2099,8 @@ export class LedgeHang {
    * Three to four rays where there is one, one where there is no face at all.
    */
   private findLip(world: LedgeWorld, fx: number, fy: number, fz: number, dx: number, dz: number, lo: number, hi: number, ahead: number, flt: number, steepTop: boolean, out: Lip): boolean {
+    // The smoothness round, item 1: a shallow lip with something over or behind it is a lip too (a column up the face).
+    if (CLIMB_TUNE.shelves === 'grab') return this.findShelf(world, fx, fy, fz, dx, dz, lo, hi, ahead, flt, steepTop, out);
     const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
     this.qflt = flt;
     // The face at the band's foot: no face there, no lip in the band (the wall ends under the hands, or there is none).
@@ -1696,6 +2158,422 @@ export class LedgeHang {
     return true;
   }
 
+  // ---- the smoothness round, item 1: shallow lips (`climb.shelves` 'grab') ----------------------------------------------------
+
+  /**
+   * `findLip`'s ask answered for a shallow lip too: rays toward the face up a column from `SHELF_BELOW` under the band's foot
+   * to a step over its head, every `SHELF_SCAN`; where one meets a face within the reach and the next meets it no more
+   * (nothing there, a top, or something further back by `SHELF_STEP_BACK`), the face's top edge stands between the two, and
+   * it is a lip where `shelfEdge` takes it (a walkable top in the band, running back `shelfMin`, `handRoom` over it). Every
+   * such edge in the band is looked at and the one nearest the hands' own height (the band's middle: where a lip met in a
+   * jump is gripped with the arms neither stretched nor bent) taken, into `out`. A rung, a shelf with its next tier behind
+   * it and a sill are lips this way; a face that goes on past the band's head has no edge in it, as `findLip` says.
+   */
+  private findShelf(world: LedgeWorld, fx: number, fy: number, fz: number, dx: number, dz: number, lo: number, hi: number, ahead: number, flt: number, steepTop: boolean, out: Lip): boolean {
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    this.qflt = flt;
+    const want = fy + (lo + hi) * 0.5;
+    const len = ahead + CLIMB_TUNE.shelfMin + 0.3;
+    const y0 = fy + lo - SHELF_BELOW;
+    // (Two steps over the band's head: an edge at the band's own 0.05 m of slack over it has a ray over it to end its face.)
+    const y1 = fy + hi + 2 * SHELF_SCAN;
+    // The gate: one shape round the whole column. Where it meets nothing, no ray of the column can (each lies inside it), so the
+    // column is not cast: on foot in the open with the use key held, one query a frame rather than twenty-odd rays.
+    if (this.columnEmpty(world, fx, fz, dx, dz, len, y0, y1)) {
+      this.gated++;
+      return false;
+    }
+    // The second gate (the round's review): one plain face across the whole column, nothing in front of it and nothing breaking
+    // it behind its own line, has no edge in the band: a wall climbed asks three queries a frame here, not the column's dozen.
+    if (this.flatFace(world, fx, fz, dx, dz, len, y0, y1)) {
+      this.flatGated++;
+      return false;
+    }
+    const h = this.hit;
+    let best = Number.POSITIVE_INFINITY;
+    let got = false;
+    // The last ray's face (its distance, NaN where it met none within the reach) and where it was cast.
+    let near = Number.NaN;
+    let nearY = 0;
+    for (let k = 0; k < 64; k++) {
+      const y = y0 + k * SHELF_SCAN;
+      if (y > y1 + 1e-9) break;
+      this.qx = fx;
+      this.qy = y;
+      this.qz = fz;
+      this.qdx = dx;
+      this.qdy = 0;
+      this.qdz = dz;
+      this.qlen = len;
+      const hit = this.cast(world);
+      const toi = hit ? h.toi : Number.POSITIVE_INFINITY;
+      const ny = hit ? h.ny : 0;
+      const nl = hit ? Math.sqrt(h.nx * h.nx + h.nz * h.nz) : 0;
+      const face = hit && toi > 1e-4 && toi <= ahead && ny < walk && nl > 1e-6 && -(h.nx * dx + h.nz * dz) / nl >= 0.5;
+      if (near === near && (!hit || toi > near + SHELF_STEP_BACK || ny >= walk)) {
+        if (this.shelfEdge(world, fx, fz, dx, dz, nearY, y, near, ahead, steepTop, walk, fy + lo - 0.05, fy + hi + 0.05)) {
+          const d = this.foy > want ? this.foy - want : want - this.foy;
+          if (d < best) {
+            best = d;
+            got = true;
+            out.ex = this.fox;
+            out.ey = this.foy;
+            out.ez = this.foz;
+            out.nx = this.fonx;
+            out.nz = this.fonz;
+            out.topNy = this.fotop;
+          }
+        }
+      }
+      near = face ? toi : Number.NaN;
+      nearY = y;
+    }
+    return got;
+  }
+
+  /**
+   * Whether `findShelf`'s whole column (horizontal rays from (`fx`, `fz`) along (`dx`, `dz`) for `len`, at every height from `y0`
+   * to `y1`) meets nothing that stands still: one capsule lying along the reach, its middle the column's, its half length and
+   * radius rounded up to 0.05 m (the radius a centimetre over the column's half height), so every ray of the column lies inside
+   * it and its lowest point is the column's lowest ray's height less that centimetre. One query, counted with the casts.
+   */
+  private columnEmpty(world: LedgeWorld, fx: number, fz: number, dx: number, dz: number, len: number, y0: number, y1: number): boolean {
+    const n = Math.sqrt(dx * dx + dz * dz);
+    if (!(n > 1e-6)) return false;
+    const hq = Math.ceil(len * 10) | 0;
+    const rq = Math.ceil(((y1 - y0) * 0.5 + 0.01) * 20) | 0;
+    const key = hq * 1000 + rq;
+    const K = this.gateKeys;
+    let shape: RAPIER.Shape | null = null;
+    for (let k = 0; k < 4; k++) {
+      if (K[k] === key) {
+        shape = this.gateShapes[k];
+        break;
+      }
+    }
+    if (shape === null) {
+      shape = this.makers.capsule(hq / 20, rq / 20);
+      const at = this.gateNext;
+      this.gateShapes[at] = shape;
+      K[at] = key;
+      this.gateNext = (at + 1) & 3;
+    }
+    const ux = dx / n;
+    const uz = dz / n;
+    const at = this.shapeAt;
+    at.x = fx + ux * len * 0.5;
+    at.y = (y0 + y1) * 0.5;
+    at.z = fz + uz * len * 0.5;
+    // The capsule's own axis (up) laid along the reach: a quarter turn about (uz, 0, -ux).
+    const q = this.gateRot;
+    q.x = Math.SQRT1_2 * uz;
+    q.y = 0;
+    q.z = -Math.SQRT1_2 * ux;
+    q.w = Math.SQRT1_2;
+    this.casts++;
+    return world.intersectionWithShape(at, q, shape, STILL_FLAGS, this.qflt) === null;
+  }
+
+  /**
+   * Whether `findShelf`'s column (horizontal rays from (`fx`, `fz`) along (`dx`, `dz`), every `SHELF_SCAN` from `y0` to `y1`)
+   * meets one plain face and nothing else, so it can find no edge: its foot ray meets something `d` ahead; a box over the
+   * column's whole strip from the rays' start to within `FLAT_FRONT` of `d` (its length rounded up, so it stops 0.03 to 0.05 m
+   * short) meets nothing; and a ray down the band `FLAT_IN` behind that face's line, answering where it leaves anything it
+   * starts in, meets nothing. Then every ray of the column meets its first surface between `d - FLAT_FRONT` and `d + FLAT_IN`
+   * (inside the face at the foot, the line behind it crosses no surface over the band, so it is inside at every height), less
+   * than `SHELF_STEP_BACK` apart, and no top, hole, sill or step back lies in the band: a top, a window's sill and head, a
+   * rung's or a shelf's faces each cross one of the box or that line. (A face thinner than `FLAT_IN` is passed through by the
+   * line; its own top is then no lip, the top ray `TOP_IN` behind its face missing it.) Three queries; none without the box
+   * maker. False wherever in doubt: the column decides.
+   */
+  private flatFace(world: LedgeWorld, fx: number, fz: number, dx: number, dz: number, len: number, y0: number, y1: number): boolean {
+    const make = this.makers.cuboid;
+    if (make === undefined) return false;
+    const n = Math.sqrt(dx * dx + dz * dz);
+    if (!(n > 1e-6)) return false;
+    const h = this.hit;
+    this.qx = fx;
+    this.qy = y0;
+    this.qz = fz;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    this.qlen = len;
+    if (!this.cast(world) || h.toi < 1e-4) return false;
+    const d = h.toi * n;
+    const lq = Math.ceil((d - FLAT_FRONT) / FLAT_BOX_STEP) | 0;
+    if (lq < 1) return false;
+    const hy = Math.ceil(((y1 - y0) * 0.5 + 0.005) * 200) | 0;
+    const key = lq * 1000 + hy;
+    const K = this.flatKeys;
+    let shape: RAPIER.Shape | null = null;
+    for (let k = 0; k < 8; k++) {
+      if (K[k] === key) {
+        shape = this.flatShapes[k];
+        break;
+      }
+    }
+    if (shape === null) {
+      shape = make.call(this.makers, FLAT_HALF_WIDTH, hy / 200, lq * FLAT_BOX_STEP * 0.5);
+      const at = this.flatNext;
+      this.flatShapes[at] = shape;
+      K[at] = key;
+      this.flatNext = (at + 1) & 7;
+    }
+    const ux = dx / n;
+    const uz = dz / n;
+    const at = this.shapeAt;
+    at.x = fx + ux * lq * FLAT_BOX_STEP * 0.5;
+    at.y = (y0 + y1) * 0.5;
+    at.z = fz + uz * lq * FLAT_BOX_STEP * 0.5;
+    // The box's length (its own z) laid along the reach: a turn about up by the reach's heading.
+    const q = this.flatRot;
+    const yaw = Math.atan2(ux, uz);
+    q.x = 0;
+    q.y = Math.sin(yaw * 0.5);
+    q.z = 0;
+    q.w = Math.cos(yaw * 0.5);
+    this.casts++;
+    if (world.intersectionWithShape(at, q, shape, STILL_FLAGS, this.qflt) !== null) return false;
+    this.qx = fx + ux * (d + FLAT_IN);
+    this.qy = y1 + 0.001;
+    this.qz = fz + uz * (d + FLAT_IN);
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = y1 - y0 + 0.002;
+    this.qsolid = false;
+    const met = this.cast(world);
+    this.qsolid = true;
+    return !met;
+  }
+
+  /**
+   * One edge of `findShelf`'s column, between a ray at `yNear` that met the face `dNear` ahead and one at `yFar` that did
+   * not: the face's top found by halving (six times, under a millimetre), the top down onto it a little behind the face from
+   * `handRoom` over the edge (refused where anything stands within that room, which the ray meets first or starts in), its
+   * top walkable (`steepTop`: as `findLip`) and within the band (`bandLo` to `bandHi`), the face just under it facing the
+   * ray (as `findLip`), and the top running back `shelfMin` before anything steep rises behind it. Into `fo*`.
+   */
+  private shelfEdge(world: LedgeWorld, fx: number, fz: number, dx: number, dz: number, yNear: number, yFar: number, dNear: number, ahead: number, steepTop: boolean, walk: number, bandLo: number, bandHi: number): boolean {
+    const T = CLIMB_TUNE;
+    const h = this.hit;
+    let a = yNear;
+    let c = yFar;
+    let faceX = fx + dx * dNear;
+    let faceZ = fz + dz * dNear;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    for (let k = 0; k < 6; k++) {
+      const mid = (a + c) * 0.5;
+      this.qx = fx;
+      this.qy = mid;
+      this.qz = fz;
+      this.qdx = dx;
+      this.qdy = 0;
+      this.qdz = dz;
+      this.qlen = dNear + SHELF_STEP_BACK;
+      if (this.cast(world) && h.toi > 1e-4 && h.ny < walk) {
+        a = mid;
+        faceX = h.x;
+        faceZ = h.z;
+      } else c = mid;
+    }
+    // The top, from the hands' room over the edge.
+    this.qx = faceX + dx * TOP_IN;
+    this.qy = c + T.handRoom;
+    this.qz = faceZ + dz * TOP_IN;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = T.handRoom + (c - a) + 0.1;
+    if (!this.cast(world)) return false;
+    if (h.toi < 1e-4 || h.ny < (steepTop ? 0.2 : walk)) return false;
+    const topY = h.y;
+    const topNy = h.ny;
+    if (topY > c + 0.02 || topY < a - 0.08 || topY < bandLo || topY > bandHi) return false;
+    // The face just under the top: where the edge stands, and which way it faces.
+    this.qx = fx;
+    this.qy = topY - 0.06;
+    this.qz = fz;
+    this.qdx = dx;
+    this.qdy = 0;
+    this.qdz = dz;
+    this.qlen = ahead + 0.3;
+    if (!this.cast(world) || h.ny >= walk) return false;
+    let nx = h.nx;
+    let nz = h.nz;
+    const nl = Math.sqrt(nx * nx + nz * nz);
+    if (!(nl > 1e-6)) return false;
+    nx /= nl;
+    nz /= nl;
+    if (-(nx * dx + nz * dz) < 0.5) return false;
+    const ex = h.x;
+    const ez = h.z;
+    const edge = h.toi;
+    // It runs back `shelfMin` before anything rises behind it (a rise gentle enough to walk is the top going on).
+    this.qy = topY + SHELF_OVER;
+    this.qlen = edge + T.shelfMin;
+    if (this.cast(world) && h.toi > 1e-4 && h.ny < walk) return false;
+    this.fox = ex;
+    this.foy = topY;
+    this.foz = ez;
+    this.fonx = nx;
+    this.fonz = nz;
+    this.fotop = topNy;
+    return true;
+  }
+
+  /**
+   * `probeLip`'s ask answered through every top in its column: down from `frise` over `fref` to `ffall` under it, a little
+   * behind the face's line; each top met that `shelfTop` takes is a lip (its face under it facing the way asked, within
+   * `facc`, standing where the top is, running back `shelfMin`, `handRoom` over it), and the walk goes on down through it
+   * (out at its underside, `outOf`); the lip whose top is nearest `fref` taken, into `fo*`. A column that starts inside
+   * something tall comes out at its foot, past the window, and finds nothing, as `probeLip` refuses it.
+   */
+  private probeShelf(world: LedgeWorld): boolean {
+    const walk = Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
+    const nx = this.fnx;
+    const nz = this.fnz;
+    const cx = this.fpx - nx * TOP_IN;
+    const cz = this.fpz - nz * TOP_IN;
+    const end = this.fref - this.ffall;
+    const ref = this.fref;
+    let y = this.fref + this.frise;
+    let best = Number.POSITIVE_INFINITY;
+    let got = false;
+    let gx = 0;
+    let gy = 0;
+    let gz = 0;
+    let gnx = 0;
+    let gnz = 0;
+    let gtop = 0;
+    const h = this.hit;
+    for (let it = 0; it < SHELF_TOPS && y > end; it++) {
+      this.qx = cx;
+      this.qy = y;
+      this.qz = cz;
+      this.qdx = 0;
+      this.qdy = -1;
+      this.qdz = 0;
+      this.qlen = y - end;
+      if (!this.cast(world)) break;
+      if (h.toi < 1e-4) {
+        // Started inside what it met: on from its underside.
+        y = this.outOf(world, cx, y, cz, end);
+        if (!(y === y)) break;
+        continue;
+      }
+      const topY = h.y;
+      const topNy = h.ny;
+      if (topNy >= walk && this.shelfTop(world, cx, cz, topY, topNy, walk)) {
+        let d = topY > ref ? topY - ref : ref - topY;
+        // (`shelfUp`: a top over the height asked about before any under it, a chimney's rung above before the one below.)
+        if (this.shelfUp && topY < ref) d += SHELF_UP_LAST;
+        if (d < best) {
+          best = d;
+          got = true;
+          gx = this.fox;
+          gy = this.foy;
+          gz = this.foz;
+          gnx = this.fonx;
+          gnz = this.fonz;
+          gtop = this.fotop;
+        }
+      }
+      y = this.outOf(world, cx, topY - SHELF_OUT, cz, end);
+      if (!(y === y)) break;
+    }
+    if (!got) return false;
+    this.fox = gx;
+    this.foy = gy;
+    this.foz = gz;
+    this.fonx = gnx;
+    this.fonz = gnz;
+    this.fotop = gtop;
+    return true;
+  }
+
+  /**
+   * From a point in a column, down to `end`: where the shelf walk goes on (`probeShelf`). A ray that answers at its way out
+   * (the engine's, from inside what it starts in) meets either that way out or, starting in nothing, the top of the next
+   * thing below; the first goes on from just under it, the second from just over it (so the walk's next ray meets that
+   * top). NaN where nothing is met before `end`. Two rays.
+   */
+  private outOf(world: LedgeWorld, x: number, y: number, z: number, end: number): number {
+    this.qx = x;
+    this.qy = y;
+    this.qz = z;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = y - end;
+    if (!(this.qlen > 0)) return Number.NaN;
+    this.qsolid = false;
+    const met = this.cast(world);
+    this.qsolid = true;
+    if (!met) return Number.NaN;
+    const ye = this.hit.y;
+    // Inside something just under it: it was the top of the next thing below, not the way out.
+    this.qy = ye - SHELF_OUT;
+    this.qlen = SHELF_OUT * 0.5;
+    if (this.cast(world) && this.hit.toi < 1e-4) return ye + SHELF_OUT;
+    return ye - SHELF_OUT;
+  }
+
+  /**
+   * A top the shelf walk met at `topY` in the column (`cx`, `cz`): a lip where `handRoom` over it is clear (one ray up), the
+   * face just under it is found from out in front (`probeLip`'s own ray and checks: steep, facing the way asked within
+   * `facc`, standing where the top is), and it runs back `shelfMin` from that face before anything steep rises behind it.
+   * Into `fo*`. One to three rays.
+   */
+  private shelfTop(world: LedgeWorld, cx: number, cz: number, topY: number, topNy: number, walk: number): boolean {
+    const T = CLIMB_TUNE;
+    const h = this.hit;
+    const nx = this.fnx;
+    const nz = this.fnz;
+    this.qx = cx;
+    this.qy = topY + SHELF_OUT;
+    this.qz = cz;
+    this.qdx = 0;
+    this.qdy = 1;
+    this.qdz = 0;
+    this.qlen = T.handRoom;
+    if (this.cast(world)) return false;
+    this.qx = this.fpx + nx * 0.5;
+    this.qy = topY - 0.06;
+    this.qz = this.fpz + nz * 0.5;
+    this.qdx = -nx;
+    this.qdy = 0;
+    this.qdz = -nz;
+    this.qlen = 0.85;
+    if (!this.cast(world)) return false;
+    if (h.toi < 1e-4 || h.ny >= walk) return false;
+    let mx = h.nx;
+    let mz = h.nz;
+    const ml = Math.sqrt(mx * mx + mz * mz);
+    if (!(ml > 1e-6)) return false;
+    mx /= ml;
+    mz /= ml;
+    if (mx * nx + mz * nz < this.facc) return false;
+    const back = (h.x - this.fpx + nx * TOP_IN) * mx + (h.z - this.fpz + nz * TOP_IN) * mz;
+    if (back < -0.02 || back > TOP_IN + 0.1) return false;
+    const ex = h.x;
+    const ez = h.z;
+    const edge = h.toi;
+    this.qy = topY + SHELF_OVER;
+    this.qlen = edge + T.shelfMin;
+    if (this.cast(world) && h.toi > 1e-4 && h.ny < walk) return false;
+    this.fox = ex;
+    this.foy = topY;
+    this.foz = ez;
+    this.fonx = mx;
+    this.fonz = mz;
+    this.fotop = topNy;
+    return true;
+  }
+
   /**
    * The hang place under a lip for the hang's kind into `bx/by/bz`: the body's feet where the idle's own feet hang (so the
    * capsule is the hanging figure, and a let-go falls from where the figure is), out from the face by the idle's grip, and
@@ -1714,9 +2592,92 @@ export class LedgeHang {
       this.qx = this.bx;
       this.qy = this.by;
       this.qz = this.bz;
-      if (this.clear(world, false)) return true;
+      // (Smoothness III, item 2, 'fit': and no ground within the hang, which a shape test cannot find a body wholly under.)
+      if (this.clear(world, false) && !(T.targetRoom === 'fit' && this.hangGround(world, lip))) return true;
     }
     return false;
+  }
+
+  /**
+   * Climbing II, Smoothness III, item 2 (`climb.targetRoom` 'fit'): whether anything still stands within the body hanging at
+   * (bx, by, bz) under `lip`: one ray straight down from `GROUND_OVER` over the lip to a skin over the hanging feet, in front of
+   * the lip's face by the hang's own reach out or `GROUND_FRONT`, whichever is the further (a free hang's body is under the lip's
+   * edge, whose own top the ray must miss). It finds the terrain's heightfield, which a shape test cannot find a body wholly under
+   * (the edge of a floor slab a few centimetres over the ground: a hang there stood the body in the ground), and anything else
+   * the hanging body would stand in. Counted in `groundRefused`. The kept ray only.
+   */
+  private hangGround(world: LedgeWorld, lip: Lip): boolean {
+    const s = this.s;
+    const out = (this.bx - lip.ex) * lip.nx + (this.bz - lip.ez) * lip.nz;
+    const front = GROUND_FRONT * s;
+    const more = (out > front ? out : front) - out;
+    this.qx = this.bx + lip.nx * more;
+    this.qy = lip.ey + GROUND_OVER * s;
+    this.qz = this.bz + lip.nz * more;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = this.qy - (this.by + GROUND_SKIN);
+    if (!(this.qlen > 0) || !this.cast(world)) return false;
+    this.groundRefused++;
+    this.groundAtX = this.hit.x;
+    this.groundAtY = this.hit.y;
+    this.groundAtZ = this.hit.z;
+    this.groundFeet = this.by;
+    this.groundFrom = this.qy;
+    this.groundPath = false;
+    this.groundLip.copy(lip);
+    this.groundQx = this.qx;
+    this.groundQz = this.qz;
+    this.groundBx = this.bx;
+    this.groundBz = this.bz;
+    return true;
+  }
+
+  /** Item 2: where the last hang refused for the ground met it, and where that hang's feet stood (the console's). */
+  private groundAtX = Number.NaN;
+  private groundAtY = Number.NaN;
+  private groundAtZ = Number.NaN;
+  private groundFeet = Number.NaN;
+  private groundFrom = Number.NaN;
+  private readonly groundLip = new Lip();
+  private groundQx = Number.NaN;
+  private groundQz = Number.NaN;
+  private groundBx = Number.NaN;
+  private groundBz = Number.NaN;
+  private groundPath = false;
+
+  /** Item 2: hangs and ways refused for the ground under them (the console's and the tests'). */
+  groundRefused = 0;
+
+  /**
+   * Item 2: whether the capsule standing at (q) on a hop's way has the ground in it: one ray from its top down to its feet less a
+   * skin. A shape test does not find a body under the terrain's heightfield; this finds one the ground's surface cuts.
+   */
+  private pathGround(world: LedgeWorld, crouched: boolean): boolean {
+    const height = 2 * (LEDGE_CAPSULE.r + (crouched ? LEDGE_CAPSULE.crouch : LEDGE_CAPSULE.stand));
+    const x = this.qx;
+    const y = this.qy;
+    const z = this.qz;
+    this.qy = y + height;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = height - GROUND_SKIN;
+    const hit = this.cast(world);
+    this.qx = x;
+    this.qy = y;
+    this.qz = z;
+    if (hit) {
+      this.groundRefused++;
+      this.groundAtX = this.hit.x;
+      this.groundAtY = this.hit.y;
+      this.groundAtZ = this.hit.z;
+      this.groundFeet = y;
+      this.groundFrom = y + height;
+      this.groundPath = true;
+    }
+    return hit;
   }
 
   /** A face within reach of the feet under the lip: the hang is braced. One ray. */
@@ -1734,6 +2695,9 @@ export class LedgeHang {
     this.qdy = 0;
     this.qdz = -lip.nz;
     this.qlen = out + 0.1 + 0.3 * s;
+    // The smoothness round, item 1: a shallow lip's wall stands behind it (a ladder's rung a foot's length out of its wall),
+    // which a foot reaches with the knees bent: felt for that much further (`SHELF_BRACE`).
+    if (CLIMB_TUNE.shelves === 'grab') this.qlen += SHELF_BRACE * s;
     if (!this.cast(world)) return false;
     return this.hit.ny < Math.cos((LOCO_TUNE.slope.climb * Math.PI) / 180);
   }
@@ -1745,6 +2709,7 @@ export class LedgeHang {
    * is held from here (`holding`), its velocity is put down, and a one-off is asked for (`startClip`). False otherwise.
    */
   sense(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     // `climb.grabSweep`: where the feet stood at the last look (nothing while something holds the body), for the frame's rise or fall.
     const y0 = this.seenY;
@@ -1817,6 +2782,9 @@ export class LedgeHang {
     this.braced = braced;
     this.heading = Math.atan2(-L.nx, -L.nz);
     this.startMove(id, 'grab', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, this.heading, 'hands', 'idle', L);
+    // Smoothness II, item 1: carried in time with the clip's own hands (on the ground and not jumping: from its start, on its
+    // feet; a jump pressed this frame is in the air whether or not the physics has lifted it yet, alike at every rate).
+    this.timeMove(i.grounded && !i.jumped);
     b.vel.x = 0;
     b.vel.y = 0;
     b.vel.z = 0;
@@ -1829,6 +2797,7 @@ export class LedgeHang {
    * the grab's own look the way the keys push, else the body travels, else it faces, and nothing begun. A few rays.
    */
   canGrab(world: LedgeWorld, b: LedgeBody, i: LedgeIn): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     if (T.ledges !== 'on' || this.phase !== LEDGE_NONE || i.busy || -b.vel.y > T.grabFall) return false;
     const s = i.scale;
@@ -1914,6 +2883,7 @@ export class LedgeHang {
     // The clip walks off facing away from the wall and turns round to grab it: the body faces the wall once it is done.
     this.heading = Math.atan2(dx, dz);
     this.startMove(LEDGE_STEP_DOWN, 'stepDown', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, false, Math.atan2(-nx, -nz), 'feet', 'idle', L);
+    this.timeMove(true);
     b.vel.x = 0;
     b.vel.y = 0;
     b.vel.z = 0;
@@ -1926,6 +2896,7 @@ export class LedgeHang {
    * there if the lip is in reach ahead of the body (a top steeper than walkable counts). True where it took the body.
    */
   fromHaul(world: LedgeWorld, b: LedgeBody, i: LedgeIn, dx: number, dz: number): boolean {
+    this.barK = i.scale;
     const T = CLIMB_TUNE;
     if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
     const s = i.scale;
@@ -1950,6 +2921,7 @@ export class LedgeHang {
     this.heading = Math.atan2(-L.nx, -L.nz);
     const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
     this.startMove(roles.grabRise, 'grab', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, this.braced, this.heading, 'hands', 'idle', L);
+    this.timeMove(false);
     b.vel.x = 0;
     b.vel.y = 0;
     b.vel.z = 0;
@@ -1978,6 +2950,7 @@ export class LedgeHang {
    * up from it (the top-out). False where the ledges are switched off or the body has no room there.
    */
   fromWall(world: LedgeWorld, b: LedgeBody, i: LedgeIn, L: Lip, ox: number, oy: number, oz: number): boolean {
+    this.barK = i.scale;
     if (CLIMB_TUNE.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
     const s = i.scale;
     const braced = this.bracedAt(world, L, s, i.filter);
@@ -2103,6 +3076,25 @@ export class LedgeHang {
     m.spin = 0;
     m.path = PATH_LINE;
     m.crouchFrom = 2;
+    m.timed = false;
+    m.blending = false;
+    m.arc = false;
+    m.parts = 0;
+    m.dir = 1;
+    m.switched = false;
+    m.upper = false;
+    m.cycle = false;
+    // (The feedback round II, item 0d: any move ends the free cue's rise; a free hop up carries its laid lift on, `freeHopBegin`.)
+    this.cueRise = 0;
+    this.cueLift = 0;
+    this.carry = 0;
+    // (Smoothness III, item 4b: any other move ends a ladder's cycle; the hands' holds go with it.)
+    this.cycWait = false;
+    this.cycPh = Number.NaN;
+    this.cycHeld = false;
+    this.cycSettle = 0;
+    this.cycShift = 0;
+    m.touch = handMoment(id, 'touch');
     m.lip.copy(lip);
     const s = this.s;
     const h0 = this.heading;
@@ -2144,7 +3136,10 @@ export class LedgeHang {
     this.startClip = id;
     this.fresh = true;
     this.startFrom = f.t0;
-    this.startFade = CLIMB_TUNE.ease;
+    // Smoothness II, item 2 after its review (`climb.transitions` 'blend'): a move's one-off crossfaded in over the round's own
+    // `transitionBlend` as it crossfades out, never the hang's quicker ease (a grab from a run's fall came in over 0.15 s from
+    // the falling loop's pose: a jump at 144 frames a second by the round's own measure); the ease as ever under 'before'.
+    this.startFade = CLIMB_TUNE.transitions === 'blend' ? Math.max(CLIMB_TUNE.ease, CLIMB_TUNE.transitionBlend) : CLIMB_TUNE.ease;
     this.beginFade();
   }
 
@@ -2161,6 +3156,136 @@ export class LedgeHang {
     this.wx = (p[0] * ch + p[2] * sh) * s;
     this.wy = p[1] * s;
     this.wz = (-p[0] * sh + p[2] * ch) * s;
+  }
+
+  /**
+   * Smoothness II, item 1 (`climb.hopFlight` 'timed'): the one-off just begun (`startMove`) carried by its clip's own moments
+   * (src/anim/handTimes.ts): still until the hands leave the held lip (or the feet the ground), through the air until the
+   * hands touch the new lip, still after. A grab from the ground (`ground`) starts its clip at its start, on its feet; a grab
+   * caught in the air starts it `grabLead` before its touch (never before its feet left the ground), the body flying from
+   * there; a hop and a step down keep their start. The stretch between the two moments is played at a rate fitted to the way
+   * (the clip's own travel over the way's length, the square root, as a thrown body's time goes with the root of its fall,
+   * held to `flightRateMin` .. `flightRateMax`). The line-ups at either end are written less the clip's own level travel there
+   * (`moveStep` puts it back a frame), the start's by its feet for a grab. Nothing at all under 'before', or for a clip with no
+   * touch known: the move stays as `startMove` made it.
+   */
+  private timeMove(ground: boolean): void {
+    const T = CLIMB_TUNE;
+    // (Smoothness III: 'arc' times a grab and a step down as 'timed' does; a hop flies its arc, `arcMove`.)
+    if (T.hopFlight === 'before') return;
+    const m = this.move;
+    if (T.hopFlight === 'arc' && m.kind === 'hop') {
+      this.arcMove();
+      return;
+    }
+    const f = LEDGE_FACTS[m.id];
+    const tT = handMoment(m.id, 'touch');
+    if (!f || !(tT === tT) || tT >= f.dur) return;
+    let tL = handMoment(m.id, 'leave');
+    const grab = m.kind === 'grab';
+    let start = f.t0;
+    if (grab) {
+      if (ground && tL === tL) start = 0;
+      else {
+        start = tT - T.grabLead;
+        if (tL === tL && start < tL) start = tL;
+        if (start < 0) start = 0;
+        tL = start;
+      }
+    } else if (!(tL === tL)) tL = start;
+    if (tL < start) tL = start;
+    if (!(tT > tL)) return;
+    const s = this.s;
+    const len = this.pathLength();
+    // The clip's own travel over its flight: a hop's and a grab from the ground's is its whole travel, a grab caught in the
+    // air's its share of the clip from where it starts.
+    const nl = Math.sqrt(f.net[0] * f.net[0] + f.net[1] * f.net[1] + f.net[2] * f.net[2]) * s;
+    const own = grab && !(ground && start === 0) ? (nl * (tT - start)) / f.dur : nl;
+    let r = len > 1e-6 && own > 1e-6 ? Math.sqrt(own / len) : T.flightRateMax;
+    if (r < T.flightRateMin) r = T.flightRateMin;
+    if (r > T.flightRateMax) r = T.flightRateMax;
+    m.timed = true;
+    m.tL = tL;
+    m.tT = tT;
+    m.fr = r;
+    m.rx = f.net[0] / f.dur;
+    m.rz = f.net[2] / f.dur;
+    m.t0 = start;
+    m.time = start;
+    this.startFrom = start;
+    // The start's line-up: a grab's by its feet (the clip's ankles where the body's are, the figure over the body), the others'
+    // as `startMove` made it; each less the clip's own travel to there, turned by the heading it starts at.
+    if (grab) {
+      m.o0x = 0;
+      m.o0y = (LEDGE_REST.ankle - (ground && start === 0 ? LEDGE_REST.ankle : f.a0)) * s;
+      m.o0z = 0;
+    }
+    this.rampAt(start, m.h0);
+    m.o0x -= this.wx;
+    m.o0y -= this.wy;
+    m.o0z -= this.wz;
+    // The end's: less the clip's whole travel, turned by the heading it ends at.
+    this.rampAt(f.dur, m.kind === 'hop' ? m.heading : m.h0);
+    m.o1x -= this.wx;
+    m.o1y -= this.wy;
+    m.o1z -= this.wz;
+  }
+
+  /** The clip's own level travel `t` clip seconds in (the move's ramp), turned into the world by heading `h` and scaled, into `wx/wy/wz`. */
+  private rampAt(t: number, h: number): void {
+    const m = this.move;
+    const s = this.s;
+    const sh = Math.sin(h);
+    const ch = Math.cos(h);
+    const px = m.rx * t;
+    const pz = m.rz * t;
+    this.wx = (px * ch + pz * sh) * s;
+    this.wy = 0;
+    this.wz = (-px * sh + pz * ch) * s;
+  }
+
+  /**
+   * Smoothness II, item 1: the clip's rate this frame under a timed move (clip seconds a second: the rig plays the one-off at
+   * it, so the pose keeps the move's clock), NaN otherwise (the rig plays it at its own rate, today's).
+   */
+  moveRate = 0.5;
+  /**
+   * Smoothness II, item 2 (`climb.transitions` 'blend'): the one-off under way is `transitionBlend` from its clip's end this
+   * frame, so the caller crossfades it into what follows now (the hang's loop, or for a climb up the crouch: `blendStand`),
+   * never holding its last frame while the move ends (consumed by the caller). The move itself still ends at its end.
+   */
+  blendNow = false;
+  blendStand = false;
+
+  /** Item 2: a move whose clip is now within `transitionBlend` of its end begins its crossfade (once). Fields only. */
+  private blendCheck(): void {
+    const m = this.move;
+    if (CLIMB_TUNE.transitions !== 'blend' || m.blending || m.kind === 'ladder') return;
+    if (m.T - m.time > CLIMB_TUNE.transitionBlend) return;
+    m.blending = true;
+    // (Smoothness III, item 0: the clock the crossfade began at, a frame back: the rig's crossfade has taken this frame's step
+    // by the time the figure is drawn.)
+    m.blendAt = m.time - this.dtNow;
+    this.blendNow = true;
+    if (m.kind === 'climb') this.blendStand = true;
+  }
+
+  /**
+   * Smoothness III, item 0: the share of the climb's own line-up the figure keeps while a climb up crossfades into the crouch it
+   * ends in (1 outside that crossfade, nought at its end and after it until the next hold): the crossfade's own share, the clock
+   * it began at against the move's.
+   * The climb's drawn offset goes out by it (`moveStep`), and so does the spheres' push the climb laid on the figure (handed to
+   * the limbs as `LimbPlace.pushKeep`), so the figure comes onto its feet with nothing left of the climb to drop.
+   */
+  standKeep(): number {
+    const m = this.move;
+    // (The hand-back's own frame and any after it while a hand's weight still lets go: the figure is on its feet, and the push
+    // is none. Read off the frame it once stood at a whole share, a figure on a stepped top was lifted 12 cm for that frame.)
+    if (this.phase === LEDGE_NONE) return this.lastLetGo === 'climbed up' ? 0 : 1;
+    if (this.phase !== LEDGE_MOVE || m.kind !== 'climb' || !m.blending) return 1;
+    const bl = CLIMB_TUNE.transitionBlend;
+    const k = bl > 0 ? (m.time - m.blendAt) / bl : 1;
+    return k >= 1 ? 0 : k <= 0 ? 1 : 1 - k;
   }
 
   /** The figure's offset fades from where it stands now to its next target over the clip's own fade. */
@@ -2180,8 +3305,11 @@ export class LedgeHang {
    * movement takes it from the next).
    */
   step(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    this.barK = i.scale;
     const held = this.stepIn(world, b, i, stam);
     this.fresh = false;
+    // The feedback round II (maker B, items 0e and 0f): the legs laid under and the hips' sway, once the frame's place is written.
+    if (this.phase !== LEDGE_NONE) this.legsStep(b, i);
     return held;
   }
 
@@ -2199,10 +3327,22 @@ export class LedgeHang {
       return false;
     }
     this.dtNow = dt;
+    this.worldNow = world;
     if (!this.fresh) this.startClip = '';
     this.ended = false;
     this.stood = false;
+    // The smoothness round, item 2: a ladder's climb names its clip's rate and an arm's clip over the legs, frame by frame.
+    this.rigRate = Number.NaN;
+    this.rigUpper = '';
+    this.rigSeek = Number.NaN;
+    this.upperSeek = Number.NaN;
+    this.moveRate = Number.NaN;
+    this.moveSeek = Number.NaN;
+    this.blendNow = false;
+    this.blendStand = false;
     if (this.phase === LEDGE_MOVE) {
+      // The smoothness round, item 3: the crouch held through its drop past `dropHold` lets go fully.
+      if (this.dropping && this.dropStep(b, i)) return false;
       // The feedback round, item 1 (`climb.grabFree` 'share'): a grab past its share hands the hang the keys asked (the
       // presses made earlier in it kept for then), the body put on the hang place with its drawn figure where it is; the
       // hang below takes the keys this very frame. Nothing asked, the grab goes on as ever.
@@ -2212,7 +3352,18 @@ export class LedgeHang {
         stam.step(dt, -T.stamina.hang, i.pool, LOCO_TUNE);
         // Climbing II, item 7: a look-away eased out through a one-off (the spine's turn back with it).
         this.lookStep(i);
-        return this.moveStep(world, b, i, true);
+        // The smoothness round: a cue let go of through a one-off (the drop's lowered hand back on).
+        if (T.hangKeys === 'cue') this.easeCue(0, i);
+        const held = this.moveStep(world, b, i, true);
+        // Item 3: the drop's hop reached its lip with the crouch still held: let go fully there.
+        if (this.dropping && this.phase !== LEDGE_MOVE) {
+          this.dropping = false;
+          if (this.phase === LEDGE_HANG && i.crouchHeld) {
+            this.drop(b, 'let go fully');
+            return false;
+          }
+        }
+        return held;
       }
       // Ended into a hang that went straight on into a one-off of its own (a free hang onto the wall): that, carried.
       if ((this.phase as number) !== LEDGE_HANG) return this.begun(world, b, i);
@@ -2227,6 +3378,8 @@ export class LedgeHang {
       this.drop(b, 'tired');
       return false;
     }
+    // The smoothness round, items 2 and 3 (`climb.hangKeys` 'cue'): the owner's grammar while hanging, in place of what follows.
+    if (T.hangKeys === 'cue') return this.cueKeys(world, b, i, stam);
     if (i.crouchPressed) {
       this.drop(b, 'let go');
       return false;
@@ -2340,13 +3493,16 @@ export class LedgeHang {
     const span = m.T - m.t0;
     if (span > 1e-6 && (m.time - m.t0) / span < CLIMB_TUNE.grabFreeAt - 1e-9) return false;
     if ((i.leftHeld || i.rightHeld) && !(i.leftHeld && i.rightHeld)) return true;
+    // (Under the smoothness round's 'cue', W or S held from before the grab asks nothing of it: a run-up's W plays the grab
+    // whole, and the hang answers the key held once it is done; W pressed during it is kept, as ever.)
     return this.pendJump || this.pendForward || this.pendCrouch || this.lookWanted(i);
   }
 
   /** Item 1: the braced look-away would begin from the hang the grab under way ends in (`lookStep`'s own threshold). */
   private lookWanted(i: LedgeIn): boolean {
     const T = CLIMB_TUNE;
-    if (T.lookAway !== 'reach' || !this.move.braced || i.leftHeld || i.rightHeld) return false;
+    // (Under the smoothness round's 'cue' the look-away is W's cue, which the line above answers.)
+    if (T.lookAway !== 'reach' || T.hangKeys === 'cue' || !this.move.braced || i.leftHeld || i.rightHeld) return false;
     const v = i.viewYaw;
     if (!(v === v)) return false;
     let off = v - this.move.heading;
@@ -2398,6 +3554,10 @@ export class LedgeHang {
   private moveStep(world: LedgeWorld, b: LedgeBody, i: LedgeIn, chain: boolean): boolean {
     const dt = i.dt;
     const m = this.move;
+    // Smoothness III, item 1: a hop flying its arc's own time (`climb.hopFlight` 'arc').
+    if (m.arc) return this.arcStep(world, b, i, chain);
+    // Smoothness II, item 1: a timed move's clock runs at the clip's own rate but between its two moments, at the flight's.
+    if (m.timed) return this.timedStep(world, b, i, chain);
     m.time += dt;
     const span = m.T - m.t0;
     const lin = span > 1e-6 ? Math.min(1, Math.max(0, (m.time - m.t0) / span)) : 1;
@@ -2417,15 +3577,18 @@ export class LedgeHang {
     this.ax = m.o0x + (m.o1x - m.o0x) * u;
     this.ay = m.o0y + (m.o1y - m.o0y) * u;
     this.az = m.o0z + (m.o1z - m.o0z) * u;
-    // A hop to another face turns with it as it goes.
-    if (m.kind === 'hop') {
+    // Smoothness III, item 4b: a ladder's cycle hangs the figure between its two hands' rungs.
+    if (m.cycle) this.ay += m.sh0 + (m.sh1 - m.sh0) * u;
+    // A hop to another face turns with it as it goes (and the smoothness round's ladder reach round a corner).
+    if (m.kind === 'hop' || m.kind === 'ladder') {
       let dh = m.heading - m.h0;
       dh -= Math.round(dh / TAU) * TAU;
       // Climbing II, item 7: a hop behind turns round the leading side's way.
       if (m.spin !== 0 && dh * m.spin < 0) dh += m.spin * TAU;
       this.heading = m.h0 + dh * u;
     }
-    this.tiltGoal = 0;
+    // Smoothness II, item 8 (`climb.slopeHands` 'each'): a grab's figure turns with the lip from its start (its hands' arrival).
+    this.tiltGoal = CLIMB_TUNE.slopeHands === 'each' && m.kind === 'grab' ? Math.atan(m.lip.slope) * CLIMB_TUNE.lipTilt : 0;
     this.easeTilt();
     this.setOffset();
     // A climb's figure keeps the straight line it always had (its clip's own pose and line-up): its offset takes back,
@@ -2440,13 +3603,104 @@ export class LedgeHang {
     // A climb's hands push off the top and leave the lip: let go over its first third. A hop's hands leave the lip it
     // leaves and take the one it is aimed at (`hopHands`): wholly on a lip only at its two ends.
     this.goalHands = m.kind === 'climb' ? Math.max(0, 1 - 3 * u) : m.kind === 'hop' ? hopHands(lin) : 1;
-    this.goalFeet = 0;
+    // The smoothness round, item 2: a braced ladder's feet stay on the wall as it climbs.
+    this.goalFeet = m.kind === 'ladder' && m.braced ? 1 : 0;
     this.easeLimbs();
     this.rigState = m.kind === 'climb' ? (m.braced ? 'climbUpBraced' : 'climbUpFree') : this.loopState(m.braced, 0);
     this.rigClip = m.kind === 'climb' ? m.id : (m.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    if (m.kind === 'ladder') this.ladderDraw();
+    // Smoothness II, item 2: crossfaded into what follows before its own end (a climb up's into the crouch it ends in).
+    this.blendCheck();
+    if (m.blending && m.kind === 'climb') {
+      this.rigState = '';
+      this.blendStand = true;
+      // Smoothness III, item 0 (a fault: no switch): the climb's drawn offset lines its own clip up on the body (its feet on the
+      // top: the clip carries the figure up a metre and a half that the offset takes back), and the crouch it crossfades into
+      // stands on the body as it is; held whole through the crossfade, the offset lowered the crouch with it and the figure fell
+      // a metre and more under the top it had just climbed onto before the offset eased out after the climb. So it goes out by
+      // the crossfade's own share, and the crouch is drawn where it stands as it comes in.
+      const keep = this.standKeep();
+      this.offX *= keep;
+      this.offY *= keep;
+      this.offZ *= keep;
+    }
     if (m.time >= m.T - 1e-9) {
       this.endMove(world, b, i);
       // A one-off chained on at the end (a free hang onto the wall) carried its first frame too.
+      if (chain && this.phase === LEDGE_MOVE && m.time === m.t0) return this.moveStep(world, b, i, false);
+    }
+    return (this.phase as number) !== LEDGE_NONE;
+  }
+
+  /**
+   * Smoothness II, item 1: a frame of a timed one-off (`timeMove`). The clip's clock is advanced at its own rate outside the
+   * flight and at the flight's rate inside it, piece by piece within the frame (so the share of a frame either side of a moment
+   * is exact at any frame rate), and that rate handed to the rig (`moveRate`). The body stands on the way's start until the
+   * leave, goes along it at an even pace through the flight (a quadratic way at an even pace: a constant acceleration, a thrown
+   * body's), and stands on its end from the touch. The figure: the two line-ups blended by the flight's share, the clip's own
+   * travel put back on top. The hands are on the lip held before the leave and on the lip aimed at from the touch.
+   */
+  private timedStep(world: LedgeWorld, b: LedgeBody, i: LedgeIn, chain: boolean): boolean {
+    const dt = i.dt;
+    const m = this.move;
+    let t = m.time;
+    let left = dt;
+    if (t < m.tL) {
+      const d = m.tL - t < left ? m.tL - t : left;
+      t += d;
+      left -= d;
+    }
+    if (left > 0 && t < m.tT) {
+      const room = m.tT - t;
+      const d = left * m.fr < room ? left * m.fr : room;
+      t += d;
+      left -= d / m.fr;
+    }
+    if (left > 0) t += left;
+    if (t > m.T) t = m.T;
+    this.moveRate = dt > 0 ? (t - m.time) / dt : 1;
+    m.time = t;
+    const span = m.tT - m.tL;
+    const u = t <= m.tL ? 0 : t >= m.tT ? 1 : (t - m.tL) / span;
+    this.pu = u;
+    this.pathAt();
+    b.pos.x = this.pqx;
+    b.pos.y = this.pqy;
+    b.pos.z = this.pqz;
+    this.crouchedNow = this.pathCrouched;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    // A hop to another face turns with it as it goes.
+    if (m.kind === 'hop') {
+      let dh = m.heading - m.h0;
+      dh -= Math.round(dh / TAU) * TAU;
+      if (m.spin !== 0 && dh * m.spin < 0) dh += m.spin * TAU;
+      this.heading = m.h0 + dh * u;
+    }
+    this.rampAt(t, this.heading);
+    this.ax = m.o0x + (m.o1x - m.o0x) * u + this.wx;
+    this.ay = m.o0y + (m.o1y - m.o0y) * u + this.wy;
+    this.az = m.o0z + (m.o1z - m.o0z) * u + this.wz;
+    // Item 8 (`climb.slopeHands` 'each'): from the touch the figure turns with the lip it took, as its hang does; upright before.
+    this.tiltGoal = CLIMB_TUNE.slopeHands === 'each' && u >= 1 ? Math.atan(m.lip.slope) * CLIMB_TUNE.lipTilt : 0;
+    this.easeTilt();
+    this.setOffset();
+    // The hands' line: the lip the one-off leaves until the leave (a hop's), then the lip it is aimed at.
+    this.lineFor(u <= 0 && m.kind === 'hop' ? this.lip : m.lip);
+    // On the held lip until the leave (a hop's); off it from there; put on the new lip over the hands' own ease before the touch
+    // (by the clip's clock, so alike at every rate), wholly on it from the touch.
+    const lead = CLIMB_TUNE.ease;
+    const on = t >= m.tT ? 1 : lead > 0 && t > m.tT - lead ? (t - (m.tT - lead)) / lead : 0;
+    this.hands = u <= 0 && m.kind === 'hop' ? 1 : on;
+    this.goalHands = this.hands;
+    this.goalFeet = 0;
+    this.easeLimbs();
+    this.rigState = this.loopState(m.braced, 0);
+    this.rigClip = (m.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    this.blendCheck();
+    if (m.time >= m.T - 1e-9) {
+      this.endMove(world, b, i);
       if (chain && this.phase === LEDGE_MOVE && m.time === m.t0) return this.moveStep(world, b, i, false);
     }
     return (this.phase as number) !== LEDGE_NONE;
@@ -2550,6 +3804,8 @@ export class LedgeHang {
           this.bx = this.qx;
           this.by = y;
           this.bz = this.qz;
+          // Smoothness III, item 2 ('fit'): a step along the lip down to a hang the ground stands in is no room.
+          if (T.targetRoom === 'fit' && this.hangGround(world, L)) continue;
           return true;
         }
       }
@@ -2693,6 +3949,9 @@ export class LedgeHang {
     this.phase = LEDGE_HANG;
     this.shimmy = 0;
     this.crouchedNow = false;
+    // The smoothness round, item 2: the way is looked for again from the new hang, and a ladder's key still held climbs on.
+    this.seekStale = true;
+    if (m.kind === 'ladder') this.ladderOn = true;
     // The lip held, followed along its own edge either way from here (its corners, its curve, its slope).
     this.qflt = i.filter;
     this.railStart(world);
@@ -2709,6 +3968,32 @@ export class LedgeHang {
     // Into a free hang where the feet find the wall: on to braced (a step down's way into a braced hang).
     if (!this.braced && m.kind !== 'turn' && this.bracedAt(world, this.lip, this.s, i.filter) && this.placeFor(world, this.lip, true, this.s, i.filter)) {
       this.startMove(LEDGE_ROLES.free.toOther, 'turn', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, true, this.heading, 'idle', 'idle', this.lip);
+    }
+    // Smoothness III, item 4b (`climb.ladderCycle` 'cycle'): a rung of a ladder's cycle ended: its pose held where its phase stands
+    // and the reaching hand on the rung it took (the other still on the one below), until the next rung or the key let go
+    // (`cycleHang`); never the hang's loop between two rungs.
+    if (m.kind === 'ladder' && m.cycle && this.phase === LEDGE_HANG) {
+      this.cycPh = m.ph0 + m.phSpan;
+      if (m.reach >= 0) {
+        const k = m.reach * 3;
+        this.cycHold[k] = this.cycNew[0];
+        this.cycHold[k + 1] = this.cycNew[1];
+        this.cycHold[k + 2] = this.cycNew[2];
+        this.cycHand = m.reach;
+      }
+      this.cycWait = true;
+      this.cycShift = m.sh1;
+      this.ended = false;
+      this.cycleDraw(this.braced, this.cycPh);
+      gripAt.x = b.pos.x;
+      gripAt.y = b.pos.y;
+      gripAt.z = b.pos.z;
+      this.ladderOff(this.lip, gripAt, this.braced);
+      this.ay += this.cycShift;
+      this.setOffset();
+      this.cycOfX = this.offX;
+      this.cycOfY = this.offY;
+      this.cycOfZ = this.offZ;
     }
   }
 
@@ -2738,12 +4023,68 @@ export class LedgeHang {
     this.startFrom = 0;
     this.startFade = 0.08;
     this.cutIn = CLIMB_TUNE.dropCut;
+    // Smoothness II, item 1: the owner's drops' rule (`climb.hopFlight` 'timed'): the clip played through the fall in place of the cut.
+    this.dropBegin(b);
+  }
+
+  /**
+   * Smoothness II, item 1, the owner's drops' rule ("We can repeat or slow down the frames that happen between those two points
+   * in time until the player touches the ground without speeding it down at lightspeed to finish the animation in time"): the
+   * let-go drop's clip, begun this frame, is played through the fall rather than cut into the falling loop. Its own rate up to
+   * the hands' release; from there to the feet's touch at the rate that lands the touch on the ground the body will fall to
+   * (one ray down: the fall from rest under the game's gravity), never quicker than its own and never slower than
+   * `dropRateLeast`, and held at the touch frame should the body still be falling; the landing after it from the moment the feet
+   * meet the ground (a fall shorter than the clip's own skips to the touch there). Nothing under 'before' or for a clip with no
+   * moments known (the cut as ever).
+   */
+  private dropBegin(b: LedgeBody): void {
+    const T = CLIMB_TUNE;
+    if (T.hopFlight === 'before' || !this.worldNow) return;
+    const id = this.startClip;
+    const f = LEDGE_FACTS[id];
+    const tL = handMoment(id, 'leave');
+    const tT = handMoment(id, 'touch');
+    if (!f || !(tL === tL) || !(tT > tL) || tT >= f.dur) return;
+    // How far the feet fall: the first thing that stands still under them, within the drop's own reach and a good deal more.
+    this.qx = b.pos.x;
+    this.qy = b.pos.y + 0.05;
+    this.qz = b.pos.z;
+    this.qdx = 0;
+    this.qdy = -1;
+    this.qdz = 0;
+    this.qlen = 60;
+    const h = this.cast(this.worldNow) ? this.hit.toi - 0.05 : 60;
+    const fall = h > 0 ? Math.sqrt((2 * h) / GRAVITY) : 0;
+    let r = fall > tL ? (tT - tL) / (fall - tL) : 1;
+    if (r > 1) r = 1;
+    if (r < T.dropRateLeast) r = T.dropRateLeast;
+    this.dropId = id;
+    // (The let-go frame has played the clip one frame already, at its own rate: the clock starts there, never at nought, or
+    // every frame rate holds the rig a frame past the clock's touch.)
+    this.dropClock = this.dtNow;
+    this.dropHeldFor = 0;
+    this.dropTL = tL;
+    this.dropTT = tT;
+    this.dropDur = f.dur;
+    this.dropRate = r;
+    this.dropLanded = false;
+    this.dropHold = true;
+    this.cutIn = 0;
   }
 
   /** S with Space: braced, the jump off backward (its clip turns the figure round, which the caller takes up once it has played); free, a drop with a push back. */
   private jumpOff(b: LedgeBody): void {
     const T = CLIMB_TUNE;
     const L = this.lip;
+    // Climbing II, Smoothness II, item 6 (`climb.pushOff` 'jka'): braced, Jedi Academy's rebound back off the wall at its own
+    // speeds (src/player/jkaMove.ts), facing it as it flies (no turn round).
+    if (this.braced && T.pushOff === 'jka') {
+      this.letGo(b, 'pushed off', L.nx * JKA.jumpOffWallSpeed * UNIT * T.pushBack, JKA.wallJumpStrength * UNIT * T.pushUp, L.nz * JKA.jumpOffWallSpeed * UNIT * T.pushBack);
+      this.startClip = LEDGE_PUSH_OFF;
+      this.startFrom = 0;
+      this.startFade = 0.06;
+      return;
+    }
     if (this.braced) {
       const h = this.heading;
       this.letGo(b, 'jumped off', L.nx * T.jumpBack, T.jumpUp, L.nz * T.jumpBack);
@@ -2781,7 +4122,8 @@ export class LedgeHang {
     const hnx = this.lip.nx;
     const hnz = this.lip.nz;
     this.qflt = i.filter;
-    // The look along the held lip, from the body's own place on it.
+    // The look along the held lip, from the body's own place on it (the walk begun again: none of a way's look carried on).
+    this.walkKeep = false;
     const R = this.rail;
     const W = this.walk;
     R.q = this.barc;
@@ -2972,6 +4314,11 @@ export class LedgeHang {
       m.cy = (m.fy + m.ty) * 0.5 + lift;
       m.cz = (m.fz + m.tz) * 0.5;
     }
+    // Smoothness II, item 1: a timed hop's way is a thrown body's, lifted by `flightLift` (and an up hop's at least to its top).
+    // (Not a ladder's reach: it is climbed hand over hand on the wall's own clips, at phase 2's arc.)
+    // (Smoothness III, item 1, 'arc': the arc a thrown body takes under `flightGravity`, rising `arcRise` over its higher end; a
+    // drop to a lower lip falls from rest.)
+    if (T.hopFlight !== 'before' && !this.ladderGo) lift = T.hopFlight === 'arc' ? this.arcPath() : this.flightArc();
     let ok = this.pathClear(world);
     if (!ok) {
       let ox = this.lip.nx + A.nx;
@@ -3006,14 +4353,508 @@ export class LedgeHang {
     const cxx = m.cx;
     const cyy = m.cy;
     const czz = m.cz;
+    // The smoothness round, item 2: a way only looked for (the cue's search) is answered here and nothing begun: where the
+    // hang would go and how far that is from where it hangs.
+    if (this.dry) {
+      this.dryOk = true;
+      const ddx = this.bx - b.pos.x;
+      const ddz = this.bz - b.pos.z;
+      // How far the hang goes across (a side's way) and how far the lip found stands over or under the one held (up's and down's).
+      this.dryDist = Math.sqrt(ddx * ddx + ddz * ddz);
+      this.dryRise = A.ey - this.lip.ey;
+      this.dryLip.copy(A);
+      return true;
+    }
     const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    // Item 2: a ladder-like hold is climbed to by the key alone, on the climb's own clips, its way the one just checked.
+    if (this.ladderGo) {
+      this.startLadder(b, A, braced);
+      m.path = path;
+      m.cx = cxx;
+      m.cy = cyy;
+      m.cz = czz;
+      return true;
+    }
     stam.step(1, -T.stamina.hop, i.pool, LOCO_TUNE);
+    // Smoothness III, item 4b (`climb.dropMove` 'drop' or 'reverse'): a drop to a lip beneath plays a move of its own.
+    if (this.dropGo && T.dropMove !== 'hop' && T.hopFlight !== 'before' && this.dropMoveBegin(b, A, braced, path, cxx, cyy, czz)) return true;
+    // Smoothness III, item 4 (`climb.freeHops` 'on'): a free hang's hop up plays the free hop's own move.
+    if (this.freeUpGo && T.freeHops === 'on' && T.hopFlight !== 'before' && this.freeHopBegin(b, A, braced, path, cxx, cyy, czz)) return true;
     this.startMove(clip || (dir > 0 ? roles.hopLeft : roles.hopRight), 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, Math.atan2(-A.nx, -A.nz), 'idle', 'idle', A);
     m.path = path;
     m.cx = cxx;
     m.cy = cyy;
     m.cz = czz;
+    this.timeMove(false);
     return true;
+  }
+
+  // ---- Climbing II, Smoothness III, items 1 and 4b: a hop's arc and a drop's two parts ------------------------------------------
+
+  /**
+   * Item 1 (`climb.hopFlight` 'arc'): the move's way (`move` f to t) made the arc a thrown body takes under `flightGravity`: up
+   * from its start to `arcRise` over the higher of its two ends and down onto its end, its time the rise's and the fall's (a drop
+   * to a lip beneath, `dropGo`, falls from rest: its top its start). As a quadratic through a control point over its middle,
+   * traversed at an even pace over the flight, that is the arc exactly (a quadratic's acceleration is constant). Answers the
+   * control's rise over the middle (which a bend round what stands in the way adds to, `arcFit` reading the flight's time back off
+   * the curve as it is flown).
+   */
+  private arcPath(): number {
+    const T = CLIMB_TUNE;
+    const m = this.move;
+    const g = T.flightGravity;
+    const fy = m.fy;
+    const ty = m.ty;
+    const top = this.dropGo && T.dropMove !== 'hop' && ty < fy ? fy : (fy > ty ? fy : ty) + T.arcRise * this.s;
+    const t1 = top > fy ? Math.sqrt((2 * (top - fy)) / g) : 0;
+    const t2 = top > ty ? Math.sqrt((2 * (top - ty)) / g) : 0;
+    const F = t1 + t2;
+    const lift = (g * F * F) / 4;
+    m.path = PATH_CURVE;
+    m.cx = (m.fx + m.tx) * 0.5;
+    m.cy = (fy + ty) * 0.5 + lift;
+    m.cz = (m.fz + m.tz) * 0.5;
+    return lift;
+  }
+
+  /**
+   * Item 1: a hop just begun (`startMove`, its way final) flies its arc's own time: the clip's own moments (src/anim/handTimes.ts)
+   * on the move's clock, its line-ups less the clip's own level travel at either end (`arcStep` puts it back a frame), and the
+   * flight fitted (`arcFit`). Nothing for a clip with no touch known: the move as `startMove` made it.
+   */
+  private arcMove(): void {
+    const m = this.move;
+    const f = LEDGE_FACTS[m.id];
+    const tT = handMoment(m.id, 'touch');
+    if (!f || !(tT === tT) || tT >= f.dur) return;
+    let tL = handMoment(m.id, 'leave');
+    const start = m.time;
+    if (!(tL === tL) || tL < start) tL = start;
+    if (!(tT > tL)) return;
+    m.rx = f.net[0] / f.dur;
+    m.rz = f.net[2] / f.dur;
+    m.cd = f.dur;
+    this.arcFit(tL, tT);
+    this.rampC(start, m.h0);
+    m.o0x -= this.wx;
+    m.o0y -= this.wy;
+    m.o0z -= this.wz;
+    this.rampC(m.T, m.heading);
+    m.o1x -= this.wx;
+    m.o1y -= this.wy;
+    m.o1z -= this.wz;
+  }
+
+  /**
+   * Item 1: the flight's time read off the way as it will be flown (a quadratic's bulge over its ends' middle is a quarter of
+   * gravity times the flight's time squared), and the clip's stretch from the leave `tL` to the touch `tT` (the move's clock)
+   * fitted to it: at its own rate or quicker up to `flightRateMax` (a flight shorter than the stretch at that rate is flown
+   * slower, never the clip hurried), else slowed to `flightRateMin` and held just before the touch, eased into and out of the hold
+   * over `holdEase`, so the touch falls as the flight ends. Fields only.
+   */
+  private arcFit(tL: number, tT: number): void {
+    const T = CLIMB_TUNE;
+    const m = this.move;
+    const bulge = m.path === PATH_CURVE ? 2 * m.cy - m.fy - m.ty : 0;
+    let F = bulge > 1e-9 ? Math.sqrt((2 * bulge) / T.flightGravity) : 0;
+    const S = tT - tL;
+    const most = T.flightRateMax;
+    if (S > 0 && S > F * most) F = S / most;
+    if (F < 1e-3) F = 1e-3;
+    m.arc = true;
+    m.timed = false;
+    m.tL = tL;
+    m.tT = tT;
+    m.F = F;
+    m.fly = 0;
+    m.S = S;
+    m.hm = 0;
+    m.ar = S > 0 ? S / F : 0;
+    const least = T.flightRateMin;
+    if (S > 0 && m.ar < least) {
+      let e = T.holdEase;
+      if (e > S / least) e = S / least;
+      if (F - S / least >= e) {
+        m.hm = 1;
+        m.ar = least;
+        m.he = e;
+        m.ta = S / least - e;
+      }
+    }
+  }
+
+  /**
+   * Item 1: how far the clip's stretch is played `tau` seconds into the flight (nought to `S`), into `arcAt`: steady, or slowed and
+   * held. (A field, never a number handed back: one boxes wherever the compiler leaves the call out.)
+   */
+  private arcAt = 0.5;
+  private arcClip(tau: number): void {
+    const m = this.move;
+    const a = m.ar;
+    const ta = m.ta;
+    const e = m.he;
+    if (tau <= 0) this.arcAt = 0;
+    else if (tau >= m.F) this.arcAt = m.S;
+    else if (m.hm === 0 || tau <= ta) this.arcAt = a * tau;
+    else if (tau - ta <= e) this.arcAt = a * (ta + (tau - ta) * 0.5 + (e / (2 * Math.PI)) * Math.sin((Math.PI * (tau - ta)) / e));
+    else if (tau <= m.F - e) this.arcAt = a * (ta + e * 0.5);
+    else this.arcAt = a * (ta + e * 0.5 + (tau - (m.F - e)) * 0.5 - (e / (2 * Math.PI)) * Math.sin((Math.PI * (tau - (m.F - e))) / e));
+  }
+
+  /** Item 1 and 4b: the clip time the move's clock `c` stands at, into `clipT` (a drop's second part's own, a clip played backward's from its end). */
+  private clipT = 0.5;
+  private clipAt(c: number): void {
+    const m = this.move;
+    if (m.parts === 2) this.clipT = c > m.d1 ? m.p2From + (c - m.d1) : m.p1From + c;
+    // (Smoothness III, item 4: one part of its clip, from `p1From`: the free hop up's.)
+    else if (m.parts === 1) this.clipT = m.p1From + c;
+    else if (m.dir < 0) this.clipT = m.cd - c;
+    else this.clipT = c;
+  }
+
+  /** Item 1 and 4b: the clip's own level travel at the move's clock `c` (the ramp the pack took off), turned by heading `h` and scaled, into `wx/wy/wz`. */
+  private rampC(c: number, h: number): void {
+    const m = this.move;
+    let px = 0;
+    let pz = 0;
+    if (m.parts === 2 && c > m.d1) {
+      const t = m.p2From + (c - m.d1);
+      px = m.k2x + m.r2x * t;
+      pz = m.k2z + m.r2z * t;
+    } else {
+      this.clipAt(c);
+      px = m.rx * this.clipT;
+      pz = m.rz * this.clipT;
+    }
+    const s = this.s;
+    const sh = Math.sin(h);
+    const ch = Math.cos(h);
+    this.wx = (px * ch + pz * sh) * s;
+    this.wy = 0;
+    this.wz = (-px * sh + pz * ch) * s;
+  }
+
+  /**
+   * Item 1: a frame of an arc's move. The move's clock at the clip's own rate to the leave; then the flight's own seconds, the
+   * body on the arc at an even pace through them and the clip's stretch played as `arcClip` has it; then the clip's own rate
+   * from the touch. The clip is put at the clock's place at the frame's start every frame (`moveSeek`) and played at the rate
+   * that brings it to the clock's place at the frame's end (`moveRate`), so the pose and the clock are one at any frame rate; a
+   * drop's second part begun as the clock crosses its join (`startClip`), crossfaded over `transitionBlend`. The figure: the two
+   * line-ups blended by the flight's share, the clip's own travel put back; the hands on the lip held until the leave, put on the
+   * lip aimed at over the hands' own ease before the body arrives, wholly on it from the arrival.
+   */
+  private arcStep(world: LedgeWorld, b: LedgeBody, i: LedgeIn, chain: boolean): boolean {
+    const dt = i.dt;
+    const m = this.move;
+    const c0 = m.time;
+    let c = c0;
+    let tau = m.fly;
+    let left = dt;
+    if (c < m.tL) {
+      const d = m.tL - c < left ? m.tL - c : left;
+      c += d;
+      left -= d;
+    }
+    if (left > 0 && tau < m.F) {
+      const d = m.F - tau < left ? m.F - tau : left;
+      tau += d;
+      left -= d;
+      this.arcClip(tau);
+      c = m.tL + this.arcAt;
+    }
+    if (left > 0) c += left;
+    if (c > m.T) c = m.T;
+    m.fly = tau;
+    m.time = c;
+    // The clip: put where the clock stood at the frame's start, played to where it stands now; a drop's second part begun at
+    // its own start the frame the clock crosses the join.
+    if (m.parts === 2 && !m.switched && c > m.d1) {
+      m.switched = true;
+      m.id = m.p2Id;
+      this.startClip = m.p2Id;
+      this.startFrom = m.p2From;
+      this.startFade = CLIMB_TUNE.transitions === 'blend' ? Math.max(CLIMB_TUNE.ease, CLIMB_TUNE.transitionBlend) : CLIMB_TUNE.ease;
+      this.moveSeek = m.p2From;
+      this.moveRate = dt > 0 ? (c - m.d1) / dt : 1;
+    } else if (m.upper) {
+      // Smoothness III, item 4: the free hop's arms are the hang state's upper layer, put where the clock stands.
+      this.clipAt(c);
+      this.upperSeek = this.clipT;
+    } else {
+      this.clipAt(c0);
+      const a0 = this.clipT;
+      this.clipAt(c);
+      this.moveSeek = a0;
+      this.moveRate = dt > 0 ? (this.clipT - a0) / dt : m.dir;
+    }
+    this.moveClip = m.id;
+    const u = tau >= m.F ? 1 : tau / m.F;
+    this.pu = u;
+    this.pathAt();
+    b.pos.x = this.pqx;
+    b.pos.y = this.pqy;
+    b.pos.z = this.pqz;
+    this.crouchedNow = this.pathCrouched;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    let dh = m.heading - m.h0;
+    dh -= Math.round(dh / TAU) * TAU;
+    if (m.spin !== 0 && dh * m.spin < 0) dh += m.spin * TAU;
+    this.heading = m.h0 + dh * u;
+    this.rampC(c, this.heading);
+    this.ax = m.o0x + (m.o1x - m.o0x) * u + this.wx;
+    this.ay = m.o0y + (m.o1y - m.o0y) * u + this.wy;
+    this.az = m.o0z + (m.o1z - m.o0z) * u + this.wz;
+    this.tiltGoal = CLIMB_TUNE.slopeHands === 'each' && u >= 1 ? Math.atan(m.lip.slope) * CLIMB_TUNE.lipTilt : 0;
+    this.easeTilt();
+    this.setOffset();
+    this.lineFor(u <= 0 ? this.lip : m.lip);
+    // The hands by the body's own arrival: on the held lip until the leave, put on the new one over the hands' ease before the
+    // body reaches it, wholly on it from then (a clip held waiting for the contact never puts them on early).
+    const lead = CLIMB_TUNE.ease;
+    const on = tau >= m.F ? 1 : lead > 0 && tau > m.F - lead ? (tau - (m.F - lead)) / lead : 0;
+    this.hands = u <= 0 && c <= m.tL ? 1 : on;
+    this.goalHands = this.hands;
+    this.goalFeet = 0;
+    this.easeLimbs();
+    this.rigState = this.loopState(m.braced, 0);
+    this.rigClip = (m.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free).idle;
+    // (Item 4: the free hop's arms over the free hang's own legs, whatever kind of hang it lands in.)
+    if (m.upper) {
+      this.rigState = this.loopState(false, 0);
+      this.rigClip = FREE_HOP_PARTS.legs;
+      this.rigUpper = m.id;
+    }
+    this.blendCheck();
+    if (m.time >= m.T - 1e-9) {
+      this.endMove(world, b, i);
+      if (chain && this.phase === LEDGE_MOVE && m.time === m.t0) return this.moveStep(world, b, i, false);
+    }
+    return (this.phase as number) !== LEDGE_NONE;
+  }
+
+  /**
+   * Item 1: under an arc's move, where the caller's rig puts its one-off at the frame's start (clip seconds; NaN: nowhere, today's)
+   * and which clip that is (`ledgeClipName`'s id). The rig plays it from there at `moveRate`.
+   */
+  moveSeek = 0.5;
+  moveClip = '';
+
+  /**
+   * Item 4b (`climb.dropMove` 'drop' or 'reverse'): a drop to the lip beneath begun (from `hopTo`, its way checked: `path` and its
+   * control point): 'drop' the owner's two parts (`DROP_PARTS`, their seconds `climb.dropParts`): the held hang's kind's release
+   * clip from its start through the hands' release and on into the fall, then the lower hang's kind's catch into the hang, the
+   * clock across the join the two parts' own seconds, the flight between the release's leave and the catch's touch fitted to the
+   * fall (`arcFit`); 'reverse' the braced hop up played backward (its touch the leave, its leave the touch). Each end lined up
+   * by its own clip's hands (the release's at its start on the held lip, the catch's at its end on the lip beneath). False where a
+   * clip of the table is not one the game has (the plain hop then).
+   */
+  private dropMoveBegin(b: LedgeBody, A: Lip, braced: boolean, path: number, cxx: number, cyy: number, czz: number): boolean {
+    const T = CLIMB_TUNE;
+    const P = T.dropParts;
+    const reverse = T.dropMove === 'reverse';
+    const id1 = reverse ? (LEDGE_ROLES.braced.hopUp ?? '') : this.braced ? DROP_PARTS.braced : DROP_PARTS.free;
+    const id2 = reverse ? id1 : braced ? DROP_PARTS.catchBraced : DROP_PARTS.catchFree;
+    const f1 = LEDGE_FACTS[id1];
+    const f2 = LEDGE_FACTS[id2];
+    if (!f1 || !f2) return false;
+    const endH = Math.atan2(-A.nx, -A.nz);
+    this.startMove(id1, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, endH, 'idle', 'idle', A);
+    const m = this.move;
+    m.path = path;
+    m.cx = cxx;
+    m.cy = cyy;
+    m.cz = czz;
+    const h0 = this.heading;
+    let tL = 0;
+    let tT = 0;
+    if (reverse) {
+      // Backward: the hop up's end on the held lip, its start on the lip beneath.
+      m.dir = -1;
+      m.cd = f1.dur;
+      m.t0 = 0;
+      m.time = 0;
+      m.T = f1.dur;
+      this.startFrom = f1.dur;
+      const hl = handMoment(id1, 'leave');
+      const ht = handMoment(id1, 'touch');
+      tL = ht === ht ? f1.dur - ht : 0;
+      tT = hl === hl ? f1.dur - hl : f1.dur;
+      gripAt.x = m.fx;
+      gripAt.y = m.fy;
+      gripAt.z = m.fz;
+      this.gripOff(this.lip, gripAt, f1.g1);
+      m.o0x = this.ax;
+      m.o0y = this.ay;
+      m.o0z = this.az;
+      gripAt.x = m.tx;
+      gripAt.y = m.ty;
+      gripAt.z = m.tz;
+      this.heading = endH;
+      this.gripOff(A, gripAt, f1.g0);
+      this.heading = h0;
+      m.o1x = this.ax;
+      m.o1y = this.ay;
+      m.o1z = this.az;
+      m.rx = f1.net[0] / f1.dur;
+      m.rz = f1.net[2] / f1.dur;
+    } else {
+      const k = this.braced;
+      const from1 = k ? P.bracedFrom : P.freeFrom;
+      const to1 = k ? P.bracedTo : P.freeTo;
+      const from2 = braced ? P.catchBracedFrom : P.catchFreeFrom;
+      const to2 = braced ? P.catchBracedTo : P.catchFreeTo;
+      const d1 = to1 > from1 ? to1 - from1 : 0;
+      const d2 = to2 > from2 ? to2 - from2 : 0;
+      m.parts = 2;
+      m.p1From = from1;
+      m.d1 = d1;
+      m.p2Id = id2;
+      m.p2From = from2;
+      m.switched = false;
+      m.t0 = 0;
+      m.time = 0;
+      m.T = d1 + d2;
+      this.startFrom = from1;
+      const l1 = handMoment(id1, 'leave');
+      const t2 = handMoment(id2, 'touch');
+      tL = l1 === l1 ? l1 - from1 : 0;
+      if (tL < 0) tL = 0;
+      if (tL > d1) tL = d1;
+      let at = t2 === t2 ? t2 - from2 : 0;
+      if (at < 0) at = 0;
+      if (at > d2) at = d2;
+      tT = d1 + at;
+      // The end lined up by the catch's own hands at its end, on the lip beneath (`startMove` lined it up by the release's).
+      gripAt.x = m.tx;
+      gripAt.y = m.ty;
+      gripAt.z = m.tz;
+      this.heading = endH;
+      this.gripOff(A, gripAt, f2.g1);
+      this.heading = h0;
+      m.o1x = this.ax;
+      m.o1y = this.ay;
+      m.o1z = this.az;
+      // The two clips' own level travel, carried across the join so the figure does not jump there.
+      m.rx = f1.net[0] / f1.dur;
+      m.rz = f1.net[2] / f1.dur;
+      m.r2x = f2.net[0] / f2.dur;
+      m.r2z = f2.net[2] / f2.dur;
+      m.k2x = m.rx * (from1 + d1) - m.r2x * from2;
+      m.k2z = m.rz * (from1 + d1) - m.r2z * from2;
+    }
+    if (!(tT > tL)) tT = tL + 1e-3;
+    this.arcFit(tL, tT);
+    this.rampC(0, h0);
+    m.o0x -= this.wx;
+    m.o0y -= this.wy;
+    m.o0z -= this.wz;
+    this.rampC(m.T, endH);
+    m.o1x -= this.wx;
+    m.o1y -= this.wy;
+    m.o1z -= this.wz;
+    this.dropMoves++;
+    return true;
+  }
+
+  /** Item 4b: drops begun on their own move (the console's and the tests'). */
+  dropMoves = 0;
+
+  /**
+   * Smoothness III, item 4 (`climb.freeHops` 'on'): a free hang's hop up begun (from `hopTo`, its way checked: `path` and its
+   * control point): the owner's table (`FREE_HOP_PARTS`, its seconds `climb.freeHopParts`): the braced hop up's upper body (its
+   * arms' coil, reach, pull and catch) over the free hang's own hanging legs, never a whole-body one-off (the rig plays it as the
+   * hang state's upper layer, put at the move's clock: `upperSeek`). Lined up by the free hang's own hands at either end (the
+   * legs are the free idle's), a braced lip above taken braced at its end as any move ending braced is; the flight between the
+   * clip's hands leaving and touching item 1's arc (`arcFit`). False where the table's clip is not one the game has (the plain hop
+   * then).
+   */
+  private freeHopBegin(b: LedgeBody, A: Lip, braced: boolean, path: number, cxx: number, cyy: number, czz: number): boolean {
+    const T = CLIMB_TUNE;
+    const id = FREE_HOP_PARTS.upper;
+    const f = LEDGE_FACTS[id];
+    const legs = LEDGE_FACTS[FREE_HOP_PARTS.legs];
+    if (!f || !legs) return false;
+    const from = T.freeHopParts.from < f.dur ? T.freeHopParts.from : 0;
+    const to = T.freeHopParts.to > from ? (T.freeHopParts.to < f.dur ? T.freeHopParts.to : f.dur) : f.dur;
+    const endH = Math.atan2(-A.nx, -A.nz);
+    // (The feedback round II, item 0d: the whole lift the free cue's pull stood the figure up by over its line-up, the anchor's and
+    // the pull's, carried into the hop, whose anchor waits while it is carried: the hop's arms leave the grip as they always did.)
+    const carry = T.freeCue === 'pull' && this.cueRise > 0 ? this.lifted : 0;
+    const carryShare = carry !== 0 ? this.liftShare : 0;
+    this.startMove(id, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, braced, endH, 'idle', 'idle', A);
+    const m = this.move;
+    m.path = path;
+    m.cx = cxx;
+    m.cy = cyy;
+    m.cz = czz;
+    m.upper = true;
+    m.parts = 1;
+    m.p1From = from;
+    m.t0 = 0;
+    m.time = 0;
+    m.T = to - from;
+    // No whole-body one-off: the arms ride the hang's own legs.
+    this.startClip = '';
+    // The free hang's own line-up at either end (by its idle's hands), the braced idle's where it lands braced.
+    const h0 = this.heading;
+    gripAt.x = m.fx;
+    gripAt.y = m.fy;
+    gripAt.z = m.fz;
+    this.gripOff(this.lip, gripAt, legs.g0);
+    m.o0x = this.ax;
+    m.o0y = this.ay;
+    m.o0z = this.az;
+    gripAt.x = m.tx;
+    gripAt.y = m.ty;
+    gripAt.z = m.tz;
+    this.heading = endH;
+    this.gripOff(A, gripAt, braced ? LEDGE_FACTS[LEDGE_ROLES.braced.idle].g0 : legs.g0);
+    this.heading = h0;
+    m.o1x = this.ax;
+    m.o1y = this.ay;
+    m.o1z = this.az;
+    // (The legs' loop carries no travel, and the arms none level: nothing to put back.)
+    m.rx = 0;
+    m.rz = 0;
+    const hl = handMoment(id, 'leave');
+    const ht = handMoment(id, 'touch');
+    let tL = hl === hl ? hl - from : 0;
+    if (tL < 0) tL = 0;
+    if (tL > m.T) tL = m.T;
+    let tT = ht === ht ? ht - from : m.T;
+    if (tT > m.T) tT = m.T;
+    if (!(tT > tL)) tT = tL + 1e-3;
+    this.arcFit(tL, tT);
+    this.freeHops++;
+    // Item 0d: eased out by the hands' leave (`limbsFor`), so the hop starts from where the cue left the figure.
+    this.carry = carry;
+    this.carryShare = carryShare;
+    this.carryLeave = tL > 1e-3 ? tL : 1e-3;
+    return true;
+  }
+
+  /**
+   * Smoothness II, item 1: the move's way (`move` f to t) made a thrown body's: a quadratic through a control point over its
+   * middle by twice `flightLift` of its length (the way rises `flightLift` of its length at its middle), and an up hop's control
+   * point at least at its end's height, so the body slows to its top as it reaches the new lip. Answers the lift (the control's
+   * rise over the middle), which a bend round what stands in the way adds to.
+   */
+  private flightArc(): number {
+    const m = this.move;
+    const ddx = m.tx - m.fx;
+    const ddy = m.ty - m.fy;
+    const ddz = m.tz - m.fz;
+    let lift = 2 * CLIMB_TUNE.flightLift * Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+    if (ddy > 0 && lift < ddy * 0.5) lift = ddy * 0.5;
+    if (lift > 0) {
+      m.path = PATH_CURVE;
+      m.cx = (m.fx + m.tx) * 0.5;
+      m.cy = (m.fy + m.ty) * 0.5 + lift;
+      m.cz = (m.fz + m.tz) * 0.5;
+    } else m.path = PATH_LINE;
+    return lift;
   }
 
   /** Space with W: a lip above within `hopUp` on the same face (braced only; a free hang has nothing to brace on to hop). */
@@ -3085,13 +4926,26 @@ export class LedgeHang {
     m.ty = this.by;
     m.tz = this.bz;
     m.path = PATH_LINE;
+    // Smoothness II, item 1: a timed hop up's way slows to its top (the room checked along that way); Smoothness III's arc rises
+    // over it by `arcRise` under `flightGravity`.
+    if (T.hopFlight === 'arc') this.arcPath();
+    else if (T.hopFlight === 'timed') this.flightArc();
     if (!this.pathClear(world)) {
       this.said = 'No room to hop up there.';
       return true;
     }
+    const path = m.path;
+    const cyy = m.cy;
     this.measureSlope(world, A, i.filter);
     stam.step(1, -T.stamina.hop, i.pool, LOCO_TUNE);
     this.startMove(LEDGE_ROLES.braced.hopUp ?? LEDGE_ROLES.braced.idle, 'hop', b.pos.x, b.pos.y, b.pos.z, this.bx, this.by, this.bz, AFTER_HANG, true, this.heading, 'idle', 'idle', A);
+    if (path !== PATH_LINE) {
+      m.path = path;
+      m.cx = (m.fx + m.tx) * 0.5;
+      m.cy = cyy;
+      m.cz = (m.fz + m.tz) * 0.5;
+    }
+    this.timeMove(false);
     return true;
   }
 
@@ -3131,14 +4985,34 @@ export class LedgeHang {
     const W = this.walk;
     R.q = this.barc;
     R.sample();
-    const C = this.cand;
-    C.ex = R.sx;
-    C.ey = R.sy;
-    C.ez = R.sz;
-    C.nx = R.snx;
-    C.nz = R.snz;
-    C.topNy = R.stop;
-    W.start(C);
+    // The smoothness round (the round's review): a way's look (`dry`, `seek`), made again a little further along the same lip,
+    // the same way, its face turned no further since, carries on the walk the last look left going on past the reach, from that
+    // walk's far end (its arcs measured from where it began, `off` the hang's own move along the lip since): looked for again
+    // every quarter metre of a shimmy, the walk from the hands each time was the whole of a hop's reach again, 165 rays a look.
+    let keep = this.dry && this.walkKeep && this.walkHi === hi && this.walkHang === this.hangNo && this.walkNx * hnx + this.walkNz * hnz >= WALK_KEEP_COS;
+    this.walkKeep = false;
+    let off = 0;
+    if (keep) {
+      off = this.barc - this.walkArc;
+      // (Only while its far end still lies ahead of the hands.)
+      if ((hi ? W.a[W.n - 1] - off : off - W.a[0]) <= 0) keep = false;
+    }
+    if (!keep) {
+      off = 0;
+      const C = this.cand;
+      C.ex = R.sx;
+      C.ey = R.sy;
+      C.ez = R.sz;
+      C.nx = R.snx;
+      C.nz = R.snz;
+      C.topNy = R.stop;
+      W.start(C);
+      this.walkArc = this.barc;
+      this.walkHi = hi;
+      this.walkNx = hnx;
+      this.walkNz = hnz;
+      this.walkHang = this.hangNo;
+    }
     let ex = R.sx;
     let ey = R.sy;
     let ez = R.sz;
@@ -3146,9 +5020,12 @@ export class LedgeHang {
     let enz = R.snz;
     for (let it = 0; it < 200; it++) {
       const k = hi ? W.n - 1 : 0;
-      const at = hi ? W.a[k] : -W.a[k];
-      // The held lip goes on further than a hop reaches: that is the shimmy's.
-      if (at > range) return false;
+      const at = hi ? W.a[k] - off : off - W.a[k];
+      // The held lip goes on further than a hop reaches: that is the shimmy's (and a way's look may carry this walk on).
+      if (at > range) {
+        this.walkKeep = this.dry;
+        return false;
+      }
       ex = W.x[k];
       ey = W.y[k];
       ez = W.z[k];
@@ -3176,8 +5053,22 @@ export class LedgeHang {
     const etz = enx * dir;
     this.handHalf(this.braced);
     const out = this.hh + T.edgeAhead * s;
-    const up = sy < 0 ? 0.3 : T.hopUp * s + 0.1;
-    const down = sy > 0 ? 0.3 : T.hopDown * s + 0.1;
+    let up = sy < 0 ? 0.3 : T.hopUp * s + 0.1;
+    let down = sy > 0 ? 0.3 : T.hopDown * s + 0.1;
+    // The smoothness round, item 6 (`climb.diagonals` 'below'): a diagonal asked with W takes only a lip over the held one and
+    // with S only one under it, by the quarter metre the band up or down keeps; a lip level with the hands is A's or D's alone.
+    let refY = 0;
+    if (sy !== 0 && T.diagonals === 'below') {
+      const near = 0.25 * s;
+      refY = sy > 0 ? near : -near;
+      if (sy > 0) {
+        up -= near;
+        down = 0;
+      } else {
+        up = 0;
+        down -= near;
+      }
+    }
     // A block standing across the way (its near side facing back, as today's hop feels for it), low down.
     let back = Number.POSITIVE_INFINITY;
     let bx = 0;
@@ -3217,14 +5108,14 @@ export class LedgeHang {
         if (step * BAND_STEP > depthMost + 1e-9) break;
         this.fpx = ex + etx * d + enx * dep;
         this.fpz = ez + etz * d + enz * dep;
-        this.fref = ey;
+        this.fref = refY === 0 ? ey : ey + refY;
         this.frise = up;
         this.ffall = down;
         this.fnx = enx;
         this.fnz = enz;
         this.facc = 0.5;
         if (this.probeLip(world) && this.hopTo(world, b, i, stam, dir, false, T.hopArc)) {
-          if (this.phase === LEDGE_MOVE) return true;
+          if (this.phase === LEDGE_MOVE || this.dryOk) return true;
           // No room there: further on may have it.
           this.said = '';
         }
@@ -3233,13 +5124,13 @@ export class LedgeHang {
     if (back < Number.POSITIVE_INFINITY && back <= range + 1e-9) {
       this.fpx = bx;
       this.fpz = bz;
-      this.fref = ey;
+      this.fref = refY === 0 ? ey : ey + refY;
       this.frise = up;
       this.ffall = down;
       this.fnx = bnx;
       this.fnz = bnz;
       this.facc = CORNER_COS;
-      if (this.probeLip(world) && this.hopTo(world, b, i, stam, dir, true, T.hopArc) && this.phase === LEDGE_MOVE) return true;
+      if (this.probeLip(world) && this.hopTo(world, b, i, stam, dir, true, T.hopArc) && (this.phase === LEDGE_MOVE || this.dryOk)) return true;
       this.said = '';
     }
     return false;
@@ -3253,7 +5144,34 @@ export class LedgeHang {
   private bandUpDown(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, sy: number): boolean {
     const T = CLIMB_TUNE;
     const s = this.s;
-    if (sy > 0 && !this.braced) return false;
+    return this.bandVertical(world, b, i, stam, sy, sy > 0 ? T.hopUp * s : T.hopDown * s, T.hopDepth * s, BAND_STEP, BAND_STEP, false);
+  }
+
+  /**
+   * `bandUpDown`'s look with its reach, its depth, its columns' spacing across the lip (`grid`) and in depth (`depthStep`) and
+   * whether a free hang may go up given (the smoothness round's way search asks with its own: `climb.wayDepth`, the ladder's
+   * and the drop's reaches, a coarser grid across, the band's own step in depth, and a free hang's ladder up). With phase 2's
+   * own numbers it is `bandUpDown` to the letter.
+   */
+  private bandVertical(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, sy: number, reach: number, depthMost: number, grid: number, depthStep: number, freeUp: boolean): boolean {
+    // Smoothness III, item 4b: a lip beneath is dropped to (`climb.dropMove`), never a ladder's rung climbed down.
+    this.dropGo = sy < 0 && !this.ladderGo;
+    const began = this.bandVerticalIn(world, b, i, stam, sy, reach, depthMost, grid, depthStep, freeUp);
+    this.dropGo = false;
+    this.freeUpGo = false;
+    return began;
+  }
+
+  /** Item 4b: the band's look under way is a drop to a lip beneath (its way falls from rest; its move the owner's two parts). */
+  private dropGo = false;
+  /** Item 4: the candidate the band's look tries is a free hang's hop up (its move the free hop's own, `FREE_HOP_PARTS`). */
+  private freeUpGo = false;
+
+  private bandVerticalIn(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, sy: number, reach: number, depthMost: number, grid: number, depthStep: number, freeUp: boolean): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    // (Smoothness III, item 4: a free hang hops up as well, `climb.freeHops` 'on'.)
+    if (sy > 0 && !this.braced && !freeUp && T.freeHops !== 'on') return false;
     const L = this.lip;
     const nx = L.nx;
     const nz = L.nz;
@@ -3261,20 +5179,18 @@ export class LedgeHang {
     const tlx = -nz;
     const tlz = nx;
     const slack = T.hopSlack * s;
-    const depthMost = T.hopDepth * s;
-    const reach = sy > 0 ? T.hopUp * s : T.hopDown * s;
     const C = this.bandC;
     this.bandN = 0;
     // Nothing within this of the held lip's own height is a lip above or below it.
     const near = 0.25 * s;
     for (let ju = 0; ju < 2 * BAND_SIDES + 1; ju++) {
       const su = (ju + 1) >> 1;
-      const u = (ju & 1 ? 1 : -1) * su * BAND_STEP;
-      if (su * BAND_STEP > slack + 1e-9) break;
+      const u = (ju & 1 ? 1 : -1) * su * grid;
+      if (su * grid > slack + 1e-9) break;
       for (let j = 0; j < 2 * BAND_DEPTHS + 1; j++) {
         const step = (j + 1) >> 1;
-        const dep = (j & 1 ? 1 : -1) * step * BAND_STEP;
-        if (step * BAND_STEP > depthMost + 1e-9) break;
+        const dep = (j & 1 ? 1 : -1) * step * depthStep;
+        if (step * depthStep > depthMost + 1e-9) break;
         this.fpx = L.ex + tlx * u + nx * dep;
         this.fpz = L.ez + tlz * u + nz * dep;
         if (sy > 0) {
@@ -3327,8 +5243,10 @@ export class LedgeHang {
       const along = (this.fox - L.ex) * tlx + (this.foz - L.ez) * tlz;
       const dy = this.foy - L.ey;
       const clip = sy > 0 && dy >= (along < 0 ? -along : along) && roles.hopUp ? roles.hopUp : along > 0 ? roles.hopLeft : roles.hopRight;
+      // Smoothness III, item 4: up (more up than across) from a free hang, the free hop's own move (`freeHopBegin`).
+      this.freeUpGo = sy > 0 && !this.braced && T.freeHops === 'on' && dy >= (along < 0 ? -along : along);
       if (this.hopTo(world, b, i, stam, 1, true, T.hopArc, clip)) {
-        if (this.phase === LEDGE_MOVE) return true;
+        if (this.phase === LEDGE_MOVE || this.dryOk) return true;
         this.said = '';
         continue;
       }
@@ -3345,7 +5263,7 @@ export class LedgeHang {
         this.fonz = C[k + 4];
         this.fotop = C[k + 5];
         if (this.hopTo(world, b, i, stam, dir, false, T.hopArc, clip)) {
-          if (this.phase === LEDGE_MOVE) return true;
+          if (this.phase === LEDGE_MOVE || this.dryOk) return true;
           this.said = '';
           break;
         }
@@ -3363,7 +5281,10 @@ export class LedgeHang {
   private lookStep(i: LedgeIn): void {
     const T = CLIMB_TUNE;
     let want = 0;
-    if (T.lookAway === 'reach' && this.phase === LEDGE_HANG && this.braced && this.shimmy === 0 && !i.leftHeld && !i.rightHeld) {
+    // The smoothness round (`climb.hangKeys` 'cue'): the look-away is the behind cue, shown only while W asks behind and a lip
+    // there is found (`behindCued`).
+    // (The feedback round II, item 0g, `climb.freeBehind` 'reach': a free hang looks away too, by the braced one's threshold and twist.)
+    if (T.lookAway === 'reach' && this.phase === LEDGE_HANG && (this.braced || T.freeBehind === 'reach') && this.shimmy === 0 && !i.leftHeld && !i.rightHeld && (T.hangKeys !== 'cue' || this.behindCued)) {
       const v = i.viewYaw;
       if (v === v) {
         let off = v - this.heading;
@@ -3389,6 +5310,11 @@ export class LedgeHang {
     this.lookTwistNow = this.lookSide * ((T.lookTwist * Math.PI) / 180) * k;
     this.poseClip = goal === 1 ? (this.lookSide > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight) : '';
     this.poseAt = T.lookPose;
+    // The feedback round II, item 0g: a free hang's held pose is the owner's table's (the free hang's own side hop of the leading side).
+    if (goal === 1 && !this.braced) {
+      this.poseClip = this.lookSide > 0 ? FREE_BEHIND_PARTS.left : FREE_BEHIND_PARTS.right;
+      this.poseAt = T.freeBehindParts.pose;
+    }
   }
 
   /**
@@ -3414,7 +5340,12 @@ export class LedgeHang {
     const down = T.hopDown * s + 0.1;
     const sx = -dz;
     const sz = dx;
-    const clip = this.lookSide > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight;
+    // (The smoothness round's way search asks before the look-away has eased in: the view's own side then.)
+    const side = this.lookSide !== 0 ? this.lookSide : this.behindSide;
+    // (The feedback round II, item 0g: a free hang's hop behind is the owner's table's, played on from its own held pose.)
+    const free = !this.braced;
+    const clip = free ? (side > 0 ? FREE_BEHIND_PARTS.left : FREE_BEHIND_PARTS.right) : side > 0 ? LEDGE_ROLES.braced.hopLeft : LEDGE_ROLES.braced.hopRight;
+    const poseAt = free ? T.freeBehindParts.pose : T.lookPose;
     for (let d = BAND_STEP; d <= range + BAND_STEP + 1e-9; d += BAND_STEP) {
       for (let j = 0; j < 2 * BAND_SIDES + 1; j++) {
         const su = (j + 1) >> 1;
@@ -3429,7 +5360,11 @@ export class LedgeHang {
         this.fnz = -dz;
         this.facc = 0.5;
         if (!this.probeLip(world)) continue;
-        if (!this.hopTo(world, b, i, stam, this.lookSide, true, T.hopArc, clip)) continue;
+        // (Item 0g: a free hang's held thing is a beam whose own far face stands under its hands, inside the band: a lip behind
+        // stands past the held lip's line along the view's way, or it is the held thing's own other side.)
+        if (free && (this.fox - L.ex) * dx + (this.foz - L.ez) * dz < FREE_BEHIND_PAST * s) continue;
+        if (!this.hopTo(world, b, i, stam, side, true, T.hopArc, clip)) continue;
+        if (this.dryOk) return true;
         if (this.phase !== LEDGE_MOVE) {
           // No room there: further on may have it.
           this.said = '';
@@ -3438,12 +5373,13 @@ export class LedgeHang {
         // On from the held pose, turned round the leading side's way.
         const m = this.move;
         const most = LEDGE_FACTS[clip].dur - 0.05;
-        const t0 = T.lookPose < most ? T.lookPose : most;
+        const t0 = poseAt < most ? poseAt : most;
         m.t0 = t0;
         m.time = t0;
         this.startFrom = t0;
-        m.spin = this.lookSide;
+        m.spin = side;
         this.behindHops++;
+        if (free) this.freeBehinds++;
         return true;
       }
     }
@@ -3459,6 +5395,1161 @@ export class LedgeHang {
     const L = this.lip;
     const up = T.offUp > 0 ? Math.sqrt(2 * GRAVITY * T.offUp) : 0;
     this.letGo(b, 'jumped off a little', L.nx * T.offPush, up, L.nz * T.offPush);
+  }
+
+  // ---- the smoothness round, items 2 and 3: the hang's keys as the owner designed them (`climb.hangKeys` 'cue') -------------
+
+  /** The way asked this frame (`WAY_*`: none, up, down, left, right, behind), and what was found that way (`WAYK_*`). */
+  way = 0;
+  wayKind = 0;
+  /** The cue shown, eased in and out over `climb.cueEase` (0 to 1), and its kind (`WAYK_HOP` or `WAYK_DROP`; nought none). */
+  cue = 0.5;
+  cueKind = 0;
+  /** The lip the last look that way found (a ladder's hold, a hop's lip, the drop's lip beneath). */
+  readonly dryLip = new Lip();
+  /** A look only (`seek`): the band's searches answer where a hop would go and begin nothing; whether one was found, and how far it is. */
+  private dry = false;
+  private dryOk = false;
+  private dryDist = 0.5;
+  private dryRise = 0.5;
+  /** A ladder's climb is begun where the search would begin a hop (`commitWay`), its way (`WAY_*`). */
+  private ladderGo = false;
+  private ladderWay = 0;
+  /** The way last looked for, from where, and its diagonal; stale once a one-off has ended or the hold is let go. */
+  private seekStale = true;
+  private seekWay = -1;
+  private seekSy = 0;
+  private seekX = 0.5;
+  private seekY = 0.5;
+  private seekZ = 0.5;
+  /** A ladder's climb ended with its key still held: W on with nothing up climbs onto the top as a press would. */
+  private ladderOn = false;
+  /** The hop clip a hop's cue holds the coil of. */
+  private cueClip = '';
+  /** A side's cue: the figure's lean that way about its own front, radians (positive to its left), drawn with the tilt; and its side. */
+  leanNow = 0.5;
+  private leanSide = 0;
+  /** The side a hop behind turns while the look-away has not eased in yet (the way search's), and whether the behind cue shows. */
+  private behindSide = 0;
+  private behindCued = false;
+  /** Item 3: the crouch's drop under way, and how long the crouch has been held through it, seconds. */
+  private dropping = false;
+  private dropHeld = 0.5;
+  /** Item 3: the drop's cue: its leading hand (0 the left, 1 the right, -1 none) and where it reaches from its place on the lip, world metres. */
+  dropLead = -1;
+  private dropVx = 0.5;
+  private dropVy = 0.5;
+  private dropVz = 0.5;
+  /** Item 3: the head's look down at the lip beneath while the drop's cue shows: its pitch (radians down) and its share (the cue's). */
+  headDown = 0.5;
+  headShare = 0.5;
+  /** The leading hand's share this frame (the look-away's, or the drop cue's), and whether it is the drop's. */
+  private leadShare = 0.5;
+  private leadDrop = false;
+  /** A ladder's climb: the rate its clip plays at (NaN: the rig's own) and a clip over the legs for the arms ('' none), for the caller's rig. */
+  rigRate = 0.5;
+  rigUpper = '';
+  /**
+   * Smoothness III, items 4 and 4b: where the caller's rig puts the state's clip (`rigSeek`, a ladder's cycle on the wall's clip)
+   * and its upper layer's clip (`upperSeek`: a free hop up's arms, a free ladder's cycle, a free hang's cue up), seconds into each,
+   * held there; NaN for nowhere (today's: each plays at its rate).
+   */
+  rigSeek = 0.5;
+  upperSeek = 0.5;
+  /** Item 4b (`climb.ladderCycle` 'cycle'): the wall clip's phase carried from rung to rung, seconds (NaN: none under way), its clip, and the hand that reached last (0, 1; -1 none). */
+  private cycPh = 0.5;
+  private cycClip = '';
+  private cycHand = -1;
+  /** Item 4b: each hand's hold while a ladder's cycle runs (x, y, z a hand: where it last landed), and whether it is known. */
+  private readonly cycHold = new Float64Array(6);
+  private cycHeld = false;
+  /** Item 4b: the ladder's climb ended with the key still held: the cycle's pose held where it stands until the next rung begins (or the key is let go). */
+  private cycWait = false;
+  /** Item 4: free hops up begun (the console's and the tests'). */
+  freeHops = 0;
+  /** Looks made, ladders climbed, cued hops taken and drops begun (the console's and the tests'). */
+  seeks = 0;
+  ladders = 0;
+  cueHops = 0;
+  drops = 0;
+
+  // ---- the feedback round II (maker B): the free cue's pull, the legs laid under, the sway, the free jump behind -------------
+
+  /**
+   * Item 0d (`climb.freeCue` 'pull'): the free hang's up cue's rise, eased in over `freeCueIn` (0 to 1) while the up cue shows and
+   * back down when it goes, how far it lifts the figure now (`freeCueRise` by it, scaled: metres), and what `limbsFor` laid on over
+   * the anchor's own lift to stand the figure there (`liftExtra`; the plain free hang's own anchor lift kept as what the rise is
+   * measured from, `liftBase`). A commit carries the last frame's laid lift into the hop (`carry`) and eases it out by the hop's
+   * hands' leave (`carryLeave`, the move's seconds), so the hop starts from where the cue left the figure.
+   */
+  cueRise = 0.5;
+  cueLift = 0.5;
+  liftExtra = 0.5;
+  private liftBase = 0.5;
+  private carry = 0.5;
+  private carryLeave = 0.5;
+  /** Item 0d: the pull's torso share drawn last frame (`liftOn`), and its share carried into a commit. */
+  private liftShare = 0.5;
+  private carryShare = 0.5;
+  /** Item 0d: the free hang's own pull shown (the console's and the tests'). */
+  freeCues = 0;
+  /**
+   * Items 0e and 0f: the legs laid under the pose for the caller's limbs (`LimbPlace.legClip`): a ledge clip's id ('' none), its
+   * seconds and its share; written each frame by the step, handed over by `limbsFor`.
+   */
+  legId = '';
+  legAt = 0.5;
+  legW = 0.5;
+  /**
+   * Item 0f (`climb.ladderSway` 'sway', and item 0e's free hop up under 'kick'): the hips' lag, a damped pendulum driven by the
+   * body's own acceleration on the physics' own steps (`steps` and `behind`, written by the caller before the step, as the bar's
+   * swing has them): the lag (`swayX`, `swayY`, `swayZ`, the world's metres) and its rate; the body's place at the last step and
+   * its velocity there; whether it was fed last step. Drawn by `limbsFor` (the feet carried by it, `LimbPlace.swayX`, `swayZ`).
+   */
+  steps = 0;
+  behind = 0.5;
+  swayX = 0.5;
+  swayY = 0.5;
+  swayZ = 0.5;
+  private swayVX = 0.5;
+  private swayVY = 0.5;
+  private swayVZ = 0.5;
+  private swHX = 0.5;
+  private swHY = 0.5;
+  private swHZ = 0.5;
+  private swVX = 0.5;
+  private swVY = 0.5;
+  private swVZ = 0.5;
+  private swayFed = false;
+  private swayHave = false;
+  /** Item 0f: the legs' share of a free ladder's shimmy legs (eased in and out over the hang's ease). */
+  private shimW = 0.5;
+  /** Item 0g: free hops behind begun (the console's and the tests'). */
+  freeBehinds = 0;
+
+  /**
+   * Item 0d, from `limbsFor` once the anchor has put the posed hands on the grip and their places are written: the free cue's
+   * pull stands the figure `cueLift` over where the plain free hang's anchor stood it (its pose's own bend counted: the anchor's
+   * lift taken off), the limbs' solve then holding the hands on the grip; a free hop up begun from it carries the last frame's lay
+   * and eases it out by the hands' leave. Nothing at all under 'arms' or with no cue: the plain hang's anchor lift kept as what
+   * the rise is measured from.
+   */
+  private liftOn(lp: LimbPlace, rig: LimbRig): void {
+    this.liftExtra = 0;
+    const T = CLIMB_TUNE;
+    if (T.freeCue !== 'pull') return;
+    let extra = 0;
+    let share = 0;
+    const m = this.move;
+    if (this.phase === LEDGE_HANG && !this.braced) {
+      if (this.cueRise > 0) {
+        extra = this.cueLift - (this.lifted - this.liftBase);
+        share = this.cueRise * this.cueRise * (3 - 2 * this.cueRise);
+      } else this.liftBase = this.lifted;
+    } else if (this.phase === LEDGE_MOVE && m.upper && this.carry !== 0) {
+      let u = m.time / this.carryLeave;
+      if (!(u > 0)) u = 0;
+      if (u >= 1) this.carry = 0;
+      else {
+        const k = 1 - u * u * (3 - 2 * u);
+        extra = this.carry * k;
+        share = this.carryShare * k;
+      }
+    }
+    // The pull's own torso at the rise's share (the owner's table's part), the arms then bent onto the grip by the hands' solve.
+    if (share > 0) {
+      const P = T.freeCueParts;
+      lp.torsoClip = LEDGE_CLIP_NAMES[FREE_CUE_PARTS.pull] ?? '';
+      lp.torsoAt = P.pullFrom + share * (P.pullTo - P.pullFrom);
+      lp.torsoW = share;
+      this.liftShare = share;
+    } else this.liftShare = 0;
+    if (extra === 0) return;
+    const root = rig.root;
+    root.position.y += extra;
+    root.updateMatrixWorld(true);
+    this.lifted += extra;
+    this.liftExtra = extra;
+  }
+
+  /**
+   * Items 0e and 0f, from `limbsFor`: the legs laid under the pose and the hips' sway handed to the limbs (`LimbPlace.legClip`,
+   * `legAt`, `legW`; `swayX`, `swayZ`): the feet carried horizontally by the lag, its rise or fall carrying them out from or in to
+   * the face, by `swayAmount`, the lag led to the frame's own time (`swayLead`). Not aboard a ship's rooms (their frame turns it).
+   */
+  private legsTo(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    this.legsHand(lp, toPhys);
+    // Laid now, as they are handed over, so the climb's sphere clearing after this sees the figure as it is drawn.
+    lp.lay(rig, toPhys);
+  }
+
+  /** Items 0e and 0f: legsTo's hand-over into the limbs' fields. */
+  private legsHand(lp: LimbPlace, toPhys: THREE.Matrix4 | null): void {
+    if (toPhys !== null) return;
+    if (this.legId !== '' && this.legW > 0) {
+      lp.legClip = LEDGE_CLIP_NAMES[this.legId] ?? '';
+      lp.legAt = this.legAt;
+      lp.legW = this.legW;
+    }
+    if (!this.swayHave) return;
+    const a = CLIMB_TUNE.swayAmount;
+    if (!(a > 0)) return;
+    const k = this.swayLead;
+    const lx = this.swayX + this.swayVX * k;
+    const ly = this.swayY + this.swayVY * k;
+    const lz = this.swayZ + this.swayVZ * k;
+    const x = (lx - this.lip.nx * ly) * a;
+    const z = (lz - this.lip.nz * ly) * a;
+    if (x * x + z * z < 1e-12) return;
+    lp.swayX = x;
+    lp.swayZ = z;
+  }
+
+  /** Item 0f: how far past the last physics step the frame's own time stands, seconds (the lag drawn led by it). */
+  private swayLead = 0.5;
+
+  /**
+   * Items 0e and 0f, every frame the hold goes on (from `step`, once the frame's place is written): the legs laid under the pose
+   * (a free hop up's leg kick under 'kick', timed to its pull and let go of by its catch; a free ladder's shimmy legs under
+   * 'sway', one shimmy step a reach of the cycle's own phase), and the hips' lag stepped (fed by a ladder's climb, between two of
+   * its rungs, and a free hop up). Nothing at all with both switches at their other settings.
+   */
+  private legsStep(b: LedgeBody, i: LedgeIn): void {
+    const T = CLIMB_TUNE;
+    // (The frame's seconds read off the frame's record, never handed over: a number across a call is a number made.)
+    const dt = i.dt;
+    this.legId = '';
+    this.legW = 0;
+    const kick = T.freeHopLegs === 'kick';
+    const sway = T.ladderSway === 'sway';
+    if (!kick && !sway) return;
+    const m = this.move;
+    const moving = this.phase === LEDGE_MOVE;
+    const freeHop = moving && m.upper && m.kind === 'hop';
+    // Item 0e: the free hop up's leg kick, timed to its pull (to the hands' leave), let go of over its flight (to the touch).
+    if (freeHop && kick && m.arc) {
+      const P = T.freeCueParts;
+      const lv = m.tL > 1e-3 ? m.tL : 1e-3;
+      const c = m.time;
+      let u = c / lv;
+      if (!(u > 0)) u = 0;
+      if (u > 1) u = 1;
+      this.legId = FREE_CUE_PARTS.kick;
+      this.legAt = P.kickFrom + u * (P.kickTo - P.kickFrom);
+      const span = m.tT - m.tL;
+      let w = c <= m.tL ? 1 : span > 1e-6 ? 1 - (c - m.tL) / span : 0;
+      if (w < 0) w = 0;
+      // (Eased in from the hang's own legs over the hang's ease, so the commit never snaps the legs.)
+      const ein = T.ease > 0 ? c / T.ease : 1;
+      if (ein < 1 && w > ein) w = ein > 0 ? ein : 0;
+      this.legW = w * w * (3 - 2 * w);
+    }
+    // Item 0f: a free ladder's shimmy legs under the climb's arms (the cycle's phase on the climb clip, `upperSeek`).
+    const ladder = (moving && m.kind === 'ladder') || this.cycWait || this.cycSettle > 0;
+    const freeCycle = sway && ladder && this.rigUpper !== '' && this.rigUpper === this.cycClip && this.upperSeek === this.upperSeek;
+    const e = T.ease;
+    const st = e > 0 ? dt / e : 1;
+    this.shimW = freeCycle ? (this.shimW + st < 1 ? this.shimW + st : 1) : this.shimW - st > 0 ? this.shimW - st : 0;
+    if (this.shimW > 0 && this.legW === 0) {
+      const f = LEDGE_FACTS[LADDER_SWAY_LEGS];
+      const dur = this.cycDur > 1e-6 ? this.cycDur : 1;
+      if (f && this.upperSeek === this.upperSeek) {
+        let p = this.upperSeek / dur;
+        p -= Math.floor(p);
+        this.shimAt = p * f.dur;
+      }
+      this.legId = LADDER_SWAY_LEGS;
+      this.legAt = this.shimAt;
+      this.legW = this.shimW;
+    }
+    this.swayStep(b, i, (sway && ladder) || (kick && freeHop));
+  }
+  /** Item 0f: the free ladder's shimmy legs' last seconds (held while the legs ease out). */
+  private shimAt = 0.5;
+
+  /**
+   * Item 0f: the hips' lag stepped on the physics' own coming steps (`steps`, the caller's `Physics.stepsAhead`): a damped
+   * pendulum (`swayHz` its own swing, `swayDamp` of the critical damping) whose rate takes, at each step, the body's own change of
+   * velocity against it while fed (`feed`, or the step after a fed one: a stop counts), the body's place spread evenly over the
+   * steps. The lag is drawn led to the frame's own time (`swayLead`).
+   */
+  private swayStep(b: LedgeBody, i: LedgeIn, feed: boolean): void {
+    const dt = i.dt;
+    if (!this.swayHave) {
+      this.swHX = b.pos.x;
+      this.swHY = b.pos.y;
+      this.swHZ = b.pos.z;
+      this.swVX = 0;
+      this.swVY = 0;
+      this.swVZ = 0;
+      this.swayHave = true;
+    }
+    const n = this.steps;
+    const h = SWAY_STEP;
+    let lead = this.behind + dt - n * h;
+    if (!(lead > 0)) lead = 0;
+    this.swayLead = lead;
+    if (!(n > 0)) return;
+    const T = CLIMB_TUNE;
+    const w = 2 * Math.PI * T.swayHz;
+    const z = T.swayDamp;
+    const vx = (b.pos.x - this.swHX) / (n * h);
+    const vy = (b.pos.y - this.swHY) / (n * h);
+    const vz = (b.pos.z - this.swHZ) / (n * h);
+    for (let k = 0; k < n; k++) {
+      if (feed || this.swayFed) {
+        this.swayVX -= vx - this.swVX;
+        this.swayVY -= vy - this.swVY;
+        this.swayVZ -= vz - this.swVZ;
+      }
+      this.swVX = vx;
+      this.swVY = vy;
+      this.swVZ = vz;
+      this.swayFed = feed;
+      // Spring and damper, the rate first (semi-implicit, steady at every step this short).
+      this.swayVX += (-w * w * this.swayX - 2 * z * w * this.swayVX) * h;
+      this.swayVY += (-w * w * this.swayY - 2 * z * w * this.swayVY) * h;
+      this.swayVZ += (-w * w * this.swayZ - 2 * z * w * this.swayVZ) * h;
+      this.swayX += this.swayVX * h;
+      this.swayY += this.swayVY * h;
+      this.swayZ += this.swayVZ * h;
+    }
+    this.swHX = b.pos.x;
+    this.swHY = b.pos.y;
+    this.swHZ = b.pos.z;
+  }
+
+  /** The fade a held pose comes in and goes out over: the cue's own under 'cue', the hang's ease otherwise. */
+  poseFadeNow(): number {
+    return CLIMB_TUNE.hangKeys === 'cue' ? CLIMB_TUNE.cueEase : CLIMB_TUNE.ease;
+  }
+
+  /**
+   * A hang frame under 'cue'. The crouch first (item 3: a tap drops to the lip beneath, or lets go where there is none). Then
+   * the way the held keys ask (`askWay`): a side shimmies along a lip that runs on, as ever; the way is looked for (`seek`)
+   * once as it is asked and again once the hang has moved on, and what is found decides: a ladder-like hold is climbed to by
+   * the key alone (a side's once its shimmy has stopped at the lip's end), a lip further within the hop band is cued, the
+   * drop's lip beneath is cued while S is held. Space commits to what is cued; with nothing cued, S and Space is phase 2's
+   * (down, else off backward) and Space alone the small jump off. W with nothing up climbs onto the top.
+   */
+  private cueKeys(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const T = CLIMB_TUNE;
+    if (i.crouchPressed) {
+      this.easeCue(0, i);
+      if (this.commitDrop(world, b, i, stam)) {
+        this.dropping = true;
+        this.dropHeld = 0;
+        this.drops++;
+        return this.begun(world, b, i);
+      }
+      this.said = '';
+      this.drop(b, 'let go');
+      return false;
+    }
+    const way = this.askWay(i);
+    this.way = way;
+    if (!i.forwardHeld) this.ladderOn = false;
+    const side = way === WAY_LEFT || way === WAY_RIGHT;
+    // A side shimmies along a lip that runs on, first (and onto or off the wall through its clip).
+    this.shimmyStep(world, b, i, side ? (way === WAY_LEFT ? 1 : -1) : 0);
+    if (this.phase !== LEDGE_HANG) return this.begun(world, b, i);
+    const moving = this.shimmy !== 0;
+    const sy = side && (i.leftHeld || i.rightHeld) ? (i.forwardHeld ? 1 : i.backHeld ? -1 : 0) : 0;
+    const mx = b.pos.x - this.seekX;
+    const my = b.pos.y - this.seekY;
+    const mz = b.pos.z - this.seekZ;
+    // Looked for again once moved on (a shimmy's look across a gap ahead: a side's look carries on the walk along the held lip
+    // it made last time, `walkKeep`, so along a lip that runs on it walks only the new ground).
+    if (this.seekStale || way !== this.seekWay || sy !== this.seekSy || mx * mx + my * my + mz * mz > WAY_RESEEK * WAY_RESEEK) this.seek(world, b, i, stam, way, sy);
+    const kind = this.wayKind;
+    // The cue: a hop up, or to a side once its shimmy has stopped (the pose takes the whole body), behind (the look-away's
+    // reach), or the drop's hand lowered.
+    this.behindCued = way === WAY_BEHIND && kind === WAYK_HOP;
+    this.lookStep(i);
+    const showHop = kind === WAYK_HOP && (way === WAY_UP || side);
+    // Up: the hop up clip's coil held (a slight pull-up). A side: a lean that way (the figure turned about its front on its
+    // hands, `cueLean`), which a shimmy still under way keeps playing under (`easeCue` draws it).
+    if (showHop) this.leanSide = side ? (way === WAY_LEFT ? 1 : -1) : 0;
+    this.easeCue(kind === WAYK_DROP ? WAYK_DROP : showHop || this.behindCued ? WAYK_HOP : 0, i);
+    // (Smoothness III, item 4: a free hang's pull-up is the free hop's own arms over its hanging legs, drawn below; never the
+    // braced coil's whole body.)
+    const freeUp = !this.braced && T.freeHops === 'on';
+    if (showHop && way === WAY_UP && !freeUp) {
+      this.poseClip = this.cueClip;
+      this.poseAt = T.cueShare * CUE_COIL;
+    }
+    if (freeUp && T.freeCue === 'pull') {
+      // The feedback round II, item 0d (`climb.freeCue` 'pull'): the up cue a small pull-up: the rise eased in over `freeCueIn` while
+      // the up cue shows and back down when it goes, its pose the owner's table's pull held at the rise's share, the hands kept on
+      // the grip and the figure stood `freeCueRise` up by `limbsFor`.
+      const want = showHop && way === WAY_UP ? 1 : 0;
+      const e = T.freeCueIn;
+      const st = e > 0 ? i.dt / e : 1;
+      const r = this.cueRise;
+      this.cueRise = want === 1 ? (r + st < 1 ? r + st : 1) : r - st > 0 ? r - st : 0;
+      if (want === 1 && r === 0 && this.cueRise > 0) this.freeCues++;
+      const k = this.cueRise * this.cueRise * (3 - 2 * this.cueRise);
+      this.cueLift = T.freeCueRise * this.s * k;
+      // (Its pose is the pull's torso laid over the hang by the limbs at the rise's share, `limbsFor`; no layer of the rig's, whose
+      // own fade the rise could not ease.)
+    } else {
+      // (No pull: a braced hang, or 'arms'. Nought already under 'arms'.)
+      this.cueRise = 0;
+      this.cueLift = 0;
+      if (freeUp && this.cueKind === WAYK_HOP && this.leanSide === 0 && !this.behindCued && this.cue > 0) {
+        this.rigUpper = FREE_HOP_PARTS.upper;
+        this.upperSeek = T.freeHopParts.from + this.cue * T.cueShare * CUE_COIL;
+      }
+    }
+    if (this.cueKind === WAYK_DROP) this.dropAim(i);
+    this.headShare = this.cueKind === WAYK_DROP ? this.cue : 0;
+    // (Space with a ladder-like hold asked is no jump off: the key alone climbs to it, below, Space or none.)
+    if (i.jumpPressed && kind !== WAYK_LADDER) {
+      if ((kind === WAYK_HOP || kind === WAYK_DROP) && this.commitWay(world, b, i, stam, way, sy, false)) {
+        this.cueHops++;
+        return this.begun(world, b, i);
+      }
+      this.said = '';
+      if (way === WAY_DOWN) {
+        // Phase 2's S and Space where no cue shows: a lower lip in its band, else off backward.
+        if (this.hopBand(world, b, i, stam, 0, -1)) return this.begun(world, b, i);
+        this.said = '';
+        this.jumpOff(b);
+        return false;
+      }
+      this.jumpOffSmall(b);
+      return false;
+    }
+    if (kind === WAYK_LADDER && !moving && this.commitWay(world, b, i, stam, way, sy, true)) {
+      this.ladders++;
+      return this.begun(world, b, i);
+    }
+    // Smoothness III, item 4b: between two rungs of a ladder's cycle, its pose held (or let go of, the key up).
+    if (this.cycWait || this.cycSettle > 0) this.cycleHang(b, i);
+    // W with nothing in the way up climbs onto the top: pressed, held on from a ladder's climb, or from a wall climb's hand-over.
+    const topOut = this.fromClimb && i.forwardHeld;
+    this.fromClimb = false;
+    if (way === WAY_UP && kind === WAYK_NONE && (i.forwardPressed || this.ladderOn || topOut)) {
+      this.ladderOn = false;
+      this.climbUp(world, b, i);
+      return this.begun(world, b, i);
+    }
+    return this.begun(world, b, i);
+  }
+
+  /**
+   * The way the held keys ask (`WAY_*`): A or D alone their own side; S down; W where the view looks, from the wall: within
+   * `wayTurn` up, past it that side, braced past `lookStart` behind (the look-away's own threshold, let go of `LOOK_BACK`
+   * under it); nothing else none.
+   */
+  private askWay(i: LedgeIn): number {
+    const T = CLIMB_TUNE;
+    if ((i.leftHeld || i.rightHeld) && !(i.leftHeld && i.rightHeld)) return i.leftHeld ? WAY_LEFT : WAY_RIGHT;
+    if (i.backHeld && !i.forwardHeld) return WAY_DOWN;
+    // (W pressed counts as held: a press kept through a grab, `grabFree`, is handed to the hang with the key already up.)
+    if (!(i.forwardHeld || i.forwardPressed) || i.backHeld) return WAY_NONE;
+    const v = i.viewYaw;
+    if (!(v === v)) return WAY_UP;
+    let off = v - this.heading;
+    off -= Math.round(off / TAU) * TAU;
+    const a = off < 0 ? -off : off;
+    // (The feedback round II, item 0g, `climb.freeBehind` 'reach': a free hang's look back asks behind too.)
+    if ((this.braced || T.freeBehind === 'reach') && T.lookAway === 'reach') {
+      const start = (T.lookStart * Math.PI) / 180;
+      if (a > (this.way === WAY_BEHIND ? start - LOOK_BACK : start)) {
+        this.behindSide = off > 0 ? 1 : -1;
+        this.lookDx = Math.sin(v);
+        this.lookDz = Math.cos(v);
+        return WAY_BEHIND;
+      }
+    }
+    if (a > (T.wayTurn * Math.PI) / 180) return off > 0 ? WAY_LEFT : WAY_RIGHT;
+    return WAY_UP;
+  }
+
+  /**
+   * The way looked for, nothing begun (the band's searches in their dry mode): what is there decides the way's kind. A hold
+   * whose hang is `ladderMin` to `ladderMax` from this one is ladder-like (never behind); past it, up is a hop (braced only:
+   * a free hang has nothing to brace on to hop up), down the drop's (within `dropMost`), a side or behind a hop.
+   */
+  private seek(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, way: number, sy: number): void {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.seekStale = false;
+    this.seekWay = way;
+    this.seekSy = sy;
+    this.seekX = b.pos.x;
+    this.seekY = b.pos.y;
+    this.seekZ = b.pos.z;
+    this.wayKind = WAYK_NONE;
+    if (way === WAY_NONE) return;
+    this.seeks++;
+    const said = this.said;
+    this.dry = true;
+    this.dryOk = false;
+    this.ladderGo = false;
+    this.search(world, b, i, stam, way, sy);
+    const ok = this.dryOk;
+    this.dry = false;
+    this.dryOk = false;
+    this.said = said;
+    if (!ok) return;
+    // Up and down: how far over or under the held lip the one found stands; a side: how far the hang goes across and up or down.
+    const vertical = way === WAY_UP || way === WAY_DOWN;
+    const d = vertical ? (this.dryRise < 0 ? -this.dryRise : this.dryRise) : Math.sqrt(this.dryDist * this.dryDist + this.dryRise * this.dryRise);
+    if (way !== WAY_BEHIND && d >= T.ladderMin * s - 1e-9 && d <= T.ladderMax * s + 1e-9) this.wayKind = WAYK_LADDER;
+    else if (way === WAY_DOWN) this.wayKind = d <= T.dropMost * s + 0.1 ? WAYK_DROP : WAYK_NONE;
+    // (Smoothness III, item 4, `climb.freeHops` 'on': a free hang hops up too, on its own move, `freeHopBegin`.)
+    else if (way === WAY_UP) this.wayKind = (this.braced || T.freeHops === 'on') && d <= T.hopUp * s + 0.1 ? WAYK_HOP : WAYK_NONE;
+    else this.wayKind = WAYK_HOP;
+    const roles = this.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    this.cueClip = way === WAY_UP ? (roles.hopUp ?? (T.freeHops === 'on' ? FREE_HOP_PARTS.upper : roles.idle)) : way === WAY_LEFT ? roles.hopLeft : roles.hopRight;
+  }
+
+  /** The way's own search: up and down the vertical band (`climb.wayDepth`, the ladder's, the hop's and the drop's reaches), a side the band across, behind the look-away's. */
+  private search(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, way: number, sy: number): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.qflt = i.filter;
+    this.said = '';
+    if (way === WAY_UP) return this.bandVertical(world, b, i, stam, 1, (T.hopUp > T.ladderMax ? T.hopUp : T.ladderMax) * s, T.wayDepth * s, WAY_GRID, WAY_DEPTH_STEP, true);
+    if (way === WAY_DOWN) return this.bandVertical(world, b, i, stam, -1, (T.dropMost > T.ladderMax ? T.dropMost : T.ladderMax) * s, T.wayDepth * s, WAY_GRID, WAY_DEPTH_STEP, true);
+    if (way === WAY_LEFT || way === WAY_RIGHT) return this.bandSide(world, b, i, stam, way === WAY_LEFT, sy);
+    if (way === WAY_BEHIND) {
+      // W asks behind: the lip above before the one below in each column (up a chimney, never back down a rung).
+      this.shelfUp = true;
+      const began = this.hopBehindTo(world, b, i, stam);
+      this.shelfUp = false;
+      return began;
+    }
+    return false;
+  }
+
+  /** The way's search run for real: its hop begun, or (`ladder`) its ladder's climb. True where something began. */
+  private commitWay(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina, way: number, sy: number, ladder: boolean): boolean {
+    this.dry = false;
+    this.dryOk = false;
+    this.ladderGo = ladder;
+    this.ladderWay = way;
+    this.search(world, b, i, stam, way, sy);
+    this.ladderGo = false;
+    return this.phase === LEDGE_MOVE;
+  }
+
+  /** Item 3: the crouch's drop: a hop down to the nearest lip beneath within `dropMost` (`wayDepth` in front or behind). */
+  private commitDrop(world: LedgeWorld, b: LedgeBody, i: LedgeIn, stam: LedgeStamina): boolean {
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    this.dry = false;
+    this.dryOk = false;
+    this.ladderGo = false;
+    this.qflt = i.filter;
+    this.said = '';
+    this.bandVertical(world, b, i, stam, -1, T.dropMost * s, T.wayDepth * s, WAY_GRID, WAY_DEPTH_STEP, true);
+    if (this.phase === LEDGE_MOVE) return true;
+    this.said = '';
+    return false;
+  }
+
+  /** Item 3: the crouch held through its drop past `dropHold`: let go fully where the body is (a fall past every lip). */
+  private dropStep(b: LedgeBody, i: LedgeIn): boolean {
+    if (!i.crouchHeld) return false;
+    this.dropHeld += i.dt;
+    if (this.dropHeld <= CLIMB_TUNE.dropHold) return false;
+    this.dropping = false;
+    this.drop(b, 'let go fully');
+    return true;
+  }
+
+  /** The cue eased toward `goal` (a kind, or nought for none) over `climb.cueEase`: a change of kind eases the last one out first. */
+  private easeCue(goal: number, i: LedgeIn): void {
+    const e = CLIMB_TUNE.cueEase;
+    const st = e > 0 ? i.dt / e : 1;
+    if (goal !== 0 && (this.cueKind === goal || this.cue === 0)) {
+      this.cueKind = goal;
+      this.cue = this.cue + st < 1 ? this.cue + st : 1;
+    } else {
+      this.cue = this.cue - st > 0 ? this.cue - st : 0;
+      if (this.cue === 0) {
+        this.cueKind = 0;
+        this.leanSide = 0;
+      }
+    }
+    // A side's cue drawn: the lean that way by the cue's share.
+    this.leanNow = this.cueKind === WAYK_HOP && this.leanSide !== 0 ? this.leanSide * ((CLIMB_TUNE.cueLean * Math.PI) / 180) * this.cue : 0;
+  }
+
+  /**
+   * Item 3: the drop's cue aimed at the lip beneath (`dryLip`): its leading hand the side that lip's middle lies to along the
+   * held one, else the side the view is turned to, else the right; that hand's reach from its place on the lip toward the
+   * lip beneath (across and down, never along), held to `DROP_REACH`; the head's pitch down at it.
+   */
+  private dropAim(i: LedgeIn): void {
+    const T = CLIMB_TUNE;
+    const L = this.lip;
+    const A = this.dryLip;
+    const sc = this.s;
+    const tlx = -L.nz;
+    const tlz = L.nx;
+    const along = (A.ex - L.ex) * tlx + (A.ez - L.ez) * tlz;
+    let lead = 1;
+    if (along > DROP_SIDE * sc) lead = 0;
+    else if (along >= -DROP_SIDE * sc) {
+      const v = i.viewYaw;
+      if (v === v) {
+        let off = v - this.heading;
+        off -= Math.round(off / TAU) * TAU;
+        if (off > DROP_VIEW) lead = 0;
+      }
+    }
+    this.dropLead = lead;
+    let vx = A.ex + A.nx * T.gripOut * sc - (L.ex + L.nx * T.gripOut * sc);
+    const vy0 = A.ey - L.ey;
+    let vz = A.ez + A.nz * T.gripOut * sc - (L.ez + L.nz * T.gripOut * sc);
+    const al = vx * tlx + vz * tlz;
+    vx -= tlx * al;
+    vz -= tlz * al;
+    let vy = vy0;
+    const len = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    const most = DROP_REACH * sc;
+    if (len > most) {
+      const k = most / len;
+      vx *= k;
+      vy *= k;
+      vz *= k;
+    }
+    this.dropVx = vx;
+    this.dropVy = vy;
+    this.dropVz = vz;
+    // The head (about `HEAD_UNDER` under the grip, out from the face by the hang's own reach) looking down at the lip beneath.
+    const ox = A.ex - (L.ex + L.nx * HEAD_OUT * sc);
+    const oz = A.ez - (L.ez + L.nz * HEAD_OUT * sc);
+    const down = L.ey - HEAD_UNDER * sc - A.ey;
+    const pitch = Math.atan2(down, Math.sqrt(ox * ox + oz * oz));
+    this.headDown = pitch < 0 ? 0 : pitch > HEAD_MOST ? HEAD_MOST : pitch;
+  }
+
+  /**
+   * Item 2: a ladder's climb begun (from `hopTo`, its way checked): the body carried from its hang to the next hold's, at the
+   * wall climb's speed that way (`wallSpeed`), the figure on the wall's own clip up or down (lined up on the face as the wall
+   * climb lines it, its hands' mean on the grip's line) or, with no wall under the holds, the free hang's legs with the
+   * clip's arms over them; sideways the shimmy's clip. Each hand on the hold its clip has it nearest (`ladderLimbs`).
+   */
+  private startLadder(b: LedgeBody, A: Lip, braced: boolean): void {
+    const T = CLIMB_TUNE;
+    const m = this.move;
+    const way = this.ladderWay;
+    const side = way === WAY_LEFT || way === WAY_RIGHT;
+    m.id = '';
+    m.kind = 'ladder';
+    m.fx = b.pos.x;
+    m.fy = b.pos.y;
+    m.fz = b.pos.z;
+    m.tx = this.bx;
+    m.ty = this.by;
+    m.tz = this.bz;
+    const dx = m.tx - m.fx;
+    const dy = m.ty - m.fy;
+    const dz = m.tz - m.fz;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const speed = way === WAY_DOWN ? T.wallSpeed.down : side ? T.wallSpeed.side : T.wallSpeed.up;
+    const T1 = dist / speed;
+    m.t0 = 0;
+    m.time = 0;
+    m.T = T1 > LADDER_LEAST ? T1 : LADDER_LEAST;
+    m.after = AFTER_HANG;
+    m.braced = braced;
+    m.heading = Math.atan2(-A.nx, -A.nz);
+    m.h0 = this.heading;
+    m.spin = 0;
+    m.crouchFrom = 2;
+    // (Smoothness II: a ladder's climb is no timed move, whatever the move before it was, and has no one-off to blend out.)
+    m.timed = false;
+    // (Smoothness III: nor an arc's, nor a drop's two parts, nor a free hop's arms.)
+    m.arc = false;
+    m.parts = 0;
+    m.upper = false;
+    m.cycle = false;
+    m.blending = false;
+    m.touch = Number.NaN;
+    m.lip.copy(A);
+    // Smoothness III, item 4b (`climb.ladderCycle` 'cycle'): the clip's whole cycle carried on from the rung before, its pace held
+    // within `ladderStretch` of its own (the move's length follows).
+    if (T.ladderCycle === 'cycle') this.cycleBegin(m, way, side, dist, speed, braced);
+    const h0 = this.heading;
+    gripAt.x = m.fx;
+    gripAt.y = m.fy;
+    gripAt.z = m.fz;
+    this.ladderOff(this.lip, gripAt, braced);
+    m.o0x = this.ax;
+    m.o0y = this.ay;
+    m.o0z = this.az;
+    gripAt.x = m.tx;
+    gripAt.y = m.ty;
+    gripAt.z = m.tz;
+    this.heading = m.heading;
+    this.ladderOff(A, gripAt, braced);
+    this.heading = h0;
+    m.o1x = this.ax;
+    m.o1y = this.ay;
+    m.o1z = this.az;
+    this.phase = LEDGE_MOVE;
+    this.shimmy = 0;
+    this.startClip = '';
+    this.fresh = true;
+    this.beginFade();
+    // (Item 4b: a cycle carried on from the rung before fades from where the figure hung between the two, never from the hang's
+    // own line-up, which the hang's step put back earlier this frame: a jump of the figure that a hand a rung behind follows.)
+    if (m.cycle && this.cycGo) {
+      this.ofX = this.cycOfX;
+      this.ofY = this.cycOfY;
+      this.ofZ = this.cycOfZ;
+    }
+  }
+
+  /** Where a ladder's clip is drawn against a body at `at` on lip `L` (into `ax/ay/az`): `startLadder`'s line-up. */
+  private ladderOff(L: Lip, at: { readonly x: number; readonly y: number; readonly z: number }, braced: boolean): void {
+    const way = this.ladderWay;
+    const roles = braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    if (way === WAY_LEFT || way === WAY_RIGHT) {
+      this.gripOff(L, at, LEDGE_FACTS[way === WAY_LEFT ? roles.shimmyLeft : roles.shimmyRight].g0);
+      return;
+    }
+    // (Smoothness III, item 4b: a free ladder's cycle is lined up as a braced one, by the climb clip's own hands, whose arms it
+    // draws over the free hang's legs: lined up by the idle's hands, the climb's arms reached half a metre short of every rung.)
+    if (!braced && CLIMB_TUNE.ladderCycle !== 'cycle') {
+      this.gripOff(L, at, LEDGE_FACTS[roles.idle].g0);
+      return;
+    }
+    const T = CLIMB_TUNE;
+    const s = this.s;
+    const f = WALL_FACTS[way === WAY_DOWN ? WALL_CLIPS.down : WALL_CLIPS.up];
+    const w = clipWall(f) * s;
+    let x = L.ex + L.nx * w - at.x;
+    // (Smoothness III, item 4b: a free ladder's arms are the climb clip's over the free hang's own hips, which stand as the up
+    // clip's do: its hands' height taken against its own hips, put on the up clip's; the down clip was authored 1.22 m higher.)
+    const hands = braced ? f.hands : f.hands - f.hips + WALL_FACTS[WALL_CLIPS.up].hips;
+    const y = L.ey - T.gripDrop * s - hands * s - at.y;
+    let z = L.ez + L.nz * w - at.z;
+    const tlx = -L.nz;
+    const tlz = L.nx;
+    const along = x * tlx + z * tlz;
+    x -= tlx * along;
+    z -= tlz * along;
+    this.ax = x;
+    this.ay = y;
+    this.az = z;
+  }
+
+  /**
+   * Smoothness III, item 4b (`climb.ladderCycle` 'cycle'), from `startLadder`: the ladder's clip as a whole cycle. Up and down,
+   * half the wall clip's cycle a rung (one hand reaching a rung, the clip's two reaches over two), its rate the half over the
+   * rung's time at the climb's speed, held within `ladderStretch` of its own rate (1), the move's
+   * length following; sideways, the shimmy's own cycle by the distance at its own stride. Its phase carried on from the rung before
+   * where the cycle is under way on the same clip (`cycWait`), else from its start.
+   */
+  private cycleBegin(m: Move, way: number, side: boolean, dist: number, speed: number, braced: boolean): void {
+    const T = CLIMB_TUNE;
+    const s = this.s > 1e-6 ? this.s : 1;
+    const roles = braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    const clip = side ? (way === WAY_LEFT ? roles.shimmyLeft : roles.shimmyRight) : way === WAY_DOWN ? WALL_CLIPS.down : WALL_CLIPS.up;
+    let dur = 0;
+    let span = 0;
+    if (side) {
+      const f = LEDGE_FACTS[clip];
+      if (!f) return;
+      const travel = (f.net[0] < 0 ? -f.net[0] : f.net[0]) * s;
+      if (!(travel > 1e-6)) return;
+      dur = f.dur;
+      span = (dur * dist) / travel;
+    } else {
+      const f = WALL_FACTS[clip];
+      if (!f) return;
+      dur = f.dur;
+      span = dur / 2;
+      // (The rate a rung at the climb's speed asks of the clip, held within `ladderStretch` of its own rate, 1: the reach's
+      // time follows, so a near or far rung stretches the reach and never the clip past its own.)
+      const want = dist > 1e-6 ? (span * speed) / dist : 1;
+      const st = T.ladderStretch;
+      const r = want < 1 - st ? 1 - st : want > 1 + st ? 1 + st : want;
+      const T1 = span / r;
+      m.T = T1 > LADDER_LEAST ? T1 : LADDER_LEAST;
+    }
+    m.cycle = true;
+    m.phSpan = span;
+    m.reach = -1;
+    const go = this.cycWait && this.cycClip === clip && this.cycPh === this.cycPh;
+    this.cycGo = go;
+    m.ph0 = go ? this.cycPh : 0;
+    // The figure hung between its two hands' rungs (up and down; a side's holds are within an arm either way).
+    // (The reaching hand meets its rung at the clip's own furthest reach that way, half its stride from the hands' middle: the
+    // figure lowered that much going up, raised going down; the hand left on the rung behind stretches the rest.)
+    m.sh0 = go ? this.cycShift : 0;
+    const half = side ? 0 : (WALL_FACTS[clip].stride * s) / 2;
+    m.sh1 = way === WAY_DOWN ? half : -half;
+    this.cycClip = clip;
+    this.cycDur = dur;
+    if (!go) {
+      this.cycHand = -1;
+      this.cycHeld = false;
+    }
+    this.cycWait = false;
+    this.cycSettle = 0;
+    this.cycReachT = m.T > 1e-6 ? m.T : CLIMB_TUNE.ease * 2;
+  }
+  /** Item 4b: whether the move begun carries the cycle on, and the figure's drawn line-up between the two rungs before it. */
+  private cycGo = false;
+  private cycOfX = 0.5;
+  private cycOfY = 0.5;
+  private cycOfZ = 0.5;
+  /** Item 4b: how long a rung's reach takes now, seconds (the hand left a rung down settles over as long once the climb stops). */
+  private cycReachT = 0.5;
+  /** Item 4b: the figure's lift between two rungs now (the last move's end's), metres. */
+  private cycShift = 0.5;
+  /** Item 4b: the cycle's clip's length, seconds; a settle of the hand left a rung down once the climb stops, seconds left. */
+  private cycDur = 0.5;
+  private cycSettle = 0.5;
+  /** Item 4b: where the reaching hand lands on its rung (x, y, z), as the move's last frame put it. */
+  private readonly cycNew = new Float64Array(3);
+
+  /** Item 4b: the cycle's clip put at phase `ph` on the rig (`ladderDraw`'s, and the hang's between two rungs). Fields only. */
+  private cycleDraw(braced: boolean, ph: number): void {
+    const way = this.ladderWay;
+    const dur = this.cycDur > 1e-6 ? this.cycDur : 1;
+    let p = ph - Math.floor(ph / dur) * dur;
+    if (p < 0) p = 0;
+    if (way === WAY_LEFT || way === WAY_RIGHT) {
+      this.rigState = this.loopState(braced, way === WAY_LEFT ? 1 : -1);
+      this.rigClip = this.cycClip;
+      this.rigRate = 0;
+      this.rigSeek = p;
+      return;
+    }
+    if (braced) {
+      this.rigState = way === WAY_DOWN ? 'wallDown' : 'wallUp';
+      this.rigClip = this.cycClip;
+      this.rigRate = 0;
+      this.rigSeek = p;
+      return;
+    }
+    this.rigState = this.loopState(false, 0);
+    this.rigClip = LEDGE_ROLES.free.idle;
+    this.rigUpper = this.cycClip;
+    this.upperSeek = p;
+  }
+
+  /**
+   * Item 4b: a hang between two rungs of a ladder's cycle (`cycWait`, from `cueKeys`): the way's key still held, the clip's pose
+   * held at the cycle's phase on the wall's line-up until the next rung begins; let go of, the hang's own loop and line-up come
+   * back over the hang's ease and the hand left a rung down reaches up onto the held lip (`cycSettle`).
+   */
+  private cycleHang(b: LedgeBody, i: LedgeIn): void {
+    const way = this.ladderWay;
+    const held = way === WAY_UP ? i.forwardHeld : way === WAY_DOWN ? i.backHeld : way === WAY_LEFT ? i.leftHeld : i.rightHeld;
+    // (Let go of, the hand left a rung behind settles onto the held lip first, over a reach's own time, with the figure still in
+    // the cycle's pose and on its line-up, and only then does the hang's own loop and line-up come back: brought back at once,
+    // the hang's arms could no longer reach the rung that hand was still on, and the hand fell off it with the arm.)
+    if (this.cycWait && !(held && this.phase === LEDGE_HANG)) {
+      this.cycWait = false;
+      this.cycSettle = this.cycReachT;
+    } else if (!this.cycWait) this.cycSettle -= this.dtNow;
+    if ((this.cycWait || this.cycSettle > 0) && this.phase === LEDGE_HANG) {
+      this.cycleDraw(this.braced, this.cycPh);
+      gripAt.x = b.pos.x;
+      gripAt.y = b.pos.y;
+      gripAt.z = b.pos.z;
+      this.ladderOff(this.lip, gripAt, this.braced);
+      this.ay += this.cycShift;
+      this.setOffset();
+      this.cycOfX = this.offX;
+      this.cycOfY = this.offY;
+      this.cycOfZ = this.offZ;
+      return;
+    }
+    this.cycWait = false;
+    this.cycPh = Number.NaN;
+    this.cycShift = 0;
+    this.cycSettle = 0;
+    this.cycHeld = false;
+    this.cycHand = -1;
+    this.beginFade();
+  }
+
+  /** A ladder's frame of clips (`moveStep`'s): the wall's clip at its rate, or the free hang's legs with its arms, or the shimmy's. */
+  private ladderDraw(): void {
+    const T = CLIMB_TUNE;
+    const m = this.move;
+    const s = this.s;
+    const way = this.ladderWay;
+    const roles = m.braced ? LEDGE_ROLES.braced : LEDGE_ROLES.free;
+    // Smoothness III, item 4b: the cycle's phase by how far the climb has gone (the move's even share), never restarted.
+    if (m.cycle) {
+      const span = m.T - m.t0;
+      const lin = span > 1e-6 ? Math.min(1, Math.max(0, (m.time - m.t0) / span)) : 1;
+      this.cycleDraw(m.braced, m.ph0 + lin * m.phSpan);
+      return;
+    }
+    if (way === WAY_LEFT || way === WAY_RIGHT) {
+      this.rigState = this.loopState(m.braced, way === WAY_LEFT ? 1 : -1);
+      this.rigClip = way === WAY_LEFT ? roles.shimmyLeft : roles.shimmyRight;
+      return;
+    }
+    const clip = way === WAY_DOWN ? WALL_CLIPS.down : WALL_CLIPS.up;
+    const speed = way === WAY_DOWN ? T.wallSpeed.down : T.wallSpeed.up;
+    if (m.braced) {
+      this.rigState = way === WAY_DOWN ? 'wallDown' : 'wallUp';
+      this.rigClip = clip;
+      this.rigRate = speed / (WALL_FACTS[clip].stride * (s > 1e-6 ? s : 1));
+      return;
+    }
+    // No wall under the holds: the free hang's own legs, hanging, and the climb's arms over them.
+    this.rigState = this.loopState(false, 0);
+    this.rigClip = roles.idle;
+    this.rigUpper = clip;
+  }
+
+  /**
+   * A ladder's hands (`limbsFor`'s): each on the hold its clip has it nearest (the one it leaves, `lip`, or the one it climbs
+   * to, the move's), along that hold where the clip has it, wholly placed within a hand's width and let go of by a forearm's
+   * length off it; the feet on the face while braced.
+   */
+  private ladderLimbs(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    // Smoothness III, item 4b: a ladder's cycle's hands in turn (`cycleLimbs`).
+    if (this.move.cycle) {
+      this.cycleLimbs(lp, rig, toPhys);
+      return;
+    }
+    const T = CLIMB_TUNE;
+    const sc = this.s;
+    const m = this.move;
+    this.leadNow = -1;
+    this.leadShare = 0;
+    this.leadDrop = false;
+    for (let s = 0; s < 2; s++) {
+      const g = lp.gripNow(rig, s, toPhys, gripV);
+      if (!g || !(this.hands > 0)) {
+        lp.handW[s] = 0;
+        continue;
+      }
+      const gx = g.x;
+      const gy = g.y;
+      const gz = g.z;
+      let best = Number.POSITIVE_INFINITY;
+      let bx = 0;
+      let by = 0;
+      let bz = 0;
+      for (let k = 0; k < 2; k++) {
+        const L = k === 0 ? this.lip : m.lip;
+        const lx = L.ex + L.nx * T.gripOut * sc;
+        const ly = L.ey - T.gripDrop * sc;
+        const lz = L.ez + L.nz * T.gripOut * sc;
+        const tx = -L.nz;
+        const tz = L.nx;
+        const along = (gx - lx) * tx + (gz - lz) * tz;
+        const px = lx + tx * along;
+        const py = ly + L.slope * along;
+        const pz = lz + tz * along;
+        const d2 = (gx - px) * (gx - px) + (gy - py) * (gy - py) + (gz - pz) * (gz - pz);
+        if (d2 < best) {
+          best = d2;
+          bx = px;
+          by = py;
+          bz = pz;
+        }
+      }
+      const d = Math.sqrt(best);
+      const near = d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      lp.hand[s * 3] = bx;
+      lp.hand[s * 3 + 1] = by;
+      lp.hand[s * 3 + 2] = bz;
+      const w = this.hands * near;
+      lp.handW[s] = w > 0 ? w : 0;
+    }
+    const L = this.lip;
+    lp.palmW[0] = 0;
+    lp.palmW[1] = 0;
+    lp.footFade = false;
+    lp.footStep = T.ease > 0 ? this.dtNow / T.ease : 1;
+    lp.wallW = this.feet;
+    lp.wall[0] = L.ex;
+    lp.wall[1] = L.ey;
+    lp.wall[2] = L.ez;
+    lp.wall[3] = L.nx;
+    lp.wall[4] = 0;
+    lp.wall[5] = L.nz;
+  }
+
+  /**
+   * Smoothness III, item 4b (`climb.ladderCycle` 'cycle'): the hands of a ladder's cycle, in turn. While a rung is climbed, the
+   * hand that reaches it (the other than the last; the first by the clip's own pose: up the lower, down the higher, a side the
+   * leading) eases off the hold it had over the first half of the reach, is where the clip carries it in between, and eases onto
+   * its place on the rung (where the clip has it along it) over the second half; the other hand stays on its own hold all the
+   * while. Between two rungs both stay where they are; the climb let go of, the hand left a rung down reaches up onto the held lip
+   * over `cycSettle` the same way. The feet on the wall while braced, as a ladder's always are. Fields and kept arrays only.
+   */
+  private cycleLimbs(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null): void {
+    const T = CLIMB_TUNE;
+    const sc = this.s;
+    const m = this.move;
+    this.leadNow = -1;
+    this.leadShare = 0;
+    this.leadDrop = false;
+    const moving = this.phase === LEDGE_MOVE && m.cycle;
+    if (!this.cycHeld) {
+      for (let k = 0; k < 6; k++) this.cycHold[k] = lp.hand[k];
+      this.cycHeld = true;
+    }
+    if (moving && m.reach < 0) {
+      if (this.cycHand >= 0) m.reach = 1 - this.cycHand;
+      else {
+        const way = this.ladderWay;
+        if (way === WAY_LEFT) m.reach = 0;
+        else if (way === WAY_RIGHT) m.reach = 1;
+        else {
+          const g0 = lp.gripNow(rig, 0, toPhys, gripV);
+          const y0 = g0 ? g0.y : 0;
+          const g1 = lp.gripNow(rig, 1, toPhys, gripV);
+          const y1 = g1 ? g1.y : 0;
+          m.reach = (way === WAY_DOWN ? y0 > y1 : y0 < y1) ? 0 : 1;
+        }
+      }
+    }
+    const span = m.T - m.t0;
+    let u = 1;
+    if (moving) u = span > 1e-6 ? Math.min(1, Math.max(0, (m.time - m.t0) / span)) : 1;
+    let settle = -1;
+    if (!moving && !this.cycWait && this.cycSettle > 0) {
+      settle = this.cycHand >= 0 ? 1 - this.cycHand : -1;
+      const whole = this.cycReachT;
+      // (The step counts the settle down, `cycleHang`, and ends it, so the hang's logic never waits on its drawing.)
+      u = whole > 0 ? 1 - this.cycSettle / whole : 1;
+      if (u < 0) u = 0;
+    }
+    const L = moving ? m.lip : this.lip;
+    for (let s = 0; s < 2; s++) {
+      const k = s * 3;
+      if (!(this.hands > 0)) {
+        lp.handW[s] = 0;
+        continue;
+      }
+      const reaching = moving ? s === m.reach : s === settle;
+      if (!reaching) {
+        lp.hand[k] = this.cycHold[k];
+        lp.hand[k + 1] = this.cycHold[k + 1];
+        lp.hand[k + 2] = this.cycHold[k + 2];
+        lp.handW[s] = this.hands;
+        // (The hand that reached the rung before keeps it as it did between the two rungs, handed over to the reaching one as
+        // that one is put on its own over the second half, so the figure never jumps between the two.)
+        // (And once the climb stops, over the settle, as the hang's own line-up comes back: let go of at once, the figure
+        // stepped off the reach it was being held to.)
+        if (s === this.cycHand && (moving || settle >= 0)) {
+          const a2 = !moving ? u : u <= 0.5 ? 0 : (u - 0.5) * 2;
+          this.reachW = 1 - a2 * a2 * (3 - 2 * a2);
+          this.cycleReach(lp, rig, toPhys, s);
+        }
+        continue;
+      }
+      const g = lp.gripNow(rig, s, toPhys, gripV);
+      if (!g) {
+        lp.handW[s] = 0;
+        continue;
+      }
+      const lx = L.ex + L.nx * T.gripOut * sc;
+      const ly = L.ey - T.gripDrop * sc;
+      const lz = L.ez + L.nz * T.gripOut * sc;
+      const tx = -L.nz;
+      const tz = L.nx;
+      const along = (g.x - lx) * tx + (g.z - lz) * tz;
+      const px = lx + tx * along;
+      const py = ly + L.slope * along;
+      const pz = lz + tz * along;
+      // The reaching hand, at its whole weight all the way (a hand let go to the clip alone passes in and out of what it climbs,
+      // and anything pushing it out of a rung or a wall would snap it): from its hold to its new place on the lip along a path
+      // eased at both ends, out round the rungs' front by `ladderArc` at the middle on a free ladder (whose rungs stand in the air
+      // with no wall behind them), and drawn toward where the clip carries it by all but `ladderLead` at the reach's middle, so
+      // the clip's reach shows. The hand left a rung behind once the climb stops settles the same way over a reach's own time.
+      const t = u * u * (3 - 2 * u);
+      const mid = Math.sin(Math.PI * u);
+      const out = (moving ? m.braced : this.braced) ? 0 : T.ladderArc * sc * mid;
+      const lead = 1 - (1 - T.ladderLead) * mid;
+      const hx = this.cycHold[k] + (px - this.cycHold[k]) * t + L.nx * out;
+      const hy = this.cycHold[k + 1] + (py - this.cycHold[k + 1]) * t;
+      const hz = this.cycHold[k + 2] + (pz - this.cycHold[k + 2]) * t + L.nz * out;
+      lp.hand[k] = g.x + (hx - g.x) * lead;
+      lp.hand[k + 1] = g.y + (hy - g.y) * lead;
+      lp.hand[k + 2] = g.z + (hz - g.z) * lead;
+      if (moving) {
+        this.cycNew[0] = px;
+        this.cycNew[1] = py;
+        this.cycNew[2] = pz;
+      } else if (u >= 1) {
+        this.cycHold[k] = px;
+        this.cycHold[k + 1] = py;
+        this.cycHold[k + 2] = pz;
+      }
+      // Whatever the reaching arm still lacks of its place over the reach's second half the figure is moved toward it by, as
+      // the hang's own anchor does: the hand lands on its rung, the one behind stretching the more.
+      const a2 = u <= 0.5 ? 0 : (u - 0.5) * 2;
+      this.reachW = a2 * a2 * (3 - 2 * a2);
+      this.cycleReach(lp, rig, toPhys, s);
+      lp.handW[s] = this.hands;
+    }
+    // Between two rungs the hand that reached last keeps its rung the same way.
+    if (!moving && this.cycWait && this.cycHand >= 0) {
+      const k = this.cycHand * 3;
+      lp.reachAt[0] = this.cycHold[k];
+      lp.reachAt[1] = this.cycHold[k + 1];
+      lp.reachAt[2] = this.cycHold[k + 2];
+      this.reachW = 1;
+      this.cycleReach(lp, rig, toPhys, this.cycHand);
+    }
+    const H = this.lip;
+    lp.palmW[0] = 0;
+    lp.palmW[1] = 0;
+    lp.footFade = false;
+    lp.footStep = T.ease > 0 ? this.dtNow / T.ease : 1;
+    lp.wallW = this.feet;
+    lp.wall[0] = H.ex;
+    lp.wall[1] = H.ey;
+    lp.wall[2] = H.ez;
+    lp.wall[3] = H.nx;
+    lp.wall[4] = 0;
+    lp.wall[5] = H.nz;
+  }
+
+  /** Item 4b: the share `cycleReach` moves the figure by (a field: a number handed across a call is a number made). */
+  private reachW = 0.5;
+
+  /**
+   * Item 4b: the figure moved toward hand `s`'s target (`lp.hand`, or `lp.reachAt` where the caller set it) by what its arm
+   * still lacks of it, by `reachW`: the hang's own anchor's way (`reachPastIn`), the root moved in its parent's frame. Fields only.
+   */
+  private cycleReach(lp: LimbPlace, rig: LimbRig, toPhys: THREE.Matrix4 | null, s: number): void {
+    const w = this.reachW;
+    if (!(w > 0) || toPhys !== null) return;
+    const root = rig.root;
+    const parent = root.parent;
+    if (!parent) return;
+    const at = lp.reachAt;
+    if (w < 1 || !this.cycWait) {
+      at[0] = lp.hand[s * 3];
+      at[1] = lp.hand[s * 3 + 1];
+      at[2] = lp.hand[s * 3 + 2];
+    }
+    const dir = anchorD;
+    lp.reachPastIn(rig, s, toPhys, dir);
+    const e = lp.past;
+    if (!(e > 0)) return;
+    const k = (e + REACH_SPARE) * w;
+    root.getWorldPosition(anchorP);
+    anchorP.x += dir.x * k;
+    anchorP.y += dir.y * k;
+    anchorP.z += dir.z * k;
+    parent.worldToLocal(anchorP);
+    root.position.x = anchorP.x;
+    root.position.y = anchorP.y;
+    root.position.z = anchorP.z;
+    root.updateMatrixWorld(true);
   }
 
   /**
@@ -3828,6 +6919,87 @@ export class LedgeHang {
    * The caller's clocks after a let-go, every frame off the ledge: the drop clip's cut, the jump off's turn (true where the
    * body turns to `turnNow` this frame), and the drawn offset eased out. Nothing at all while none of them runs.
    */
+  /**
+   * Smoothness II, item 1: the drop played by the owner's rule (`dropBegin`) and where its clip stands: its id ('' for none), its
+   * clock (clip seconds), its two moments, its length and the stretch's rate, whether the feet have landed, and whether the
+   * caller must hold the clip (as a hang's one-offs are held: its own end is the drop's, not the rig's). A frame's answer
+   * (`dropClocks`): the clip's rate this frame (NaN for none) and a time to put it at (NaN for none).
+   */
+  dropId = '';
+  private dropClock = 0.5;
+  private dropTL = 0.5;
+  private dropTT = 0.5;
+  private dropDur = 0.5;
+  private dropRate = 0.5;
+  private dropLanded = false;
+  dropHold = false;
+  dropRateNow = 0.5;
+  dropSeek = 0.5;
+  /** How long the drop's clip has stood held at the feet's touch while the body still falls (the backstop `DROP_HOLD_MOST`). */
+  private dropHeldFor = 0.5;
+  /** The world the hang's step was last handed (the drop's ray down: a let-go is asked from inside the step). */
+  private worldNow: LedgeWorld | null = null;
+
+  /**
+   * Smoothness II, item 1: a frame of the drop (the player's, after `tick`): its clock at its own rate to the hands' release,
+   * at the stretch's rate to the feet's touch, held there while the body still falls; the feet down (`grounded`), skipped to
+   * the touch if short of it, then its own rate to its end, where it is handed to the falling or standing loop (`cutNow`).
+   * The clip is put at the clock's start every frame (`dropSeek`) and run at the frame's rate to its end, so the drawn clip is
+   * the clock at every frame rate. A body that does anything but fall (`falling` false: in the water, on the rope) ends the
+   * drop at once and hands it to what it does now, and so does a hold at the touch past `DROP_HOLD_MOST`. Fields only.
+   */
+  dropClocks(dt: number, grounded: boolean, falling: boolean): void {
+    this.dropRateNow = Number.NaN;
+    this.dropSeek = Number.NaN;
+    if (!this.dropId) return;
+    if (this.phase !== LEDGE_NONE) {
+      this.dropId = '';
+      return;
+    }
+    if (!falling || this.dropHeldFor > DROP_HOLD_MOST) {
+      this.dropId = '';
+      this.cutNow = true;
+      return;
+    }
+    let t = this.dropClock;
+    let from = t;
+    if (!this.dropLanded && grounded && t > 0) {
+      this.dropLanded = true;
+      if (t < this.dropTT) {
+        t = this.dropTT;
+        from = t;
+      }
+    }
+    let left = dt;
+    if (!this.dropLanded) {
+      if (t < this.dropTL) {
+        const d = this.dropTL - t < left ? this.dropTL - t : left;
+        t += d;
+        left -= d;
+      }
+      if (left > 0 && t < this.dropTT) {
+        const room = this.dropTT - t;
+        if (left * this.dropRate < room) {
+          t += left * this.dropRate;
+          left = 0;
+        } else {
+          t = this.dropTT;
+          left -= room / this.dropRate;
+        }
+      }
+      // (Held at the touch while the body still falls: counted against the backstop.)
+      if (left > 0) this.dropHeldFor += left;
+    } else t += left;
+    if (t > this.dropDur) t = this.dropDur;
+    this.dropSeek = from;
+    this.dropRateNow = dt > 0 ? (t - from) / dt : 1;
+    this.dropClock = t;
+    if (this.dropLanded && t >= this.dropDur - 1e-6) {
+      this.dropId = '';
+      this.cutNow = true;
+    }
+  }
+
   tick(dt: number): boolean {
     this.cutNow = false;
     // Climbing II, item 7: a look-away's spine turn eased back after a let-go (nothing at all while there is none).
@@ -3886,10 +7058,73 @@ export class LedgeHang {
     // Hanging, and through a one-off whose hands stay on a lip (a hop's ends, a grab once caught, a turn onto or off the wall).
     const k = this.move.kind;
     this.lifted = 0;
+    // Smoothness III, item 0: the climb's push goes out with its crossfade into the stand (1 at every other time).
+    lp.pushKeep = this.standKeep();
+    // The smoothness round, item 2: a ladder's climb puts each hand on the hold its clip has it nearest (`ladderLimbs`).
+    if (this.phase === LEDGE_MOVE && k === 'ladder') {
+      this.ladderLimbs(lp, rig, toPhys);
+      // (The feedback round II, item 0f: a ladder's legs laid under and its hips' sway.)
+      this.legsTo(lp, rig, toPhys);
+      return;
+    }
+    // Smoothness III, item 4b: between two rungs of a ladder's cycle, and the hand left a rung down settling onto the held lip.
+    if (this.phase === LEDGE_HANG && (this.cycWait || this.cycSettle > 0)) {
+      this.cycleLimbs(lp, rig, toPhys);
+      this.legsTo(lp, rig, toPhys);
+      return;
+    }
     // Climbing II, item 7: the leading hand while looking away (-1 none): 0 the left, 1 the right.
-    const lead = this.phase === LEDGE_HANG && this.look > 0 ? (this.lookSide > 0 ? 0 : this.lookSide < 0 ? 1 : -1) : -1;
+    let lead = this.phase === LEDGE_HANG && this.look > 0 ? (this.lookSide > 0 ? 0 : this.lookSide < 0 ? 1 : -1) : -1;
+    this.leadShare = lead >= 0 ? this.look : 0;
+    // The smoothness round, item 3: the drop's cue lets its leading hand go of the lip and lowers it toward the lip beneath.
+    this.leadDrop = false;
+    if (lead < 0 && this.phase === LEDGE_HANG && this.cueKind === WAYK_DROP && this.cue > 0) {
+      lead = this.dropLead;
+      this.leadShare = this.cue;
+      this.leadDrop = true;
+    }
     this.leadNow = lead;
-    if (this.phase === LEDGE_HANG || (this.phase === LEDGE_MOVE && (k === 'hop' || k === 'grab' || k === 'turn'))) this.anchor(lp, rig, toPhys);
+    // (The feedback round II, item 0d: a free hop up carrying the cue's lift is not anchored while it carries it: its arms leave the
+    // grip as a free hop's always have, and the anchor following them off it and letting go was a drop of the figure.)
+    const carried = this.carry !== 0 && this.phase === LEDGE_MOVE && this.move.upper;
+    let hold = 0;
+    if (carried) {
+      let u = this.move.time / this.carryLeave;
+      if (!(u > 0)) u = 0;
+      if (u > 1) u = 1;
+      hold = 1 - u * u * (3 - 2 * u);
+    }
+    if (!carried && (this.phase === LEDGE_HANG || (this.phase === LEDGE_MOVE && (k === 'hop' || k === 'grab' || k === 'turn')))) this.anchor(lp, rig, toPhys);
+    // Smoothness II, item 8 (`climb.slopeHands` 'each'): on a sloping lip each hand is near its own place by the pair's error,
+    // never by the slope's own rise between them (a straight-line pose reaching a lip 35 degrees steep has its lower hand a
+    // forearm over its place, which the old rule let go of): the hands' middle as posed against the lip's at the middle.
+    const each = CLIMB_TUNE.slopeHands === 'each' && this.hands > 0;
+    let rise = 0;
+    if (each) {
+      const gl = lp.gripNow(rig, 0, toPhys, gripV);
+      const gly = gl ? gl.y : 0;
+      const glx = gl ? gl.x : 0;
+      const glz = gl ? gl.z : 0;
+      const gr = lp.gripNow(rig, 1, toPhys, gripV);
+      if (gl && gr) {
+        // (Against the middle of the two hands' own places, never the lip's height at their middle: a step between them.)
+        const grx = gr.x;
+        const gry = gr.y;
+        const grz = gr.z;
+        this.tgAlong = (glx - this.lineX) * this.lineTx + (glz - this.lineZ) * this.lineTz;
+        this.targetAt();
+        const tly = this.tgy;
+        this.tgAlong = (grx - this.lineX) * this.lineTx + (grz - this.lineZ) * this.lineTz;
+        this.targetAt();
+        rise = (gly + gry) * 0.5 - (tly + this.tgy) * 0.5;
+      }
+    }
+    // (And from a grab's touch on its hands are on the lip whatever its clip's reach still lacks: the reach bent onto it, on
+    // through the grab's crossfade into the hang, `caughtFor`.)
+    const grabbing = each && this.phase === LEDGE_MOVE && k === 'grab' && this.move.time >= this.move.touch - 1e-9;
+    const caught = grabbing || (each && this.phase === LEDGE_HANG && k === 'grab' && this.caughtFor > 0);
+    if (grabbing) this.caughtFor = CLIMB_TUNE.transitionBlend + CLIMB_TUNE.ease;
+    else if (this.caughtFor > 0) this.caughtFor = this.phase === LEDGE_HANG && k === 'grab' ? this.caughtFor - this.dtNow : 0;
     for (let s = 0; s < 2; s++) {
       const g = lp.gripNow(rig, s, toPhys, gripV);
       if (!g || !(this.hands > 0)) {
@@ -3903,11 +7138,14 @@ export class LedgeHang {
       const ty = this.tgy;
       const tz = this.tgz;
       const dx = g.x - tx;
-      const dy = g.y - ty;
+      const dy = each ? rise : g.y - ty;
       const dz = g.z - tz;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // Wholly placed within a hand's width of the line, let go of by a forearm's length off it.
-      const near = d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      let near = caught || d <= HAND_NEAR ? 1 : d >= HAND_FAR ? 0 : 1 - (d - HAND_NEAR) / (HAND_FAR - HAND_NEAR);
+      // (The feedback round II, item 0d: a free hop up carrying the cue's lift keeps its hands on the grip they were on at the
+      // commit, let go of as the carry eases out by the hands' leave, so the hop's arms take them off the grip smoothly.)
+      if (carried && hold > near) near = hold;
       // Written into the limbs' own arrays (`setHand`'s), so no number crosses a call.
       lp.hand[s * 3] = tx;
       lp.hand[s * 3 + 1] = ty;
@@ -3917,18 +7155,30 @@ export class LedgeHang {
       // Climbing II, item 7: looking away, the leading hand leaves the lip and reaches toward the view (out along it from its
       // place on the lip, down to about the shoulder), by the look's share; `lookArm` of the way, the rest the held pose's own.
       if (s === lead) {
-        const k = this.look;
+        const k = this.leadShare;
         const sc = this.s;
-        const rx = tx + this.lookDx * LOOK_OUT * sc;
-        const ry = ty - LOOK_DOWN * sc;
-        const rz = tz + this.lookDz * LOOK_OUT * sc;
+        let rx = tx + this.lookDx * LOOK_OUT * sc;
+        let ry = ty - LOOK_DOWN * sc;
+        let rz = tz + this.lookDz * LOOK_OUT * sc;
+        let arm = CLIMB_TUNE.lookArm;
+        // (The drop's cue: lowered toward the lip beneath, wholly placed there by the cue's share.)
+        if (this.leadDrop) {
+          rx = tx + this.dropVx;
+          ry = ty + this.dropVy;
+          rz = tz + this.dropVz;
+          arm = 1;
+        }
         lp.hand[s * 3] = tx + (rx - tx) * k;
         lp.hand[s * 3 + 1] = ty + (ry - ty) * k;
         lp.hand[s * 3 + 2] = tz + (rz - tz) * k;
-        const wl = (w > 0 ? w : 0) * (1 - k) + k * CLIMB_TUNE.lookArm;
+        const wl = (w > 0 ? w : 0) * (1 - k) + k * arm;
         lp.handW[s] = wl;
       }
     }
+    // The feedback round II (maker B): the free cue's pull stands the figure up over its hands (item 0d), and the legs laid under
+    // and the hips' sway handed to the limbs (items 0e and 0f). Nothing under the round's other settings.
+    this.liftOn(lp, rig);
+    this.legsTo(lp, rig, toPhys);
     const L = this.lip;
     // The clip's own palms and both feet wholly on the wall (maker B's bracing and wall climb set their own).
     lp.palmW[0] = 0;
@@ -3947,6 +7197,10 @@ export class LedgeHang {
 
   /** How far `limbsFor`'s anchor moved the rig's root up in its parent's frame this frame (a caller that takes its own offset back off adds it). */
   lifted = 0.5;
+  /** Smoothness II, item 8: seconds a grab's hands stay wholly on the lip into the hang after it (its crossfade into the hang's loop). */
+  private caughtFor = 0.5;
+  /** Smoothness II, item 8: frames the anchor turned the figure further with a sloping lip for a short hand (the console's and the tests'). */
+  slopeTurns = 0;
   /** Climbing II, item 7: the leading hand this frame (0 the left, 1 the right, -1 none), what the anchor leaves out. */
   private leadNow = -1;
 
@@ -3958,7 +7212,8 @@ export class LedgeHang {
    */
   tiltLift = 0.5;
   applyTilt(root: THREE.Object3D): void {
-    const t = this.tilt;
+    // (The smoothness round: a side's cue leans the figure that way on top of the lip's tilt, `leanNow`; nought otherwise.)
+    const t = this.tilt + this.leanNow;
     this.tiltLift = 0;
     if (t === 0) return;
     const f = LEDGE_FACTS[this.rigClip] ?? LEDGE_FACTS[this.braced ? LEDGE_ROLES.braced.idle : LEDGE_ROLES.free.idle];
@@ -4040,9 +7295,14 @@ export class LedgeHang {
     const upR = try_ - ry;
     let up = upL > upR ? upL : upR;
     let out = ((tlx + trx) * 0.5 - mx) * nx + ((tlz + trz) * 0.5 - mz) * nz;
-    // Climbing II, item 7: looking away, the body hangs by its trailing hand alone, by the look's share.
+    // Climbing II, item 7: looking away, the body hangs by its trailing hand alone, by the look's share (and by the drop's
+    // cue's, the smoothness round's).
     const lead = this.leadNow;
-    const lk = lead >= 0 ? this.look : 0;
+    const lk = lead >= 0 ? this.leadShare : 0;
+    // Smoothness II, item 8 (`climb.slopeHands` 'each'): on a sloping lip by the hands' middle, the slope's own rise between
+    // them left to the turn below (by the hand furthest under its place, a steep lip's upper hand lifted the whole body and was
+    // refused as a pose flying past the lip).
+    if (CLIMB_TUNE.slopeHands === 'each' && lk === 0 && toPhys === null && this.lineSlope !== 0) up = (upL + upR) * 0.5;
     if (lk > 0) {
       const upT = lead === 0 ? upR : upL;
       const outT = lead === 0 ? (trx - rx) * nx + (trz - rz) * nz : (tlx - lx) * nx + (tlz - lz) * nz;
@@ -4084,6 +7344,53 @@ export class LedgeHang {
         v.z += dz * k;
       }
     }
+    // Smoothness II, item 8 (`climb.slopeHands` 'each'): on a sloping lip, where a hand still cannot reach its own place (the
+    // lower one reaching down, or on a steep lip the upper one reaching up), the figure turns with the slope (past
+    // `lipTilt`'s share, by what the shorter arm lacks) about the hands' middle and the lip's outward line, the lower hand's
+    // side down, which brings both hands toward their places, so no hand is left short. Not aboard a hull (its frame turns the
+    // axis) nor while looking away; nought on a level lip.
+    if (CLIMB_TUNE.slopeHands === 'each' && lk === 0 && toPhys === null && this.lineSlope !== 0) {
+      const low = tly < try_ ? 0 : 1;
+      let e = 0;
+      for (let q = 0; q < 2; q++) {
+        at[0] = (q === 0 ? tlx : trx) - v.x;
+        at[1] = (q === 0 ? tly : try_) - v.y;
+        at[2] = (q === 0 ? tlz : trz) - v.z;
+        lp.reachPastIn(rig, q, toPhys, dir);
+        if (lp.past > e) e = lp.past;
+      }
+      const hx = (low === 0 ? lx : rx) - mx;
+      const hz = (low === 0 ? lz : rz) - mz;
+      const half = Math.sqrt(hx * hx + hz * hz);
+      // (No further than the slope itself, less what the figure is already turned with it.)
+      const turned = this.tilt + this.leanNow;
+      const most = Math.atan(this.lineSlope < 0 ? -this.lineSlope : this.lineSlope) - (turned < 0 ? -turned : turned);
+      if (e > SLOPE_TURN_LEAST && half > 0.05) {
+        let ang = (e + REACH_SPARE) / half;
+        if (ang > most) ang = most;
+        // About n = (nx, 0, nz): a turn by +ang moves the hand by ang (n x h), whose height is nz hx - nx hz: the lower hand down.
+        const sign = nz * hx - nx * hz > 0 ? -1 : 1;
+        anchorQ.setFromAxisAngle(anchorAx.set(nx, 0, nz), sign * ang);
+        root.updateWorldMatrix(true, false);
+        root.getWorldPosition(anchorP);
+        root.getWorldQuaternion(anchorQ2);
+        const my = (ly + ry) * 0.5;
+        anchorP.x -= mx;
+        anchorP.y -= my;
+        anchorP.z -= mz;
+        anchorP.applyQuaternion(anchorQ);
+        anchorP.x += mx;
+        anchorP.y += my;
+        anchorP.z += mz;
+        anchorQ2.premultiply(anchorQ);
+        parent.getWorldQuaternion(anchorQ);
+        root.quaternion.copy(anchorQ.invert().multiply(anchorQ2));
+        parent.worldToLocal(anchorP);
+        root.position.copy(anchorP);
+        root.updateMatrixWorld(true);
+        this.slopeTurns++;
+      }
+    }
     v.x *= w;
     v.y *= w;
     v.z *= w;
@@ -4116,6 +7423,7 @@ export class LedgeHang {
    * near enough to where the hang puts their hands (their hands are then drawn as the clip has them).
    */
   peerLip(world: LedgeWorld, q: { readonly x: number; readonly y: number; readonly z: number; readonly heading: number; readonly scale: number; readonly filter: number }, braced: boolean): boolean {
+    this.barK = q.scale;
     const T = CLIMB_TUNE;
     const x = q.x;
     const y = q.y;
@@ -4224,8 +7532,23 @@ export class LedgeHang {
       keepCrouched: this.keepCrouched,
       // Climbing II, item 7: the look-away (the leading side, how far it has eased in, the spine's turn, the pose held).
       look: { side: this.lookSide, share: n(this.look), twist: n((this.lookTwistNow * 180) / Math.PI), pose: this.poseClip || null, behindHops: this.behindHops },
+      // The smoothness round: the way asked, what is there, the cue shown, the drop, and the counts.
+      way: { asked: WAY_WORDS[this.way] ?? '', found: WAYK_WORDS[this.wayKind] ?? '', cue: WAYK_WORDS[this.cueKind] ?? '', share: n(this.cue), to: this.wayKind === WAYK_NONE ? null : [n(this.dryLip.ex), n(this.dryLip.ey), n(this.dryLip.ez)], dropping: this.dropping, seeks: this.seeks, ladders: this.ladders, cueHops: this.cueHops, drops: this.drops },
       grabs: this.grabs,
       casts: this.casts,
+      // Smoothness III: the move's arc (its flight's seconds and how far into them, the clip's stretch, whether it holds for the
+      // contact, its touch on the move's clock), the drops on their own move, and the hangs refused for the ground under them.
+      flight: this.phase === LEDGE_MOVE && this.move.arc ? { seconds: n(this.move.F), flown: n(this.move.fly), stretch: n(this.move.S), held: this.move.hm === 1, touch: n(this.move.tT), parts: this.move.parts, clip: this.move.id } : null,
+      dropMoves: this.dropMoves,
+      // The feedback round II (maker B): a free hang's pull-up cue (its share, the rise it asks, how much of it this frame stood
+      // the figure up by, and how many were begun), the legs laid under the arms (the clip, its second, its weight), the hips' lag
+      // (metres, x up z) and the free hang's jumps behind.
+      freeCue: { share: n(this.cueRise), rise: n(this.cueLift), extra: n(this.liftExtra), begun: this.freeCues },
+      legs: this.legId === '' ? null : { clip: this.legId, at: n(this.legAt), weight: n(this.legW) },
+      sway: this.swayHave ? [n(this.swayX), n(this.swayY), n(this.swayZ)] : null,
+      freeBehinds: this.freeBehinds,
+      groundRefused: this.groundRefused,
+      groundLast: this.groundRefused > 0 ? { met: [n(this.groundAtX), n(this.groundAtY), n(this.groundAtZ)], feet: n(this.groundFeet), from: n(this.groundFrom), way: this.groundPath, lip: [n(this.groundLip.ex), n(this.groundLip.ey), n(this.groundLip.ez), n(this.groundLip.nx), n(this.groundLip.nz)], ray: [n(this.groundQx), n(this.groundQz)], hang: [n(this.groundBx), n(this.groundBz)] } : null,
       lastLetGo: this.lastLetGo,
     };
   }

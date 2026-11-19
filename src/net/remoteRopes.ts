@@ -33,6 +33,7 @@ import { armAimFor } from '../player/grappleMath.ts';
 import { PEER_GLIDE } from '../player/grappleFrames.ts';
 import { markActor } from '../world/portalRender.ts';
 import { PEER_ROPE_POINTS, PEER_ROPE_TUNE, type PeerRope } from './peerRope.ts';
+import { PEER_HANGS, type PeerHangs } from '../player/ropeChain.ts';
 import { watchPeers, type PeerWatcher } from './remotePlayers.ts';
 
 /** As much of a peer's rig as the rope needs: the left hand it hangs from, and the arm it raises. `CharacterRig` is one. */
@@ -40,6 +41,8 @@ export interface RopeRig {
   readonly root: THREE.Object3D;
   boneFor(role: 'leftHand'): THREE.Object3D | null;
   aimArm(side: 'left', dir: THREE.Vector3, roll?: number, weight?: number): void;
+  /** The rope chain round (maker B): a joint by its name (the wrists and index knuckles a hanging rope bends to). `CharacterRig` has it. */
+  boneNamed?(name: string): THREE.Object3D | null;
 }
 
 /** One peer as the ropes read them: the peers' own `PeerView` satisfies it as it stands. */
@@ -93,6 +96,8 @@ interface RopeRecord {
   readonly armDir: THREE.Vector3;
   ribbon: RopeRibbon | null;
   dart: THREE.Mesh | null;
+  /** Climbing II, phase 4 (maker B): a hanging rope they hold, not a hook's (`PeerRope.hung`): no dart, and nothing heard. */
+  hung: boolean;
 }
 
 const AXIS_Z = new THREE.Vector3(0, 0, 1);
@@ -104,6 +109,9 @@ const aimed = { x: 0, y: 0, z: 0 };
 const turn = new THREE.Quaternion();
 const posePos = new THREE.Vector3();
 const poseQuat = new THREE.Quaternion();
+/** The rope chain round: a peer's wrist and index knuckle, read two at a time (`hungInto`). */
+const hangA = new THREE.Vector3();
+const hangB = new THREE.Vector3();
 
 /**
  * Every peer's rope. One of these exists for the life of the page: it listens to the peers, is told the frame's step
@@ -226,6 +234,7 @@ export class RemoteRopes implements PeerWatcher {
       armDir: new THREE.Vector3(0, 1, 0),
       ribbon: null,
       dart: null,
+      hung: false,
     };
   }
 
@@ -237,7 +246,10 @@ export class RemoteRopes implements PeerWatcher {
   private take(r: RopeRecord, rope: PeerRope): void {
     const was = r.kind;
     const now = rope.kind;
-    if (r.shown && r.wasShown && this.sound) {
+    // (Phase 4, maker B: a hanging rope taken or let go of is no hook's fire, bite or let-go.)
+    const hungNow = rope.hung || r.hung;
+    r.hung = rope.hung;
+    if (r.shown && r.wasShown && this.sound && !hungNow) {
       const what = was < 0 && now === 0 ? 'fire' : now === 1 && was !== 1 ? 'bite' : was >= 0 && now < 0 ? 'letGo' : '';
       if (what) {
         this.handOf(r, hand);
@@ -304,7 +316,12 @@ export class RemoteRopes implements PeerWatcher {
   private ropePointOf(r: RopeRecord, out: THREE.Vector3): THREE.Vector3 {
     const g = r.group;
     if (!g) return out.set(0, 0, 0);
-    return out.set(0, GRAPPLE_TUNE.ropeY, 0).applyQuaternion(g.quaternion).add(g.position);
+    // (Written by its components, never handed to `set`: where the compiler left `set` out of `aim`, the rope's height handed to it
+    // was a number made anew every frame a peer hangs on a rope, 14 bytes a frame in one process of twelve of the chain's measure.)
+    out.x = 0;
+    out.y = GRAPPLE_TUNE.ropeY;
+    out.z = 0;
+    return out.applyQuaternion(g.quaternion).add(g.position);
   }
 
   /** Their drawn left hand, where the rope leaves them, or their rope point with no rig. Into `out`. */
@@ -337,12 +354,21 @@ export class RemoteRopes implements PeerWatcher {
       const dy = at[i + 1] - ropePoint.y;
       const dz = at[i + 2] - ropePoint.z;
       const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dl > 1e-4) r.armDir.set(dx / dl, dy / dl, dz / dl);
+      // (The same: by its components.)
+      if (dl > 1e-4) {
+        const a = r.armDir;
+        a.x = dx / dl;
+        a.y = dy / dl;
+        a.z = dz / dl;
+      }
     }
     turn.copy(g.quaternion).multiply(rig.root.quaternion).invert();
     local.copy(r.armDir).applyQuaternion(turn);
     armAimFor(local.x, local.y, local.z, T, aimed);
-    rig.aimArm('left', local.set(aimed.x, aimed.y, aimed.z), 0, r.armWeight);
+    local.x = aimed.x;
+    local.y = aimed.y;
+    local.z = aimed.z;
+    rig.aimArm('left', local, 0, r.armWeight);
   }
 
   // --- the drawing -----------------------------------------------------------------------------------------------------
@@ -371,6 +397,11 @@ export class RemoteRopes implements PeerWatcher {
    * `normalize` handed back.
    */
   private lay(r: RopeRecord, camera: THREE.PerspectiveCamera, screenH: number, now: number): void {
+    // (The rope chain round, item 4: a rope here drawn bent to their hands draws their rope; their own line is not drawn.)
+    if (r.hung && this.hangs !== null && this.hangs.drawnFor(r.id)) {
+      this.hide(r);
+      return;
+    }
     if (!r.ribbon || !r.dart) this.give(r);
     const root = rootOf(r.group);
     if (root) {
@@ -384,6 +415,8 @@ export class RemoteRopes implements PeerWatcher {
       this.layDart(r, camera, screenH);
     }
     this.pointDart(r.dart!);
+    // (Phase 4, maker B: a hanging rope is no hook's: its anchor carries no dart.)
+    if (r.hung) r.dart!.visible = false;
   }
 
   /** A held rope: from the anchor through every bend to the hand, hung by the slack sent; the dart bitten in at the anchor. */
@@ -398,6 +431,52 @@ export class RemoteRopes implements PeerWatcher {
     if (r.count > 1) dir.set(d[0] - d[3], d[1] - d[4], d[2] - d[5]);
     else dir.set(d[0] - hand.x, d[1] - hand.y, d[2] - hand.z);
   }
+
+  /**
+   * The rope chain round, item 4 (maker B): every peer hanging on a rope this frame (shown, moved, a held rope marked `hung`, a rig
+   * with its wrists and index knuckles) written into `out`: their relay id, the anchor their state sends (the glided one, as their
+   * line is drawn from) and their two hands as drawn here (each wrist and index knuckle's middle, as the player's own grip is read),
+   * after their figures were moved and posed and before the player's ropes are laid (`Player.drawRopes`), whose chains take a rope
+   * of this browser's own hanging from that anchor and bend it to those hands; such a peer's own line to the anchor is then not
+   * drawn here (`lay`, by `out.drawnFor`). Nothing new is sent or read: the anchor is what their state already carried. Kept arrays.
+   */
+  hungInto(out: PeerHangs): void {
+    out.clear();
+    this.hangs = out;
+    for (let i = 0; i < this.live.length && out.count < PEER_HANGS; i++) {
+      const r = this.live[i];
+      if (!r.moved || !r.shown || !r.hung || r.kind !== 1 || r.count < 1) continue;
+      const rig = r.rig;
+      if (!rig || !rig.boneNamed) continue;
+      const a = rig.boneNamed('lWrist');
+      const b = rig.boneNamed('lIndex01');
+      const c = rig.boneNamed('rWrist');
+      const d = rig.boneNamed('rIndex01');
+      if (!a || !b || !c || !d) continue;
+      const k = out.count;
+      out.id[k] = r.id;
+      out.anchor[3 * k] = r.drawn[0];
+      out.anchor[3 * k + 1] = r.drawn[1];
+      out.anchor[3 * k + 2] = r.drawn[2];
+      const H = out.hand;
+      a.getWorldPosition(hangA);
+      b.getWorldPosition(hangB);
+      H[6 * k] = (hangA.x + hangB.x) / 2;
+      H[6 * k + 1] = (hangA.y + hangB.y) / 2;
+      H[6 * k + 2] = (hangA.z + hangB.z) / 2;
+      c.getWorldPosition(hangA);
+      d.getWorldPosition(hangB);
+      H[6 * k + 3] = (hangA.x + hangB.x) / 2;
+      H[6 * k + 4] = (hangA.y + hangB.y) / 2;
+      H[6 * k + 5] = (hangA.z + hangB.z) / 2;
+      out.taken[k] = 0;
+      out.count = k + 1;
+    }
+    out.filled = true;
+  }
+
+  /** The table `hungInto` last wrote (the player's chains'), asked in `lay` whether a peer's rope is drawn bent to their hands. */
+  private hangs: PeerHangs | null = null;
 
   /** The frame's clock for the dart, and the segment its ray is cast along (a, b, then the answer), kept: handed in fields. */
   private readonly dartNow = { now: 0.5, lead: PEER_ROPE_TUNE.peerLead };

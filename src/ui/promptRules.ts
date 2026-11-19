@@ -232,6 +232,13 @@ export interface PromptState {
    * otherwise, when it has the key only where nothing else in reach takes it, so it is offered last.
    */
   climb: '' | 'air' | 'ground';
+  /** Climbing II, phase 3 (maker B): what the climb in reach is a bar (its word "grab", for the climb's "climb"). */
+  climbBar: boolean;
+  /**
+   * Phase 3 (maker B): the hands on a bar ('hang': Space lets go and flies on the swing, the crouch drops straight down), or in
+   * the flight off one ('fly': nothing to press, a bar ahead is caught by itself); '' neither.
+   */
+  bar: '' | 'hang' | 'fly' | 'pole' | 'poleDrop' | 'poleSlide';
 }
 
 /** A state struct with nothing in it: the caller keeps one and fills it. */
@@ -262,6 +269,8 @@ export function newPromptState(): PromptState {
     near: '',
     shipMenu: '',
     climb: '',
+    climbBar: false,
+    bar: '',
   };
 }
 
@@ -291,6 +300,8 @@ export function resetPromptState(s: PromptState): PromptState {
   s.near = '';
   s.shipMenu = '';
   s.climb = '';
+  s.climbBar = false;
+  s.bar = '';
   const v = s.vehicle;
   v.kind = '';
   v.ship = false;
@@ -393,6 +404,13 @@ export const PROMPT_WORDS = Object.freeze({
   yank: 'yank it',
   // Climbing II: the use key grabs a lip in reach or starts a wall climb.
   climb: 'climb',
+  // Climbing II, phase 3: the use key grabs a bar in reach; on it, Space lets go (and flies on the swing) and the crouch drops.
+  grabBar: 'grab',
+  barLetGo: 'let go',
+  barDrop: 'drop',
+  // Climbing II, phase 5: on a pole, Space jumps off along the view and the crouch slides down.
+  poleJump: 'jump off',
+  poleSlide: 'slide down',
   // Everywhere.
   shipMenu: 'ship menu',
   noclipOff: 'noclip off',
@@ -477,6 +495,22 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     return n;
   }
 
+  // Climbing II, phase 3: the hands on a bar, Space lets go (flying on the swing) and the crouch drops; in the flight off it
+  // nothing is pressed (a bar ahead is caught by itself). Nothing else can be done meanwhile, so it returns.
+  if (s.bar) {
+    if (s.bar === 'hang') {
+      n = push(out, n, 'jump', W.barLetGo);
+      n = push(out, n, 'crouch', W.barDrop);
+    }
+    // Phase 5 (maker B): on a pole, Space jumps off along the view (caught by what is in reach) and the crouch slides down; each
+    // by its own switch the bar's words instead.
+    else if (s.bar === 'pole' || s.bar === 'poleDrop' || s.bar === 'poleSlide') {
+      n = push(out, n, 'jump', s.bar === 'poleSlide' ? W.barLetGo : W.poleJump);
+      n = push(out, n, 'crouch', s.bar === 'poleDrop' ? W.barDrop : W.poleSlide);
+    }
+    return n;
+  }
+
   // The grappling hook, while it is out. Swinging or with the dart in flight, nothing else the bar offers can
   // be done, so it returns; on the ground or afloat its three words come first and the fourth slot falls
   // through to whatever the on-foot block offers (a speeder beside you is mounted, and mounting lets go).
@@ -558,7 +592,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
 
   // Climbing II: falling, the use key grabs a lip or a wall before anything else may take it (the game's dispatch gives
   // the climb the press first then), so its cap comes first and the rest that want the key are dropped for sharing it.
-  if (s.climb === 'air') n = push(out, n, 'mount', W.climb);
+  if (s.climb === 'air') n = push(out, n, 'mount', s.climbBar ? W.grabBar : W.climb);
   // On foot. A lift shaft, an elevator and a doorless building all want the same key, so the one
   // underfoot wins, exactly as it does today.
   if (s.lift) n = push(out, n, 'mount', W.lift);
@@ -608,7 +642,7 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   if (s.gate) n = push(out, n, 'mount', s.gate === 'travel' ? W.gate : W.gateNowhere);
   // Climbing II: standing or rising, the climb has the use key only where nothing else in reach took it (the dispatch's
   // last), so it is offered last of all, and dropped for sharing the key with anything above.
-  if (s.climb === 'ground') n = push(out, n, 'mount', W.climb);
+  if (s.climb === 'ground') n = push(out, n, 'mount', s.climbBar ? W.grabBar : W.climb);
   if (s.shipMenu) n = push(out, n, 'ship', W.shipMenu);
   return n;
 }
