@@ -332,6 +332,39 @@ const INJECTED: { what: string; lib: 'physical' | 'depth'; shader: Shader; loops
   const parts = ['this.lights = [];', 'this.frustums = [];', 'this.breaks = [];', 'this.mainFrustum = new CSMFrustum', 'this.shaders = new Map();', 'updateFrustums() {', 'setupMaterial( material ) {', 'material.onBeforeCompile = function ( shader ) {', "material.defines.USE_CSM = 1;"];
   const csmLost = parts.filter((p) => !csm.includes(p));
   ok(csmLost.length === 0, `the cascades keep their lights, frustums, breaks and shader records, and put their define and their hook on a material${csmLost.length ? ` (lost: ${csmLost.join(' | ')})` : ''}`);
+
+  // The GPU port's pass 1, wave 1: what the pipeline ledger, the key census and the card's clock reach under three's WebGPU
+  // renderer (`src/core/gpu/pipeLedger.ts`, `keyCensus.ts`, `gpuTimer.ts`, `framePerf.ts`).
+  const pipelines = three('src/renderers/common/Pipelines.js');
+  ok(/pipeline = new RenderObjectPipeline\( cacheKey, stageVertex, stageFragment \);\s*this\.caches\.set\( cacheKey, pipeline \);\s*renderObject\.pipeline = pipeline;[\s\S]{0,400}?this\.backend\.createRenderPipeline\( renderObject, promises \);/.test(pipelines), "a new pipeline is in the cache and on its render object before the backend makes it (the ledger reads its key there)");
+  ok(pipelines.includes("return stageVertex.id + ',' + stageFragment.id + ',' + this.backend.getRenderCacheKey( renderObject );"), "a pipeline's key is its two programs' ids and the draw state (the census takes it apart so)");
+  const gpuBackend = three('src/renderers/webgpu/WebGPUBackend.js');
+  const stateAt = gpuBackend.indexOf('getRenderCacheKey( renderObject ) {');
+  const stateText = stateAt > 0 ? gpuBackend.slice(stateAt, gpuBackend.indexOf('].join();', stateAt)) : '';
+  const stateItems = (stateText.split('return [')[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const wantItems = ['material.transparent', 'material.blending', 'material.premultipliedAlpha', 'material.blendSrc', 'material.blendDst', 'material.blendEquation', 'material.blendSrcAlpha', 'material.blendDstAlpha', 'material.blendEquationAlpha', 'material.colorWrite', 'material.depthWrite', 'material.depthTest', 'material.depthFunc', 'material.stencilWrite', 'material.stencilFunc', 'material.stencilFail', 'material.stencilZFail', 'material.stencilZPass', 'material.stencilFuncMask', 'material.stencilWriteMask', 'material.polygonOffset', 'material.polygonOffsetFactor', 'material.polygonOffsetUnits', 'material.side', 'material.alphaToCoverage', 'frontFaceCW', 'utils.getSampleCountRenderContext( renderContext )', 'utils.getCurrentColorSpace( renderContext )', 'utils.getCurrentColorFormat( renderContext )', 'utils.getCurrentDepthStencilFormat( renderContext )', 'utils.getPrimitiveTopology( object', 'material )', 'utils.getStripIndexFormat( object', 'geometry )', 'this.attributeUtils.getVertexBufferLayoutCacheKey( renderObject )', 'renderObject.clippingContextCacheKey'];
+  ok(stateItems.join('|') === wantItems.join('|'), `the draw state's items in the order the census groups read them (keyCensus.ts DRAW_STATE_GROUPS): ${stateItems.join(', ')}`);
+  ok(/initTimestampQuery\( type, uid, descriptor \) \{\s*if \( ! this\.trackTimestamp \) \{\s*descriptor\.timestampWrites = undefined;\s*return;/.test(gpuBackend), 'with timestamps off a pass carries no writes and no query set is made (the clock is free unless asked)');
+  ok(/new WebGPUTimestampQueryPool\( this\.device, type, 2048 \)/.test(gpuBackend), "the pool of a kind is made at its first timed pass");
+  const backendBase = three('src/renderers/common/Backend.js');
+  ok(backendBase.includes("contextData.timestampUID = prefix + ':' + id + ':f' + frame;") && /getTimestampUID\( abstractRenderContext \) \{\s*return this\.get\( abstractRenderContext \)\.timestampUID;/.test(backendBase), "a pass's uid ends in its frame, read through getTimestampUID");
+  const rendererCommon = three('src/renderers/common/Renderer.js');
+  const uidAt = rendererCommon.indexOf('this.backend.updateTimeStampUID( renderContext );');
+  const camAt = rendererCommon.indexOf('renderContext.camera = camera;', uidAt);
+  const beginAt = rendererCommon.indexOf('this.backend.beginRender( renderContext );', uidAt);
+  ok(uidAt > 0 && camAt > uidAt && beginAt > camAt, "a render's uid and camera are set before its pass begins (the clock names each pass there)");
+  ok(/async resolveTimestampsAsync\( type = 'render' \) \{/.test(rendererCommon) && /_renderScene\( scene, camera, useFrameBufferTarget = true \) \{/.test(rendererCommon), 'the renderer resolves timestamps and draws a scene through the methods the frame report wraps');
+  const pool = three('src/renderers/common/TimestampQueryPool.js');
+  ok(/this\.timestamps = new Map\(\);/.test(pool), "the pool keeps each pass's milliseconds by uid");
+  const pipeUtils = three('src/renderers/webgpu/utils/WebGPUPipelineUtils.js');
+  ok(/if \( promises === null \) \{\s*pipelineData\.pipeline = device\.createRenderPipeline\( _renderPipelineDescriptor \);/.test(pipeUtils) && /promises\.push\( p \);\s*\}\s*\}/.test(pipeUtils), "a draw's pipeline is made at once and one asked ahead pushes its promise as it is asked (the ledger's landing)");
+  const shadowNode = three('src/nodes/lighting/ShadowNode.js');
+  ok(/scene\.overrideMaterial = this\.getShadowMaterial\(\);/.test(shadowNode) && /renderer\.render\( scene, shadow\.camera \);/.test(shadowNode), "a shadow map is drawn through its scene with three's shadow material as the override, through the shadow's camera (the clock names cascades and lamps by them)");
+  const nodeManager = three('src/renderers/common/nodes/NodeManager.js');
+  ok(/getCustomProgramCacheKey\( material, scene \) \{/.test(nodeManager), "three keeps a material's own program key by its version (the ledger reads that copy)");
+  const ro3 = three('src/renderers/common/RenderObject.js');
+  ok(ro3.includes("if ( /^(is[A-Z]|_)|^(visible|version|uuid|name|opacity|userData|iridescenceThicknessRange)$/.test( property ) ) continue;") && ro3.includes("const _enumProperties = [ 'side', 'blending', 'combine', 'normalMapType' ];"), "the material's properties three keys, as the ledger reduces them");
+  ok(/cacheKey \+= object\.skeleton\.bones\.length \+ ',';/.test(ro3) && /cacheKey \+= 'morph-' \+ name \+ ',';/.test(ro3) && /getDynamicCacheKey\(\) \{/.test(ro3), 'three keys a program on the bone count and each morph attribute, and checks the environment every draw');
 }
 
 // ---------------------------------------------------------------- 7. reversed depth, left to three

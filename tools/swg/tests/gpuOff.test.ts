@@ -523,6 +523,36 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(w[g[0] + 7] === 'if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {' && w[g[0] + 8] === 'await this.nextFrame();' && w.filter((x) => x === 'if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {').length === 1, "world.ts: the WebGL path's own sweepYield line follows the WebGPU block, there once, as it was");
     ok(startText.includes('return DRAW_COST.sweepPace ? WARM_TUNE.sliceInPlayMs : 0;'), 'start.ts: the runtime answers the pace from the switch and the warm-up\'s in-play slice');
   }
+  // Pass 1, wave 1 (items 1, 2, 4 and 5): the pipeline ledger, the key census, the landing log and the card's clock are
+  // modules under src/core/gpu/ reached only through start.ts (section 2 holds that the WebGL graph loads none of them); the
+  // console's two new words are read only after the helper's WebGL answer has returned; the frame's end hands the runtime the
+  // travel's flag on its WebGPU line alone; and the runtime installs the ledger and makes the clock.
+  {
+    for (const p of ['pipeLedger.ts', 'keyCensus.ts', 'gpuTimer.ts']) ok(existsSync(join(SRC, 'core', 'gpu', p)), `pass 1's ${p} is under src/core/gpu/`);
+    const m = lines('src/main.ts');
+    const gl = m.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
+    const keysAt = m.findIndex((x) => x.startsWith('if (o?.keys) return { ...rt.keys('));
+    const landingAt = m.findIndex((x) => x === 'if (o?.landing) return rt.landing(o.landing === true ? {} : o.landing);');
+    ok(gl > 0 && keysAt > gl && keysAt - gl < 12 && landingAt === keysAt + 1, "main.ts: gpu({ keys }) and gpu({ landing }) are read only after the helper's WebGL answer has returned, through the WebGPU runtime");
+    ok(m.filter((x) => x.includes('rt.keys(') || x.includes('rt.landing(')).length === 2, 'main.ts: the census and the log are asked nowhere else');
+    const ends = m.filter((x) => x.includes('GPU.rt!.endFrame('));
+    ok(ends.length === 1 && ends[0] === 'if (GPU.webgpu) GPU.rt!.endFrame(this.traveling || !this.inWorld, this.traveling);', `main.ts: the frame's end hands the runtime the travel's flag on its WebGPU line alone (${ends.join(' | ')})`);
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes('installLedger(renderer, ') && startText.includes('const timer = passTimer(renderer, adapter.vendor);') && startText.includes('ledgerFrame(loading, traveling);') && startText.includes('return keyCensus(renderer, o);') && startText.includes('return landingReport(o);'), 'start.ts: the WebGPU runtime installs the ledger, makes the clock, calls the frame and answers the two words');
+    const perfText = readFileSync(join(SRC, 'core', 'gpu', 'framePerf.ts'), 'utf8');
+    ok(!/\btrackTimestamp\b|timestampQueryPool|resolveTimestampsAsync/.test(perfText.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')),"framePerf.ts: the card's clock is read through the adapter alone (gpuTimer.ts), the file three r188's GPUTimer changes");
+    const all: string[] = [];
+    const walkAll = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walkAll(p);
+        else if (CODE.test(n) && !n.endsWith('.d.ts')) all.push(p);
+      }
+    };
+    walkAll(SRC);
+    const outside = all.filter((f) => !inGpuDir(f)).flatMap((f) => readFileSync(f, 'utf8').split(/\r?\n/).filter((x) => /\b(import|from)\b/.test(x) && /(pipeLedger|keyCensus|gpuTimer)(\.ts)?['"]/.test(x)).map((x) => `${rel(f)}: ${x.trim()}`));
+    ok(outside.length === 0, `nothing outside src/core/gpu/ imports wave 1's modules: ${outside.join('; ')}`);
+  }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');
   ok(main.filter((x) => x === "if (GPU.asked === 'webgpu') await startGpu();").length === 1, 'main.ts: the boot starts WebGPU only when asked for it');

@@ -177,8 +177,18 @@ export interface GpuRuntime {
    * moved live; answers them as they stand.
    */
   look(o: Record<string, unknown>): Record<string, number | boolean>;
-  /** After each frame is drawn: the frame's counters taken, and whether a loading screen was up (pipelines made in play). */
-  endFrame(loading: boolean): void;
+  /**
+   * After each frame is drawn: the frame's counters taken, and whether a loading screen was up (pipelines made in play);
+   * `traveling` whether an arrival is under way (pass 1's landing log: an arrival begins when it goes up).
+   */
+  endFrame(loading: boolean, traveling?: boolean): void;
+  /**
+   * The key census (pass 1, wave 1, `gpu/keyCensus.ts`): every render pipeline three holds, the field of three's key that
+   * separates each from its nearest sibling, counted by that field, and what the pool and the morph bake would merge.
+   */
+  keys(o: { list?: boolean; limit?: number }): Record<string, unknown>;
+  /** The landing log (pass 1, wave 1, `gpu/pipeLedger.ts`): each pipeline asked and landed since the page's start, by arrival. */
+  landing(o: { all?: boolean; last?: number }): Record<string, unknown>;
   /**
    * The frame report on WebGPU (the performance step, `gpu/framePerf.ts`): the main thread's sections with the sun's cascades
    * timed apart, the WebGPU calls a frame and three's own steps by kind, and the card's time where asked (`{ gpu: true }`).

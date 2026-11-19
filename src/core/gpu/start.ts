@@ -43,6 +43,9 @@ import { gpuFramePerf } from './framePerf.ts';
 import { DRAW_COST, drawCostReport, drawSwitchesNow, isDrawSwitch, readDrawSwitches, registerDrawPerfSwitches, setDrawSwitch } from './drawCost.ts';
 import { installShadowCull } from './shadowCull.ts';
 import { registerPerfSwitch } from '../perf.ts';
+import { installLedger, landingReport, ledgerFrame } from './pipeLedger.ts';
+import { keyCensus } from './keyCensus.ts';
+import { passTimer } from './gpuTimer.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -173,6 +176,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     loading: () => loadingNow,
   });
   RT_HOOKS.compile = (_r, scene, camera, target) => warm.compile(scene, camera, target);
+  // Pass 1, wave 1: every pipeline three makes, recorded as it is asked for and as it lands (`pipeLedger.ts`), for the key
+  // census and the landing log; and the card's clock behind its adapter (`gpuTimer.ts`) for the frame report's named sections.
+  let worldScene: THREE.Scene | null = null;
+  installLedger(renderer, { queued: () => warm.pendingItems(), inFlight: () => warm.inFlightNow(), queuedNames: (out) => warm.queuedNames(out) }, { native: () => !(WARM_PATCH.on && WARM_PATCH.applied), world: () => worldScene });
+  const timer = passTimer(renderer, adapter.vendor);
   // Reflections (step 4): the black stand-in made here, at start, behind the first loading screen, with the dome's generator.
   const environment = makeGpuEnvironment(renderer);
   // The effects chain (step 6): the ported passes, put on the WebGL path's own runner by its constructor and its install.
@@ -265,6 +273,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       return DRAW_COST.sweepPace ? WARM_TUNE.sliceInPlayMs : 0;
     },
     makeSun(scene: THREE.Scene, camera: THREE.PerspectiveCamera, o: GpuSunOptions) {
+      worldScene = scene;
       sunNow = makeSun(renderer, scene, camera, o);
       return sunNow;
     },
@@ -278,7 +287,13 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       if (!forcedOff.has(name)) forcedOff.set(name, why);
     },
     perf(o) {
-      return gpuFramePerf(renderer, { ended: () => frame.ended, cascadeNodes: () => ((sunNow?.node as Any)?._shadowNodes ?? []) as Any[], switches: drawSwitchesNow }, o);
+      return gpuFramePerf(renderer, { ended: () => frame.ended, cascadeNodes: () => ((sunNow?.node as Any)?._shadowNodes ?? []) as Any[], switches: drawSwitchesNow, timer }, o);
+    },
+    keys(o) {
+      return keyCensus(renderer, o);
+    },
+    landing(o) {
+      return landingReport(o);
     },
     horizonSelfTest(o: HorizonSelfTestInput) {
       return horizonSelfTestGpu(renderer, o);
@@ -286,9 +301,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     async compile(scene: THREE.Object3D, camera: THREE.Camera, target: THREE.Scene | null = null) {
       if (RT_HOOKS.compile) await RT_HOOKS.compile(renderer, scene, camera, target);
     },
-    endFrame(loading: boolean) {
+    endFrame(loading: boolean, traveling = false) {
       loadingNow = loading;
       frame.ended++;
+      // The landing log's arrivals (pass 1, wave 1): numbers compared and stored.
+      ledgerFrame(loading, traveling);
       const r = renderer.info.render;
       // The draws as they rose this frame; the triangles the game's own frame zeroes as it begins drawing.
       frame.draws = r.drawCalls - frame.lastDraws;

@@ -3539,8 +3539,13 @@ class App {
        * `{ dynamicHint: true }` keeps the game's dynamic-draw hint on what the scene holds (dropped on WebGPU by default);
        * `{ carries: true }` checks what three's node copies carry of the scene's materials (step 4: the person keys, the
        * emissive splits, unlit, decals, flip-books and scrolls, the stencil reference), and `stays` says what is step 3's still.
+       * Pass 1, wave 1: `{ keys: true }` (or `{ keys: { list: true, limit } }`) the key census, every pipeline three holds and
+       * the field of its key that separates it from its nearest sibling; `{ landing: true }` (or `{ landing: { all: true } }`)
+       * the landing log, each pipeline asked and landed since the page's start, by arrival, and what was pending 30 s into
+       * each; `{ perf: { gpu: true } }` names the card's sections. All three are WebGPU's: on WebGL the helper answers that
+       * WebGPU is not in use and does nothing.
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown> }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number } }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
@@ -3548,6 +3553,9 @@ class App {
         if (o?.perf) return rt.perf(o.perf === true ? {} : o.perf).then((r) => ({ ...r, view: { pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } }));
         const look = o?.look ? rt.look(o.look) : undefined;
         const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        // Pass 1, wave 1: the key census and the landing log, the WebGPU runtime's own.
+        if (o?.keys) return { ...rt.keys(o.keys === true ? {} : o.keys), view: { planet: this.world.planet?.id, pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } };
+        if (o?.landing) return rt.landing(o.landing === true ? {} : o.landing);
         return { renderer: 'WebGPU', ...how, ...rt.report({ shadowsOn: this.renderer.shadowMap.enabled }), effectsSwitch: { ...this.world.gpuSwitchLast, does: "an Effects switch in play lists for the new target what is made ready while it is under way, then walks the scene for what stood after its sweep until a walk finds nothing (step 6's fixer)" }, ...(look ? { look } : {}), ...(tuned ? { tuned } : {}) };
       },
       /**
@@ -36738,7 +36746,7 @@ class App {
       // mouse, a panel, the map, a loading screen, a death) is left out of the report and only counted.
       perf.frameEnd(performance.now(), this.frameCalls, simulate);
       // WebGPU's own counters for the frame (draws, triangles, pipelines made while no loading screen was up).
-      if (GPU.webgpu) GPU.rt!.endFrame(this.traveling || !this.inWorld);
+      if (GPU.webgpu) GPU.rt!.endFrame(this.traveling || !this.inWorld, this.traveling);
       input.endFrame();
     };
     frame();

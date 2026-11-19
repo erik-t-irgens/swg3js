@@ -132,6 +132,11 @@ export interface Warm {
   since(mark: number): Promise<void>;
   /** Items listed and not yet built, and pipeline batches in flight. */
   pending(): { items: number; inFlight: number };
+  /** The same two as numbers (the landing log reads them in a frame). */
+  pendingItems(): number;
+  inFlightNow(): number;
+  /** The material names of the items listed and not yet built, into `out` (existing strings); answers how many. */
+  queuedNames(out: string[]): number;
 }
 
 /** A macrotask's breath: a message to itself, which a hidden tab never throttles (a timer would wait a second there). */
@@ -535,7 +540,19 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     return wait.length ? Promise.all(wait).then(() => undefined) : Promise.resolve();
   };
 
-  return { compile, compiled, mark, since, pending: () => ({ items: queue.length - head, inFlight }) };
+  // Pass 1, wave 1 (the landing log, `pipeLedger.ts`): the queue read in numbers and, by reference into the caller's kept
+  // slots, the names of the items listed and not yet built; once an arrival, at its thirtieth second.
+  const queuedNames = (out: string[]): number => {
+    let k = 0;
+    for (let i = head; i < queue.length && k < out.length; i++) {
+      const it = queue[i];
+      if (!it) continue;
+      const m = it.a[1];
+      out[k++] = m?.name || m?.type || '?';
+    }
+    return k;
+  };
+  return { compile, compiled, mark, since, pending: () => ({ items: queue.length - head, inFlight }), pendingItems: () => queue.length - head, inFlightNow: () => inFlight, queuedNames };
 }
 
 /** The sun's layer: a pass whose camera sees it draws with the sun, and three draws the sun's maps in it. */

@@ -14,10 +14,13 @@
 //   - **the card** (`gpu: true`): three's own timestamp queries over the render passes, each whole frame's passes summed
 //     from the pool's per-pass timestamps (`completeCardFrames`: three's own answer is a set's last frame, often cut short),
 //     the passes begun and timed counted beside them, each answer raced against a timeout (a headless tab answers about
-//     one a second, and two measures at once lose one's answer for good).
+//     one a second, and two measures at once lose one's answer for good); since pass 1's first wave each pass is named as
+//     it begins (each sun cascade, the world pass, the rooms, the chain's passes: `sectionOfPass`) and summed by name, and
+//     every read of three's timestamps goes through one adapter (`gpuTimer.ts`), the file three r188's `GPUTimer` changes.
 // What switches the step has, and where each stands, is said beside the numbers (`switches`).
 
-import { perf, PERF, PERF_TUNE } from '../perf.ts';
+import { perf, PASS, PERF, PERF_TUNE } from '../perf.ts';
+import { frameOfUid, type GpuPassTimer } from './gpuTimer.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -39,6 +42,61 @@ export interface FramePerfDeps {
   cascadeNodes(): Any[];
   /** The step's switches and where each stands. */
   switches(): Record<string, unknown>;
+  /** The card's clock (`gpuTimer.ts`, pass 1's adapter over three's timestamp queries). */
+  timer: GpuPassTimer;
+}
+
+/**
+ * The name of the section a render pass belongs to (pass 1, wave 1, item 5), from what is being drawn as it begins: a sun
+ * cascade by its shadow camera, any other shadow map as a lamp's, the effects chain's passes by their graph's name, and the
+ * rest by the frame report's own pass kind (`perf.passBegin`, set while the report times).
+ */
+export function sectionOfPass(camera: unknown, scene: Any, cascades: Map<unknown, string>, pass: number): string {
+  const c = camera ? cascades.get(camera) : undefined;
+  if (c) return c;
+  if (scene?.overrideMaterial?.isShadowPassMaterial === true) return 'lamp shadows';
+  const name = String(scene?.name ?? '');
+  if (scene?.userData?.gpuChain === true || name.startsWith('fx.gpu.')) {
+    if (/ssao|gtao|normals|linearDepth|depthHalf/i.test(name)) return 'chain: ssao';
+    if (/bloom/.test(name)) return 'chain: bloom';
+    if (/grade/i.test(name)) return 'chain: colour grade';
+    if (/output/.test(name)) return 'chain: output';
+    if (/sanitize/.test(name)) return 'chain: sanitize';
+    return `chain: ${name.replace(/^fx\.gpu\./, '') || '?'}`;
+  }
+  switch (pass) {
+    case PASS.world:
+      return 'world pass';
+    case PASS.interior:
+      return 'rooms';
+    case PASS.doorways:
+      return 'doorways';
+    case PASS.weather:
+      return 'weather';
+    case PASS.post:
+      return 'chain: other';
+    case PASS.air:
+      return 'air';
+    default:
+      return name ? `other: ${name}` : 'other';
+  }
+}
+
+/**
+ * Each whole frame's milliseconds by section: the passes of `timestamps` (uid to ms) summed by the name each was given as it
+ * began (`names`), over the frames `whole` holds (`completeCardFrames`'s); passes never named are 'unnamed'.
+ */
+export function sectionSums(timestamps: Map<string, number>, names: Map<string, string>, whole: Set<string>): Map<string, Map<string, number>> {
+  const out = new Map<string, Map<string, number>>();
+  for (const [uid, ms] of timestamps) {
+    const f = frameOfUid(uid);
+    if (f === null || !whole.has(f)) continue;
+    let m = out.get(f);
+    if (!m) out.set(f, (m = new Map()));
+    const n = names.get(uid) ?? 'unnamed';
+    m.set(n, (m.get(n) ?? 0) + ms);
+  }
+  return out;
 }
 
 /** The API calls counted, by name. */
@@ -310,9 +368,32 @@ export async function gpuFramePerf(renderer: Any, deps: FramePerfDeps, o: FrameP
     // never three's answer, which is the last frame of a set and often a frame's first few passes; and the passes begun a
     // frame against those given timestamp writes, so what is left untimed is said.
     if (o.gpu) {
-      const be = renderer.backend;
-      const had = be.trackTimestamp === true;
-      be.trackTimestamp = true;
+      // Pass 1, wave 1, item 5: the card's clock behind its adapter (`gpuTimer.ts`), and each pass named as it begins.
+      const timer = deps.timer;
+      timer.start();
+      PERF.on = true;
+      const cascades = new Map<unknown, string>();
+      deps.cascadeNodes().forEach((n, i) => {
+        const cam = n?.shadow?.camera;
+        if (cam) cascades.set(cam, `cascade ${i}`);
+      });
+      const names = new Map<string, string>();
+      const sceneStack: Any[] = [];
+      const ownScene = Object.prototype.hasOwnProperty.call(renderer, '_renderScene');
+      const renderScene = renderer._renderScene;
+      const sceneWrap = function (this: Any, scene: Any, ...rest: Any[]) {
+        sceneStack.push(scene);
+        try {
+          return renderScene.call(this, scene, ...rest);
+        } finally {
+          sceneStack.pop();
+        }
+      };
+      if (typeof renderScene === 'function') renderer._renderScene = sceneWrap;
+      const unwatch = timer.watchPasses((uid, ctx) => {
+        names.set(uid, sectionOfPass(ctx?.camera, sceneStack[sceneStack.length - 1], cascades, PERF.pass));
+      });
+      const sectionFrames: Map<string, number>[] = [];
       const want = Math.max(4, Math.floor(o.gpuFrames ?? 20));
       const frames: CardFrame[] = [];
       const seen = new Set<string>();
@@ -339,27 +420,41 @@ export async function gpuFramePerf(renderer: Any, deps: FramePerfDeps, o: FrameP
       try {
         // The first answers carry the queries made before the timing was on, and the frames before the counting began.
         await new Promise((r) => requestAnimationFrame(r));
-        await within(renderer.resolveTimestampsAsync('render') as Promise<number>, 4000);
+        await timer.resolve(4000);
         for (let i = 0; i < want * 4 && frames.length < want; i++) {
           // A few frames between answers, so a set holds frames between its ends (well under the pool's 2,048 queries).
           for (let k = 0; k < CARD_FRAMES_A_SET; k++) await new Promise((r) => requestAnimationFrame(r));
-          const v = await within(renderer.resolveTimestampsAsync('render') as Promise<number>, 4000);
-          if (v === null) {
+          const ts = await timer.resolve(4000);
+          if (ts === null) {
             lost++;
             continue;
           }
-          const ts = be.timestampQueryPool?.render?.timestamps as Map<string, number> | undefined;
-          if (!ts) continue;
+          const fresh = new Set<string>();
           for (const f of completeCardFrames(ts)) {
             if (seen.has(f.frame) || !(f.ms > 0) || !Number.isFinite(f.ms)) continue;
             seen.add(f.frame);
+            fresh.add(f.frame);
             frames.push(f);
           }
+          for (const m of sectionSums(ts, names, fresh).values()) sectionFrames.push(m);
         }
       } finally {
         countTo = deps.ended();
-        be.trackTimestamp = had;
+        unwatch();
+        timer.stop();
+        if (renderer._renderScene === sceneWrap) {
+          if (ownScene) renderer._renderScene = renderScene;
+          else delete renderer._renderScene;
+        }
         if (counting && enc.beginRenderPass !== begin) enc.beginRenderPass = begin;
+      }
+      // Each section's milliseconds a whole frame, the median over the frames timed (a frame without a section counts it 0).
+      const sectionNames = new Set<string>();
+      for (const m of sectionFrames) for (const k of m.keys()) sectionNames.add(k);
+      const sections: Record<string, number> = {};
+      for (const k of [...sectionNames].sort()) {
+        const v = sectionFrames.map((m) => m.get(k) ?? 0).sort((a, b) => a - b);
+        sections[k] = r2(v[v.length >> 1], 3);
       }
       const n = Math.max(1, countTo - countFrom);
       const ms = frames.map((f) => f.ms).sort((a, b) => a - b);
@@ -367,12 +462,15 @@ export async function gpuFramePerf(renderer: Any, deps: FramePerfDeps, o: FrameP
       out.gpu = ms.length
         ? {
             renderMs: { n: ms.length, p50: r2(ms[ms.length >> 1], 3), p90: r2(ms[Math.floor(ms.length * 0.9)], 3) },
+            sections,
             passesTimed: passes[passes.length >> 1],
             passesAFrame: counting ? { begun: r2(begun / n, 1), timed: r2(timed / n, 1), untimed: [...untimed].map(([k, v]) => `${k} ${r2(v / n, 1)}`) } : null,
             covers: 'every render pass three gives timestamp writes, summed over whole frames; WebGL\'s timer queries on ANGLE run from when a pass\'s first commands reach the card to when its last do, the main thread\'s issuing included, so the two are not one measure',
+            sectionsAre: "each section's median milliseconds a whole frame: each sun cascade by its shadow camera, other shadow maps as the lamps', the world pass, the rooms, the doorways, the weather, and the effects chain's passes by their graph",
+            ...(timer.coarse ? { coarse: timer.coarse } : {}),
             lost,
           }
-        : { renderMs: null, lost };
+        : { renderMs: null, lost, ...(timer.able ? {} : { why: 'this device was not granted timestamp queries' }), ...(timer.coarse ? { coarse: timer.coarse } : {}) };
     }
     out.switches = deps.switches();
     return out;
