@@ -28920,6 +28920,10 @@ class App {
       bar: p.bar.report(),
       // Phase 4: the rope held, its swing, the ropes standing and the clips' times it is drawn at.
       rope: p.rope.report(),
+      // The rope chain round: how each rope is drawn (`climb.ropeLook`), and each chain's pin, hands, end, stretch, lying points and rays.
+      ropeChain: p.ropeChains.report(p.rope.ropes),
+      // The rope chain round (maker B): how each rope is drawn: the strip through the chain's curve, its width, lifts and hands.
+      ropeDrawn: p.ropeDrawReport(),
       // Phase 5: the pole held, where the hands are up it and round it, and the clip's time it is drawn at.
       pole: p.pole.report(),
       brace: p.brace.report(),
@@ -36407,6 +36411,10 @@ class App {
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
       player.drawBlades(dt, this.cam.camera);
+      // The rope chain round (maker B): the other players hanging on a rope, their anchors and drawn hands (their figures were moved
+      // and posed in stepNet above), handed to the chains before the ropes are laid below, so a rope here bends to their hands (their
+      // own line to the anchor then not drawn: `remoteRopes.draw` below asks the same table).
+      remoteRopes.hungInto(player.ropeChains.peers);
       // And the grapple's rope and dart, laid once a frame before the render from the drawn left hand.
       player.drawGrapple(this.cam.camera, window.innerHeight);
       // Climbing II, phase 4: and the ropes hanging in the world, laid the same way (the hook's ribbon each).

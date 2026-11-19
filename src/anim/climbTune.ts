@@ -643,6 +643,38 @@ export interface ClimbTune {
    * climb stops at the top and nothing more.
    */
   poleTop: 'climb' | 'stop';
+  /**
+   * The rope chain round (the owner's ask of 2026-11-18: "the rope in our climbing pass right now is quite lackluster and is just a
+   * straight pipe on a pendulum with no physics or bend"): 'chain' each rope's drawn shape is a chain of points stepped on the
+   * physics' own steps (src/player/ropeChain.ts: pinned at its anchor, its links held to the rope's length, a gentle bend, gravity,
+   * a damping and the weather's wind as a drag, held over the ground and out of what stands still), and with a body on it the
+   * hands a moving pin, the tail swinging after the body; nothing of it feeds back into the body. 'straight' phase 5's (`6e59ce8`):
+   * drawn from the anchor through the hands to its end in a straight line at the swing's angle, as phase 4 drew it.
+   */
+  ropeLook: 'chain' | 'straight';
+  /** The rope chain: how many points a rope's chain is laid with (the brief's start, 24: a link of a third of a metre on the course's 8 m rope, a curve that reads as a curve; a whole number from 4 to 64). */
+  ropePoints: number;
+  /** The rope chain: each of the physics' steps solved in this many substeps (ours, 8: a 480th of a second, so the course's 8 m rope of 24 points hangs 1.2 cm longer than itself, where 4 hang it 4.9 cm long and 2 19 cm: each doubling a quarter of the stretch; a whole number from 1 to 16). */
+  ropeSubsteps: number;
+  /** The rope chain: two links folding are pushed back apart by this share a pass (ours, 0.1: a hemp rope's give, so it curves rather than kinks and is never stiff as a pole). */
+  ropeBend: number;
+  /** The rope chain: the chain's own motion dies away by this, a second (ours, 0.3: the free rope's own swing's, `ROPE_FREE_DAMP`, so the drawn rope settles as the rope the grab finds does). */
+  ropeChainDamp: number;
+  /** The rope chain: the wind drags the chain toward its own speed at this, a second (ours, 0.3: against the swing's own gravity, `swingGravity` 20.32, a 10 m/s gale leans a free rope about 8 degrees and a light breeze of 2 m/s under 2, so the rope moves in the wind without flying in it). */
+  ropeWind: number;
+  /** The rope chain: a point lying on something (the ground, a ledge) slides across it dying away by this, a second (ours, 10: its slide halves in a fourteenth of a second, so a tail that lands drags to a stop where it lands rather than skating on; the share a substep is worked out from the substep's own time, so the substeps slider leaves it as it is). */
+  ropeGrip: number;
+  /**
+   * The rope chain round, item 3 (maker B): how thick a rope is drawn as a chain, metres (ours, 0.04: the course's rope column is 4
+   * cm across, and at that width the strip's half is the chain's own radius, 2 cm, the very distance it is held off what it lies
+   * on, so seen edge on it never dips into it; held to at least the hook's `minPx` pixels across, as the hook's rope is, so far off
+   * it never vanishes or twinkles).
+   */
+  ropeWidth: number;
+  /** The rope chain round, item 3: a point lying on something drawn lifted this far along that surface's normal, metres (the brief's start, 0.01: a centimetre, over a depth offset, so the drawn rope never flickers into the ground or a wall). */
+  ropeLift: number;
+  /** The rope chain round, item 3: the drawn twist's lay, metres (ours, 0.14: one turn of a three-strand rope's strands in three and a half times its 4 cm thickness, a hawser's lay: a strand's band every 4.7 cm along it). */
+  ropeLay: number;
 }
 
 /**
@@ -869,9 +901,32 @@ export const CLIMB_POLES_ALSO: (() => void)[] = [];
 
 /** Phase 5's switches at their other setting (the feedback round II's climbing, `5421344`). */
 export function climbPolesBefore(): void {
+  // (`5421344` had none of the rope chain round's either: put back first, so phase 5's own words below win where a switch is shared.)
+  climbRopeLookBefore();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_POLES_BEFORE)) t[k] = v;
   for (const f of CLIMB_POLES_ALSO) f();
+}
+
+/**
+ * The rope chain round (the owner's ask of 2026-11-18): every switch it adds, at its other setting (the rope as phase 5 drew it,
+ * `6e59ce8`: straight from its anchor through the hands to its end). Drawing only: the body is the same under either. A later maker
+ * of the round adds its own here (`CLIMB_ROPELOOK_ALSO` for one beside the climbing's), so one call puts the whole round back;
+ * `climbPolesBefore` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_ROPELOOK_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (the chain, and a body on it).
+  ropeLook: 'straight',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_ROPELOOK_ALSO: (() => void)[] = [];
+
+/** The rope chain round's switches at their other setting (phase 5's rope, `6e59ce8`). */
+export function climbRopeLookBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_ROPELOOK_BEFORE)) t[k] = v;
+  for (const f of CLIMB_ROPELOOK_ALSO) f();
 }
 
 /**
@@ -1135,6 +1190,16 @@ export const CLIMB_TUNE: ClimbTune = {
   poleCrouch: 'slide',
   poleSlide: 3,
   poleTop: 'climb',
+  ropeLook: 'chain',
+  ropePoints: 24,
+  ropeSubsteps: 8,
+  ropeBend: 0.1,
+  ropeChainDamp: 0.3,
+  ropeWind: 0.3,
+  ropeGrip: 10,
+  ropeWidth: 0.04,
+  ropeLift: 0.01,
+  ropeLay: 0.14,
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -1289,6 +1354,15 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   polePush: { min: 0, max: 8 },
   poleJumpUp: { min: 0, max: 2 },
   poleSlide: { min: 0.3, max: 10 },
+  ropePoints: { min: 4, max: 64 },
+  ropeSubsteps: { min: 1, max: 16 },
+  ropeBend: { min: 0, max: 1 },
+  ropeChainDamp: { min: 0, max: 5 },
+  ropeWind: { min: 0, max: 3 },
+  ropeGrip: { min: 0, max: 60 },
+  ropeWidth: { min: 0.005, max: 0.2 },
+  ropeLift: { min: 0, max: 0.1 },
+  ropeLay: { min: 0.02, max: 1 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -1342,6 +1416,7 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   poleJump: ['fly', 'plain'],
   poleCrouch: ['slide', 'drop'],
   poleTop: ['climb', 'stop'],
+  ropeLook: ['chain', 'straight'],
 };
 
 /**

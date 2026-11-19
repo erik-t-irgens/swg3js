@@ -23,6 +23,10 @@ import { ClimbAsk, LedgeHang, LedgeIn, type LedgeWorld } from '../../../src/play
 import { driveDropClip } from '../../../src/player/hangClips.ts';
 import { BarSwing, type BarWorld } from '../../../src/player/barSwing.ts';
 import { RopeSwing, type RopeWorld } from '../../../src/player/ropeSwing.ts';
+import { RopeChains, type ChainAsk, type ChainWorld } from '../../../src/player/ropeChain.ts';
+import { RopeCurve } from '../../../src/player/ropeCurve.ts';
+import { ChainRibbon, drawChained } from '../../../src/player/ropeChainDraw.ts';
+import type { HangingRope } from '../../../src/player/hangingRope.ts';
 import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleWorld } from '../../../src/player/poleClimb.ts';
 import type { CharacterRig } from '../../../src/player/rig.ts';
 import { Stamina } from '../../../src/anim/locoClass.ts';
@@ -234,6 +238,15 @@ export class TestBody implements GrappleBody {
   readonly rope = new RopeSwing({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   /** The frames the rope held the body for. */
   ropeFrames = 0;
+  /**
+   * The rope chain round: the ropes' chains (src/player/ropeChain.ts), stepped as the player steps them: the physics' steps written at
+   * the top of `frame` (beside `tickRopes`), and the chains stepped and laid by `drawRopes`, which a test calls after `frame` as the
+   * frame loop calls the player's after its update and the physics. Its world the physics', its ray and box made once, every group
+   * but the terrain's (whose height `chainGroundAt` answers: none by default).
+   */
+  readonly ropeChains = new RopeChains();
+  /** The ground's height the chains lie on (the game's terrain's cached heights stand-in), or null for none. */
+  chainGroundAt: ((x: number, z: number) => number) | null = null;
   /** Climbing II, phase 5: the poles (`climb.poles`), stepped in the player's own places: the climb in place of the movement, the grab after the move, after the ropes'. */
   readonly pole = new PoleClimb({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
   /** The frames the pole held the body for. */
@@ -345,7 +358,52 @@ export class TestBody implements GrappleBody {
       const d = this.physics.groundDistance(this.pos.x, this.pos.y + 0.1, this.pos.z, max * 0.0254 + 0.1, this.body);
       return d === null ? null : Math.max(0, (d - 0.1) / 0.0254);
     };
+    // The rope chain round: the chains' world, ray and box made once (the player's own), every group but the terrain's.
+    const C = this.ropeChains;
+    C.world = world as unknown as ChainWorld;
+    C.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    C.box = new RAPIER.Cuboid(0.5, 0.5, 0.5);
+    C.filter = groups(Group.all, Group.all & ~Group.terrain);
+    C.ground = { at: (q: ChainAsk) => this.chainGround(q) };
   }
+
+  /** The chains' ground (the game's terrain's cached heights, here `chainGroundAt`): false with none. */
+  private chainGround(q: ChainAsk): boolean {
+    const f = this.chainGroundAt;
+    if (!f) return false;
+    q.h = f(q.x, q.z);
+    return true;
+  }
+
+  /**
+   * The player's `drawRopes` as far as the chains go: after the frame (its update and the physics' step), the chains stepped over
+   * the frame's steps and laid at the frame's own time (`Physics.behind`), the rope the body holds with no drawn hands (no rig:
+   * the grip on the rope's line stands for both).
+   */
+  drawRopes(): void {
+    const C = this.ropeChains;
+    C.behind = this.physics.behind;
+    C.frame(this.rope.ropes);
+    // (Maker B: and, given a camera, each rope's strip laid through its chain's curve as the player lays it: `drawChained`.)
+    const cam = this.chainCamera;
+    if (!cam) return;
+    const chained = CLIMB_TUNE.ropeLook === 'chain' && CLIMB_TUNE.ropes === 'on';
+    const list = this.rope.ropes;
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i];
+      let s = this.chainStrips.get(r);
+      if (!s) {
+        s = new ChainRibbon();
+        this.chainStrips.set(r, s);
+      }
+      if (!chained || !drawChained(r, s, this.ropeCurve, cam, 1080)) s.hide();
+    }
+  }
+
+  /** The rope chain round, maker B: the camera the ropes' strips are laid for (null: none laid), each rope's strip, and the curve they are laid through. */
+  chainCamera: THREE.PerspectiveCamera | null = null;
+  readonly chainStrips = new Map<HangingRope, ChainRibbon>();
+  readonly ropeCurve = new RopeCurve();
 
   get filter(): number {
     return this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
@@ -581,6 +639,8 @@ export class TestBody implements GrappleBody {
     const g = this.grapple;
     this.t += dt;
     // Phase 4: the ropes nobody holds swung once a frame, ahead of every way out (the player's `tickRopes`, at the top of its update).
+    // (The rope chain round: and the physics' steps the frame's step takes written for the chains, which `drawRopes` steps.)
+    this.ropeChains.steps = this.physics.stepsAhead(dt);
     this.rope.tickRopes(dt);
     // The key block: the grapple's own part, as `stepGrappleKeys` calls it.
     if (this.hooks) g.stepKeys(input, this, this.mutes, this.fireNow);

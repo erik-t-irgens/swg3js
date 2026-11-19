@@ -349,6 +349,22 @@ export const CLIMB_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Climbing II: the rope\'s chain',
+    note: 'straight: as phase 5 drew it, a straight line from the anchor through the hands to the end at the swing\'s angle. chain: each rope is a chain of points stepped on the physics\' own steps (alike at every frame rate): pinned at its anchor, its links held to the rope\'s length, a gentle bend, gravity, a damping and the weather\'s wind as a drag (the very wind the trees and the rain take); held over the ground and out of what stands still, a tail on the ground lying there. With a body on it the hands are a pin moving along the chain: the span above holds the swing\'s length, the tail below swings after the body, settles when it is still and whips a little at a let-go; the drawn rope meets both hands every frame. Drawn as a strip turned to the view through a smooth curve of the points, a twisted rope\'s strands of our own on it, lifted off what it lies on; another player hanging on a rope here bends it to their drawn hands. Drawing only: nothing of it moves the body.',
+    dials: [
+      choice('ropeLook', 'The rope is drawn', 'chain: a chain of points, swung, bent and blown; straight: as before, a straight line at the swing\'s angle.'),
+      dial('ropePoints', 'Its points', 1, '', 'The brief\'s 24: a link of a third of a metre on the course\'s 8 m rope, a curve that reads as a curve.'),
+      dial('ropeSubsteps', 'Each physics step solved in', 1, 'substeps', 'Ours: 8, a 480th of a second each: the course\'s 8 m rope hangs 1.2 cm longer than itself (4: 4.9 cm; 2: 19 cm).'),
+      dial('ropeBend', 'Two links folding pushed apart by', 0.01, 'a pass', 'Ours: 0.1, a hemp rope\'s give: it curves rather than kinks and is never stiff as a pole.'),
+      dial('ropeChainDamp', 'Its own motion dies away by', 0.01, 'a second', 'Ours: 0.3, the free rope\'s own swing\'s, so the drawn rope settles as the rope the grab finds does.'),
+      dial('ropeGrip', 'Lying on something, its slide dies away by', 0.5, 'a second', 'Ours: 10, the slide halving in a fourteenth of a second: a tail that lands drags to a stop where it lands rather than skating on.'),
+      dial('ropeWind', 'The wind drags it at', 0.01, 'a second', 'Ours: 0.3: against the swing\'s own gravity (20.32) a 10 m/s gale leans a free rope about 8 degrees, a 2 m/s breeze under 2.'),
+      dial('ropeWidth', 'Drawn this thick', 0.005, 'm', 'Ours: 0.04, the course rope\'s column: half of it is the chain\'s own 2 cm off what it lies on, so edge on it never dips in. Never under the hook\'s least pixels across.'),
+      dial('ropeLift', 'Lying on something, drawn lifted off it by', 0.005, 'm', 'The brief\'s 1 cm along the surface\'s normal, over a depth offset: it never flickers into the ground or a wall.'),
+      dial('ropeLay', 'One turn of its strands', 0.01, 'm', 'Ours: 0.14, three and a half times a 4 cm rope\'s thickness, a hawser\'s lay: a strand\'s band every 4.7 cm.'),
+    ],
+  },
+  {
     title: 'The hands bracing',
     note: 'before: the arms as they were (nothing is felt for). on: moving into a wall the hand on that side rests on it (head on, both), in a passage narrower than the tight share both touch its sides, among people the hand on their side rests on them, and drifting in space near a surface both hands reach to it and step along it.',
     dials: [

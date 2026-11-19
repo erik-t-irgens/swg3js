@@ -37,7 +37,7 @@ import { ROPE_CLIP_NAMES, ROPE_FACTS, ROPE_MODE_CLIMB, ROPE_MODE_HANG, ROPE_MODE
 import { ROPE_BAND_BETWEEN, ROPE_BAND_CLIPS, ROPE_BAND_FROM, ROPE_BAND_KNEE, ROPE_BAND_LEVEL, ROPE_BAND_NAMES, ROPE_BAND_WAIST, ROPE_FLIGHT_CLIP, ROPE_LAND_FACTS, ROPE_TIMES, RopeLandPose, type RopeLandTables } from '../anim/ropeClips.ts';
 import { LEDGE_CAPSULE, type LedgeBody, type LedgeIn } from './ledge.ts';
 import { LEDGE_FACTS, LEDGE_REST, LEDGE_ROLES } from '../anim/ledgeClips.ts';
-import { HangingRope, ROPE_STEP } from './hangingRope.ts';
+import { HangingRope, ROPE_STEP, SWING_REC, SWING_STEPS_MOST } from './hangingRope.ts';
 
 export { ROPE_STEP };
 /** How high the body's middle stands over its feet (the standing capsule's: what the hanging capsule is placed by). */
@@ -834,6 +834,16 @@ export class RopeSwing {
     // (Where the climb stopped is said again only on a frame that steps: a frame with no step at 144 a second keeps the last.)
     if (n > 0) this.stop = '';
     // (The ropes nobody holds swing on by themselves meanwhile: `tickRopes`, once a frame at the top of the caller's update.)
+    // (The rope chain round's fixer: the swing as it stands before the frame's steps and after each, for the chain's pin, which
+    // then pins each of its steps on the swing's own: `HangingRope.swingRec`. Written and never read here.)
+    const rec = r.swingRec;
+    rec[0] = this.th;
+    rec[1] = this.om;
+    rec[2] = this.s;
+    rec[3] = this.e;
+    rec[4] = this.fx;
+    rec[5] = this.fz;
+    r.swingSteps = 0;
     for (let k = 0; k < n; k++) {
       // The swing's plane turned toward the view (the shorter way), at most `ropeTurn` a second.
       if (viewYaw === viewYaw) {
@@ -936,6 +946,17 @@ export class RopeSwing {
       if (this.phase === ROPE_GRAB) {
         this.grabT += h;
         if (this.grabT >= this.grabDur) this.phase = ROPE_HANG;
+      }
+      // (The chain's record: the swing after this step.)
+      if (k < SWING_STEPS_MOST) {
+        const o = SWING_REC * (k + 1);
+        rec[o] = this.th;
+        rec[o + 1] = this.om;
+        rec[o + 2] = this.s;
+        rec[o + 3] = this.e;
+        rec[o + 4] = this.fx;
+        rec[o + 5] = this.fz;
+        r.swingSteps = k + 1;
       }
     }
     this.climbNow = climbedNow;

@@ -14,11 +14,16 @@
 
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { len3 } from './grappleMath.ts';
+import type { RopeChain } from './ropeChain.ts';
 
 /** How far a free rope's swing dies away a second (a mechanic: a rope let go settles in a few swings). */
 export const ROPE_FREE_DAMP = 0.3;
 /** The physics' own step, the free swing's (`FIXED_DT`; climbRopes.test.ts holds the two equal). */
 export const ROPE_STEP = 1 / 60;
+/** The most physics steps one frame takes (src/core/physics.ts's `stepsAhead`, which stops at four): the swing's record's room. */
+export const SWING_STEPS_MOST = 4;
+/** Numbers one state of the swing takes in `HangingRope.swingRec`: its angle, its speed, the hands' way down, the stretch, its plane's x and z. */
+export const SWING_REC = 6;
 /** Most steps a free rope takes in one frame (a backstop for a frame held long: a hidden tab come back). */
 const FREE_MOST = 8;
 
@@ -72,6 +77,22 @@ export class HangingRope {
   private columnOn = true;
   /** What draws it (the game's), null in the harness. */
   drawn: RopeDrawn | null = null;
+  /**
+   * The rope chain round: its drawn shape as a chain of points (src/player/ropeChain.ts), made the first frame it is drawn as one
+   * (`climb.ropeLook` 'chain'); null until then and never read under 'straight', where it is drawn by `pts` and the end as phase 4
+   * drew it. Nothing of the gameplay reads it.
+   */
+  chain: RopeChain | null = null;
+  /**
+   * The rope chain round's fixer: the held swing's state at each of the frame's physics steps, for the chain's pin
+   * (src/player/ropeSwing.ts writes it as it steps the rope it holds: slot 0 the swing as it stood before the frame's first step,
+   * then a slot after each step; each slot `SWING_REC` numbers: its angle, its speed, the hands' way down, the stretch, its plane),
+   * so the chain (src/player/ropeChain.ts) pins each of its steps on the swing's very step and is the same to the bit whichever
+   * frame rate grouped the steps into frames. `swingSteps`: the steps written after slot 0 this frame, -1 where the swing stepped
+   * none of them (the chain puts it back to -1 as it reads it). Nothing of the gameplay reads it.
+   */
+  readonly swingRec = new Float64Array(SWING_REC * (SWING_STEPS_MOST + 1));
+  swingSteps = -1;
 
   constructor(name: string, ax: number, ay: number, az: number, length = Number.NaN) {
     this.name = name;

@@ -59,8 +59,13 @@ import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleW
 import { measurePoleTable } from '../anim/poleClips.ts';
 import type { RopeTable } from '../anim/ropeClips.ts';
 import { BarSwing, type BarWorld } from './barSwing.ts';
-import { RopeSwing, type RopeWorld } from './ropeSwing.ts';
+import { ROPE_GRAB, ROPE_HANG, RopeSwing, type RopeWorld } from './ropeSwing.ts';
 import type { HangingRope } from './hangingRope.ts';
+import { RopeChains, type ChainAsk, type ChainWorld } from './ropeChain.ts';
+import { RopeCurve } from './ropeCurve.ts';
+import { ChainRibbon, chainRopeCarrier, drawChained, followHookLook } from './ropeChainDraw.ts';
+import { FLORA_WIND } from '../world/floraSway.ts';
+import { WATER_WIND_FULL } from '../world/water.ts';
 import { ROPE_CLIP_NAMES, ROPE_SWING, ROPE_SWING_TWIN, measureRopeTables, type RopeTables } from '../anim/ropeClips.ts';
 import { measureRopeLandTables, type RopeLandTables } from '../anim/ropeClips.ts';
 import { BAR_CLIP, BAR_CLIP_NAMES, BAR_FLIGHT_NAME, measureBarFlight, measureBarTable, type BarFlightTable, type BarSwingTable } from '../anim/barClips.ts';
@@ -164,6 +169,9 @@ const grappleDartAt = new Float64Array(3);
 const grappleDartDir = new THREE.Vector3();
 /** Climbing II, phase 4: a rope's end, as the hook's ribbon takes its free span's (`drawRopes`). */
 const ropeEnd = { x: 0, y: 0, z: 0 };
+/** The rope chain round: a held rope's drawn hands read off the rig (stepRopeChains), two joints at a time. */
+const chainHandA = new THREE.Vector3();
+const chainHandB = new THREE.Vector3();
 /** Phase 4, maker B: the posed ankles in the rig root's frame (`plantRopeFeet`). */
 const ropePlantA = new THREE.Vector3();
 const ropePlantB = new THREE.Vector3();
@@ -586,6 +594,14 @@ export class Player {
   /** Phase 4: the scene the ropes' ribbons hang in (the player's own). */
   private readonly ropeScene: THREE.Scene;
   /**
+   * The rope chain round (`climb.ropeLook` 'chain', src/player/ropeChain.ts): every rope's drawn shape a chain stepped on the
+   * physics' own steps (written at the top of the update, `ropeChains.steps`) and laid in `drawRopes`, the held rope's chain pinned
+   * at the drawn hands. Its world is the planet's (the one this player was made with, never a ship's rooms'); nothing of it feeds back.
+   */
+  readonly ropeChains = new RopeChains();
+  /** The physics the chains are stepped by and query (the planet's: `physics` is a ship's rooms' while aboard). */
+  private readonly chainPhysics: Physics;
+  /**
    * Climbing II, phase 5 (`climb.poles` 'on', src/player/poleClimb.ts): a pole grabbed with the use key after the move (`sensePole`,
    * after the ropes'), and while it holds the body the climb's own frame in place of the movement (`poleFrame`), its clip by the way
    * climbed (src/player/hangClips.ts's `drivePoleClips`), the figure drawn with its mean grip on the pole and its hands and feet put
@@ -857,6 +873,14 @@ export class Player {
     scene.add(group);
     markActor(group);
     this.physics = physics;
+    // The rope chain round: the chains' world, ray and near box made once, every group but the terrain's (its height is read cached).
+    this.chainPhysics = physics;
+    const chains = this.ropeChains;
+    chains.world = physics.world as unknown as ChainWorld;
+    chains.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    chains.box = new RAPIER.Cuboid(0.5, 0.5, 0.5);
+    chains.filter = groups(Group.all, Group.all & ~Group.terrain);
+    chains.ground = { at: (q: ChainAsk) => this.chainGround(q) };
     // The thrown saber: a hilt with its blade, lying flat and spinning like a boomerang.
     this.flying = new THREE.Group();
     const flyHilt = parts.hilt.clone();
@@ -985,6 +1009,11 @@ export class Player {
     markActor(this.ropeRibbon.mesh);
     // (Climbing II, phase 4: the ropes' ribbons hang in the same scene, each made as its rope is stood.)
     this.ropeScene = scene;
+    // (The rope chain round, maker B: and one strip of the chained rope's material, hidden and never laid, so every warm-up builds
+    // its program behind the loading screen and a rope stood later builds none: `chainRopeCarrier`.)
+    const carrier = chainRopeCarrier();
+    scene.add(carrier);
+    markActor(carrier);
     this.dartView = dartMesh();
     scene.add(this.dartView);
     markActor(this.dartView);
@@ -2961,6 +2990,8 @@ export class Player {
     this.grappleVehicles = world.vehicles;
     // Climbing II, phase 4: the ropes nobody holds swung by themselves (and their columns switched) once a frame, here ahead of
     // every way out of the update, so a rope swings on whatever has the body: its own flight off it and landing, a bar, a ledge.
+    // (The rope chain round: and the planet's physics steps the frame's step takes, written for the chains `drawRopes` steps.)
+    this.ropeChains.steps = this.chainPhysics.stepsAhead(dt);
     this.rope.tickRopes(dt);
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
@@ -4275,6 +4306,12 @@ export class Player {
     markActor(ribbon.mesh);
     r.drawn = ribbon;
     this.ropeRibbons.set(r, ribbon);
+    // The rope chain round (maker B): and its strip as a chain (`climb.ropeLook` 'chain'), on the chained rope's one material, which
+    // the warm-up has built already (`chainRopeCarrier`): this is a geometry on it, nothing more.
+    const strip = new ChainRibbon();
+    this.ropeScene.add(strip.mesh);
+    markActor(strip.mesh);
+    this.chainRibbons.set(r, strip);
   }
 
   /** Phase 4: a rope taken down (let go of first where it is held), its ribbon out of the scene and its geometry disposed. */
@@ -4286,11 +4323,21 @@ export class Player {
       ribbon.mesh.geometry.dispose();
       this.ropeRibbons.delete(r);
     }
+    // (The rope chain round: and its strip as a chain; the material is every chained rope's and stays.)
+    const strip = this.chainRibbons.get(r);
+    if (strip) {
+      strip.mesh.removeFromParent();
+      strip.mesh.geometry.dispose();
+      this.chainRibbons.delete(r);
+    }
     r.drawn = null;
   }
 
   /** Phase 4: the ropes stood and their ribbons (the console's and the course's). */
   private readonly ropeRibbons = new Map<HangingRope, RopeRibbon>();
+  /** The rope chain round (maker B): each rope's strip as a chain, and the one curve every rope's is laid through in turn. */
+  private readonly chainRibbons = new Map<HangingRope, ChainRibbon>();
+  private readonly ropeCurve = new RopeCurve();
 
   /**
    * Phase 4: the ropes laid for this frame (beside `drawGrapple`): each rope's ribbon from its anchor through the hands (while held)
@@ -4299,21 +4346,106 @@ export class Player {
   drawRopes(camera: THREE.PerspectiveCamera, screenH: number): void {
     const on = CLIMB_TUNE.ropes === 'on';
     const list = this.rope.ropes;
+    // The rope chain round: the chains stepped over the frame's physics steps and laid at the frame's own time, the held rope's at
+    // the drawn hands (nothing under 'straight', which draws each rope as phase 4 did below).
+    const chained = this.stepRopeChains();
+    if (chained) followHookLook();
     for (let i = 0; i < list.length; i++) {
       const r = list[i];
       const ribbon = this.ropeRibbons.get(r);
       if (!ribbon) continue;
+      const strip = this.chainRibbons.get(r);
       if (!on) {
+        if (ribbon.mesh.visible) ribbon.hide();
+        if (strip && strip.mesh.visible) strip.hide();
+        continue;
+      }
+      ribbon.slack = 0;
+      ribbon.screenH = screenH;
+      // Maker B: the chain's drawn points laid as a smooth curve (each lying one lifted off its surface) and the strip turned to the
+      // view through it, on the chained rope's material (`drawChained`, the harness's draw too); the straight ribbon hidden.
+      if (chained && strip && drawChained(r, strip, this.ropeCurve, camera, screenH)) {
         if (ribbon.mesh.visible) ribbon.hide();
         continue;
       }
+      if (strip && strip.mesh.visible) strip.hide();
       ropeEnd.x = r.endX;
       ropeEnd.y = r.endY;
       ropeEnd.z = r.endZ;
-      ribbon.slack = 0;
-      ribbon.screenH = screenH;
       ribbon.lay(r.pts, r.count, ropeEnd, camera);
     }
+  }
+
+  /**
+   * The rope chain round: the chains' frame (`RopeChains.frame`), after the update and the physics' step: how far the frame stands
+   * past the last step, the trees' and the rain's wind, and the held rope's drawn hands (each hand's grip, its wrist and index
+   * knuckle, as the rope's tables measure the grip: the rig's, posed for this frame). True where the chains are drawn.
+   */
+  private stepRopeChains(): boolean {
+    const C = this.ropeChains;
+    const on = CLIMB_TUNE.ropeLook === 'chain' && CLIMB_TUNE.ropes === 'on';
+    C.behind = this.chainPhysics.behind;
+    const W = C.wind;
+    W.x = FLORA_WIND.x;
+    W.z = FLORA_WIND.z;
+    W.speed = FLORA_WIND.strength * WATER_WIND_FULL;
+    const R = this.rope;
+    const rig = this.rig;
+    const held = R.rope;
+    if (on && rig && held && (R.phase === ROPE_GRAB || R.phase === ROPE_HANG)) {
+      const a = rig.boneNamed('lWrist');
+      const b = rig.boneNamed('lIndex01');
+      const c = rig.boneNamed('rWrist');
+      const d = rig.boneNamed('rIndex01');
+      if (a && b && c && d) {
+        a.getWorldPosition(chainHandA);
+        b.getWorldPosition(chainHandB);
+        const H = C.hand;
+        H[0] = (chainHandA.x + chainHandB.x) / 2;
+        H[1] = (chainHandA.y + chainHandB.y) / 2;
+        H[2] = (chainHandA.z + chainHandB.z) / 2;
+        c.getWorldPosition(chainHandA);
+        d.getWorldPosition(chainHandB);
+        H[3] = (chainHandA.x + chainHandB.x) / 2;
+        H[4] = (chainHandA.y + chainHandB.y) / 2;
+        H[5] = (chainHandA.z + chainHandB.z) / 2;
+        C.hands = 2;
+        C.handsRope = held;
+      }
+    }
+    C.frame(R.ropes);
+    return on;
+  }
+
+  /**
+   * The rope chain round (maker B): how each rope is drawn for the console (`__debug.climb()`'s `ropeDrawn`): the look, and under
+   * 'chain' each strip's rings, the widest a ring was laid, the knots lifted off a surface and the hands it passes through, with the
+   * sliders that shape it. Allocates freely; never called in a frame.
+   */
+  ropeDrawReport(): Record<string, unknown> {
+    const n3 = (v: number) => +v.toFixed(3);
+    return {
+      look: CLIMB_TUNE.ropeLook,
+      width: CLIMB_TUNE.ropeWidth,
+      lift: CLIMB_TUNE.ropeLift,
+      lay: CLIMB_TUNE.ropeLay,
+      peersThisFrame: this.ropeChains.peers.count,
+      ropes: this.rope.ropes.map((r) => {
+        const s = this.chainRibbons.get(r);
+        const straight = this.ropeRibbons.get(r);
+        return { name: r.name, chainShown: !!s?.mesh.visible, straightShown: !!straight?.mesh.visible, rings: s?.rings ?? 0, widest: s ? n3(s.widest) : 0, lifted: s?.lifted ?? 0, hands: s?.hands ?? 0, handOffMm: s ? +(s.handOff * 1000).toFixed(3) : 0 };
+      }),
+    };
+  }
+
+  /** The chains' ground (`RopeChains.ground`): the terrain's cached height only (a built block's, never one that makes a block); false where none is known. */
+  private chainGround(q: ChainAsk): boolean {
+    const t = this.world?.terrain;
+    if (!t) return false;
+    const h = t.nearHeightIfCached(q.x, q.z);
+    if (h === null) return false;
+    q.h = h;
+    return true;
   }
 
   /** Climbing II, phase 3 (maker B): whether the last `climbReach` found a bar (the action bar's "grab" for its "climb"). */
