@@ -226,6 +226,75 @@ export function isBarCollider(c: BarCollider): boolean {
   return barAxisOf(c, SCRATCH);
 }
 
+// ---- Climbing II, phase 5: what a pole is -------------------------------------------------------------------------------------
+
+/** How far from upright a pole's long axis may lean, degrees (a mechanic of the pole's definition, as `BAR_LEVEL` is the bar's: a post on a slant is no pole). */
+export const POLE_UPRIGHT = 10;
+const UPRIGHT_COS = Math.cos((POLE_UPRIGHT * Math.PI) / 180);
+
+/**
+ * Climbing II, phase 5: whether the collider is a pole where it stands (src/player/poleClimb.ts): the bar's own facts of its shape
+ * (`localOf`: a box, a cylinder or a capsule, a mesh's box), long and thin by `climb.poleThin` and `climb.poleLength`, its long
+ * axis within `POLE_UPRIGHT` of upright; and if so its axis in the world into `out`, from its foot (`a`) up the unit `u` for `len`
+ * metres, `thick` across. Nothing made (the collider's own facts kept from their first asking).
+ */
+export function poleAxisOf(c: BarCollider, out: BarAxis): boolean {
+  const L = localOf(c);
+  if (L.kind === 0 || L.thick > CLIMB_TUNE.poleThin || 2 * L.half < CLIMB_TUNE.poleLength) return false;
+  c.rotation(ROT);
+  const vx = L.axis === 0 ? 1 : 0;
+  const vy = L.axis === 1 ? 1 : 0;
+  const vz = L.axis === 2 ? 1 : 0;
+  const qx = ROT.x;
+  const qy = ROT.y;
+  const qz = ROT.z;
+  const qw = ROT.w;
+  let tx = 2 * (qy * vz - qz * vy);
+  let ty = 2 * (qz * vx - qx * vz);
+  let tz = 2 * (qx * vy - qy * vx);
+  let ux = vx + qw * tx + (qy * tz - qz * ty);
+  let uy = vy + qw * ty + (qz * tx - qx * tz);
+  let uz = vz + qw * tz + (qx * ty - qy * tx);
+  const ul = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+  ux /= ul;
+  uy /= ul;
+  uz /= ul;
+  // (Up the pole, whichever way its own axis runs.)
+  if (uy < 0) {
+    ux = -ux;
+    uy = -uy;
+    uz = -uz;
+  }
+  if (uy < UPRIGHT_COS) return false;
+  c.translation(TR);
+  let mx = TR.x;
+  let my = TR.y;
+  let mz = TR.z;
+  if (L.cx !== 0 || L.cy !== 0 || L.cz !== 0) {
+    tx = 2 * (qy * L.cz - qz * L.cy);
+    ty = 2 * (qz * L.cx - qx * L.cz);
+    tz = 2 * (qx * L.cy - qy * L.cx);
+    mx += L.cx + qw * tx + (qy * tz - qz * ty);
+    my += L.cy + qw * ty + (qz * tx - qx * tz);
+    mz += L.cz + qw * tz + (qx * ty - qy * tx);
+  }
+  out.ax = mx - ux * L.half;
+  out.ay = my - uy * L.half;
+  out.az = mz - uz * L.half;
+  out.ux = ux;
+  out.uy = uy;
+  out.uz = uz;
+  out.len = 2 * L.half;
+  out.thick = L.thick;
+  out.col = c;
+  return true;
+}
+
+/** Phase 5: whether the collider is a pole where it stands (`poleAxisOf`, its axis thrown away): what the wall climb passes while `climb.poles` is 'on'. */
+export function isPoleCollider(c: BarCollider): boolean {
+  return poleAxisOf(c, SCRATCH);
+}
+
 /** The little of a physics world a bar's room is asked of (rapier's `World`: one shape test, the bar itself left out). */
 export interface BarRoomWorld {
   intersectionWithShape(shapePos: { x: number; y: number; z: number }, shapeRot: { x: number; y: number; z: number; w: number }, shape: never, filterFlags?: number, filterGroups?: number, filterExcludeCollider?: never): unknown;

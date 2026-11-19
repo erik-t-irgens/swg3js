@@ -238,7 +238,7 @@ export interface PromptState {
    * Phase 3 (maker B): the hands on a bar ('hang': Space lets go and flies on the swing, the crouch drops straight down), or in
    * the flight off one ('fly': nothing to press, a bar ahead is caught by itself); '' neither.
    */
-  bar: '' | 'hang' | 'fly';
+  bar: '' | 'hang' | 'fly' | 'pole' | 'poleDrop' | 'poleSlide';
 }
 
 /** A state struct with nothing in it: the caller keeps one and fills it. */
@@ -408,6 +408,9 @@ export const PROMPT_WORDS = Object.freeze({
   grabBar: 'grab',
   barLetGo: 'let go',
   barDrop: 'drop',
+  // Climbing II, phase 5: on a pole, Space jumps off along the view and the crouch slides down.
+  poleJump: 'jump off',
+  poleSlide: 'slide down',
   // Everywhere.
   shipMenu: 'ship menu',
   noclipOff: 'noclip off',
@@ -498,6 +501,12 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     if (s.bar === 'hang') {
       n = push(out, n, 'jump', W.barLetGo);
       n = push(out, n, 'crouch', W.barDrop);
+    }
+    // Phase 5 (maker B): on a pole, Space jumps off along the view (caught by what is in reach) and the crouch slides down; each
+    // by its own switch the bar's words instead.
+    else if (s.bar === 'pole' || s.bar === 'poleDrop' || s.bar === 'poleSlide') {
+      n = push(out, n, 'jump', s.bar === 'poleSlide' ? W.barLetGo : W.poleJump);
+      n = push(out, n, 'crouch', s.bar === 'poleDrop' ? W.barDrop : W.poleSlide);
     }
     return n;
   }

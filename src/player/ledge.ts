@@ -1358,10 +1358,61 @@ export class LedgeHang {
     at.y = this.qy + LEDGE_CAPSULE.r + half;
     at.z = this.qz;
     this.casts++;
-    const c = world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt);
+    // (Climbing II, phase 5, maker B: a climb up from a pole's top leaves the pole held out, `clearSkip`; undefined otherwise, as
+    // the argument left out always was.)
+    const c = world.intersectionWithShape(at, this.shapeRot, shape, STILL_FLAGS, this.qflt, this.clearSkip);
     this.met = c;
     return c === null;
   }
+
+  /** Climbing II, phase 5 (maker B): what a climb up's room tests leave out (the pole a climb from its top is begun on); undefined at every other time. */
+  private clearSkip: RAPIER.Collider | undefined = undefined;
+
+  /**
+   * Climbing II, phase 5 (maker B, `climb.poleTop` 'climb'): a body at a pole's top climbs onto a lip in reach the way `i.moveX`,
+   * `i.moveZ` look (src/player/poleClimb.ts's hand-over at the top): the lip found as a grab finds it (the use key's reach), taken as
+   * the hang's own (its kind, its slope, the heading facing it) and the climb up begun from where the body is, as W at a hang begins
+   * it, its room tests leaving the pole (`pole`) out. True where the climb began; false where no lip is in reach that way or the
+   * climb's own tests refuse it (its words in `said`; the ledges then hold nothing).
+   */
+  climbFrom(world: LedgeWorld, b: LedgeBody, i: LedgeIn, pole: RAPIER.Collider | null): boolean {
+    this.barK = i.scale;
+    const T = CLIMB_TUNE;
+    const grip = this.fromGrip;
+    this.fromGrip = Number.NaN;
+    if (T.ledges !== 'on' || this.phase !== LEDGE_NONE) return false;
+    const s = i.scale;
+    const L = this.found;
+    const ahead = (T.useReach > T.reachAhead ? T.useReach : T.reachAhead) * s;
+    this.qflt = i.filter;
+    // (The reach band about the hands on the pole (`fromGrip`, the pole's grip): the feet where a body reaching up to them would
+    // stand, the band's middle under them; the body's own feet where none is given.)
+    const feet = grip === grip ? grip - ((T.reachLow + T.reachHigh) / 2 + T.gripDrop) * s : b.pos.y;
+    if (!this.findLip(world, b.pos.x, feet, b.pos.z, i.moveX, i.moveZ, (T.reachLow + T.gripDrop) * s, (T.reachHigh + T.gripDrop) * s, ahead, i.filter, false, L)) return false;
+    this.s = s;
+    this.braced = this.bracedAt(world, L, s, i.filter);
+    this.measureSlope(world, L, i.filter);
+    this.lip.copy(L);
+    this.heading = Math.atan2(-L.nx, -L.nz);
+    this.said = '';
+    this.clearSkip = pole ?? undefined;
+    try {
+      this.climbUp(world, b, i);
+    } finally {
+      this.clearSkip = undefined;
+    }
+    if (this.phase === LEDGE_NONE) return false;
+    b.vel.x = 0;
+    b.vel.y = 0;
+    b.vel.z = 0;
+    this.climbsFrom++;
+    return true;
+  }
+
+  /** Phase 5 (maker B): climbs begun from a pole's top (`climbFrom`), the console's and the tests'. */
+  climbsFrom = 0;
+  /** Phase 5 (maker B): the hands' height on the pole a `climbFrom` reaches about, written by its caller just before (NaN: the body's own feet). */
+  fromGrip = Number.NaN;
 
   /** The capsule shrunk all round by `brushNow` (made again only when the brush moves: an event, a climb up's). */
   private brushShape(crouched: boolean): RAPIER.Shape {

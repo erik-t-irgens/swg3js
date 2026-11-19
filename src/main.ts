@@ -136,7 +136,7 @@ import { CLIMB_TUNE, LEDGE_MUTES, resetClimbTune, tuneClimb } from './anim/climb
 import { climbDialsFor } from './anim/climbDials.ts';
 import { moveDialsFor } from './anim/moveDials.ts';
 import { MOVE_TUNE, moveBefore, resetMoveTune, tuneMove } from './anim/moveTune.ts';
-import { climbCourse, courseIds, extraIds, ropeLandIds, type ClimbCourse } from './anim/climbCourse.ts';
+import { climbCourse, courseIds, extraIds, poleTopIds, ropeLandIds, type ClimbCourse } from './anim/climbCourse.ts';
 import { buildCourseColliders, courseToWorld, courseTriangles, courseWayToWorld, standCourseRopes, type CourseCollider, type CourseFrame } from './anim/climbCourseBuild.ts';
 import { HangingRope } from './player/hangingRope.ts';
 import type { SolidRole } from './anim/climbCourse.ts';
@@ -6944,7 +6944,7 @@ class App {
        * wall climb read as the world's own still geometry, stood behind a short curtain so nothing is built in play.
        * `pieces` stands only those ids; `{ clear: true }` takes it down (so do a travel, the select screen and a reload).
        */
-      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean; ropeLands?: boolean } = {}) => {
+      climbTest: async (o: { clear?: boolean; pieces?: string[]; ahead?: number; gap?: number; extras?: boolean; ropeLands?: boolean; poleTops?: boolean } = {}) => {
         const cleared = this.dropClimbTest('cleared');
         if (o.clear) return { cleared };
         if (!this.inWorld || this.traveling) return { cleared, error: 'not now: enter the world first' };
@@ -6956,8 +6956,10 @@ class App {
         const ropeLands = o.ropeLands ?? CLIMB_TUNE.ropes === 'on';
         // (The fixer: and laid for the figure standing, its lips in the middle of each band for its size: `ropeLandTops`.)
         const ropeScale = this.player.ledgeScale();
-        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras, ropeLands, ropeScale });
-        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : [], ropeLands ? ropeLandIds() : []) };
+        // (Phase 5, maker B: and the poles' tops unless `poleTops: false`, only while `climb.poles` is 'on' unless asked.)
+        const poleTops = o.poleTops ?? CLIMB_TUNE.poles === 'on';
+        const plan = climbCourse({ pieces: o.pieces, gap: o.gap, extras, ropeLands, ropeScale, poleTops });
+        if (!plan.pieces.length) return { cleared, error: `no piece by those ids (${plan.unknown.join(', ')})`, ids: courseIds().concat(extras ? extraIds() : [], ropeLands ? ropeLandIds() : [], poleTops ? poleTopIds() : []) };
         const h = this.player.heading;
         const ahead = o.ahead ?? 4;
         const p = this.player.worldPos;
@@ -6987,7 +6989,7 @@ class App {
           deep = Math.max(deep, hi - lo + 0.55);
         }
         const floor = Math.ceil(deep * 10) / 10;
-        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras, ropeLands, ropeScale });
+        const course = climbCourse({ pieces: o.pieces, gap: o.gap, floor, extras, ropeLands, ropeScale, poleTops });
         const frame: CourseFrame = { ox, oz, h, ref: (q) => refs.get(q.id) ?? 0 };
         await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');
         const out = course.pieces.map((piece) => {
@@ -15019,6 +15021,9 @@ class App {
     s.bar = p.bar.promptWord();
     // Phase 4 (maker B): on a rope, the bar's own words (Space lets go, the crouch drops), and nothing to press flying off it or landing.
     if (!s.bar) s.bar = p.rope.promptWord();
+    // Phase 5 (maker B): on a pole, its own words (Space jumps off, the crouch slides down; or the bar's, by its switches), and
+    // nothing to press in the jump's flight.
+    if (!s.bar) s.bar = p.pole.promptWord();
     // On foot, and standing at a bridge's controls too: the long line asks for the lift underfoot
     // before it asks what is flown, and both readings are gathered here so that the long line can
     // read them rather than ask for them again on every frame it is written.
@@ -15123,6 +15128,8 @@ class App {
     s.climbBar = s.climb !== '' && p.reachBar;
     // (Phase 4, maker B: and a rope, whose word is "grab" too.)
     if (s.climb !== '' && p.reachRope) s.climbBar = true;
+    // (Phase 5, maker B: and a pole, "grab" as well.)
+    if (s.climb !== '' && p.reachPole) s.climbBar = true;
     return s;
   }
 
@@ -17969,11 +17976,12 @@ class App {
     // While the world editor flies, the player is where its body was kept (the return point), hidden (`j`): the server
     // measures creature keeping, a group's reach and a duel's from the body, never from the camera.
     const edRet = this.editor?.returnPlace ?? null;
-    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.rope.onRope && !p.aboard ? p.rope.peerPlace(leanedAt) : p.worldPos;
+    const at = edRet ? leanedAt.set(edRet.x, edRet.y, edRet.z) : leans ? p.leanedAt(leanedAt) : p.bar.onBar && !p.aboard ? p.bar.peerPlace(leanedAt) : p.rope.onRope && !p.aboard ? p.rope.peerPlace(leanedAt) : p.pole.onPole && !p.aboard ? p.pole.peerPlace(leanedAt) : p.worldPos;
     // (Climbing II, phase 3, maker B: hanging from a bar the place is where a free hang's hands would be on the grip, and the
     // rig's state the free hang's, so another player's game, which has no bar's swing on the wire, stands the nearest pose it
     // has, its hands on the bar; in the flight off it the body's own place and the falling loop's state. Phase 4, maker B: on a
-    // rope the same, its hands on the rope's grip, and the rope itself goes as a held rope from its anchor: `ropeForWire`.)
+    // rope the same, its hands on the rope's grip, and the rope itself goes as a held rope from its anchor: `ropeForWire`. Phase 5,
+    // maker B: on a pole the same, a free hang's hands on the pole's axis where the hands are, facing it: `PoleClimb.peerPlace`.)
     const n2 = (n: number) => Number(n.toFixed(2));
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
@@ -28897,6 +28905,8 @@ class App {
     // Phase 4: off a rope the plain way (the swing's own velocity kept); and a rope stood or the console's taken down.
     if (o.letGo && p.rope.holding) p.rope.letGo(p as never, true);
     if (o.rope !== undefined && o.rope !== false) words.push(this.consoleRope(o.rope));
+    // Phase 5: off a pole, straight down.
+    if (o.letGo && p.pole.holding) p.pole.letGo(p as never);
     // The feedback round: the last climb up's room tests in full (which test, where, what it met and how far into it, and
     // what the rule made of it), and nothing else.
     if (o.room) return { room: p.ledge.roomReport(), roomRule: CLIMB_TUNE.roomRule, roomSay: CLIMB_TUNE.roomSay, grabFree: CLIMB_TUNE.grabFree, grabsFreed: p.ledge.grabsFreed };
@@ -28910,6 +28920,8 @@ class App {
       bar: p.bar.report(),
       // Phase 4: the rope held, its swing, the ropes standing and the clips' times it is drawn at.
       rope: p.rope.report(),
+      // Phase 5: the pole held, where the hands are up it and round it, and the clip's time it is drawn at.
+      pole: p.pole.report(),
       brace: p.brace.report(),
       limbs: p.limbs.report(),
       // Smoothness II, items 3 and 4: the figure's spheres (the push laid on now, what is left in a wall, the drawn top held).

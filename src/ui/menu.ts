@@ -59,12 +59,12 @@ export interface EmoteSource {
 }
 
 const ACTION_LABELS: Record<Action, string> = {
-  forward: 'Move forward (held into a steep face: climb it; on a wall: up; hanging: the way you look, up a ladder-like hold or showing a hop for Space; on a bar: swing forward; on a rope: climb up)',
-  back: 'Move back (on a wall: down; hanging: down a ladder-like hold, or showing a drop for Space; on a bar: swing back; on a rope: climb down)',
-  left: 'Strafe left (on a wall, a ledge or a bar: that way; on a rope: swing toward the view)',
-  right: 'Strafe right (on a wall, a ledge or a bar: that way; on a rope: swing away from the view)',
-  jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off; hanging: takes the hop shown, else a small jump off; on a bar: let go and fly on the swing; on a rope: let go, landing on a lip it flies to)',
-  crouch: 'Crouch (tap moving: roll; on a wall: let go; hanging: a tap drops to the lip beneath, held lets go; on a bar or a rope: drop straight down; under a low roof: duck further)',
+  forward: 'Move forward (held into a steep face: climb it; on a wall: up; hanging: the way you look, up a ladder-like hold or showing a hop for Space; on a bar: swing forward; on a rope: climb up; on a pole: climb up, at its top onto a lip or a floor beside it)',
+  back: 'Move back (on a wall: down; hanging: down a ladder-like hold, or showing a drop for Space; on a bar: swing back; on a rope: climb down; on a pole: climb down)',
+  left: 'Strafe left (on a wall, a ledge or a bar: that way; on a rope: swing toward the view; on a pole: round it)',
+  right: 'Strafe right (on a wall, a ledge or a bar: that way; on a rope: swing away from the view; on a pole: round it)',
+  jump: 'Jump (hold: Force jump; on a wall or a ledge: climb up, hop, jump off; hanging: takes the hop shown, else a small jump off; on a bar: let go and fly on the swing; on a rope: let go, landing on a lip it flies to; on a pole: jump off the way you look, caught by a pole, bar or lip in reach)',
+  crouch: 'Crouch (tap moving: roll; on a wall: let go; hanging: a tap drops to the lip beneath, held lets go; on a bar or a rope: drop straight down; on a pole: slide down, again to let go; under a low roof: duck further)',
   prone: 'Lie prone (along the ground, under anything over half a metre; again to get up where there is room; under a roof too low to duck the body lies down and gets up by itself)',
   kneel: 'Kneel',
   walk: 'Walk, held (on foot: the slowest pace)',
@@ -75,7 +75,7 @@ const ACTION_LABELS: Record<Action, string> = {
   saberThrow: 'Throw saber / kick',
   saberToggle: 'Saber on and off',
   saberStyle: 'Next saber style / blaster',
-  mount: 'Mount, dismount, elevator, climb (grab a lip, a bar or a rope, start a wall climb)',
+  mount: 'Mount, dismount, elevator, climb (grab a lip, a bar, a rope or a pole, start a wall climb)',
   ship: 'Ship menu (in a ship)',
   switchClass: 'Switch class (developer)',
   map: 'Map',

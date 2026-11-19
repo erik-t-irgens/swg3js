@@ -54,6 +54,10 @@ import { figureScaleOf } from './peerHang.ts';
 import { WallClimb } from './wallClimb.ts';
 import { ClimbCamFollow } from './climbCam.ts';
 import { driveBarClips, driveDropClip, driveHangClips, driveRopeClips, releaseBarClip, releaseRopeClip, type HangClipState } from './hangClips.ts';
+import { drivePoleClips, releasePoleClip } from './hangClips.ts';
+import { HAND_BAR, HAND_NONE, POLE_STEP, PoleClimb, type PoleCatcher, type PoleWorld } from './poleClimb.ts';
+import { measurePoleTable } from '../anim/poleClips.ts';
+import type { RopeTable } from '../anim/ropeClips.ts';
 import { BarSwing, type BarWorld } from './barSwing.ts';
 import { RopeSwing, type RopeWorld } from './ropeSwing.ts';
 import type { HangingRope } from './hangingRope.ts';
@@ -581,6 +585,19 @@ export class Player {
   private ropeRooted = false;
   /** Phase 4: the scene the ropes' ribbons hang in (the player's own). */
   private readonly ropeScene: THREE.Scene;
+  /**
+   * Climbing II, phase 5 (`climb.poles` 'on', src/player/poleClimb.ts): a pole grabbed with the use key after the move (`sensePole`,
+   * after the ropes'), and while it holds the body the climb's own frame in place of the movement (`poleFrame`), its clip by the way
+   * climbed (src/player/hangClips.ts's `drivePoleClips`), the figure drawn with its mean grip on the pole and its hands and feet put
+   * on it (`placePoleLimbs`). The grapple's harness steps the very same calls in the same places.
+   */
+  readonly pole = new PoleClimb({ cuboid: (x, y, z) => new RAPIER.Cuboid(x, y, z), capsule: (h, r) => new RAPIER.Capsule(h, r) });
+  /** Phase 5: the pole's clip measured off this rig (`measurePoleTable`), once a rig, and the rig it was measured off. */
+  private poleTable: RopeTable | null = null;
+  private poleTableRig: CharacterRig | null = null;
+  /** Phase 5: whether the rig's root was last drawn by the pole (`applyPoleRoot`), and whether the pole put the hands and feet on it last frame. */
+  private poleRooted = false;
+  private poleLimbs = false;
   /**
    * Climbing II, phase 2, item 1: the use key handed to the climb by the game's one use-key dispatch (main.ts's E) and still
    * held, which `climb.grab` 'use' grabs and climbs on (`LedgeIn.use`).
@@ -1171,6 +1188,8 @@ export class Player {
     this.bar.reset('stood elsewhere');
     // (Phase 4: nor a rope.)
     this.rope.reset('stood elsewhere');
+    // (Phase 5: nor a pole.)
+    this.pole.reset('stood elsewhere');
   }
 
   /**
@@ -1325,6 +1344,31 @@ export class Player {
         this.ropeRooted = false;
       }
     }
+    // Climbing II, phase 5: on a pole, the figure drawn where its clip's mean grip is on the pole, and after a let-go eased back
+    // onto the body (never under `climb.poles` 'off').
+    if (rig && (this.poleRooted || this.pole.offset)) {
+      if (this.pole.offset) this.applyPoleRoot();
+      else {
+        rig.root.position.x = 0;
+        rig.root.position.z = 0;
+        rig.root.quaternion.set(0, 0, 0, 1);
+        this.poleRooted = false;
+      }
+    }
+  }
+
+  /** Phase 5: the rig's root put where the pole draws the figure against the body (its offset, the world's frame, into the group's). */
+  private applyPoleRoot(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const P = this.pole;
+    const c = Math.cos(this.heading);
+    const s = Math.sin(this.heading);
+    rig.root.position.x = P.offX * c - P.offZ * s;
+    rig.root.position.y += P.offY;
+    rig.root.position.z = P.offX * s + P.offZ * c;
+    rig.root.quaternion.set(0, 0, 0, 1);
+    this.poleRooted = true;
   }
 
   /**
@@ -1405,6 +1449,7 @@ export class Player {
     if (this.wall.holding) this.wall.reset('off the feet');
     if (this.bar.holding) this.bar.reset('off the feet');
     if (this.rope.holding) this.rope.reset('off the feet');
+    if (this.pole.holding) this.pole.reset('off the feet');
     if (this.brace.busy) {
       this.brace.reset();
       this.limbs.reset();
@@ -3030,6 +3075,12 @@ export class Player {
       this.ropeFrame(dt, input, cam, world);
       return;
     }
+    // Climbing II, phase 5: on a pole (`PoleClimb`), the climb has the body in place of the movement. Never under `climb.poles`
+    // 'off', where nothing ever holds.
+    if (this.pole.holding) {
+      this.poleFrame(dt, input, cam, world);
+      return;
+    }
     // Wave 4: hanging from a ledge, or carried through one of its one-offs (`LedgeHang`): the ledge has the body in place
     // of the movement. Never under `climb.ledges` 'before', where nothing ever holds.
     if (this.ledge.holding) {
@@ -3470,6 +3521,12 @@ export class Player {
       this.ropeFrame(dt, input, cam, world);
       return;
     }
+    // Climbing II, phase 5: a pole grabbed with the use key (`PoleClimb.sense`), after the ropes and before the ledges (a pole is
+    // grabbed facing it, never climbed as a wall).
+    if (this.sensePole(dt, input, move, wasGrounded, atControls)) {
+      this.poleFrame(dt, input, cam, world);
+      return;
+    }
     if (this.senseLedge(dt, input, move, wasGrounded, atControls)) {
       this.hangFrame(dt, input, cam, world);
       return;
@@ -3489,6 +3546,11 @@ export class Player {
     if (this.rope.said) {
       this.onLedgeWords?.(this.rope.said);
       this.rope.said = '';
+    }
+    // (Phase 5: and the pole's, "No room to climb the pole here.", the same way.)
+    if (this.pole.said) {
+      this.onLedgeWords?.(this.pole.said);
+      this.pole.said = '';
     }
     // Wave 3: the drawn body's lag over a step (`DrawnHeight`): what the controller added to a move that began on the
     // ground beyond the plane under the body's own rise; and the stairs the ground along the travel makes, read here
@@ -3802,6 +3864,8 @@ export class Player {
 
   /** Hanging from a ledge or carried through one of its one-offs, or on a wall: the fight's keys are muted by the game, the grapple refused. */
   get climbHolds(): boolean {
+    // (Climbing II, phase 5: and on a pole.)
+    if (this.pole.holding) return true;
     return this.ledge.holding || this.wall.holding || this.bar.holding || this.rope.holding;
   }
 
@@ -3860,14 +3924,210 @@ export class Player {
   climbReach(): boolean {
     this.reachBar = false;
     this.reachRope = false;
+    this.reachPole = false;
     if (CLIMB_TUNE.grab !== 'use' || this.mounted || this.piloting || this.aboard || this.noclip || this.swimming || this.climbHolds || this.grapple.out || this.eva || this.hp <= 0) return false;
     const li = this.fillLedgeIn(0, null, null, false);
     li.busy = false;
     const w = this.physics.world as unknown as LedgeWorld;
+    // (Climbing II, phase 5: a pole in reach with room on it, `climb.poles` 'on': its grab comes before the ledges' and the wall's.
+    // Maker B: and whether it was a pole, kept for the action bar's word, "grab", as a bar's and a rope's are.)
+    this.reachPole = this.pole.canGrab(this.physics.world as unknown as PoleWorld, this, li);
+    if (this.reachPole) return true;
     // (Climbing II, phase 3: a bar in reach with room under it, `climb.bars` 'on', first: the ledges pass a bar. Maker B: and
     // whether it was a bar, kept for the action bar's word, "grab".)
     this.reachBar = this.bar.canGrab(this.physics.world as unknown as BarWorld, this, li);
     return this.reachBar || this.ledge.canGrab(w, this, li) || this.wall.canClimb(w, this, li) || this.ropeReach(li);
+  }
+
+  /**
+   * Climbing II, phase 5: after the move, a pole grabbed with the use key (`PoleClimb.sense`), not swimming, on the grapple's rope or
+   * in its flight, thrown, dead, at a ship's controls, prone, in a wall move or a Force jump's rise, as the ropes' grab. True where
+   * the pole took the body.
+   */
+  private sensePole(dt: number, input: Input, move: THREE.Vector3, wasGrounded: boolean, atControls: boolean): boolean {
+    if (CLIMB_TUNE.poles !== 'on') return false;
+    const li = this.fillLedgeIn(dt, input, move, wasGrounded);
+    li.busy = this.swimming || this.grapple.out || this.grapple.released || this.flung || this.hp <= 0 || atControls || this.prone || this.jka.inSpecialJump || (this.jka.isForceJumping && this.vel.y > 0) || (this.aboard !== null && isSurfaceRoom(this.aboard));
+    this.pole.said = '';
+    if (!this.pole.sense(this.physics.world as unknown as PoleWorld, this, li)) return false;
+    this.takenByPole();
+    return true;
+  }
+
+  /** A pole grabbed: as a rope's (`takenByRope`), the fall ends with no harm and the air's and the slope's memories are put down. */
+  private takenByPole(): void {
+    this.jka.reset();
+    this.jka.holdApex(this.pos.y);
+    this.anim.drop();
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.brace.reset();
+    this.vel.set(0, 0, 0);
+    this.grounded = false;
+    this.heading = this.pole.heading;
+    this.hangClips.posePlaying = '';
+    // (Maker B: the health the pole's frames measure a blow against.)
+    this.poleHp = this.hp;
+  }
+
+  /** Climbing II, phase 5 (maker B): the health at the last frame on a pole (a blow since then of `climb.barKnock` or more knocks the body off). */
+  private poleHp = 0.5;
+  /** Phase 5 (maker B): a bar caught in a pole's jump takes the frame's steps that flight left (`barFrame`); -1 the frame's own. */
+  private barStepsOnce = -1;
+  /** Phase 5 (maker B): the pole's catcher (`PoleCatcher`): the bars, the ledges and the climb up from its top, asked by the pole itself. */
+  private readonly poleCatch: PoleCatcher = { bar: () => this.poleCatchBar(), lip: () => this.poleCatchLip(), top: () => this.poleCatchTop() };
+
+  /**
+   * Phase 5 (maker B): the catcher's frame record: the use key handed to the climb as a hop's catch is (no key pressed), the body in
+   * the air, the way the pole looks along (`PoleClimb.wayX`, `wayZ`), a physics step's time.
+   */
+  private poleCatchIn(): LedgeIn {
+    const li = this.fillLedgeIn(POLE_STEP, null, null, false);
+    li.use = true;
+    li.busy = false;
+    li.grounded = false;
+    li.wasGrounded = false;
+    li.jumped = false;
+    li.crouchHeld = false;
+    li.moveX = this.pole.wayX;
+    li.moveZ = this.pole.wayZ;
+    return li;
+  }
+
+  /** Phase 5 (maker B): a bar in reach of a pole's jump taken by the bars' own grab (`BarSwing.sense`), its refusal never said. */
+  private poleCatchBar(): boolean {
+    if (CLIMB_TUNE.bars !== 'on') return false;
+    const took = this.bar.sense(this.physics.world as unknown as BarWorld, this, this.poleCatchIn());
+    this.bar.said = '';
+    return took;
+  }
+
+  /** Phase 5 (maker B): a lip in reach of a pole's jump taken by the ledges' own grab (`LedgeHang.sense`). */
+  private poleCatchLip(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    return this.ledge.sense(this.physics.world as unknown as LedgeWorld, this, this.poleCatchIn(), this.loco.stamina);
+  }
+
+  /** Phase 5 (maker B): a lip in reach of a pole's top climbed onto by the ledges' own climb up (`LedgeHang.climbFrom`), the pole left out. */
+  private poleCatchTop(): boolean {
+    if (CLIMB_TUNE.ledges !== 'on') return false;
+    const li = this.poleCatchIn();
+    this.ledge.fromGrip = this.pole.gripY;
+    return this.ledge.climbFrom(this.physics.world as unknown as LedgeWorld, this, li, this.pole.pole.col as unknown as RAPIER.Collider | null);
+  }
+
+  /**
+   * Phase 5: a frame on a pole (`PoleClimb.step`) in place of the movement, as a rope's (`ropeFrame`): the speed classes put down,
+   * what is in the hands kept as a hang keeps it, the climb stepped on the physics' own coming steps (`Physics.stepsAhead`), the
+   * pole's clip by the way climbed, the figure placed with its mean grip on the pole, and its hands and feet put on it.
+   */
+  private poleFrame(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
+    void world;
+    this.loco.idle(0, this.staminaPool);
+    this.slope.reset();
+    this.feet.reset();
+    this.drawn.reset();
+    this.saber.holster();
+    this.blocking = false;
+    this.aiming = false;
+    cam.aim = false;
+    this.swimming = false;
+    this.submerged = false;
+    this.lockedHeading = null;
+    this.crouching = false;
+    const li = this.fillLedgeIn(dt, input, null, false);
+    // (Maker B: where the view looks, the way a jump off goes; none aboard a ship's rooms, whose frame is the hull's: away from the pole.)
+    if (this.aboard) li.viewYaw = Number.NaN;
+    else {
+      cam.forward(fwd);
+      li.viewYaw = Math.atan2(fwd.x, fwd.z);
+    }
+    const P = this.pole;
+    // Maker B: a blow taken since the last frame on the pole, hard enough, knocks the body off (`PoleClimb.knock`), as off a bar; the
+    // water under the body lets go into the swim and ends a jump's flight (the swim's own surface and depth; none indoors or aboard);
+    // and the bars, the ledges and the climb up from the top are the pole's catcher.
+    if (this.hp < this.poleHp) P.knock(this.poleHp - this.hp);
+    this.poleHp = this.hp;
+    if (!this.aboard && !this.inside) {
+      const flat = world.waterColumnAt(this.pos.x, this.pos.z);
+      P.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
+    } else P.swimLine = Number.NEGATIVE_INFINITY;
+    P.catcher = this.poleCatch;
+    P.steps = this.physics.stepsAhead(dt);
+    P.behind = this.physics.behind;
+    P.step(this.physics.world as unknown as PoleWorld, this, li);
+    // Maker B: a bar or a lip caught in the jump's flight, or the climb onto a lip from the top: the pole's clip and its hands and
+    // feet let go of, and the body the bar's or the ledge's from this very frame (a bar's swing taking the steps the flight left).
+    if (P.handed !== HAND_NONE) {
+      releasePoleClip(this.rig, P);
+      this.placePoleLimbs();
+      this.poleRooted = false;
+      if (P.handed === HAND_BAR) {
+        this.takenByBar();
+        this.barStepsOnce = P.stepsLeft;
+        this.barFrame(dt, input, cam, world);
+        return;
+      }
+      this.takenByLedge();
+      this.hangFrame(dt, input, cam, world);
+      return;
+    }
+    // (A climb up from the top the ledges refused says why, as a hang's refusal does.)
+    if (this.ledge.said) {
+      this.onLedgeWords?.(this.ledge.said);
+      this.ledge.said = '';
+    }
+    this.setCrouchCollider(false);
+    this.jka.holdApex(P.apexY);
+    this.grounded = false;
+    if (P.holding) this.heading = P.heading;
+    this.torsoTwist = 0;
+    this.groundSpeed = 0;
+    this.moveAmount += (0 - this.moveAmount) * Math.min(1, dt * 10);
+    this.updateThrown(dt, input, cam);
+    this.updateOrbit(dt);
+    this.updateBlades();
+    this.animatePole(dt);
+    this.placeVisual();
+    this.placePoleLimbs();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
+  }
+
+  /** Phase 5: the pole's clip measured off the rig once (`measurePoleTable`), the figure's place, and the clip on the rig. */
+  private animatePole(dt: number): void {
+    const rig = this.rig;
+    if (!rig) return;
+    if (this.poleTableRig !== rig) {
+      const T = measurePoleTable(rig);
+      if (T) {
+        this.poleTable = T;
+        this.poleTableRig = rig;
+      }
+    }
+    this.pole.placeFigure(this.poleTableRig === rig ? this.poleTable : null, rig.root.scale.y, this.pos);
+    drivePoleClips(rig, this.pole, dt, this.hangClips);
+    this.group.updateMatrixWorld(true);
+    rig.twistTorso(0, 0);
+  }
+
+  /**
+   * Phase 5: while the hands are on a pole, its hands and feet put on it by the ledges' limb solve (`PoleClimb.limbsFor`, src/player/
+   * limbPlace.ts), the figure posed and placed; the frame after, let go of. Nothing at all while neither.
+   */
+  private placePoleLimbs(): void {
+    const rig = this.rig;
+    if (!rig) return;
+    const P = this.pole;
+    const show = P.onPole;
+    if (!show && !this.poleLimbs) return;
+    const lp = this.limbs;
+    this.group.updateMatrixWorld(true);
+    const room = this.aboard;
+    const toPhys = room ? this.roomInverse.copy(roomFrame(room)).invert() : null;
+    P.limbsFor(lp, rig, toPhys);
+    if (show) lp.place(rig, null, toPhys);
+    this.poleLimbs = show;
   }
 
   /** Climbing II, phase 4: a rope in reach with room under it (`climb.ropes` 'on'): `climbReach`'s last ask (a rope is no collider: nothing else is it). */
@@ -4058,6 +4318,8 @@ export class Player {
 
   /** Climbing II, phase 3 (maker B): whether the last `climbReach` found a bar (the action bar's "grab" for its "climb"). */
   reachBar = false;
+  /** Climbing II, phase 5 (maker B): whether the last `climbReach` found a pole (its word "grab" too). */
+  reachPole = false;
 
   /**
    * Climbing II, phase 3: after the move, a bar grabbed with the use key (`BarSwing.sense`): not swimming, on the rope or in its
@@ -4125,7 +4387,9 @@ export class Player {
       const flat = world.waterColumnAt(this.pos.x, this.pos.z);
       B.swimLine = flat + world.seaSwellOverFlat(this.pos.x, this.pos.z, flat) - SWIM_DEPTH;
     } else B.swimLine = Number.NEGATIVE_INFINITY;
-    B.steps = this.physics.stepsAhead(dt);
+    // (Climbing II, phase 5, maker B: a bar caught in a pole's jump takes the frame's steps that flight left.)
+    B.steps = this.barStepsOnce >= 0 ? this.barStepsOnce : this.physics.stepsAhead(dt);
+    this.barStepsOnce = -1;
     B.behind = this.physics.behind;
     B.step(this.physics.world as unknown as BarWorld, this, li);
     this.setCrouchCollider(false);
@@ -4173,6 +4437,9 @@ export class Player {
    * held, let go of in the flight, or reached for), the engine's own collider; null for none (every bar a wall to the camera).
    */
   barCamera(): RAPIER.Collider | null {
+    // (Climbing II, phase 5: the pole the hands hold, and maker B's the pole jumped off while the jump flies, by the same rule:
+    // `PoleClimb.cameraCollider`.)
+    if (this.pole.holding) return this.pole.cameraCollider() as unknown as RAPIER.Collider | null;
     return this.bar.cameraCollider() as unknown as RAPIER.Collider | null;
   }
 
@@ -4254,6 +4521,9 @@ export class Player {
     // swung at the top of the update, `tickRopes`).
     releaseRopeClip(this.rig, this.rope);
     this.rope.tick(dt);
+    // Phase 5: and the pole's (its clip's preference let go of where nothing else did, the drawn offset eased out).
+    releasePoleClip(this.rig, this.pole);
+    this.pole.tick(dt);
   }
 
   /**

@@ -37,6 +37,7 @@ import { JKA, UNIT } from './jkaMove.ts';
 import { LEDGE_CAPSULE, Lip, type LedgeBody, type LedgeHang, type LedgeIn, type LedgeMakers, type LedgeStamina, type LedgeWorld } from './ledge.ts';
 import type { LimbPlace, LimbRig } from './limbPlace.ts';
 import { ClimbHolds } from './climbHolds.ts';
+import { isPoleCollider, type BarCollider } from './barShape.ts';
 
 /** Off the wall, and on it. */
 export const WALL_NONE = 0;
@@ -343,6 +344,8 @@ export class WallClimb {
     this.casts++;
     const h = world.castRayAndGetNormal(ray, this.qlen, true, STILL_FLAGS, this.qflt);
     if (!h) return false;
+    // (Climbing II, phase 5: a pole, `climb.poles` 'on', is grabbed and climbed as a pole, never as a face. Under 'off' not asked.)
+    if (CLIMB_TUNE.poles === 'on' && isPoleCollider(h.collider as unknown as BarCollider)) return false;
     const t = h.timeOfImpact;
     this.htoi = t;
     this.hx = this.qx + this.qdx * t;

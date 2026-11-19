@@ -598,6 +598,51 @@ export interface ClimbTune {
   freeBehind: 'reach' | 'side';
   /** Item 0g: the free look-away's held pose and the hop's start, seconds into its clip (ours, 0.3: the braced look-away's own `lookPose`). */
   freeBehindParts: { pose: number };
+  /**
+   * Climbing II, phase 5 (poles, the owner's "Pole climbing as well would be nice"): 'on' a still collider long, upright and thin
+   * (its cross-section under `poleThin` over a length of at least `poleLength`, src/player/barShape.ts's `poleAxisOf`: the course's
+   * `poles`) is a pole: E in reach grabs it facing it, W and S climb it up and down on `climbing_a_rope_1` (the feet on it, played
+   * backward for down) and stop at its top and its bottom, A and D turn the body round it, the view free (src/player/poleClimb.ts);
+   * the wall climb never takes one for a face. 'off' phase 5's before (the feedback round II's `5421344`), where a pole is whatever
+   * the wall climb and the ledges make of it.
+   */
+  poles: 'on' | 'off';
+  /** Phase 5: a pole is no thicker than this across, metres (the brief's start, 0.15: a thick pole or a sapling a fist can still close round; a lamp post's 0.2 is a wall). */
+  poleThin: number;
+  /** Phase 5: and at least this long, metres (the brief's start, 1.5: a pole a body hangs its whole length on, hands to feet; a short post is not climbed). */
+  poleLength: number;
+  /** Phase 5: W and S climb the pole at this, m/s (ours, 0.5: the rope's own climb, `ropeClimb`, the clip a little faster than its own pace, about 0.2, its holding hands still keeping their place since its phase follows the way climbed). */
+  poleClimb: number;
+  /** Phase 5: A and D turn the body round the pole at this, degrees a second (ours, 90: a quarter of the way round in a second, a hand-over-hand shuffle round a post, slow enough that the camera keeps up). */
+  poleTurn: number;
+  /** Phase 5: a grab carries the body onto the pole over this, seconds (ours, 0.25: the rope's own grab's, `ropeGrab`). */
+  poleGrab: number;
+  /** Phase 5: each foot's ball stands this far out from the pole's surface on its own side (the feet pinching it from its two sides), metres (ours, 0.04: about a sole's half width, so the instep, not the toes, is against the pole). */
+  poleFootSide: number;
+  /**
+   * Phase 5 (maker B, item 3): 'fly' Space jumps off the pole along the view (`polePush` across the ground, `poleJumpUp` up) in a
+   * flight on the physics' own steps that catches another pole, a bar or a lip in reach on the way as a hop does (src/player/
+   * poleClimb.ts); 'plain' maker A's let-go, straight down (which `climb.poles` 'off' never reaches either).
+   */
+  poleJump: 'fly' | 'plain';
+  /** Phase 5 (maker B): the jump off's push along the view, m/s (ours, 3: a strong shove off with the arms and the feet, about a standing long jump's carry over the flight, enough to reach a pole 2 m off, the course's). */
+  polePush: number;
+  /** Phase 5 (maker B): how high the jump off rises, metres (ours, 0.5: a small jump's, under the movement's own plain jump of 0.8, the body pushing off from a hold rather than the ground). */
+  poleJumpUp: number;
+  /**
+   * Phase 5 (maker B, item 3): 'slide' the crouch slides the body down the pole at `poleSlide`, the hands and feet sliding on it, to
+   * the ground (stood) or the pole's foot (dropped off it), the crouch again letting go at once and W stopping the slide; 'drop'
+   * maker A's let-go, straight down.
+   */
+  poleCrouch: 'slide' | 'drop';
+  /** Phase 5 (maker B): the slide down's speed, m/s (ours, 3: a fireman's slide, six times the climb's own and well under a fall's from a few metres). */
+  poleSlide: number;
+  /**
+   * Phase 5 (maker B, item 3): 'climb' W at the pole's top with a lip or a floor's edge in reach (behind the body first, then
+   * ahead, then either side) climbs onto it by the ledges' own climb up (src/player/ledge.ts's `climbFrom`); 'stop' maker A's, the
+   * climb stops at the top and nothing more.
+   */
+  poleTop: 'climb' | 'stop';
 }
 
 /**
@@ -797,9 +842,36 @@ export const CLIMB_FB2_ALSO: (() => void)[] = [];
 
 /** The feedback round II's switches at their other setting (phase 4's climbing, `5e8f23b`). */
 export function climbFb2Before(): void {
+  // (`5e8f23b` had none of phase 5's either: put back first, so the round's own words below win where a switch is shared.)
+  climbPolesBefore();
   const t = CLIMB_TUNE as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(CLIMB_FB2_BEFORE)) t[k] = v;
   for (const f of CLIMB_FB2_ALSO) f();
+}
+
+/**
+ * Climbing II, phase 5 (poles): every switch it adds, at its other setting (the climbing as the feedback round II shipped it,
+ * `5421344`). A later maker of the round adds its own here (`CLIMB_POLES_ALSO` for one beside the climbing's), so one call puts the
+ * whole round back; `climbFb2Before` calls it first, so every older round's chain of puts back holds.
+ */
+export const CLIMB_POLES_BEFORE: Record<string, string> = {
+  // Maker A's: items 1 and 2 (what a pole is; on the pole: the grab, the climb up and down, the turn round it).
+  poles: 'off',
+  // Maker B's: items 3 and 4 (off the pole: the jump off and its catch, the slide down, the climb onto the top). Their other
+  // settings are maker A's let-go and stop, which `poles` 'off' never reaches either.
+  poleJump: 'plain',
+  poleCrouch: 'drop',
+  poleTop: 'stop',
+};
+
+/** A later maker's own puts back (a switch outside the climbing's table), run after the round's climbing ones. */
+export const CLIMB_POLES_ALSO: (() => void)[] = [];
+
+/** Phase 5's switches at their other setting (the feedback round II's climbing, `5421344`). */
+export function climbPolesBefore(): void {
+  const t = CLIMB_TUNE as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(CLIMB_POLES_BEFORE)) t[k] = v;
+  for (const f of CLIMB_POLES_ALSO) f();
 }
 
 /**
@@ -1050,6 +1122,19 @@ export const CLIMB_TUNE: ClimbTune = {
   swayDamp: 0.5,
   freeBehind: 'reach',
   freeBehindParts: { pose: 0.3 },
+  poles: 'on',
+  poleThin: 0.15,
+  poleLength: 1.5,
+  poleClimb: 0.5,
+  poleTurn: 90,
+  poleGrab: 0.25,
+  poleFootSide: 0.04,
+  poleJump: 'fly',
+  polePush: 3,
+  poleJumpUp: 0.5,
+  poleCrouch: 'slide',
+  poleSlide: 3,
+  poleTop: 'climb',
 };
 
 /** What the game shipped with: what a reset puts back. */
@@ -1195,6 +1280,15 @@ export const CLIMB_RANGES: Record<string, { min: number; max: number }> = {
   swayHz: { min: 0.2, max: 4 },
   swayDamp: { min: 0.05, max: 2 },
   'freeBehindParts.pose': { min: 0, max: 2 },
+  poleThin: { min: 0.02, max: 0.5 },
+  poleLength: { min: 0.3, max: 10 },
+  poleClimb: { min: 0, max: 3 },
+  poleTurn: { min: 0, max: 360 },
+  poleGrab: { min: 0.02, max: 1 },
+  poleFootSide: { min: 0, max: 0.2 },
+  polePush: { min: 0, max: 8 },
+  poleJumpUp: { min: 0, max: 2 },
+  poleSlide: { min: 0.3, max: 10 },
 };
 
 /** The table's choices, by their path, and the words each takes. */
@@ -1244,6 +1338,10 @@ export const CLIMB_CHOICES: Readonly<Record<string, readonly string[]>> = {
   freeHopLegs: ['kick', 'stiff'],
   ladderSway: ['sway', 'stiff'],
   freeBehind: ['reach', 'side'],
+  poles: ['on', 'off'],
+  poleJump: ['fly', 'plain'],
+  poleCrouch: ['slide', 'drop'],
+  poleTop: ['climb', 'stop'],
 };
 
 /**

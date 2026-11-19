@@ -24,12 +24,13 @@ export async function resolve(s, c, next) {
 register('data:text/javascript,' + encodeURIComponent(hook));
 
 const { CharacterRig } = await import('../../../src/player/rig.ts');
-const { driveBarClips, driveHangClips } = await import('../../../src/player/hangClips.ts');
+const { driveBarClips, driveHangClips, drivePoleClips } = await import('../../../src/player/hangClips.ts');
 const { MixamoPack } = await import('../../../src/anim/mixamoPack.ts');
 const { LEDGE_IDS, ledgeClipName } = await import('../../../src/anim/ledgeClips.ts');
 const { WALL_CLIP_NAMES, WALL_IDS, wallClipName } = await import('../../../src/anim/wallClips.ts');
 const { BAR_IDS } = await import('../../../src/anim/barClips.ts');
 const { ROPE_IDS } = await import('../../../src/anim/ropeClips.ts');
+const { POLE_IDS } = await import('../../../src/anim/poleClips.ts');
 const { LimbPlace } = await import('../../../src/player/limbPlace.ts');
 const { CLIMB_TUNE } = await import('../../../src/anim/climbTune.ts');
 const { STILL_FLAGS } = await import('../../../src/player/stairSense.ts');
@@ -61,8 +62,8 @@ const pack = new MixamoPack({
   breath: async () => {},
   // (And the crouched walk, whose head the duck reads at its deepest: Smoothness II's item 4.)
   // (And Climbing II, phase 3's bar clip, which its suites pose: src/anim/barClips.ts.)
-  // (And phase 4's rope clips: src/anim/ropeClips.ts.)
-  also: [...LEDGE_IDS, ...WALL_IDS, 'crouched_walking', ...BAR_IDS, ...ROPE_IDS],
+  // (And phase 4's rope clips: src/anim/ropeClips.ts; and phase 5's pole clip: src/anim/poleClips.ts.)
+  also: [...LEDGE_IDS, ...WALL_IDS, 'crouched_walking', ...BAR_IDS, ...ROPE_IDS, ...POLE_IDS],
   now: () => performance.now(),
 });
 const info = console.info;
@@ -216,6 +217,36 @@ export function drawBarFrame(b: TestBody, F: Figure, dt: number, tab: unknown): 
 const BAR_X = new THREE.Vector3(1, 0, 0);
 /** The player's `barLimbs` for each figure (whether the bar put its hands on the bar last frame). */
 const barLimbs = new WeakMap<Figure, boolean>();
+
+/**
+ * Climbing II, phase 5: the game's pole frame on the figure after the body's (the player's `animatePole`: the pole's placement and
+ * its clip through `drivePoleClips`; `placeVisual`'s `applyPoleRoot`; and `placePoleLimbs`: the hands and feet on the pole by
+ * `PoleClimb.limbsFor` and the limbs' own solve while the hands hold it). The player's own lines are pinned as text by
+ * climbPoles.test.ts.
+ */
+export function drawPoleFrame(b: TestBody, F: Figure, dt: number, tab: unknown): void {
+  const P = b.pole;
+  P.placeFigure(tab as never, F.root.scale.y, b.pos);
+  drivePoleClips(F.rig as never, P as never, dt, F.hang);
+  F.group.position.set(b.pos.x, b.pos.y, b.pos.z);
+  F.group.rotation.set(0, P.heading, 0);
+  F.group.updateMatrixWorld(true);
+  F.rig.twistTorso(0, 0);
+  const c = Math.cos(P.heading);
+  const s = Math.sin(P.heading);
+  F.root.position.set(P.offX * c - P.offZ * s, P.offY, P.offX * s + P.offZ * c);
+  F.root.quaternion.set(0, 0, 0, 1);
+  const show = P.onPole;
+  if (show || poleLimbs.get(F)) {
+    F.group.updateMatrixWorld(true);
+    P.limbsFor(F.lp, F.rig as never, null);
+    if (show) F.lp.place(F.rig as never, null, null);
+    poleLimbs.set(F, show);
+  }
+  F.group.updateMatrixWorld(true);
+}
+/** The player's `poleLimbs` for each figure. */
+const poleLimbs = new WeakMap<Figure, boolean>();
 
 /** The figure's frame after the body's: the hang's, the wall's, or nothing climbing (its climb's push let go, as the player's). */
 export function drawClimb(b: TestBody, F: Figure, dt: number): 'hang' | 'wall' | '' {

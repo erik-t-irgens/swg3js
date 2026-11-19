@@ -486,10 +486,9 @@ export function measureRopeTables(rig: RopeRig): RopeTables | null {
  * then coming down against the rig's root while it holds, so the way the body goes up the rope in one round is a hand's fall
  * from its highest to its lowest there (the mean of the two hands'). What the climb's phase is driven by (the body's way up the
  * rope over this is the share of a round the clip is put at), so a holding hand keeps its place on the rope whatever the climb's
- * speed.
+ * speed. (Phase 5: `name` another climb's clip by its rig name, the pole's; the rope's unless given.)
  */
-export function climbRiseOf(rig: RopeRig): number | null {
-  const name = ROPE_CLIP_NAMES[ROPE_CLIMB];
+export function climbRiseOf(rig: RopeRig, name: string = ROPE_CLIP_NAMES[ROPE_CLIMB]): number | null {
   const d = rig.clipDuration(name);
   if (d === null) return null;
   const times = RopeTable.times(0, d);

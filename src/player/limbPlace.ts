@@ -261,9 +261,17 @@ export class LimbPlace {
     return this.legs ? this.legs[side].w : 0;
   }
 
-  /** Whether `setHand` or the wall asks anything this frame. */
+  /**
+   * Climbing II, phase 5 (the pole's feet, src/player/poleClimb.ts's `limbsFor`): each foot's ball target in the physics frame
+   * (left 0..2, right 3..5) and how much of it (0 to 1), the ankle moved by the ball's way to it and turned as the clip turns it.
+   * Nought: no foot asked so (every caller before the poles).
+   */
+  readonly foot = new Float64Array(6);
+  readonly footTW = new Float64Array(2);
+
+  /** Whether `setHand` or the wall asks anything this frame (or, phase 5, a foot's own target). */
   get busy(): boolean {
-    return this.handW[0] > 0 || this.handW[1] > 0 || this.wallW > 0;
+    return this.handW[0] > 0 || this.handW[1] > 0 || this.wallW > 0 || this.footTW[0] > 0 || this.footTW[1] > 0;
   }
 
   /** A hand's target (0 left, 1 right) in the physics frame and its weight: maker B's bracing asks through this. */
@@ -701,6 +709,8 @@ export class LimbPlace {
     }
     // The feet on the wall.
     if (this.wallW > 0 && world && this.legs) this.placeFeet(world, toPhys);
+    // (Climbing II, phase 5: or each foot on a target of its own, the pole's.)
+    else if ((this.footTW[0] > 0 || this.footTW[1] > 0) && this.legs) this.placeFeetAt(toPhys);
     this.written = true;
     // (The feedback round II: the braced feet's places before the legs were laid serve this frame's solve alone.)
     this.preKept = false;
@@ -914,6 +924,70 @@ export class LimbPlace {
   }
 
   /**
+   * Climbing II, phase 5: each foot with a target of its own (`foot`, `footTW`) put there: the ankle moved by the ball's way (the
+   * toe's joint, else the ankle) to its target by its weight, the knee bent forward and out to its own side (a foot pinching a pole
+   * from beside it), the ankle's world turn kept as the clip has it. The legs' clean pose kept for `restore`, as `placeFeet` keeps it.
+   */
+  private placeFeetAt(toPhys: THREE.Matrix4 | null): void {
+    const legs = this.legs!;
+    // The figure's own turn (its left +x, its front +z).
+    boneIn(this.rig!.root, toPhys, pA, qR);
+    for (let li = 0; li < 2; li++) {
+      const l = legs[li];
+      l.thighQ.copy(l.thigh.quaternion);
+      l.shinQ.copy(l.shin.quaternion);
+      l.ankleQ.copy(l.ankle.quaternion);
+      const w = this.footTW[li];
+      if (!(w > 0)) continue;
+      boneIn(l.thigh.parent!, toPhys, sv, qP);
+      boneIn(l.thigh, toPhys, pA, qA);
+      boneIn(l.shin, toPhys, pB, qB);
+      boneIn(l.ankle, toPhys, pC, qC);
+      if (l.toe) boneIn(l.toe, toPhys, pT, qW);
+      else pT.copy(pC);
+      const w1 = w > 1 ? 1 : w;
+      const q = this.ask;
+      q.ax = pA.x;
+      q.ay = pA.y;
+      q.az = pA.z;
+      q.bx = pB.x;
+      q.by = pB.y;
+      q.bz = pB.z;
+      q.cx = pC.x;
+      q.cy = pC.y;
+      q.cz = pC.z;
+      q.tx = pC.x + (this.foot[li * 3] - pT.x) * w1;
+      q.ty = pC.y + (this.foot[li * 3 + 1] - pT.y) * w1;
+      q.tz = pC.z + (this.foot[li * 3 + 2] - pT.z) * w1;
+      // A straight leg's knee: forward and out to its own side (the left foot's +x). (Maker B: written into the vector's own fields,
+      // never handed to `set`: a double chosen between two numbers and handed across a call the compiler left out is a number made,
+      // 32 bytes a frame for the two legs, which a measure under load caught in every one of twelve processes.)
+      sv.x = li === 0 ? 0.5 : -0.5;
+      sv.y = 0;
+      sv.z = 1;
+      sv.applyQuaternion(qR);
+      q.px = sv.x;
+      q.py = sv.y;
+      q.pz = sv.z;
+      const o = this.out;
+      solveTwoBone(q, o);
+      this.turnLimb(l.thigh, l.shin, l.ankle, qP, qA, qB, qC, qB, o, false);
+      // The ankle's world turn as the clip had it, under the shin's new one.
+      qW.copy(qD2).multiply(qD1).multiply(qB);
+      setBoneWorld(l.ankle, qC, qW);
+    }
+  }
+
+  /** Climbing II, phase 5: each foot's ball now (0 left, 1 right; the toe's joint, else the ankle) in the physics frame, from the bones as they stand. */
+  ballNow(rig: LimbRig, side: number, toPhys: THREE.Matrix4 | null, out: THREE.Vector3): THREE.Vector3 | null {
+    if (!this.limbsOf(rig) || !this.legs) return null;
+    const l = this.legs[side];
+    if (l.toe) boneIn(l.toe, toPhys, pT, qW);
+    else boneIn(l.ankle, toPhys, pT, qW);
+    return out.copy(pT);
+  }
+
+  /**
    * How far into the wall (against its normal) from the ball (`pT`) a face stands within 0.6 m, or NaN, into the leg's `toi`:
    * one ray, or the last one's answer where the foot has not moved. Read off kept fields, so no number crosses a call.
    */
@@ -1012,6 +1086,8 @@ export class LimbPlace {
     this.wallW = 0;
     this.palmW[0] = 0;
     this.palmW[1] = 0;
+    this.footTW[0] = 0;
+    this.footTW[1] = 0;
     this.footFade = false;
     this.holds = null;
     this.pushKeep = 1;

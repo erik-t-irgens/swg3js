@@ -16,6 +16,8 @@ import { WALL_CLIP_NAMES } from '../anim/wallClips.ts';
 import { BAR_TIMES } from '../anim/barClips.ts';
 import type { RopeSwing } from './ropeSwing.ts';
 import { ROPE_CLIMB, ROPE_CLIP_NAMES, ROPE_HANG, ROPE_MODE_CLIMB as MODE_CLIMB, ROPE_MODE_SWING as MODE_SWING, ROPE_TIMES } from '../anim/ropeClips.ts';
+import type { PoleClimb } from './poleClimb.ts';
+import { POLE_CLIP_NAME } from '../anim/poleClips.ts';
 
 /** Climbing II, phase 3 (maker B): how long the bar's landing fades in from the flight's pose, seconds (a mechanic: the clip's own two frames). */
 export const BAR_LAND_FADE = 0.06;
@@ -221,6 +223,42 @@ export function releaseRopeClip(rig: CharacterRig | null, R: RopeSwing): void {
   if (rig.overrideName !== R.swingName && rig.overrideName !== R.airClip) return;
   if (CLIMB_TUNE.transitions === 'blend') rig.blendOut(CLIMB_TUNE.transitionBlend);
   else rig.stopOverride(CLIMB_TUNE.ease);
+}
+
+/**
+ * Climbing II, phase 5 (`climb.poles` 'on'): the pole's clip on the rig for this frame and the rig stepped by `dt`, as the rope's
+ * climb is: with the hands on the pole the rig's state is the free hang's, its clip the pole's own (`prefer`): `climbing_a_rope_1`
+ * held (its rate nought) and put each frame at the time the pole has it at (`PoleClimb.loopT`: its phase by the way climbed, through
+ * the rig's own `timeAt`, no number handed across a call), so the pose is the one the figure is placed by. On the let-go the pole's
+ * preference taken off and the falling loop taken up. The clip's name is the pole's own, made once (`POLE_CLIP_NAME`).
+ */
+export function drivePoleClips(rig: CharacterRig, P: PoleClimb, dt: number, st: HangClipState): void {
+  st.hangFade.fade = CLIMB_TUNE.ease;
+  if (P.ended) {
+    rig.prefer('hangFree', null);
+    rig.setState('air', 0, null, st.hangFade);
+  }
+  if (P.onPole) {
+    rig.prefer('hangFree', POLE_CLIP_NAME);
+    st.ladderRate.rate = 0;
+    st.ladderRate.fade = CLIMB_TUNE.ease;
+    rig.setState('hangFree', 0, null, st.ladderRate);
+    if (P.loopT === P.loopT) {
+      rig.timeAt = P.loopT;
+      rig.setTimeNow(POLE_CLIP_NAME);
+    }
+  }
+  rig.update(dt);
+}
+
+/**
+ * Phase 5: off the pole (the player's `ledgeClocks`, every frame of the movement, before the pole's own `tick`): a pole let go of by
+ * a path that never ran the pole's frame (stood elsewhere, off the feet) still has its preference on the rig, which is taken off here
+ * as the let-go's own frame would (nothing otherwise).
+ */
+export function releasePoleClip(rig: CharacterRig | null, P: PoleClimb): void {
+  if (!P.ended || !rig) return;
+  rig.prefer('hangFree', null);
 }
 
 /**

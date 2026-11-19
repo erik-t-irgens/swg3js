@@ -120,6 +120,12 @@ export interface CourseOptions {
    * figure's, the player's own ledge scale), 1 for the human male's own size.
    */
   ropeScale?: number;
+  /**
+   * Climbing II, phase 5 (maker B): the poles' tops, a row after every other (`poleTopPieces`): a pole beside a platform whose top
+   * is the hands' at the pole's top, and a pole up through a hole in a floor. Off unless asked, so every digest is as it was; the
+   * game's `__debug.climbTest()` asks for them while `climb.poles` is 'on'.
+   */
+  poleTops?: boolean;
 }
 
 /**
@@ -566,6 +572,7 @@ export function climbCourse(o: CourseOptions = {}): ClimbCourse {
   let pieces = allPieces(floor, lipSlope, reach);
   if (o.extras) pieces = pieces.concat(extraPieces(floor));
   if (o.ropeLands) pieces = pieces.concat(ropeLandPieces(floor, o.ropeScale ?? 1));
+  if (o.poleTops) pieces = pieces.concat(poleTopPieces(floor));
   const unknown: string[] = [];
   if (o.pieces) {
     const want = new Set(o.pieces);
@@ -1101,4 +1108,60 @@ function ropeLandPieces(floor: number, k = 1): CoursePiece[] {
 /** Every id the rope landings' row has, in its order. */
 export function ropeLandIds(): string[] {
   return ropeLandPieces(1).map((p) => p.id);
+}
+
+// ---- Climbing II, phase 5 (maker B): the poles' tops (`poleTops`) -----------------------------------------------------------
+
+/** The poles' tops' row (after every other, so no piece before it moves). */
+export const POLE_TOP_ROW = 'pole tops';
+/** The platform's top over the floor, and how far its face stands off the pole's axis, metres (the pole's top a hand's width over it, so the hands at the pole's top are at the lip). */
+export const POLE_TOP_LIP = 4;
+export const POLE_TOP_FACE = 0.9;
+/** The floor's top over the floor under it, its thickness, and the hole's half width round the pole, metres. */
+export const POLE_TOP_FLOOR = 3;
+export const POLE_TOP_SLAB = 0.3;
+export const POLE_TOP_HOLE = 1;
+
+/**
+ * A pole beside a platform (`pole-top-lip`): the platform's face `POLE_TOP_FACE` off the pole's axis (a hanging body has room
+ * between them), its top `POLE_TOP_LIP` over the floor, the pole 0.1 m taller (its top a hand's width over the lip, so the hands at
+ * its top are at the lip); the body starts between the pole and the face, facing the pole. And a pole up through a square hole in
+ * a floor (`pole-top-floor`, a fire station's): the floor `POLE_TOP_FLOOR` up and `POLE_TOP_SLAB` thick, the hole
+ * `2 * POLE_TOP_HOLE` across, the pole standing in its middle to 0.1 m over the floor's top; the body starts under the hole.
+ */
+function poleTopPieces(floor: number): CoursePiece[] {
+  const r = 0.04;
+  const pz = 6;
+  const out: CoursePiece[] = [];
+  {
+    const fz = pz + POLE_TOP_FACE;
+    const solids: CourseSolid[] = [aabb('platform', -1.5, 0, fz, 1.5, POLE_TOP_LIP, fz + 6), aabb('pole', -r, 0, pz - r, r, POLE_TOP_LIP + 0.1, pz + r)];
+    const lips: CourseLip[] = [frontLip('L', -1.5, 1.5, POLE_TOP_LIP, fz)];
+    out.push(piece('pole-top-lip', 'pole', POLE_TOP_ROW, solids, lips, [{ name: 'stand', at: [0, 0, round(pz + 0.5)], face: [0, -1] }], { top: POLE_TOP_LIP, face: POLE_TOP_FACE, height: POLE_TOP_LIP + 0.1, width: 2 * r }, floor));
+  }
+  {
+    const y0 = POLE_TOP_FLOOR - POLE_TOP_SLAB;
+    const y1 = POLE_TOP_FLOOR;
+    const h = POLE_TOP_HOLE;
+    const solids: CourseSolid[] = [
+      aabb('platform', -5, y0, pz - 5, 5, y1, pz - h),
+      aabb('platform', -5, y0, pz + h, 5, y1, pz + 5),
+      aabb('platform', -5, y0, pz - h, -h, y1, pz + h),
+      aabb('platform', h, y0, pz - h, 5, y1, pz + h),
+      aabb('pole', -r, 0, pz - r, r, y1 + 0.1, pz + r),
+    ];
+    const lips: CourseLip[] = [
+      { name: 'H1', a: [-h, y1, pz - h], b: [h, y1, pz - h], out: [0, 1] },
+      { name: 'H2', a: [h, y1, pz + h], b: [-h, y1, pz + h], out: [0, -1] },
+      { name: 'H3', a: [-h, y1, pz + h], b: [-h, y1, pz - h], out: [1, 0] },
+      { name: 'H4', a: [h, y1, pz - h], b: [h, y1, pz + h], out: [-1, 0] },
+    ];
+    out.push(piece('pole-top-floor', 'pole', POLE_TOP_ROW, solids, lips, [{ name: 'stand', at: [0, 0, round(pz - 0.6)], face: [0, 1] }], { floorTop: y1, slab: POLE_TOP_SLAB, hole: 2 * h, height: y1 + 0.1, width: 2 * r }, floor));
+  }
+  return out;
+}
+
+/** Every id the poles' tops' row has, in its order. */
+export function poleTopIds(): string[] {
+  return poleTopPieces(1).map((p) => p.id);
 }

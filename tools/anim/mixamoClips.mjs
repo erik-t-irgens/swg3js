@@ -103,6 +103,12 @@ export const CLIPS = {
   swing_to_land_1: { loop: false, trimStart: frames(40) },
   swing_to_land: { loop: false, trimStart: frames(31) },
   swing_into_wall: { loop: false, trimStart: frames(28) },
+
+  // ---- Climbing II, phase 5: the pole (src/anim/poleClips.ts names what the game plays of it) ---------------------------
+  // The owner's rope climb with the feet on the rope, which he named for the pole climb (there is no pole clip): a loop,
+  // played backward for down, with nothing under its feet. The game loads it by name (`PackIo.also`), as every climbing
+  // clip, so it is not marked `use`.
+  climbing_a_rope_1: { loop: true, ground: false },
 };
 
 /** A clip's row over the defaults. */

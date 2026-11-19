@@ -330,6 +330,25 @@ export const CLIMB_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Climbing II: poles',
+    note: 'off: as before, a pole is whatever the wall climb and the ledges make of it. on: a still collider long, upright and thin (across no more than the thickness below, at least the length below, within 10 degrees of upright) is a pole: E in reach grabs it facing it (standing by it, a jump, or a fall past it), the body hanging with its hands where the climb\'s clip has them; W and S climb up and down on climbing_a_rope_1 (the feet on the pole, played backward for down), stopping at its top and its bottom; A and D carry the body round it, the view free; the hands and feet are kept on it by the limbs\' solve, the feet pinching it from its two sides. Space jumps off along the view and catches another pole, a bar or a lip in reach on the way; the crouch slides down to the ground; W at the top climbs onto a lip or a floor\'s edge in reach (each its own switch below, their other settings a let-go straight down and a stop at the top). The camera is never stopped by the pole held, nor by the pole jumped off while the jump flies (by the bars\' camera switch above).',
+    dials: [
+      choice('poles', 'Poles', 'on: grabbed with E and climbed; off: as before, a pole is the wall climb\'s.'),
+      dial('poleThin', 'A pole is no thicker than', 0.01, 'm', 'The brief\'s 0.15: a thick pole or a sapling a fist can still close round; a lamp post\'s 0.2 is a wall.'),
+      dial('poleLength', 'And at least this long', 0.1, 'm', 'The brief\'s 1.5: long enough to hang the body on, hands to feet; a short post is not climbed.'),
+      dial('poleClimb', 'W and S climb it at', 0.05, 'm/s', 'Ours: 0.5, the rope\'s own climb, the clip a little faster than its own pace (about 0.2), the holding hands keeping their place.'),
+      dial('poleTurn', 'A and D carry the body round it at', 5, 'degrees a second', 'Ours: 90, a quarter of the way round in a second, slow enough that the camera keeps up.'),
+      dial('poleGrab', 'A grab carries the body onto it over', 0.01, 's', 'Ours: 0.25, the rope\'s own grab.'),
+      dial('poleFootSide', 'Each foot pinches it this far out from its side', 0.005, 'm', 'Ours: 0.04, about a sole\'s half width, so the instep and not the toes is against the pole.'),
+      choice('poleJump', 'Space on a pole', 'fly: jumps off along the view and catches another pole, a bar or a lip in reach on the way; plain: lets go, straight down.'),
+      dial('polePush', 'The jump off pushes along the view at', 0.1, 'm/s', 'Ours: 3, a strong shove off with the arms and the feet, about a standing long jump\'s carry: a pole 2 m off is reached.'),
+      dial('poleJumpUp', 'And rises', 0.05, 'm', 'Ours: 0.5, a small jump\'s, under the plain jump\'s 0.8: the body pushes off from a hold, not the ground.'),
+      choice('poleCrouch', 'The crouch on a pole', 'slide: slides down to the ground (or off the pole\'s foot), the crouch again lets go, W stops it; drop: lets go, straight down.'),
+      dial('poleSlide', 'The slide down goes at', 0.1, 'm/s', 'Ours: 3, a fireman\'s slide: six times the climb, well under a fall\'s speed from a few metres.'),
+      choice('poleTop', 'W at a pole\'s top', 'climb: climbs onto a lip or a floor\'s edge in reach (behind first, then ahead, then the sides), as a ledge\'s climb up does; stop: the climb stops at the top.'),
+    ],
+  },
+  {
     title: 'The hands bracing',
     note: 'before: the arms as they were (nothing is felt for). on: moving into a wall the hand on that side rests on it (head on, both), in a passage narrower than the tight share both touch its sides, among people the hand on their side rests on them, and drifting in space near a surface both hands reach to it and step along it.',
     dials: [

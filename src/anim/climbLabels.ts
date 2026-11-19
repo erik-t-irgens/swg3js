@@ -1,8 +1,10 @@
 // What each piece of the climbing course is for, in words, for the labels `__debug.climbTest()` stands by each one (the
 // owner's 2026-11-17: "if we can 'label' what I'm meant to test near each test geometry that would be helpful too"). Pure:
-// read off a piece's id, row and numbers, so node runs it as the game does. The words are ours.
+// read off a piece's id, row and numbers (and, for the poles, the `climb.poles` switch as it stands), so node runs it as the
+// game does. The words are ours.
 
 import type { CoursePiece } from './climbCourse.ts';
+import { CLIMB_TUNE } from './climbTune.ts';
 
 export interface PieceLabel {
   /** One short line: what the piece is. */
@@ -70,7 +72,11 @@ export function pieceLabel(p: CoursePiece): PieceLabel {
   if (p.kind === 'rope' && n.band === 'none') return { title: 'Rope swing with nothing ahead', what: 'E grabs, hold A to swing, Space lets go: a plain fall and landing' };
   if (p.kind === 'rope' && typeof n.band === 'string') return { title: `Rope swing to a ${n.band === 'between' ? 'between knee and waist' : n.band} landing (${m(n.top)})`, what: 'E grabs standing, hold A about 9 s, Space on the swing toward the platform at about 28 degrees (laid so for your size): a later let-go or a longer swing lands the band below' };
   if (p.kind === 'rope') return { title: 'Rope over a pit', what: 'E grabs, W/S climb, A/D swing (toward and away from the view), Space lets go, the crouch drops' };
-  if (p.kind === 'pole') return { title: 'Poles (phase 5)', what: 'Poles come with phase 5' };
+  if (p.kind === 'pole' && typeof n.top === 'number') return { title: `Pole beside a platform ${m(n.top)} up`, what: 'Stand between the pole and the platform, E grabs the pole, W to its top climbs onto the platform behind you' };
+  if (p.kind === 'pole' && typeof n.floorTop === 'number') return { title: `Pole up through a floor ${m(n.floorTop)} up`, what: 'E grabs the pole under the hole, W to its top climbs out onto the floor' };
+  // (The course's own poles under `climb.poles` 'off', its other setting: the base commit's words, the pole not climbed as a pole.)
+  if (p.kind === 'pole' && CLIMB_TUNE.poles !== 'on') return { title: 'Poles (phase 5)', what: 'Poles come with phase 5' };
+  if (p.kind === 'pole') return { title: `Poles ${m(n.height)} tall, ${m(n.apart)} apart`, what: 'E grabs a pole facing it, W/S climb up and down, A/D go round it, look at the other pole and Space jumps across to it, the crouch slides down' };
   if (p.kind === 'obstacle' && n.dir === 'duck') return { title: `Beam ${m(n.under)} over the floor`, what: 'Walk and run under it with only the move keys: you should duck on your own' };
   if (p.kind === 'obstacle' && n.dir === 'tunnel') return { title: `Tunnel ${m(n.under)} high`, what: 'Go through crouched, with only the move keys' };
   if (p.kind === 'obstacle' && n.dir === 'crawl') return { title: `Slab ${m(n.under)} over the floor`, what: 'Go under it lying down, with only the move keys' };

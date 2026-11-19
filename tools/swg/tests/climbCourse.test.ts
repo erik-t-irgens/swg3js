@@ -371,7 +371,7 @@ function topAt(s: CourseSolid, x: number, z: number): number {
   const at = main.indexOf('climbTest: async (');
   ok(at > 0, 'the game has `__debug.climbTest`');
   const body = main.slice(at, main.indexOf('\n      },\n', at));
-  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, extras, ropeLands, ropeScale \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor, extras, ropeLands, ropeScale \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
+  ok(/climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, extras, ropeLands, ropeScale, poleTops \}\)/.test(body) && /climbCourse\(\{ pieces: o\.pieces, gap: o\.gap, floor, extras, ropeLands, ropeScale, poleTops \}\)/.test(body), 'the command asks the one layout for its pieces (once for their footprints, once with the floor deep enough for the ground under them)');
   ok(body.includes('const extras = o.extras ?? true;'), "the game's command stands the owner's extra rows (the ladders and the vertical pieces) unless asked not to");
   ok(body.includes("await this.groundCurtain('the climbing course', () => this.standClimbCourse(course, frame), 'the climbing course');"), 'it stands them behind a short curtain (its sweep builds the one program before the screen lifts)');
   const stand = main.slice(main.indexOf('  private standClimbCourse('), main.indexOf('  private dropClimbTest('));
