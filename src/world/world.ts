@@ -1,6 +1,7 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import { GPU, type GpuSun } from '../core/gpuSwitch.ts';
+import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
 import { packIdOf, type PlanetDef } from '../data/planets';
@@ -13231,7 +13232,9 @@ export class World {
     let made = 0;
     for (const w of wanted) {
       if (made >= budget) break;
+      const tFar = markStart();
       const geometry = this.terrain.buildFarTile(w.tx, w.tz, FAR_TILE, FAR_RES, budget === Infinity);
+      markEnd(ST_TERRAIN, tFar);
       if (!geometry) continue;
       const mesh = new THREE.Mesh(geometry, this.groundMaterial);
       mesh.receiveShadow = true;
@@ -13272,14 +13275,19 @@ export class World {
   private createChunk(cx: number, cz: number): void {
     const key = `${cx},${cz}`;
     const group = new THREE.Group();
+    // The ground and the plants timed as `__debug.load()`'s terrain and flora while a journey is open (`loadTimes.ts`).
+    const tGround = markStart();
     const { geometry, heights, origin } = this.terrain.buildChunk(cx, cz);
+    markEnd(ST_TERRAIN, tGround);
     const mesh = new THREE.Mesh(geometry, this.groundMaterial);
     this.chunkMaterial = mesh.material as THREE.Material;
     mesh.receiveShadow = true;
     // Off only while the measuring switch `groundShadows` says so (`setShadowSwitches`), so a chunk made then is the same.
     mesh.castShadow = this.groundShadows === 'on';
     group.add(mesh);
+    const tPlants = markStart();
     const { group: propGroup, colliders, trees, plants, data: floraData, extra, extraColliders } = this.chunkProps(cx, cz);
+    markEnd(ST_FLORA, tPlants);
     group.add(propGroup);
     if (extra) group.add(extra);
     // The chunk's sphere in the world, ground and plants together, so the world pass drawn from inside a
@@ -13307,7 +13315,9 @@ export class World {
       if (this.floraField.shown) propGroup.visible = false;
     }
     // Its grass, built under its own group once it is in the window round the eye (`grass.ts`).
+    const tGrass = markStart();
     this.grass?.chunkMade(cx, cz, group);
+    markEnd(ST_FLORA, tGrass);
     const b = this.groundHiddenFor;
     if (b) {
       const r = b.radius + 2;

@@ -29,6 +29,7 @@ import { SPEC_HOOK, SPEC_UNIFORMS, SPEC_WRAP, specUniformsOf } from '../../world
 import { chainHas } from '../../world/compileHooks.ts';
 import { BAND_POWER, BAND_TIGHTEN, GATE_NL, MODE_BAND_ABOVE, MODE_NONE_BELOW, SPEC_FLOOR } from '../../world/specMath.ts';
 import { GPU_LOOKS, LOOKS_AT_LOAD, type LookPart } from './looks.ts';
+import { HeldLightingModel } from './gpuLightHold.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -132,13 +133,14 @@ export function specSelfTestRefusal(atLoad = LOOKS_AT_LOAD.spec, wrap = SPEC_WRA
 }
 
 /**
- * Three's physical lighting with the client's highlight in place of its direct specular. Built with whatever features
- * three's own model for the material would have had (`from`), so a physical material keeps its clearcoat and the rest.
+ * Three's physical lighting with the client's highlight in place of its direct specular, on 0.187's indirect light
+ * (`HeldLightingModel`, pass 1's wave 2). Built with whatever features three's own model for the material would have had
+ * (`from`), so a physical material keeps its clearcoat and the rest.
  */
-export class ClientLightingModel extends (PhysicalLightingModel as Any) {
+export class ClientLightingModel extends (HeldLightingModel as Any) {
   readonly mask: Any;
   constructor(from: Any, mask: Any) {
-    super(from.clearcoat, from.sheen, from.iridescence, from.anisotropy, from.transmission, from.dispersion, from.retroreflection, from.diffuseRoughness);
+    super(from);
     this.mask = mask;
   }
 
@@ -164,7 +166,7 @@ export class ClientLightingModel extends (PhysicalLightingModel as Any) {
    * film, so where three's GGX stands it is three's own to the bit.
    */
   indirectDiffuse(builder: Any): void {
-    (PhysicalLightingModel.prototype as Any).indirectDiffuse.call(this, builder);
+    (HeldLightingModel.prototype as Any).indirectDiffuse.call(this, builder);
     if (!this.givesDiffuseBack) return;
     const self = this as Any;
     const { irradiance, reflectedLight } = builder.context;

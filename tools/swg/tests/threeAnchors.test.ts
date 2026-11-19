@@ -45,7 +45,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import * as THREE from 'three';
 import { declaredNames, glslCallables, glslCalls, glslVariant, miscalls, resolveIncludes, undeclaredNames, type GlslCallables } from './glslScan.ts';
-import { CUBE_UV_CHUNK, CUBE_UV_MAPPING, THREE_HOLDS, THREE_HOLD_REPORT, holdAt, planThreeHolds, threeChunkAsShipped } from '../../../src/core/threeHolds.ts';
+import { CSM_CHUNK, CUBE_UV_CHUNK, CUBE_UV_MAPPING, THREE_HOLDS, THREE_HOLD_REPORT, holdAt, planThreeHolds, threeChunkAsShipped, threeChunkNow } from '../../../src/core/threeHolds.ts';
 import { BLOOM_BLUR_METHOD, HeldBloomPass, bloomBlurMaterial185 } from '../../../src/core/fx/bloomHold.ts';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { CSMShader } from 'three/examples/jsm/csm/CSMShader.js';
@@ -74,7 +74,9 @@ const count = (text: string, s: string): number => text.split(s).length - 1;
 // ---------------------------------------------------------------- 1. the holds
 
 {
-  ok(THREE.REVISION === '187', `three is 0.187 (REVISION ${THREE.REVISION}): every anchor below is that text's`);
+  // Pass 1, wave 2: three is its development commit 577fb27 (REVISION 188dev; the lockfile holds the commit's tarball by its
+  // integrity, `gpuPatches.test.ts`), the stand-in for 0.188.0 until that is released.
+  ok(THREE.REVISION === '188dev' && read('package-lock.json').includes('"resolved": "https://codeload.github.com/mrdoob/three.js/tar.gz/577fb270cb4ac153c689856aa6e096342561fb38"'), `three is its development commit 577fb27 (REVISION ${THREE.REVISION}): every anchor below is that text's`);
   ok(THREE_HOLD_REPORT.held && THREE_HOLD_REPORT.missing.length === 0 && THREE_HOLD_REPORT.holds === THREE_HOLDS.length, `every one of the ${THREE_HOLDS.length} holds was written as the module loaded`);
   const shipped: Record<string, string> = {};
   for (const h of THREE_HOLDS) shipped[h.chunk] = threeChunkAsShipped(h.chunk)!;
@@ -85,8 +87,14 @@ const count = (text: string, s: string): number => text.split(s).length - 1;
   }
   // Laid over the text as shipped, the plan is the text now in three's chunks: nothing else wrote them.
   const plan = planThreeHolds(shipped);
-  ok(plan.missing.length === 0 && Object.keys(plan.chunks).every((name) => plan.chunks[name] === chunks[name]), "laid over three's chunks as shipped, the holds give exactly the chunks three now holds");
-  for (const h of THREE_HOLDS) ok(chunks[h.chunk].includes(h.put), `hold "${h.id}": what it puts is in the held ${h.chunk}`);
+  ok(plan.missing.length === 0 && Object.keys(plan.chunks).every((name) => plan.chunks[name] === threeChunkNow(name)), "laid over three's chunks (and the cascades' own) as shipped, the holds give exactly the chunks three now holds");
+  for (const h of THREE_HOLDS) ok(threeChunkNow(h.chunk)!.includes(h.put), `hold "${h.id}": what it puts is in the held ${h.chunk}`);
+  // Pass 1, wave 2: the development commit's indirect light is put back to 0.187's, in three's light loop and the cascades'.
+  for (const name of ['lights_fragment_begin', `${CSM_CHUNK}lights_fragment_begin`]) {
+    const t = threeChunkNow(name)!;
+    ok(t.includes('vec3 radiance = vec3( 0.0 );') && !t.includes('vec3 radiance = getIndirectLightRadiance(') && t.includes('vec3 iblIrradiance = vec3( 0.0 );'), `${name}: no ambient or hemisphere light is reflected, and the environment's fill is kept apart (0.187's indirect light)`);
+  }
+  ok(chunks.lights_fragment_maps.includes('iblIrradiance += getIBLIrradiance( geometryNormal );') && chunks.lights_fragment_end.includes('RE_IndirectSpecular( radiance, iblIrradiance, clearcoatRadiance,') && /void RE_IndirectSpecular_Physical\( const in vec3 radiance, const in vec3 irradiance,[\s\S]*?reflectedLight\.indirectDiffuse \+= indirectDiffuse;\s*\}/.test(chunks.lights_physical_pars_fragment), "the environment's fill is lit inside the indirect highlight, cut by the dielectric highlight's share, as 0.187 lit it");
   // All or none: one piece gone and nothing is written, whichever piece it is.
   for (const h of THREE_HOLDS) {
     const moved = { ...shipped, [h.chunk]: shipped[h.chunk].replace(h.find, `${h.find.slice(0, 8)} /* moved */ ${h.find.slice(8)}`) };
@@ -342,20 +350,46 @@ const INJECTED: { what: string; lib: 'physical' | 'depth'; shader: Shader; loops
   const stateAt = gpuBackend.indexOf('getRenderCacheKey( renderObject ) {');
   const stateText = stateAt > 0 ? gpuBackend.slice(stateAt, gpuBackend.indexOf('].join();', stateAt)) : '';
   const stateItems = (stateText.split('return [')[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  const wantItems = ['material.transparent', 'material.blending', 'material.premultipliedAlpha', 'material.blendSrc', 'material.blendDst', 'material.blendEquation', 'material.blendSrcAlpha', 'material.blendDstAlpha', 'material.blendEquationAlpha', 'material.colorWrite', 'material.depthWrite', 'material.depthTest', 'material.depthFunc', 'material.stencilWrite', 'material.stencilFunc', 'material.stencilFail', 'material.stencilZFail', 'material.stencilZPass', 'material.stencilFuncMask', 'material.stencilWriteMask', 'material.polygonOffset', 'material.polygonOffsetFactor', 'material.polygonOffsetUnits', 'material.side', 'material.alphaToCoverage', 'frontFaceCW', 'utils.getSampleCountRenderContext( renderContext )', 'utils.getCurrentColorSpace( renderContext )', 'utils.getCurrentColorFormat( renderContext )', 'utils.getCurrentDepthStencilFormat( renderContext )', 'utils.getPrimitiveTopology( object', 'material )', 'utils.getStripIndexFormat( object', 'geometry )', 'this.attributeUtils.getVertexBufferLayoutCacheKey( renderObject )', 'renderObject.clippingContextCacheKey'];
+  const wantItems = ['material.transparent', 'material.blending', 'material.premultipliedAlpha', 'material.blendSrc', 'material.blendDst', 'material.blendEquation', 'material.blendSrcAlpha', 'material.blendDstAlpha', 'material.blendEquationAlpha', 'material.colorWrite', 'material.depthWrite', 'material.depthTest', 'material.depthFunc', 'material.stencilWrite', 'material.stencilFunc', 'material.stencilFail', 'material.stencilZFail', 'material.stencilZPass', 'material.stencilFuncMask', 'material.stencilWriteMask', 'material.polygonOffset', 'material.polygonOffsetFactor', 'material.polygonOffsetUnits', 'material.side', 'material.alphaToCoverage', 'frontFaceCW', 'utils.getSampleCountRenderContext( renderContext )', 'utils.getCurrentColorSpace( renderContext )', 'utils.getCurrentColorFormats( renderContext ).join()', 'utils.getCurrentDepthStencilFormat( renderContext )', 'utils.getPrimitiveTopology( object', 'material )', 'utils.getStripIndexFormat( object', 'geometry )', 'this.attributeUtils.getVertexBufferLayoutCacheKey( renderObject )', 'renderObject.clippingContextCacheKey'];
+  // At three's development commit 577fb27 the colour formats are every output's, joined by commas: the census finds the items
+  // after them from the topology (keyCensus.ts `parsePipelineKey`), and holds that a topology is one of WebGPU's five.
   ok(stateItems.join('|') === wantItems.join('|'), `the draw state's items in the order the census groups read them (keyCensus.ts DRAW_STATE_GROUPS): ${stateItems.join(', ')}`);
-  ok(/initTimestampQuery\( type, uid, descriptor \) \{\s*if \( ! this\.trackTimestamp \) \{\s*descriptor\.timestampWrites = undefined;\s*return;/.test(gpuBackend), 'with timestamps off a pass carries no writes and no query set is made (the clock is free unless asked)');
-  ok(/new WebGPUTimestampQueryPool\( this\.device, type, 2048 \)/.test(gpuBackend), "the pool of a kind is made at its first timed pass");
-  const backendBase = three('src/renderers/common/Backend.js');
-  ok(backendBase.includes("contextData.timestampUID = prefix + ':' + id + ':f' + frame;") && /getTimestampUID\( abstractRenderContext \) \{\s*return this\.get\( abstractRenderContext \)\.timestampUID;/.test(backendBase), "a pass's uid ends in its frame, read through getTimestampUID");
-  const rendererCommon = three('src/renderers/common/Renderer.js');
+  const topo = three('src/renderers/webgpu/utils/WebGPUUtils.js');
+  ok(/getPrimitiveTopology\( object, material \) \{[\s\S]{0,600}?GPUPrimitiveTopology\.PointList[\s\S]{0,400}?GPUPrimitiveTopology\.LineList[\s\S]{0,400}?GPUPrimitiveTopology\.TriangleList/.test(topo), "the topology item is one of WebGPU's own topology names (the census reads the outputs' end from it)");
+  // Pass 1, wave 2: the card's clock is three's `GPUTimer` (three's development commit 577fb27 took out `trackTimestamp`,
+  // `resolveTimestampsAsync` and the pool's per-pass map); `gpuTimer.ts` times each pass alone by beginning its one timer just
+  // before the pass begins and ending it as soon as the pass has begun.
+  // Every clock anchor is read off the build the game loads (`build/three.webgpu.js`), class by class, never off three's src/:
+  // at the commit the two differ in what a timer answers (the build's `endTimer` answers a bare number of milliseconds, the
+  // src/'s a record `{ start, end, delta }`), and anchors read off the src/ passed while the game's clock answered nothing.
+  const webgpuBuild = three('build/three.webgpu.js').replace(/\r\n?/g, '\n');
+  /** A class of the build, from its line to its closing brace ('' when the build has no such class). */
+  const buildClass = (name: string): string => {
+    const at = webgpuBuild.search(new RegExp(`^class ${name}\\b`, 'm'));
+    return at < 0 ? '' : webgpuBuild.slice(at, webgpuBuild.indexOf('\n}\n', at) + 2);
+  };
+  /** One method of a class of the build, from its line to its closing brace ('' when it has none). */
+  const buildMethod = (cls: string, name: string): string => {
+    const c = buildClass(cls);
+    const at = c.search(new RegExp(`^\\t(async )?${name}\\(`, 'm'));
+    return at < 0 ? '' : c.slice(at, c.indexOf('\n\t}\n', at) + 3);
+  };
+  ok(buildMethod('WebGPUBackend', 'beginRender').includes('this.initTimestampQuery( renderContext, descriptor );'), "a render pass is given its timestamp writes inside beginRender (the timer begun round it holds that pass's queries alone)");
+  ok(/initTimestampQuery\( renderContext, descriptor \) \{\s*const timestampQueryPool = this\.timestampQueryPool;\s*const baseOffset = timestampQueryPool !== null \? timestampQueryPool\.allocateQueries\(\) : null;\s*if \( baseOffset === null \) \{\s*descriptor\.timestampWrites = undefined;\s*return;/.test(buildMethod('WebGPUBackend', 'initTimestampQuery')), 'with no timer active a pass carries no writes (the clock is free unless asked)');
+  ok(/beginTimer\(\) \{\s*if \( this\.hasTimestamp === false \) return null;\s*if \( this\.timestampQueryPool === null \) this\.timestampQueryPool = this\.createTimestampQueryPool\(\);/.test(buildMethod('Backend', 'beginTimer')), 'and no query set is made before the first timer begins');
+  ok(/async endTimer\( timer \) \{\s*if \( timer === null \) return null;\s*await this\.timestampQueryPool\.endTimer\( timer \);\s*return this\.timestampQueryPool\.getDuration\( timer \);\s*\}/.test(buildMethod('Backend', 'endTimer')), "a timer answers its pool's duration, a bare number (the build's shape at the commit; its src/ answers { start, end, delta }; gpuTimer.ts reads both, and this says which one runs)");
+  ok(/getDuration\( timer \) \{\s*if \( timer\.lost \) return null;\s*return timer\.begin === null \? 0 : Number\( timer\.finish - timer\.begin \) \/ 1e6;\s*\}/.test(buildMethod('WebGPUTimestampQueryPool', 'getDuration')), "and the WebGPU pool's duration is milliseconds from the earliest begin to the latest end of its passes, null when a query was lost");
+  ok(buildMethod('Backend', 'updateTimeStampUID').includes("contextData.timestampUID = prefix + ':' + id + ':f' + frame;") && /getTimestampUID\( abstractRenderContext \) \{\s*return this\.get\( abstractRenderContext \)\.timestampUID;/.test(buildMethod('Backend', 'getTimestampUID')), "a pass's uid ends in its frame, read through getTimestampUID");
+  const rendererCommon = buildClass('Renderer');
   const uidAt = rendererCommon.indexOf('this.backend.updateTimeStampUID( renderContext );');
   const camAt = rendererCommon.indexOf('renderContext.camera = camera;', uidAt);
   const beginAt = rendererCommon.indexOf('this.backend.beginRender( renderContext );', uidAt);
   ok(uidAt > 0 && camAt > uidAt && beginAt > camAt, "a render's uid and camera are set before its pass begins (the clock names each pass there)");
-  ok(/async resolveTimestampsAsync\( type = 'render' \) \{/.test(rendererCommon) && /_renderScene\( scene, camera, useFrameBufferTarget = true \) \{/.test(rendererCommon), 'the renderer resolves timestamps and draws a scene through the methods the frame report wraps');
-  const pool = three('src/renderers/common/TimestampQueryPool.js');
-  ok(/this\.timestamps = new Map\(\);/.test(pool), "the pool keeps each pass's milliseconds by uid");
+  ok(/_renderScene\( scene, camera, useFrameBufferTarget = true \) \{/.test(rendererCommon), 'the renderer draws a scene through the method the frame report wraps');
+  ok(/this\._requestId = this\._context\.requestAnimationFrame\( update \);\s*this\.renderer\.backend\.resolveTimestamps\(\);/.test(buildMethod('Animation', 'start')), "three's animation loop reads the timers' queries back once a frame");
+  ok(/this\._measurement = this\.renderer\.backend\.beginTimer\(\);/.test(buildMethod('GPUTimer', 'begin')) && /const result = this\.renderer\.backend\.endTimer\( this\._measurement \);\s*this\._active = false;\s*this\._measurement = null;\s*return result;/.test(buildMethod('GPUTimer', 'end')), "a GPUTimer measures through the backend's timers and may begin again before its last answer is read (it is free as soon as end() is called)");
+  const pool = buildClass('WebGPUTimestampQueryPool');
+  ok(/allocateQueries\(\) \{\s*if \( this\.isDisposed \|\| this\.timers\.size === 0 \) return null;/.test(pool) && /this\.queryTimers\.set\( baseOffset, this\._retainTimers\(\) \);/.test(pool), "a pass's queries are kept for the timers active as it begins, and none are allocated with no timer active");
   const pipeUtils = three('src/renderers/webgpu/utils/WebGPUPipelineUtils.js');
   ok(/if \( promises === null \) \{\s*pipelineData\.pipeline = device\.createRenderPipeline\( _renderPipelineDescriptor \);/.test(pipeUtils) && /promises\.push\( p \);\s*\}\s*\}/.test(pipeUtils), "a draw's pipeline is made at once and one asked ahead pushes its promise as it is asked (the ledger's landing)");
   const shadowNode = three('src/nodes/lighting/ShadowNode.js');
@@ -424,6 +458,11 @@ const THREE_CALLED: Readonly<Record<string, readonly string[]>> = {
   transformDirectionByInverseViewMatrix: ['vec3(vec3, mat4)'],
   transformNormalByInverseViewMatrix: ['vec3(vec3, mat4)'],
   equirectUv: ['vec2(vec3)'],
+  // The development commit's lines the r188 pieces find and put (src/core/threeHold188.ts, pass 1's wave 2): the ambient's
+  // irradiance and the environment's fill, held apart again, and the ambient's reflection, taken out of the light loop.
+  getAmbientLightIrradiance: ['vec3(vec3)'],
+  getIBLIrradiance: ['vec3(vec3)'],
+  getIndirectLightRadiance: ['vec3(vec3, vec3, float)'],
 };
 
 {
@@ -704,7 +743,8 @@ function programFaults(shipped: string, hooked: string, loop: Loop): string[] {
           const light = calls.find((c) => c.includes('singleScatteringDielectric')) ?? '';
           if (!maskCall) [maskCall, lightCall] = [mask, light];
           if (mask !== maskCall || light !== lightCall || !mask || !light) faults.push(`${which}: the mask's call of computeMultiscattering is not the one every variant makes (${mask || 'none'})`);
-          const table = whole.indexOf('material.dfg = texture2D( dfgLUT');
+          // Read with `textureLod( ..., 0.0 )` from three's development commit 577fb27 on (the table has one level).
+          const table = whole.indexOf('material.dfg = textureLod( dfgLUT');
           if (table < 0 || table > whole.indexOf('fxSingle, fxMulti')) tableFirst = false;
         }
         mat.dispose();

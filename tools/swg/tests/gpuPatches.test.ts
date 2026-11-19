@@ -1,8 +1,9 @@
-// The GPU port's four private patches of three (step 3, item 8): every method of three's a patch replaces or leans on
-// (`src/core/gpu/patchTable.ts`) is held here to the text it had in three 0.187.0, by a hash recorded when the patch was
-// written. An upgrade of three that moves any of them fails this test, naming the method and the patch, so the patch is
-// read again before it is trusted; the patches themselves refuse to apply on any revision but the one they were written
-// for (`patchApplies`), which this test holds as well.
+// The GPU port's private patches of three (step 3, item 8): every method of three's a patch replaces or leans on
+// (`src/core/gpu/patchTable.ts`) is held here to the text it has in the installed three, by a hash recorded when the patch
+// was last read against it (three 0.187.0, then three's development commit 577fb27 in pass 1's wave 2). An upgrade of three
+// that moves any of them fails this test, naming the method and the patch, so the patch is read again before it is trusted;
+// the patches themselves refuse to apply on any revision but the one each was proven on (`patchApplies`), which this test
+// holds as well.
 //
 // The text is read out of the build files the game really loads (`three/webgpu` is `build/three.webgpu.js`, whose node
 // classes come from `build/three.tsl.js`): a method is its class's line from `\t<name>(` to the class's next `\t}` at the
@@ -15,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PATCH_REVISION, PATCH_TABLE, PATCH_NEEDS, patchApplies, type ThreeMethod } from '../../../src/core/gpu/patchTable.ts';
+import { PATCH_REVISIONS, PATCH_TABLE, PATCH_NEEDS, patchApplies, type ThreeMethod } from '../../../src/core/gpu/patchTable.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const BUILD = join(ROOT, 'node_modules', 'three', 'build');
@@ -25,12 +26,24 @@ const ok = (cond: unknown, msg: string): void => {
   checks++;
 };
 
-/** The text of every method the patches name, as recorded with three 0.187.0 (sha-256 of the method's text, first 16 hex). */
+/**
+ * The text of every method the patches name (sha-256 of the method's text, first 16 hex), as recorded with three 0.187.0 and
+ * read again at three's development commit `577fb27` (pass 1, wave 2): sixteen of the twenty-one are the same text; the five
+ * that moved are recorded anew below, each read against the patch that names it.
+ */
 const RECORDED: Record<string, string> = {
   'three.webgpu.js Renderer._getShadowNodes': '4143f2b75aa3efea',
-  'three.webgpu.js Renderer.renderObject': 'ab36645b68732692',
-  'three.webgpu.js Renderer._createObjectPipeline': 'c9d2eb8999d2135b',
-  'three.webgpu.js Renderer.compileAsync': 'bb3a6574ae6f3981',
+  // Moved at 577fb27: a shadow pass's material is drawn in one pass whatever its side (`isSinglePass`), where 0.187 drew a
+  // two-sided see-through caster's shadow back then front. The shadow patch's colour node and the warm-up's listing (which
+  // keeps the side each item was listed with) stand as they were; three's adjustments to the override are the same ten.
+  'three.webgpu.js Renderer.renderObject': 'c55b1d652b3c9e5a',
+  // Moved at 577fb27: three always queues here now (its synchronous path is gone); the warm-up swaps the method for its
+  // listing during the walk alone, as before, and builds each item itself.
+  'three.webgpu.js Renderer._createObjectPipeline': 'a02dd42b74a88703',
+  // Moved at 577fb27: the state is taken by `_getPrecompilationState` before the walk and put back in a `finally`, and no node
+  // graph is built asynchronously; the walk is still synchronous (the warm-up lists in it) and the context still takes the
+  // renderer's own depth and stencil (`withTargetDepth`).
+  'three.webgpu.js Renderer.compileAsync': 'e45c181e86891d2e',
   'three.webgpu.js Renderer._renderObjectDirect': '2bab3bbbcd3d47e5',
   'three.webgpu.js Renderer._renderBundle': '6ab91c51b478c478',
   'three.webgpu.js NodeManager._createNodeBuilderState': '7be8e0829a48ce6e',
@@ -39,8 +52,11 @@ const RECORDED: Record<string, string> = {
   'three.webgpu.js WebGPUBackend.beginBundle': '5193858a7922ff11',
   'three.webgpu.js WebGPUBackend.finishBundle': 'df80cc86faf209b3',
   'three.webgpu.js WebGPUBackend.addBundle': 'bab3cffb46bd259f',
-  'three.webgpu.js WebGPUBackend.finishRender': '60e1944fff65eb51',
-  'three.webgpu.js WebGPUBackend.draw': 'a9220fd94d5ecbf5',
+  // Moved at 577fb27: a split pass's later layers continue its timestamp query (`_continueTimestampQuery`); the stencil patch
+  // runs its bundles before calling it whole, as before.
+  'three.webgpu.js WebGPUBackend.finishRender': 'a3e4d93c2176bb40',
+  // Moved at 577fb27: a comment taken out, nothing else.
+  'three.webgpu.js WebGPUBackend.draw': 'db889ce2c53b3e09',
   'three.webgpu.js Renderer._renderTransparents': '64f4b9a819a7b4d3',
   'three.webgpu.js Renderer._renderScene': '71a004a6220646d7',
   'three.tsl.js NodeMaterialObserver.needsRefresh': '522d452d6589354f',
@@ -81,12 +97,21 @@ function methodText(m: ThreeMethod): { text: string } | { why: string } {
 const hash = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
 // ---------------------------------------------------------------- the revision
+// Pass 1, wave 2: three is one pinned commit of its development branch (`577fb27`, REVISION `188dev` at every development
+// commit, its package.json still saying 0.187.0), so the revision is read from three's own constants and the commit from
+// the lockfile, which holds the tarball of that commit by its integrity.
+const PIN = '577fb270cb4ac153c689856aa6e096342561fb38';
 {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'node_modules', 'three', 'package.json'), 'utf8')) as { version: string };
-  ok(pkg.version === `0.${PATCH_REVISION}.0`, `node_modules/three is 0.${PATCH_REVISION}.0, the release the patches were written against (it is ${pkg.version})`);
-  ok(patchApplies('shadow', '188', {}) !== null && /r188/.test(patchApplies('shadow', '188', {}) ?? ''), 'a patch refuses another revision, in words');
+  const constants = readFileSync(join(ROOT, 'node_modules', 'three', 'src', 'constants.js'), 'utf8');
+  const revision = /export const REVISION = '([^']+)';/.exec(constants)?.[1] ?? '?';
+  for (const e of PATCH_TABLE) ok(PATCH_REVISIONS[e.name] === revision, `${e.name}: proven on r${PATCH_REVISIONS[e.name]}, the installed three's revision (${revision})`);
+  const lock = JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8')) as { packages: Record<string, { resolved?: string; integrity?: string }> };
+  const three = lock.packages['node_modules/three'];
+  ok(three?.resolved === `https://codeload.github.com/mrdoob/three.js/tar.gz/${PIN}` && /^sha512-/.test(three?.integrity ?? ''), `the lockfile pins three to the tarball of commit ${PIN.slice(0, 7)} by its integrity`);
+  ok(patchApplies('shadow', '188', {}) !== null && /three is r188, the patch was proven on r188dev/.test(patchApplies('shadow', '188', {}) ?? ''), 'a patch refuses another revision, in words (the release 0.188.0 included, until each patch is read against it)');
+  ok(patchApplies('shadow', '187', {}) !== null, 'and the revision it was proven on before');
   const bare: Record<string, unknown> = {};
-  ok(/_getShadowNodes/.test(patchApplies('shadow', PATCH_REVISION, bare) ?? ''), 'a patch refuses a renderer that lacks a private method it reaches, naming it');
+  ok(/_getShadowNodes/.test(patchApplies('shadow', revision, bare) ?? ''), 'a patch refuses a renderer that lacks a private method it reaches, naming it');
   // A stand-in renderer with every method each patch reaches answers yes.
   for (const e of PATCH_TABLE) {
     const r: Record<string, unknown> = {};
@@ -96,7 +121,7 @@ const hash = (s: string): string => createHash('sha256').update(s).digest('hex')
       for (let i = 0; i < parts.length - 1; i++) o = (o[parts[i]] ??= {}) as Record<string, unknown>;
       o[parts[parts.length - 1]] = () => undefined;
     }
-    ok(patchApplies(e.name, PATCH_REVISION, r) === null, `${e.name}: applies where every method it reaches is there`);
+    ok(patchApplies(e.name, PATCH_REVISIONS[e.name], r) === null, `${e.name}: applies where every method it reaches is there`);
   }
 }
 

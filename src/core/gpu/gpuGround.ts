@@ -45,6 +45,7 @@ import { LEAF, PATCH } from '../../world/horizon/horizonMath.ts';
 import { ALBEDO_SCALE } from '../../world/horizon/horizonDecode.ts';
 import { acesInverseNode, toLinearNode } from './gpuCard.ts';
 import { diffuseBackNode } from './gpuSpec.ts';
+import { HeldLightingModel } from './gpuLightHold.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 import { GPU_LOOKS } from './looks.ts';
 import { drawsInline } from './inlineOutput.ts';
@@ -438,7 +439,7 @@ const toView = (d: Any): Any => cameraViewMatrix.mul(vec4(d, 0)).xyz;
  * reads), and the diffuse three 0.187 cut for its highlight given back by `GPU_LOOK.groundDiffuseBack` (`diffuseBackNode`'s
  * arithmetic, gpuSpec.ts; WebGL holds 0.185's uncut diffuse).
  */
-export class GroundLightingModel extends (PhysicalLightingModel as Any) {
+export class GroundLightingModel extends (HeldLightingModel as Any) {
   readonly flat: Any;
   readonly back: Any;
   constructor(flat: Any, back: Any) {
@@ -455,7 +456,8 @@ export class GroundLightingModel extends (PhysicalLightingModel as Any) {
   }
 
   indirectDiffuse(builder: Any): void {
-    (PhysicalLightingModel.prototype as Any).indirectDiffuse.call(this, builder);
+    // 0.187's indirect light (`HeldLightingModel`, pass 1's wave 2), then the ambient's share given back.
+    (HeldLightingModel.prototype as Any).indirectDiffuse.call(this, builder);
     const self = this as Any;
     const { irradiance, reflectedLight } = builder.context;
     const energy = self.singleScatteringDielectric.add(self.multiScatteringDielectric);
@@ -627,6 +629,10 @@ export function groundFamiliesNode(p: FamiliesInput): MeshStandardNodeMaterial {
     m.roughnessNode = clamp(float(1).sub(a.mul(gloss)), N.floors.rough, 1);
   } else m.roughnessNode = float(1);
   m.metalnessNode = float(0);
+  // 0.187's indirect light (pass 1, wave 2: three's development commit reflects the ambient and hemisphere lights).
+  m.setupLightingModel = function (this: Any) {
+    return new HeldLightingModel();
+  };
   return m as MeshStandardNodeMaterial;
 }
 

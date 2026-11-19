@@ -37,6 +37,7 @@ import { POST_CLEAR_TUNE, clearSpotNear, insidePiece, type PieceBox } from './in
 import { isTableTemplate } from './rowSolid.ts';
 import { buildFloor, heightIn, locate, type FloorSource, type NavFloor } from './nav/navMesh.ts';
 import { GPU } from '../core/gpuSwitch.ts';
+import { markEnd, markStart, ST_SCENE } from '../core/loadTimes.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -3814,7 +3815,10 @@ export class LayoutStreamer {
       const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o && !(o.folded && models.has(this.modelKey(o)) && (!o.look || this.donorsOf(o.look).every((d) => !d.pack || models.has(d.key) || this.failed.has(d.id)))));
       const runtimeSet = runtimePlaced.length ? new Set(runtimePlaced) : null;
       const bulk = runtimeSet ? objects.filter((o) => !runtimeSet.has(o)) : objects;
+      // The tier put together, timed as `__debug.load()`'s scene while a journey is open (`loadTimes.ts`), its rooms below too.
+      const tScene = markStart();
       const loaded = this.instance(bulk, models);
+      markEnd(ST_SCENE, tScene);
       // The tier's list is the region's own array, runtime placements and all; only the instanced meshes are
       // the bulk's. `place` pushes into it and `unplace` splices out of it, and the collider sweep and
       // `unloadTier` walk it. Left as the bulk's copy, every placement in this tier -- a house, a travel
@@ -3833,9 +3837,11 @@ export class LayoutStreamer {
       // A huge object's collision comes with its tier, a few pieces an update, never keyed on the player's distance.
       for (const o of objects) if (this.huge.has(o) && !this.colliders.has(o)) this.queueHuge(o);
       // A region that arrives already under the player's nose needs its interiors now.
+      const tRooms = markStart();
       for (const b of loaded.buildings) {
         if (Math.hypot(b.x - this.lastInteriorX, b.z - this.lastInteriorZ) - b.radius <= this.interiorRange(b)) this.buildInterior(b);
       }
+      markEnd(ST_SCENE, tRooms);
       // Models that finished loading after the last collider pass get their collision next update.
       this.lastColliderX = Number.NaN;
       return loaded;

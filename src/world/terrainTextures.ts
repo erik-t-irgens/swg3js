@@ -24,6 +24,7 @@ import { COLOUR_MODES, cornerOrder, GROUND_DRAW_TUNE, maskCode, tilesFit, type G
 import { CLOUD_GREY, CLOUD_METRES, CLOUD_PERIOD, LUMA, bumpNormal, cloudShade, cloudUv, composeTile, flatShine, srgbDecode, tintGamma, type MaskSample, type TintReference } from './groundMath.ts';
 import { lighterTone } from './volumetrics/airMath.ts';
 import { GPU } from '../core/gpuSwitch.ts';
+import { markEnd, markStart, ST_TEXTURES } from '../core/loadTimes.ts';
 
 /** `toneColour`'s scratch: the lighter tones' means and how many samples were taken. */
 const TONE_SCRATCH = { r: 0.5, g: 0.5, b: 0.5, n: 0 };
@@ -1021,6 +1022,9 @@ export class TerrainTextures {
    * every pack (the copies' world has 4 px colours and 256 px masks).
    */
   private static async loadTiles(pack: AssetPack, anisotropy: number, planet: Map<number, string>, file: ShadersFile, ground: { shaderGroup: ShaderGroup; reference: TintReference | null; renderer?: THREE.WebGLRenderer | null }, lent: readonly LentPictures[] = []): Promise<TerrainTextures | null> {
+    // Timed as `__debug.load()`'s textures while a journey is open (`loadTimes.ts`): from the first picture asked to the arrays
+    // laid and uploaded, a span (the decodes are off this thread, the reading back and laying are on it).
+    const tPictures = markStart();
     const firstOnly = GROUND_FIRST_CHILD_ONLY;
     const bumps = !groundBumpOff();
     const plan = tilePlan(file.families, planet, lent, firstOnly);
@@ -1106,6 +1110,7 @@ export class TerrainTextures {
       // Uploaded now, behind the loading screen, rather than on the first frame that draws a chunk.
       const r = ground.renderer;
       if (r) for (const t of [texture, normals, masks, clouds]) if (t) r.initTexture(t);
+      markEnd(ST_TEXTURES, tPictures);
       return out;
     } finally {
       close();

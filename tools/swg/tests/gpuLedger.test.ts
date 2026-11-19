@@ -8,12 +8,14 @@
 //     three's key read off real three objects (bones, morph targets, instancing, a texture's sampler); the ring bounded;
 //  2. the arrivals and the landing log: an arrival begins when the travel's flag goes up, its screen goes when it comes
 //     down, and at 30 s the warm-up's queue is read by name; what was pending then is said by name;
-//  3. the census (`keyCensus.ts`): three's own draw-state key (`WebGPUBackend.getRenderCacheKey`, imported from its
-//     source) taken apart by the census's groups, so a pair apart in its side, blending, polygon offset or sample count
+//  3. the census (`keyCensus.ts`): three's own draw-state key (`WebGPUBackend.getRenderCacheKey`, imported from the build
+//     the game loads) taken apart by the census's groups, so a pair apart in its side, blending, polygon offset or sample count
 //     is named so; programs apart in bones, a morph attribute, a sampler or the node graph named so; the projection
 //     merging what the pool and the bake would; the held pipelines read off a stand-in renderer;
-//  4. the card's clock (`gpuTimer.ts`) and the named sections (`framePerf.ts`): nothing touched until asked, everything
-//     put back after, three's own `initTimestampQuery` writing nothing into a pass with tracking off; each pass named by
+//  4. the card's clock (`gpuTimer.ts`, over three's `GPUTimer` from pass 1's wave 2, driven through the build's own backend
+//     timers and WebGPU pool over a stand-in card) and the named sections (`framePerf.ts`):
+//     nothing touched until asked, everything put back after, three's own `initTimestampQuery` writing nothing into a pass
+//     with no timer active, each pass timed alone and answered by its uid; each pass named by
 //     its cascade camera, a lamp's shadow, the chain's graph or the frame report's pass kind, and summed by whole frame;
 //  5. what a frame costs with all of it installed and not asked: the ledger's frame call, between arrivals and inside one,
 //     measured in twelve fresh processes at once (`--alloc`), nothing allocated.
@@ -23,14 +25,21 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
-import WebGPUBackend from '../../../node_modules/three/src/renderers/webgpu/WebGPUBackend.js';
+// Three's classes out of the build the game loads (`three/webgpu` is `build/three.webgpu.js`), never out of its src/: at
+// three's development commit 577fb27 the two differ where this suite reaches (the build's `Backend.endTimer` answers a bare
+// number of milliseconds, the src/'s a record), and a suite driven through the src/ passed while the game's clock answered
+// nothing (pass 1, wave 2's fixer).
+import * as WEBGPU from 'three/webgpu';
 import { ARRIVALS_CAP, installLedger, keyFieldsOf, landingReport, LEDGER, LEDGER_CAP, LANDING_TUNE, ledgerFrame, ledgerRecords, passOf, recordPipeline, WHERE } from '../../../src/core/gpu/pipeLedger.ts';
 import { censusOf, DRAW_STATE_GROUPS, heldPipes, nearestSiblings, parsePipelineKey, propsDiffer, separate, signature, type Pipe } from '../../../src/core/gpu/keyCensus.ts';
-import { frameOfUid, passTimer } from '../../../src/core/gpu/gpuTimer.ts';
+import { frameOfUid, passTimer, timerMs } from '../../../src/core/gpu/gpuTimer.ts';
 import { sectionOfPass, sectionSums } from '../../../src/core/gpu/framePerf.ts';
 import { PASS } from '../../../src/core/perf.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+/** The build's WebGPU backend (its draw-state key, its timestamp queries and its pool) and the backend base under it. */
+const WebGPUBackend = (WEBGPU as Any).WebGPUBackend as Any;
+const Backend = (WEBGPU as Any).Backend as Any;
 let checks = 0;
 const ok = (cond: unknown, msg: string): void => {
   assert.ok(cond, msg);
@@ -278,7 +287,8 @@ if (process.argv.includes('--alloc')) {
   be.utils = {
     getSampleCountRenderContext: (c: Any) => c.samples ?? 4,
     getCurrentColorSpace: () => 'srgb',
-    getCurrentColorFormat: (c: Any) => c.format ?? 'rgba16float',
+    // Every output's format (three's development commit 577fb27, pass 1's wave 2; one before it).
+    getCurrentColorFormats: (c: Any) => c.formats ?? ['rgba16float'],
     getCurrentDepthStencilFormat: () => 'depth24plus-stencil8',
     getPrimitiveTopology: () => 'triangle-list',
     getStripIndexFormat: () => undefined,
@@ -288,7 +298,10 @@ if (process.argv.includes('--alloc')) {
   const base = new THREE.MeshStandardMaterial();
   const p0 = parsePipelineKey(keyOf(1, 2, base));
   ok(p0.v === '1' && p0.f === '2' && p0.state.clipping === 'clip' && p0.state['vertex layout'] === '12,vertex,0,0,float32x3,', `three's key taken apart: programs, the vertex layout and the clipping (${JSON.stringify(p0.state)})`);
-  ok(DRAW_STATE_GROUPS.length === 9 && p0.state.side === '0' && p0.state['sample count'] === '4' && p0.state['output formats'] === 'srgb,rgba16float,depth24plus-stencil8', "each group reads its own items of three's key");
+  ok(DRAW_STATE_GROUPS.length === 7 && p0.state.side === '0' && p0.state['sample count'] === '4' && p0.state['output formats'] === 'srgb,rgba16float,depth24plus-stencil8' && p0.state.topology === 'triangle-list,', "each group reads its own items of three's key");
+  // Two outputs: their formats joined into the key shift every item after them, which the census finds from the topology.
+  const p2 = parsePipelineKey(keyOf(1, 2, base, { formats: ['rgba16float', 'rgba8unorm'] }));
+  ok(p2.state['output formats'] === 'srgb,rgba16float,rgba8unorm,depth24plus-stencil8' && p2.state.topology === 'triangle-list,' && p2.state['vertex layout'] === '12,vertex,0,0,float32x3,' && p2.state.clipping === 'clip' && p2.state.side === '0', `two outputs' formats read as one group, the items after them where they are (${JSON.stringify(p2.state)})`);
   const rec = (key: string, fields: Partial<Record<string, unknown>> = {}, matType = 'MeshStandardMaterial', pass = 'world'): Pipe => ({
     key,
     parsed: parsePipelineKey(key),
@@ -302,7 +315,8 @@ if (process.argv.includes('--alloc')) {
   const offset = new THREE.MeshStandardMaterial({ polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 });
   ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, offset))) === 'polygon offset', 'and in the polygon offset');
   ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, base, { samples: 1 }))) === 'sample count', 'and in the sample count');
-  ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, base, { format: 'bgra8unorm' }))) === 'output formats', 'and in the outputs\' formats');
+  ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, base, { formats: ['bgra8unorm'] }))) === 'output formats', 'and in the outputs\' formats');
+  ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, base, { formats: ['rgba16float', 'rgba8unorm'] }))) === 'output formats', 'and in the outputs\' count');
   ok(named(rec(keyOf(1, 2, base)), rec(keyOf(1, 2, base, {}, '16,vertex,0,0,float32x4,'))) === 'vertex layout', 'and in the vertex layout');
   const k1 = keyOf(1, 2, base);
   const k2 = keyOf(3, 4, base);
@@ -348,42 +362,129 @@ if (process.argv.includes('--alloc')) {
 
 // ---------------------------------------------------------------- 4. the card's clock and the named sections
 {
-  // Three's own: with tracking off a pass gets no timestamp writes and no query set is made.
+  // Pass 1, wave 2: the clock is three's own `GPUTimer` (three's development commit 577fb27), driven here through the build the
+  // game loads: its backend timers (`Backend.beginTimer` / `endTimer`), its WebGPU pool (made by
+  // `WebGPUBackend.createTimestampQueryPool`, given each pass's queries by `initTimestampQuery`, read back by
+  // `resolveTimestamps` as three's animation loop does once a frame) and its `GPUTimer`, over a stand-in card: a device whose
+  // query sets hold each pass's length and whose read-back answers when the test says. (Wave 2's fixer: the suite first drove
+  // three's src/ classes, whose `endTimer` answers `{ start, end, delta }`; the build's answers a bare number, and the clock
+  // read nothing from it while every check here passed.)
+  const g = globalThis as Any;
+  const hadUsage = 'GPUBufferUsage' in g;
+  const hadMap = 'GPUMapMode' in g;
+  // The browser's WebGPU flag tables, which three's pool reads as it makes its buffers; node has none.
+  if (!hadUsage) g.GPUBufferUsage = { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, QUERY_RESOLVE: 512 };
+  if (!hadMap) g.GPUMapMode = { READ: 1, WRITE: 2 };
+  /** Each pass's length in milliseconds, handed to the passes as they begin. */
+  let lengths: number[] = [];
+  /** The read-backs asked of the card and not yet answered. */
+  let asked: (() => void)[] = [];
+  const card: Any = {
+    features: new Set(['timestamp-query']),
+    queue: { submit: () => {} },
+    createQuerySet: (q: Any) => ({ count: q.count, ms: new Map<number, number>() }),
+    createBuffer: (b: Any) => {
+      const data = new ArrayBuffer(b.size);
+      const buffer: Any = {
+        data,
+        mapState: 'unmapped',
+        mapAsync: () =>
+          new Promise<void>((res) =>
+            asked.push(() => {
+              buffer.mapState = 'mapped';
+              res();
+            }),
+          ),
+        getMappedRange: (at = 0, size?: number) => data.slice(at, size === undefined ? undefined : at + size),
+        unmap: () => {
+          buffer.mapState = 'unmapped';
+        },
+      };
+      return buffer;
+    },
+    createCommandEncoder: () => ({
+      // The card ran the set's passes one after another, each as long as it was handed, a microsecond apart.
+      resolveQuerySet(set: Any, first: number, count: number, into: Any, at: number) {
+        const times = new BigUint64Array(into.data, at, count);
+        let t = 1_000_000n;
+        for (let i = first; i + 1 < first + count; i += 2) {
+          const end = t + BigInt(Math.round((set.ms.get(i) ?? 0) * 1e6));
+          times[i - first] = t;
+          times[i - first + 1] = end;
+          t = end + 1000n;
+        }
+      },
+      copyBufferToBuffer(from: Any, fromAt: number, into: Any, intoAt: number, size: number) {
+        new Uint8Array(into.data, intoAt, size).set(new Uint8Array(from.data, fromAt, size));
+      },
+      finish: () => ({}),
+    }),
+  };
+  /** The card answers every read-back asked of it so far. */
+  const answer = (): void => {
+    const now = asked;
+    asked = [];
+    for (const f of now) f();
+  };
+  // Three's own: with no timer active a pass gets no timestamp writes, with or without a pool.
   const d: Any = {};
-  const off: Any = { trackTimestamp: false, timestampQueryPool: { render: null, compute: null } };
-  WebGPUBackend.prototype.initTimestampQuery.call(off, 'render', 'r:0:1:f1', d);
-  ok(d.timestampWrites === undefined && off.timestampQueryPool.render === null, "three writes nothing into a pass and makes no query set with tracking off");
-  // The adapter touches nothing until asked.
-  const proto = { beginRender(_c: Any) {} };
+  WebGPUBackend.prototype.initTimestampQuery.call({ timestampQueryPool: null }, {}, d);
+  ok(d.timestampWrites === undefined, 'three writes nothing into a pass while no pool has been made');
+  const noTimers = WebGPUBackend.prototype.createTimestampQueryPool.call({ device: card });
+  const d2: Any = {};
+  WebGPUBackend.prototype.initTimestampQuery.call({ timestampQueryPool: noTimers }, {}, d2);
+  ok(d2.timestampWrites === undefined && noTimers.currentQueryIndex === 0, 'nor while no timer is active');
+  // The build's backend, its pass begun by a stand-in that does what three's `beginRender` does about timing alone.
+  const proto: Any = Object.create(WebGPUBackend.prototype);
+  proto.beginRender = function (this: Any, ctx: Any) {
+    const descriptor: Any = {};
+    this.initTimestampQuery(ctx, descriptor);
+    const w = descriptor.timestampWrites;
+    if (w !== undefined) w.querySet.ms.set(w.beginningOfPassWriteIndex, lengths.shift() ?? 0);
+  };
   const be: Any = Object.create(proto);
-  be.trackTimestamp = false;
-  be.device = { features: new Set(['timestamp-query']) };
+  be.data = new WeakMap();
+  be.device = card;
+  be.timestampQueryPool = null;
   be.getTimestampUID = (c: Any) => `r:${c.call}:${c.id}:f${c.frame}`;
-  be.timestampQueryPool = { render: { timestamps: new Map([['r:0:1:f9', 0.5]]) } };
-  let resolved = 0;
-  const renderer: Any = { backend: be, resolveTimestampsAsync: async () => (resolved++, 0.5) };
+  const renderer: Any = { backend: be, _initialized: true };
   const t = passTimer(renderer, 'nvidia');
-  ok(t.able && t.coarse === null && !t.on && be.trackTimestamp === false && !Object.prototype.hasOwnProperty.call(be, 'beginRender'), 'made, the clock changes nothing: no tracking, no wrap');
-  ok(passTimer(renderer, 'apple').coarse !== null && !passTimer({ backend: { device: { features: new Set() } } }, 'nvidia').able, "Apple's adapter is said coarse; a device without timestamp queries cannot time");
+  ok(t.able && t.coarse === null && !t.on && be.timestampQueryPool === null && !Object.prototype.hasOwnProperty.call(be, 'beginRender'), 'made, the clock changes nothing: no pool, no wrap');
+  const noFeature: Any = Object.create(WebGPUBackend.prototype);
+  noFeature.device = { features: new Set<string>() };
+  ok(passTimer(renderer, 'apple').coarse !== null && !passTimer({ backend: noFeature }, 'nvidia').able, "Apple's adapter is said coarse; a device without timestamp queries cannot time (three's own `hasTimestamp`)");
   t.start();
-  ok(t.on && be.trackTimestamp === true, 'started, every pass is timed');
+  ok(t.on && Object.prototype.hasOwnProperty.call(be, 'beginRender') && be.timestampQueryPool === null, 'started, each pass will be timed (the pool is made at the first timer, by three)');
+  lengths = [0.25, 1.5, 0.75];
+  be.beginRender({ call: 0, id: 1, frame: 9 });
+  be.beginRender({ call: 1, id: 2, frame: 9 });
+  be.beginRender({ call: 0, id: 1, frame: 10 });
+  const pool = be.timestampQueryPool;
+  ok(pool !== null && pool.currentQueryIndex === 6 && [...pool.queryTimers.values()].every((timers: Any[]) => timers.length === 1) && new Set([...pool.queryTimers.values()].map((timers: Any[]) => timers[0])).size === 3 && pool.timers.size === 0, "each pass is timed alone: three's pool gave it a pair of queries carrying its own timer, ended as soon as the pass had begun");
+  const pending = t.resolve(1000);
+  be.resolveTimestamps();
+  answer();
+  const ts = await pending;
+  ok(ts instanceof Map && [...ts.keys()].join() === 'r:0:1:f9,r:1:2:f9,r:0:1:f10' && ts.get('r:0:1:f9') === 0.25 && ts.get('r:1:2:f9') === 1.5 && ts.get('r:0:1:f10') === 0.75, `a read-back answers each pass timed since the last, by its uid, in the order begun, out of the build's own answers (${JSON.stringify([...(ts ?? new Map())])})`);
+  ok(timerMs(1.5) === 1.5 && timerMs(0) === 0 && timerMs({ delta: 0.5 }) === 0.5 && Number.isNaN(timerMs(null)), "and the clock reads either shape three answers: the build's bare milliseconds and the src/'s record (the release's, likely)");
+  lengths = [2];
+  be.beginRender({ call: 2, id: 3, frame: 11 });
+  ok((await t.resolve(30)) === null, 'and one whose passes the card has not answered in time answers null');
+  be.resolveTimestamps();
+  answer();
+  await pool.pendingResolve;
   t.stop();
-  ok(!t.on && be.trackTimestamp === false, 'stopped, tracking is as it was');
-  be.trackTimestamp = true;
-  t.start();
-  t.stop();
-  ok(be.trackTimestamp === true, 'and timestamps on at load stay on');
-  be.trackTimestamp = false;
+  ok(!t.on && !Object.prototype.hasOwnProperty.call(be, 'beginRender') && be.beginRender === proto.beginRender, "stopped, three's own beginRender is back");
+  be.beginRender({ call: 3, id: 3, frame: 12 });
+  ok(pool.currentQueryIndex === 0 && pool.timers.size === 0, 'and a pass begun after it is given no queries');
   const seen: string[] = [];
   const unwatch = t.watchPasses((uid) => seen.push(uid));
   be.beginRender({ call: 3, id: 7, frame: 12 });
-  ok(seen.join() === 'r:3:7:f12', 'watched, each pass is handed over with its uid as it begins');
+  ok(seen.join() === 'r:3:7:f12' && pool.currentQueryIndex === 0, 'watched, each pass is handed over with its uid as it begins, and not timed');
   unwatch();
   ok(!Object.prototype.hasOwnProperty.call(be, 'beginRender') && be.beginRender === proto.beginRender, "unwatched, three's own beginRender is back");
-  const ts = await t.resolve(1000);
-  ok(resolved === 1 && ts instanceof Map && ts.get('r:0:1:f9') === 0.5 && ts !== be.timestampQueryPool.render.timestamps, 'a read-back answers a copy of the pool\'s passes');
-  const slow: Any = { backend: be, resolveTimestampsAsync: () => new Promise(() => {}) };
-  ok((await passTimer(slow, 'nvidia').resolve(30)) === null, 'and one that does not answer in time answers null');
+  if (!hadUsage) delete g.GPUBufferUsage;
+  if (!hadMap) delete g.GPUMapMode;
   ok(frameOfUid('r:4:2:f117') === '117' && frameOfUid('c:1:3') === null, "a pass's frame read off its uid");
   // The sections.
   const cam0 = new THREE.OrthographicCamera();

@@ -256,7 +256,9 @@ export function keyFieldsOf(ro: Any): KeyFields {
     recv: object.receiveShadow === true,
     lights,
     env,
-    outputs: `${mrt}|${ctx.stateKey ?? ''}`,
+    // The context's part of three's program key: `buildKey` from three's development commit 577fb27 on (the outputs, their
+    // multiple targets and the camera, without the sample count), `stateKey` before it.
+    outputs: `${mrt}|${ctx.buildKey ?? ctx.stateKey ?? ''}`,
     clip: String(ro.clippingContextCacheKey ?? ''),
     custom,
     props: propsKey(material, true),
@@ -418,8 +420,17 @@ const rowOf = (r: PipeRecord): Record<string, unknown> => ({
   arrival: r.arrival,
 });
 
-/** The landing log (`__debug.gpu({ landing })`). `all` lists every record held, else the last `last` (60). */
-export function landingReport(o: { all?: boolean; last?: number } = {}): Record<string, unknown> {
+/**
+ * A row with its times in milliseconds from the page's start, unrounded, and who asked: what `__debug.load()` (pass 1,
+ * wave 2, `loadTimes.ts`) lays over its journeys.
+ */
+const rowExact = (r: PipeRecord): { askedMs: number; landedMs: number; asked: string } => ({ askedMs: r.askedAt, landedMs: r.landedAt, asked: WHERE[r.where] });
+
+/**
+ * The landing log (`__debug.gpu({ landing })`). `all` lists every record held, else the last `last` (60); `exact` gives the
+ * rows as `rowExact` does.
+ */
+export function landingReport(o: { all?: boolean; last?: number; exact?: boolean } = {}): Record<string, unknown> {
   const recs = ledgerRecords();
   const t = now();
   const byWhere: Record<string, { asked: number; landed: number; pending: number; meanWaitMs: number; maxWaitMs: number }> = {};
@@ -481,7 +492,7 @@ export function landingReport(o: { all?: boolean; last?: number } = {}): Record<
     pendingNow: recs.filter((r) => r.landedAt < 0).length,
     byWhere,
     arrivals,
-    pipelines: (o.all ? recs : recs.slice(-last)).map(rowOf),
+    pipelines: (o.all ? recs : recs.slice(-last)).map(o.exact ? rowExact : rowOf),
     note: `a draw's pipeline is made while the main thread waits (it lands as it is asked); one asked ahead lands when three's promise for it answers. Pending at ${LANDING_TUNE.pendingAtMs / 1000} s is every pipeline asked by then and not landed by then, with the warm-up's items listed and not yet built. { landing: { all: true } } lists every record held.`,
   };
 }

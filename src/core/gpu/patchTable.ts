@@ -43,8 +43,21 @@ export interface PatchEntry {
   relies: ThreeMethod[];
 }
 
-/** The three revision every patch was written against: a patch applies on this one alone. */
-export const PATCH_REVISION = '187';
+/**
+ * The three revision each patch was last read against: a patch applies on that one alone (pass 1, wave 2).
+ * Three's development branch is `188dev` at every commit, so the commit is pinned by the lockfile (a tarball of three's
+ * `577fb27`, held by its integrity) and each method a patch reaches by `gpuPatches.test.ts`'s hashes of the installed text.
+ * At 577fb27 each was read against the build's text and proven by the node suites alone: the browser measures that should
+ * decide each (on against off, by frame report, in play and by arrival) are owed, the wave's browser having been refused.
+ * When the released 0.188.0 replaces it, each patch is read against it again and moved to `'188'` one by one.
+ */
+export const PATCH_REVISIONS: Readonly<Record<PatchEntry['name'], string>> = {
+  shadow: '188dev',
+  still: '188dev',
+  warm: '188dev',
+  stencil: '188dev',
+  replay: '188dev',
+};
 
 export const PATCH_TABLE: readonly PatchEntry[] = [
   {
@@ -132,7 +145,8 @@ export const PATCH_NEEDS: Readonly<Record<PatchEntry['name'], readonly string[]>
  * method it reaches is there. Answers null when it may, or why not in words.
  */
 export function patchApplies(name: PatchEntry['name'], revision: string, renderer: Record<string, unknown>): string | null {
-  if (revision !== PATCH_REVISION) return `three is r${revision}, the patch was written for r${PATCH_REVISION}`;
+  const own = PATCH_REVISIONS[name];
+  if (revision !== own) return `three is r${revision}, the patch was proven on r${own}`;
   for (const path of PATCH_NEEDS[name]) {
     let o: unknown = renderer;
     for (const k of path.split('.')) o = o === null || o === undefined ? undefined : (o as Record<string, unknown>)[k];

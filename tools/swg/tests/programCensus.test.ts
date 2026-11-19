@@ -76,6 +76,8 @@ function makeKey(p: KeyParts): string {
  * texture. It is here so that a three that changes the shape of its keys fails this file rather
  * than quietly reporting a world of two hundred programs as unreadable.
  */
+// Pass 1, wave 2: the build of three's development commit 577fb27, which the game runs, makes this same key (its key functions
+// are 0.187's build's text; its src/ dropped the light probes' count, its build did not). Not yet retaken from a running game.
 const REAL_KEY = '5,6,highp,srgb,false,false,,,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,false,,false,false,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,4,0,0,0,0,16,srgb,onBeforeCompile() {}';
 
 const bit = (names: readonly string[], ...want: string[]): number => {

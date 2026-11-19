@@ -28,6 +28,7 @@ import { installUsageHint, setUsageHint, USAGE_HINT } from './usageHint.ts';
 import { installLooks, LOOK_PARTS, LOOKS_AT_LOAD, looksReport, setLooks } from './looks.ts';
 import { DETAIL_GPU_STATS, detailPart } from './gpuDetail.ts';
 import { SPEC_GPU_STATS, specPart } from './gpuSpec.ts';
+import { lightHoldPart } from './gpuLightHold.ts';
 import { specSelfTestGpu } from './gpuSpecSelfTest.ts';
 import { CARD_GPU_STATS, cardPart } from './gpuCard.ts';
 import { cardLightSelfTestGpu, leafShadowSelfTestGpu } from './gpuCardSelfTest.ts';
@@ -106,7 +107,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   if (!(navigator as Any).gpu) throw new Error('this browser has no navigator.gpu');
   const adapter = await askAdapter();
   if (!adapter) throw new Error('no WebGPU adapter was given');
-  const renderer: Any = new WebGPURenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: opts.reversedDepth, trackTimestamp: opts.timestamps } as Any);
+  // Three's development commit 577fb27 (pass 1, wave 2) took the backend's `trackTimestamp` out for its `GPUTimer`, which the
+  // card's clock (`gpuTimer.ts`) begins round each pass only while the frame report times the card: `opts.timestamps` (the old
+  // `swg.gpu.timestamps` switch) no longer turns anything on.
+  void opts.timestamps;
+  const renderer: Any = new WebGPURenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: opts.reversedDepth } as Any);
   await renderer.init();
   if (renderer.backend?.isWebGPUBackend !== true) throw new Error('three fell back to its WebGL2 backend');
   const device = renderer.backend.device;
@@ -128,9 +133,10 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     return copyTexture(src, dst, ...rest);
   };
   const fallback: FallbackStats = installFallback(renderer);
-  // The models' own looks on the node copies three makes (step 4): the detail map's colour, then the client's highlight,
-  // then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
-  LOOK_PARTS.push(detailPart, specPart, cardPart);
+  // The models' own looks on the node copies three makes (step 4): three's indirect light held at 0.187's first (pass 1,
+  // wave 2: `gpuLightHold.ts`, which three's development commit 577fb27 changed), then the detail map's colour, then the
+  // client's highlight, then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
+  LOOK_PARTS.push(lightHoldPart, detailPart, specPart, cardPart);
   installLooks(renderer);
   // The Effects-off picture drawn the way WebGL draws it (step 6, item 5): every material's output tone-mapped and encoded
   // onto the canvas, before any material is built.
@@ -196,7 +202,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       // The occlusion's console (step 6, item 4): the WebGL helper as it stands, its probe of the centre a WebGPU readback
       // the answer waits for, and what the pass drew of the water.
       const ssao0 = debug.ssao as ((o?: unknown) => unknown) | undefined;
-      wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: renderer.backend?.trackTimestamp === true ? 'on' : "off (localStorage['swg.gpu.timestamps'] = '1' and a reload)" }), {
+      wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: !timer.able ? 'not granted on this device' : timer.on ? "on (three's GPUTimer, round each pass)" : "off: on while __debug.gpu({ perf: { gpu: true } }) times the card" }), {
         ...(ssao0
           ? {
               ssao: (o?: unknown) => {

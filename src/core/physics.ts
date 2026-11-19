@@ -1,5 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { ColliderPart } from '../world/floraCollision.ts';
+import { markEnd, markStart, ST_COLLIDERS } from './loadTimes.ts';
 
 /**
  * Collision group bits. Everything is in `all` by default; terrain and building shells get
@@ -253,6 +254,15 @@ export class Physics {
     // against the ground, and with four they shiver where they lie.
     this.world.integrationParameters.numSolverIterations = 8;
     this.keeper = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    // Every collider this world makes, whoever makes it, timed as the colliders' stage of `__debug.load()` while a journey is
+    // open (`loadTimes.ts`): the engine's own build of a mesh's tree is inside the call. Closed, one flag read.
+    const make = this.world.createCollider.bind(this.world);
+    this.world.createCollider = (desc: RAPIER.ColliderDesc, parent?: RAPIER.RigidBody): RAPIER.Collider => {
+      const t0 = markStart();
+      const c = make(desc, parent);
+      markEnd(ST_COLLIDERS, t0);
+      return c;
+    };
   }
 
   /**

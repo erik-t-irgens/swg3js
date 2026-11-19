@@ -20,7 +20,11 @@
 // ever moves it, the anchor stops validating rather than lying: a program whose key cannot be
 // read is reported as unread, and the count of unread programs is part of the answer.
 
-/** The fourteen light counts in the key, in three's order, and what they are called here. */
+/**
+ * The fourteen light counts in the key, in three's order, and what they are called here. (The build of three's development
+ * commit 577fb27, pass 1's wave 2, which the game runs, still pushes the light probes' count: the commit's src/ took it out,
+ * its build/ did not.)
+ */
 export const LIGHT_FIELDS = ['sun', 'dir', 'point', 'spot', 'spotMaps', 'hemi', 'rectArea', 'sunShadow', 'dirShadow', 'pointShadow', 'spotShadow', 'spotShadowMaps', 'lightProbes', 'lightProbeGrids'] as const;
 
 export type LightField = (typeof LIGHT_FIELDS)[number];

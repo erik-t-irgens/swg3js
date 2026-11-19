@@ -67,7 +67,7 @@ const compiled = (m: THREE.Material): Shader => {
 {
   const chunk = THREE.ShaderChunk.lights_physical_pars_fragment;
   const fn = glslFunction(chunk, 'RE_Direct_Physical');
-  ok(THREE.REVISION === '187', `three is 0.187 (REVISION ${THREE.REVISION}), whose lighting, held to 0.185's lines, this replaces a line of`);
+  ok(THREE.REVISION === '188dev', `three is its development commit 577fb27 (REVISION ${THREE.REVISION}; pass 1's wave 2), whose lighting, held to 0.187's indirect light and 0.185's lines, this replaces a line of`);
   ok(fn.includes(GGX_ANCHOR), "three's RE_Direct_Physical adds each direct light's highlight with the GGX line the injection replaces");
   ok(count(chunk, GGX_ANCHOR) === 1, 'and that line is in the chunk once, so nothing else is replaced with it');
   ok(lib.fragmentShader.includes('#include <lights_physical_pars_fragment>') && lib.fragmentShader.includes('#include <lights_fragment_begin>') && lib.fragmentShader.includes('#include <roughnessmap_fragment>'), 'the physical program includes the chunk, the light loop and the roughness stage the injection writes around');

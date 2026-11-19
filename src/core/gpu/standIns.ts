@@ -18,6 +18,7 @@ import { GPU_LOOK } from './gpuLook.ts';
 import { groundFamiliesNode, groundTilesNode, ringNode } from './gpuGround.ts';
 import { bladeNode, lavaNode, marksNode, particlesNode, tunnelNode } from './gpuPrograms.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
+import { HeldLightingModel } from './gpuLightHold.ts';
 
 /**
  * A program of step 5's left out at load (`localStorage['swg.gpu.<part>'] = '0'`): step 3's way, nothing drawn. Every vertex
@@ -79,6 +80,8 @@ export function makeStandIns(): GpuStandIns {
       m.roughnessNode = float(1);
       m.metalnessNode = float(0);
       m.emissiveNode = vec3(0);
+      // 0.187's indirect light (pass 1, wave 2: three's development commit reflects the ambient and hemisphere lights).
+      (m as unknown as { setupLightingModel: () => unknown }).setupLightingModel = () => new HeldLightingModel();
       return m;
     },
     groundTiles(u) {

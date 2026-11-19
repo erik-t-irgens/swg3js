@@ -354,7 +354,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     for (const want of ['export const SPEC_FLOOR = 1e-6;', 'export const GATE_NL = 1e-4;', 'export const MODE_NONE_BELOW = 0.5;', 'export const MODE_BAND_ABOVE = 1.5;']) ok(m.includes(want), `specMath.ts: ${want}`);
     for (const g of ['looks.ts', 'gpuSpec.ts', 'gpuDetail.ts', 'gpuEnv.ts', 'gpuSpecSelfTest.ts', 'gpuCard.ts', 'gpuCardSelfTest.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g)), `step 4's ${g} is under src/core/gpu/`);
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
-    ok(/LOOK_PARTS\.push\(detailPart, specPart, cardPart\);\s*installLooks\(renderer\);/.test(startText) && startText.indexOf('installLooks(renderer);') > startText.indexOf('const fallback: FallbackStats = installFallback(renderer);'), "start.ts: the looks go on the node library after the fallback's wrap");
+    // Pass 1, wave 2: three's indirect light held at 0.187's goes on first (`gpuLightHold.ts`).
+    ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);\s*installLooks\(renderer\);/.test(startText) && startText.indexOf('installLooks(renderer);') > startText.indexOf('const fallback: FallbackStats = installFallback(renderer);'), "start.ts: the looks go on the node library after the fallback's wrap");
   }
   // The leaf cards' part (step 4, item 4): the two files of the WebGL path it touches are the mirrors, whose new names are
   // the numbers their own functions and the WebGL shader text use; and the one guarded site is inside `forceGpuOff`, which

@@ -10,6 +10,14 @@
   <body>
     <canvas id="game"></canvas>
     <div id="ui"></div>
+    <!-- Where load time goes (`__debug.load()`, src/core/loadTimes.ts): the browser keeps 250 downloads' timings by default,
+         and the dev server's module graph is more than that before the game's first line runs; room for the page's start,
+         folded into the game's own record and cleared from then on. -->
+    <script>
+      try {
+        performance.setResourceTimingBufferSize(4000);
+      } catch {}
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

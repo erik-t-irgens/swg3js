@@ -16,7 +16,9 @@
 //     the passes begun and timed counted beside them, each answer raced against a timeout (a headless tab answers about
 //     one a second, and two measures at once lose one's answer for good); since pass 1's first wave each pass is named as
 //     it begins (each sun cascade, the world pass, the rooms, the chain's passes: `sectionOfPass`) and summed by name, and
-//     every read of three's timestamps goes through one adapter (`gpuTimer.ts`), the file three r188's `GPUTimer` changes.
+//     every read of three's timestamps goes through one adapter (`gpuTimer.ts`), which since pass 1's second wave times each
+//     pass alone with three's `GPUTimer` and answers the passes timed since its last read-back (a set's ends are still
+//     dropped, as a set begins and ends wherever the window's read-back falls).
 // What switches the step has, and where each stands, is said beside the numbers (`switches`).
 
 import { perf, PASS, PERF, PERF_TUNE } from '../perf.ts';

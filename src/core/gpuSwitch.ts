@@ -187,8 +187,11 @@ export interface GpuRuntime {
    * separates each from its nearest sibling, counted by that field, and what the pool and the morph bake would merge.
    */
   keys(o: { list?: boolean; limit?: number }): Record<string, unknown>;
-  /** The landing log (pass 1, wave 1, `gpu/pipeLedger.ts`): each pipeline asked and landed since the page's start, by arrival. */
-  landing(o: { all?: boolean; last?: number }): Record<string, unknown>;
+  /**
+   * The landing log (pass 1, wave 1, `gpu/pipeLedger.ts`): each pipeline asked and landed since the page's start, by arrival.
+   * `exact` (pass 1, wave 2: `__debug.load()`'s) gives each row its times in milliseconds unrounded.
+   */
+  landing(o: { all?: boolean; last?: number; exact?: boolean }): Record<string, unknown>;
   /**
    * The frame report on WebGPU (the performance step, `gpu/framePerf.ts`): the main thread's sections with the sun's cascades
    * timed apart, the WebGPU calls a frame and three's own steps by kind, and the card's time where asked (`{ gpu: true }`).

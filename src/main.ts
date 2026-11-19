@@ -10,6 +10,9 @@ import { REVERSED_DEPTH, projectedBehind } from './core/depthMode.ts';
 // Which renderer the game draws with, read once at boot (the GPU port's step 3): WebGL unless asked otherwise. The WebGPU
 // side is one dynamic import (`./core/gpu/start.ts`) made by the boot only with the switch at WebGPU.
 import { GPU, readRendererSwitch } from './core/gpuSwitch.ts';
+// Where load time goes (the GPU port's pass 1, wave 2): the page's start and each journey between worlds split by stage, for
+// `__debug.load()`. Nothing of three in it; both renderers.
+import { installLoadTimes, loadBegin, loadEnd, loadPhase, loadReport, type PipeRow } from './core/loadTimes.ts';
 import { addressKept } from './core/address.ts';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
@@ -1929,7 +1932,20 @@ class App {
   private lastPlaceSave = 0;
   private readonly timer = new THREE.Timer();
   private started = false;
-  private traveling = false;
+  /**
+   * An arrival or a trip between worlds is under way. Its going up and coming down begin and end a journey of
+   * `__debug.load()` (`loadTimes.ts`) at the moment it is set, whichever of the trips sets it; a set to what it is does nothing.
+   */
+  private travelingNow = false;
+  private get traveling(): boolean {
+    return this.travelingNow;
+  }
+  private set traveling(v: boolean) {
+    if (v === this.travelingNow) return;
+    this.travelingNow = v;
+    if (v) loadBegin(performance.now(), LINK_WAITS.totalMs);
+    else loadEnd(performance.now(), { link: LINK_WAITS.totalMs, screens: this.loadingLog.screens.map((s) => ({ title: s.title, s: s.s, programs: s.programs, sweep: s.sweep })) });
+  }
   /**
    * A race start's course curtain is up (beside `traveling`, which it also sets: every one of the seventy-odd
    * places that read `traveling` is right for any screen). The two side effects a race must not trip read this as
@@ -3545,7 +3561,7 @@ class App {
        * each; `{ perf: { gpu: true } }` names the card's sections. All three are WebGPU's: on WebGL the helper answers that
        * WebGPU is not in use and does nothing.
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number } }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean } }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
@@ -5377,6 +5393,20 @@ class App {
        * `LOADING_TUNE` in memory first.
        */
       loading: (opts?: { tune?: Partial<Record<keyof typeof LOADING_TUNE, unknown>> }) => this.loadingReport(opts),
+      /**
+       * Where load time goes (the GPU port's pass 1, wave 2, `src/core/loadTimes.ts`): the last journeys (the page's start
+       * to the character list, then each arrival or trip between worlds, the travel's flag up to down), each with its
+       * downloads by kind (files, bytes over the wire and of the files, the wall time they were under way), its stages
+       * (models, textures, terrain, flora, colliders, scene: marks summed and their union), its shaders (WebGPU: the
+       * landing log's pipelines and the time one was pending; WebGL: the link waits and the screens' sweep), its loading
+       * screen's phases with each of those inside them, what is left, and the share that is shaders and that is not.
+       * `{ last: 2 }` the last two journeys only.
+       */
+      load: (o?: { last?: number }) => {
+        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+        const pipelines = GPU.webgpu ? ((GPU.rt!.landing({ all: true, exact: true }).pipelines ?? []) as PipeRow[]) : null;
+        return loadReport({ now: performance.now(), renderer: GPU.webgpu ? 'WebGPU' : 'WebGL', pipelines, navigation: nav ?? null }, o);
+      },
       /**
        * The files the game asked for this session that belong to a world's pack, and the public files a build ships
        * (`packFiles.ts`): each one asked with its answer (`ok`, `missing`, `page` for a page handed back in its place,
@@ -11406,6 +11436,8 @@ class App {
     // The last trip's screens kept for `__debug.loading()`: each going up and away, its words, and the programs built
     // behind it off the watch's own loading count (sampled here, so a hidden tab drawing no frames counts too).
     this.loadingScreen.onChange = (kind, text, now) => {
+      // And each change kept for `__debug.load()`'s phases (`loadTimes.ts`), as it comes.
+      loadPhase(kind, text, now);
       if (kind === 'what') {
         this.loadingLog.what(text, now);
         return;
@@ -13190,6 +13222,8 @@ class App {
     // address (`updateUrl`).
     this.setClass('jedi');
     this.select.show(loadCharacters());
+    // The page's own journey of `__debug.load()` ends with the character list shown.
+    loadEnd(performance.now());
     // Where the character stands is written back now and then, and when the page goes.
     window.addEventListener('pagehide', () => this.savePlace(true));
     // The character leaves the world with the page too, so a job's clock that counts only time played
@@ -36806,11 +36840,16 @@ async function startGpu(): Promise<void> {
 }
 
 async function boot(): Promise<void> {
+  // The page's own journey of `__debug.load()`, from the navigation's start, and each step of the boot said as its phase.
+  installLoadTimes();
+  loadPhase('what', 'the physics engine and the worlds file', performance.now());
   readRendererSwitch();
   // The worlds file waits a few seconds at most; a read that answers after that is landed when it comes (`readWithin`), never
   // thrown away, or the session would stand no world of yours and the editor mint ids against an empty list.
   const [physics, worlds] = await Promise.all([Physics.create(), readWithin(readOurWorlds(), 4000)]);
+  loadPhase('what', 'starting the renderer', performance.now());
   if (GPU.asked === 'webgpu') await startGpu();
+  loadPhase('what', 'building the game and the character list', performance.now());
   if (worlds.value?.length) {
     BOOT_WORLDS = worlds.value;
     mergeOurWorlds(worlds.value);

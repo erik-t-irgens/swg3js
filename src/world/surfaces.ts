@@ -13,6 +13,7 @@ import * as THREE from 'three';
 import type { GLTF, GLTFLoader, GLTFLoaderPlugin, GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { frac, makeClock, stepClock, type FlipClock, type FlipMode } from './surfaceClock.ts';
 import { skinnedPlugin } from '../core/skinnedLoad.ts';
+import { markEnd, markStart, ST_MODELS } from '../core/loadTimes.ts';
 
 /** The converter's `extras.swg` on a material (tools/swg/glb.mjs). */
 export interface SwgSurface {
@@ -664,17 +665,29 @@ class SwgSurfacesPlugin implements GLTFLoaderPlugin {
   private readonly parser: GLTFParser;
   private readonly target: AnimatedSurfaces;
 
+  /** When this file's taking apart began (`__debug.load()`'s models, `loadTimes.ts`): 0 with no journey open. */
+  private unpackFrom = 0;
+
   constructor(parser: GLTFParser, target: AnimatedSurfaces) {
     this.parser = parser;
     this.target = target;
+  }
+
+  /** The loader's first hook, before any of the file's parts is read: where its unpacking span begins. Asks nothing. */
+  beforeRoot(): null {
+    this.unpackFrom = markStart();
+    return null;
   }
 
   afterRoot(result: GLTF): Promise<void> | null {
     // A decal wherever one is worn (a placed scorch, a prop's graffiti), whether or not its model carries anything animated.
     markDecals(result);
     const json = this.parser.json as { materials?: { extras?: { swg?: unknown } }[] };
-    if (!json.materials?.some((d) => d?.extras?.swg)) return null;
-    return this.apply(result, json);
+    if (!json.materials?.some((d) => d?.extras?.swg)) {
+      markEnd(ST_MODELS, this.unpackFrom);
+      return null;
+    }
+    return this.apply(result, json).then(() => markEnd(ST_MODELS, this.unpackFrom));
   }
 
   private async apply(result: GLTF, json: { materials?: unknown[] }): Promise<void> {

@@ -70,8 +70,21 @@ const ok = (cond: boolean, what: string): void => {
 // layout's height where the three fields of a filtered cube now are, one map channel fewer, a morph attribute
 // count it never set, and no sun light or probe grid counts), then exactly two boolean masks and the renderer's
 // colour space, with the material's own custom key last. (`shaderWatch.ts` counts the same 56.)
+//
+// Read off the build the game loads (`three` is `build/three.module.js`), never off three's src/: at three's development
+// commit 577fb27 (pass 1, wave 2) the src/ took the light probes' count out of the key while the build still pushes it,
+// and a reader moved to the src/ misread every key the running game made. The build's `WebGLPrograms` is cut out whole,
+// and the shader cache's ids with it.
 const here = dirname(fileURLToPath(import.meta.url));
-const programsJs = readFileSync(join(here, '../../../node_modules/three/src/renderers/webgl/WebGLPrograms.js'), 'utf8');
+const moduleBuild = readFileSync(join(here, '../../../node_modules/three/build/three.module.js'), 'utf8').replace(/\r\n?/g, '\n');
+const cutBuild = (from: string, to: string): string => {
+  const at = moduleBuild.indexOf(from);
+  assert.ok(at >= 0, `three's build still has ${from}`);
+  const end = moduleBuild.indexOf(to, at);
+  assert.ok(end > at, `and ${to} after it`);
+  return moduleBuild.slice(at, end);
+};
+const programsJs = cutBuild('\nfunction WebGLPrograms(', '\n}\n');
 
 function bodyOf(name: string): string {
   const at = programsJs.indexOf(`function ${name}(`);
@@ -113,7 +126,7 @@ const EXPECTED_TAIL = [
   // carries a comma cannot flip the answer.
   ok(/array\.push\(\s*parameters\.shaderID\s*\)/.test(key) && /array\.push\(\s*parameters\.customVertexShaderID\s*\)[\s\S]{0,120}?array\.push\(\s*parameters\.customFragmentShaderID\s*\)/.test(key), 'the key opens with one shader name, or with the two ids of a material carrying its own shaders');
   ok(/for\s*\(\s*const name in parameters\.defines\s*\)[\s\S]{0,160}?array\.push\(\s*name\s*\)[\s\S]{0,80}?array\.push\(\s*parameters\.defines\[ name \]\s*\)/.test(key), 'and then every define as a name and then its value, both into the same array');
-  const shaderCacheJs = readFileSync(join(here, '../../../node_modules/three/src/renderers/webgl/WebGLShaderCache.js'), 'utf8');
+  const shaderCacheJs = cutBuild('\nlet _id = 0;', '\nfunction WebGLPrograms(');
   ok(/let _id = 0;/.test(shaderCacheJs) && /this\.id\s*=\s*_id\s*\+\+/.test(shaderCacheJs), "and those two ids are plain numbers, which a shader's name can never be and a define's name never is either — which is what makes the head's first field a safe way to tell one from two");
   // The bit each boolean sits on: the module names a handful of them, and every one must still be
   // where it was, or a double-sided material would read as alpha-tested.
@@ -260,6 +273,9 @@ const ROOM_PASS = { dir: 1, point: 12 };
 // world whose key cannot be read at all. (Taken again on three 0.187, whose run is another length: the
 // ground is drawn the client's way now, every material carries the cascades and the highlight's wrap, the
 // rooms pass lights with the torch's spot, and the shadow pass with every light.)
+// Pass 1, wave 2: the build of three's development commit 577fb27, which the game runs, makes these same keys (its four
+// key functions are character for character 0.187's build's: its src/ dropped the light probes' count, its build did not).
+// Not yet retaken from a running game on the commit: no browser has measured it.
 //
 // They are cache keys and nothing else: three builds them out of its own parameters, the defines
 // and the material's own key, so no name of anything converted appears in one.

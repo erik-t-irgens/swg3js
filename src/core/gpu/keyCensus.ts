@@ -16,7 +16,12 @@ import { LEDGER, type KeyFields, type PipeRecord, WHERE } from './pipeLedger.ts'
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-/** Three 0.187's draw state, as `getRenderCacheKey` joins it, grouped into the fields the census names. */
+/**
+ * Three's draw state, as `getRenderCacheKey` joins it, grouped into the fields the census names: its first 27 items stand
+ * where they stand. From three's development commit 577fb27 on (pass 1, wave 2) the colour formats are every output's,
+ * joined (`getCurrentColorFormats( ctx ).join()`), so the items after the colour space shift by the outputs' count less one,
+ * and the census finds them from the topology, the first item after them that names one.
+ */
 export const DRAW_STATE_GROUPS: readonly [string, readonly number[]][] = [
   ['blending', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 24]],
   ['depth', [10, 11, 12]],
@@ -25,11 +30,11 @@ export const DRAW_STATE_GROUPS: readonly [string, readonly number[]][] = [
   ['side', [23]],
   ['winding', [25]],
   ['sample count', [26]],
-  ['output formats', [27, 28, 29]],
-  ['topology', [30, 31]],
 ];
-/** The draw state's fixed items before the vertex layout. */
-const FIXED = 32;
+/** The colour space's item: the output formats are it, every colour format after it and the depth-stencil format. */
+const COLOR_SPACE = 27;
+/** A WebGPU primitive topology, the item that follows the output formats. */
+const TOPOLOGY = /^(point-list|line-list|line-strip|triangle-list|triangle-strip)$/;
 
 export interface ParsedKey {
   v: string;
@@ -46,8 +51,15 @@ export function parsePipelineKey(key: string): ParsedKey {
   const s = parts.slice(2);
   const state: Record<string, string> = {};
   for (const [name, idx] of DRAW_STATE_GROUPS) state[name] = idx.map((i) => s[i] ?? '').join(',');
-  state['vertex layout'] = s.slice(FIXED, -1).join(',');
-  state.clipping = s.length > FIXED ? (s[s.length - 1] ?? '') : '';
+  // The topology: the first item past the colour space and one colour format and the depth-stencil format that names one.
+  let t = COLOR_SPACE + 3;
+  while (t < s.length && !TOPOLOGY.test(s[t])) t++;
+  if (t >= s.length) t = COLOR_SPACE + 3;
+  state['output formats'] = s.slice(COLOR_SPACE, t).join(',');
+  state.topology = [s[t] ?? '', s[t + 1] ?? ''].join(',');
+  const fixed = t + 2;
+  state['vertex layout'] = s.slice(fixed, -1).join(',');
+  state.clipping = s.length > fixed ? (s[s.length - 1] ?? '') : '';
   return { v, f, state };
 }
 

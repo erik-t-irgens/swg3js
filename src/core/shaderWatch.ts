@@ -244,6 +244,8 @@ const AT = {
   numPointLightShadows: 43,
   numSpotLightShadows: 44,
   numSpotLightShadowsWithMaps: 45,
+  // Still pushed by the build of three's development commit 577fb27 (pass 1, wave 2), which the game runs: the commit's
+  // src/ took it out with the probes, its build/ did not (shaderWatch.test reads the order off the build).
   numLightProbes: 46,
   numLightProbeGrids: 47,
   shadowMapType: 48,

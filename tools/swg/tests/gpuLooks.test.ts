@@ -162,7 +162,8 @@ function wrapped(spec = { mode: 'phong', color: [0.5, 0.25, 0.125], power: 20 },
   ok((model as Any).givesDiffuseBack === true && (gmodel as Any).givesDiffuseBack === true, 'a standard and a clearcoated material give it back (three cut theirs by the plain Fresnel alone)');
   // And the ambient's: three's own indirect diffuse first, then the share it took for its highlight's whole energy given
   // back by the same film (the WebGL picture's 0.185 ambient, the `ambient-diffuse` hold).
-  ok(gpuSpec.includes('(PhysicalLightingModel.prototype as Any).indirectDiffuse.call(this, builder);') && gpuSpec.includes('const energy = self.singleScatteringDielectric.add(self.multiScatteringDielectric);') && gpuSpec.includes('reflectedLight.indirectDiffuse.addAssign(irradiance.mul((BRDF_Lambert as Any)({ diffuseColor: diffuseContribution })).mul(energy).mul(float(1).sub(filmNode())));'), "the client's model runs three's indirect diffuse whole and gives back the energy share by the film");
+  // Three's indirect diffuse as 0.187 lit it (`HeldLightingModel`, pass 1's wave 2: the development commit reflects the ambient).
+  ok(gpuSpec.includes('(HeldLightingModel.prototype as Any).indirectDiffuse.call(this, builder);') && gpuSpec.includes('const energy = self.singleScatteringDielectric.add(self.multiScatteringDielectric);') && gpuSpec.includes('reflectedLight.indirectDiffuse.addAssign(irradiance.mul((BRDF_Lambert as Any)({ diffuseColor: diffuseContribution })).mul(energy).mul(float(1).sub(filmNode())));'), "the client's model runs three's indirect diffuse whole and gives back the energy share by the film");
   const velvet = new THREE.MeshPhysicalMaterial({ sheen: 1 });
   velvet.userData.swgSpec = { mode: 'phong', color: [1, 1, 1], power: 8 };
   applySpec(velvet, false);
@@ -272,7 +273,8 @@ function wrapped(spec = { mode: 'phong', color: [0.5, 0.25, 0.125], power: 20 },
   ok(renderer.library.fromMaterial(shader) === standIn && met.length === 0, "a stand-in the fallback keeps is never a part's");
   ok(renderer.library.fromMaterial(standIn) === standIn && met.length === 0, 'nor a node material, its own copy');
   const start = read('src/core/gpu/start.ts');
-  ok(/LOOK_PARTS\.push\(detailPart, specPart, cardPart\);/.test(start), 'the game hands the node library the detail first, then the highlight, then the leaf cards (which change the highlight\'s model)');
+  // Pass 1, wave 2: three's indirect light held at 0.187's goes on before them all (`gpuLightHold.ts`), the model they build on.
+  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);/.test(start), 'the game hands the node library the held indirect light first, then the detail, then the highlight, then the leaf cards (which change the highlight\'s model)');
 }
 
 // ---------------------------------------------------------------- 5. step 3's stand-ins, mended here

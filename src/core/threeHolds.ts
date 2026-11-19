@@ -23,8 +23,14 @@
 // be taken off (`sun-shadow-bias`). It is the look the game has had; taking that one hold out is the mend.
 // What is not held, because nothing the game draws asks for it: sheen, iridescence, anisotropy, transmission, light
 // probes and area lights, whose lines 0.187 also changed.
+//
+// Pass 1, wave 2: three is its development commit 577fb27 (toward r188), which reworked the indirect light again. Its pieces
+// (`threeHold188.ts`) put 0.187's indirect light back first, in three's chunks and in the cascades' own light loop
+// (`CSMShader`, named `csm:<chunk>` here), and the 0.185 holds below are laid over what they leave, all of them or none.
 import { ShaderChunk } from 'three';
+import * as CSMShaderModule from 'three/examples/jsm/csm/CSMShader.js';
 import { CUBE_UV_REFLECTION_185, ENV_FILL_185, ENV_FILL_187, ENV_REFLECTION_185, ENV_REFLECTION_187, GGX_MULTISCATTER_185, POINT_SHADOW_185, POINT_SHADOW_187, SUN_BIAS_185, SUN_BIAS_187 } from './threeHoldText.ts';
+import { THREE_HOLDS_188 } from './threeHold188.ts';
 
 /** One piece of three's shader text held to what three 0.185.1 had there. */
 export interface ChunkHold {
@@ -72,8 +78,15 @@ const FILTERED_CUBE = '\t\t#ifdef ENVMAP_TYPE_PMREM\n';
 const FLAT_LAYOUT = '\t\t#ifdef ENVMAP_TYPE_CUBE_UV\n';
 const ELSE_FILTERED_CUBE = '\t\t#elif defined( ENVMAP_TYPE_PMREM )\n';
 
-/** Every hold, in the order they are written. */
+/** The prefix of the cascades' own chunks (`CSMShader`'s), which `CSM` writes over three's as it is made. */
+export const CSM_CHUNK = 'csm:';
+
+/** The cascades' own chunks (typed as an interface alone, but a value three's addon exports and `CSM` reads as it is made). */
+const CSMShader = (CSMShaderModule as unknown as { CSMShader: Record<string, string> }).CSMShader;
+
+/** Every hold, in the order they are written: the development commit's pieces first, then 0.185's over 0.187's. */
 export const THREE_HOLDS: readonly ChunkHold[] = [
+  ...THREE_HOLDS_188,
   {
     id: 'roughness-floor',
     chunk: 'lights_physical_fragment',
@@ -235,26 +248,36 @@ export interface HoldReport {
 /** Each chunk the holds wrote over, as three shipped it, or nothing where three ships none of that name (the test and the console compare against it). */
 const shipped = new Map<string, string | undefined>();
 
+/** A chunk as it stands now, three's or the cascades' (`csm:<name>`). */
+export function threeChunkNow(name: string): string | undefined {
+  if (name.startsWith(CSM_CHUNK)) return (CSMShader as unknown as Record<string, string>)[name.slice(CSM_CHUNK.length)];
+  return (ShaderChunk as unknown as Record<string, string>)[name];
+}
+
 /** A chunk as three shipped it, whether or not a hold has since been written over it. */
 export function threeChunkAsShipped(name: string): string | undefined {
-  return shipped.has(name) ? shipped.get(name) : (ShaderChunk as unknown as Record<string, string>)[name];
+  return shipped.has(name) ? shipped.get(name) : threeChunkNow(name);
 }
 
 let report: HoldReport | null = null;
 
-/** Write the holds into three's chunks, once a page (a second call answers what the first did). */
+/** Write the holds into three's chunks and the cascades', once a page (a second call answers what the first did). */
 export function applyThreeHolds(): HoldReport {
   if (report) return report;
   const chunks = ShaderChunk as unknown as Record<string, string>;
-  const plan = planThreeHolds(chunks);
+  const csm = CSMShader as unknown as Record<string, string>;
+  const now: Record<string, string> = { ...chunks };
+  for (const k of Object.keys(csm)) now[`${CSM_CHUNK}${k}`] = csm[k];
+  const plan = planThreeHolds(now);
   if (plan.missing.length) {
     console.warn(`three: its shader text has moved (${plan.missing.join(', ')}), so nothing of its lighting is held and surfaces take three's own new look`);
     report = { held: false, holds: THREE_HOLDS.length, missing: plan.missing };
     return report;
   }
   for (const name of Object.keys(plan.chunks)) {
-    shipped.set(name, typeof chunks[name] === 'string' ? chunks[name] : undefined);
-    chunks[name] = plan.chunks[name];
+    shipped.set(name, threeChunkNow(name));
+    if (name.startsWith(CSM_CHUNK)) csm[name.slice(CSM_CHUNK.length)] = plan.chunks[name];
+    else chunks[name] = plan.chunks[name];
   }
   report = { held: true, holds: THREE_HOLDS.length, missing: [] };
   return report;

@@ -43,12 +43,15 @@ function draw(r: Any, g: ChainGraph, into: THREE.RenderTarget | null): void {
 const warmInto = (g: ChainGraph, into: THREE.RenderTarget): FxWarmItem => ({ material: g.material, object: g.mesh, where: 'target', into });
 const warmItem = (g: ChainGraph, where: FxWarmItem['where']): FxWarmItem => ({ material: g.material, object: g.mesh, where });
 
-/** A geometry's layout as three keys a program on it (`RenderObject.getGeometryCacheKey`): each attribute's name, size, normalisation. */
+/**
+ * A geometry's layout as three keys a program on it (`RenderObject.getGeometryCacheKey`): each attribute's name, the kind of
+ * array it is read from (keyed from three's development commit 577fb27 on, pass 1's wave 2), its size and normalisation.
+ */
 export function geometryLayout(g: THREE.BufferGeometry): string {
   let key = '';
   for (const name of Object.keys(g.attributes).sort()) {
     const a = g.attributes[name] as THREE.BufferAttribute;
-    key += `${name},${a.itemSize ?? ''},${a.normalized ? 'n,' : ''}`;
+    key += `${name},${a.array?.constructor?.name ?? ''},${a.itemSize ?? ''},${a.normalized ? 'n,' : ''}`;
   }
   return key;
 }

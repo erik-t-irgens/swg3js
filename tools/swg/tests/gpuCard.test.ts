@@ -202,7 +202,7 @@ function card(blend = false): THREE.MeshStandardMaterial {
   ok(chainHas(m.onBeforeCompile, CARD_HOOK) && cardPart.applies(m) && !cardPart.applies(plain) && !cardPart.applies(new THREE.MeshBasicMaterial()), "the part goes on a material the card rule's wrap went on and nowhere else");
   ok(m.customProgramCacheKey().includes('card'), "which is exactly where the program key says 'card'");
   const start = read('src/core/gpu/start.ts');
-  ok(/LOOK_PARTS\.push\(detailPart, specPart, cardPart\);/.test(start), "start.ts: the card part goes on after the highlight's, whose model it changes");
+  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);/.test(start), "start.ts: the card part goes on after the highlight's, whose model it changes (and after the held indirect light, pass 1's wave 2, which both build on)");
   const copy: Any = new MeshStandardNodeMaterial();
   for (const key in m) copy[key] = (m as Any)[key];
   const own = { position: copy.setupPosition, diffuse: copy.setupDiffuseColor, model: copy.setupLightingModel, lighting: copy.setupLighting };
