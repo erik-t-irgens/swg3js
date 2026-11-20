@@ -540,6 +540,8 @@ export class Hud {
   /** The action bar's switch (`setKitLook`): its lines at the bar's full height, or `slotLineShare` of it; and the prompt's blur. */
   private linesFull = false;
   private promptBlur = false;
+  /** The Interface page's "Keep the bars up when full" (`setBarsKept`): no bar goes away for being full. */
+  private barsKept = false;
   /**
    * Whether the kit has a Force pool (the bar in the block or `gone`), as last written. `NaN` elsewhere is "nothing
    * written yet", because it is the one value that is never equal to itself.
@@ -723,6 +725,16 @@ export class Hud {
    */
   setMarkBlade(follow: boolean): void {
     this.markFollows = follow;
+  }
+
+  /**
+   * The Interface page's switch for the bars staying up (the owner's ask of 20 November: "disable the fade of the bars,
+   * which would be easier to size them and give feedback"; off to begin with): on, health, Force, stamina and breath stay
+   * shown when full instead of going away, so their size and place can be judged. Not in a frame; each bar's own next
+   * frame takes `off` away or puts it back (one write each way, as when it fills or drops).
+   */
+  setBarsKept(kept: boolean): void {
+    this.barsKept = kept;
   }
 
   /**
@@ -1465,7 +1477,7 @@ export class Hud {
   private ageFull(bar: BodyBar, px: number): void {
     if (bar.cur === px) bar.sinceFull += this.frameDt;
     else bar.sinceFull = 0;
-    const show = bar.cur !== px || bar.sinceFull < HUD_SIZES.fullLinger;
+    const show = this.barsKept || bar.cur !== px || bar.sinceFull < HUD_SIZES.fullLinger;
     if (show === bar.shown) return;
     bar.shown = show;
     bar.root.classList.toggle('off', !show);
@@ -1599,7 +1611,8 @@ export class Hud {
   private setBreath(r: BarReadout | null): void {
     // Read off the breath's own record (`breathOf`), never handed its two numbers: a fraction handed to a call is a number made.
     const b = r ? breathOf(r, this.breathOut) : noBreath(this.breathOut);
-    const show = !!r && b.show;
+    // Kept up (`setBarsKept`), it stands full on dry land too, at the place it always keeps.
+    const show = !!r && (b.show || this.barsKept);
     if (show !== this.breathShown) {
       this.breathShown = show;
       this.breathBar.classList.toggle('off', !show);
@@ -1647,6 +1660,7 @@ export class Hud {
       this.layoutBars();
     }
     if (!on) show = false;
+    else if (this.barsKept) show = true;
     const value = pool.value;
     const tired = pool.tired;
     if (show !== this.staminaShown) {
