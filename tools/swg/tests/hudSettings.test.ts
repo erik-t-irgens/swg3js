@@ -61,6 +61,8 @@ const HUD_KEYS = [
   // The second wave: the lines between the action bar's cells, and the blur behind the use prompt.
   ['hudSlotLines', 'string'],
   ['hudPromptBlur', 'boolean'],
+  // The owner's switch of 20 November: the bars kept up when full.
+  ['hudBarsKept', 'boolean'],
   // And the Colours switch: a theme's word (`THEMES` in src/core/themes.ts), Default to begin with.
   ['hudTheme', 'string'],
 ] as const;

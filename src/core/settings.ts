@@ -226,6 +226,8 @@ export interface Settings extends FxSettings {
   hudForceEdge: string;
   /** The weapon mark's lightsaber draws its blade in and out with the real one; off, its blade stands out always. */
   hudMarkBlade: boolean;
+  /** Health, Force, stamina and breath stay up when full instead of going away (for judging their size and place). */
+  hudBarsKept: boolean;
   /** The lines between the action bar's cells (and the use prompt's actions): 'short' (`slotLineShare` of the bar's height) or 'full'. */
   hudSlotLines: string;
   /** A soft blur of the world behind the use prompt and the long prompt line. */
@@ -509,6 +511,9 @@ export const DEFAULT_SETTINGS: Settings = {
   hudForceEdge: 'lower',
   // The owner's answer of 19 November 2026 on the weapon mark's blade drawing in and out with the real one: "Start on not off".
   hudMarkBlade: true,
+  // The owner's ask of 20 November 2026, to size the bars and judge them: a switch that keeps them up when full. Off to
+  // begin with, so the bars still go away when full as he first asked.
+  hudBarsKept: false,
   // The interface rewrite's second wave: the lines between the action bar's cells start at about 80% of the bar's height,
   // the full-height line a switch away (the wave's default, not yet answered); the blur behind the use prompt starts off
   // (the owner's tab: blurring the world behind it costs the graphics card a little every frame).

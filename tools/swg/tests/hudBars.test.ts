@@ -392,6 +392,28 @@ const bottom = (b: BarBox) => (b.clipBottom ? b.y + b.h / 2 : b.y + b.h);
   hp = 100;
   for (let i = 0; i < linger + 5; i++) frame();
   ok(hpBar.names.has('off'), 'full again, it goes again');
+  // The owner's switch of 20 November, "Keep the bars up when full": on, every bar of the block comes up full and stays
+  // (stamina and breath with them) at one write each, and writes nothing more while it stays; off, they go again.
+  const staminaBar = root.querySelector('.hud-bar.stamina');
+  const breathBar = root.querySelector('.hud-bar.breath');
+  const fullPool = { value: 100, tired: false };
+  hud.setStamina(fullPool, 100, false, true);
+  frame();
+  ok(hpBar.names.has('off') && poolBar.names.has('off'), 'full, health and Force are down to begin with');
+  hud.setBarsKept(true);
+  hud.setStamina(fullPool, 100, false, true);
+  hud.update(0.016, 1, 2, 3, kit, hp, 100, '12:00', '', false, { value: 30, max: 30 } as Any);
+  ok(!hpBar.names.has('off') && !poolBar.names.has('off') && !staminaBar.names.has('off') && !breathBar.names.has('off'), 'kept up: health, Force, stamina and breath all stand, full');
+  const keptFrame = () => {
+    hud.setStamina(fullPool, 100, false, true);
+    hud.update(0.016, 1, 2, 3, kit, hp, 100, '12:00', '', false, { value: 30, max: 30 } as Any);
+  };
+  for (let i = 0; i < linger + 10; i++) keptFrame();
+  ok(!hpBar.names.has('off') && !poolBar.names.has('off') && !staminaBar.names.has('off') && !breathBar.names.has('off'), `and they stay well past the ${S.fullLinger} s linger`);
+  ok(own(() => { for (let i = 0; i < 120; i++) keptFrame(); }) === 0, 'kept up and full, they write nothing at all');
+  hud.setBarsKept(false);
+  for (let i = 0; i < linger + 10; i++) keptFrame();
+  ok(hpBar.names.has('off') && poolBar.names.has('off') && staminaBar.names.has('off') && breathBar.names.has('off'), 'the switch off, every full bar goes again');
   // Health's colour and ripple: one class each way at each share, and nothing between.
   hp = 41;
   frame();

@@ -8534,7 +8534,7 @@ class App {
        * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
        * is a write that is meant to happen.
        */
-      hud: (opts: { hidden?: boolean; overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; fps?: boolean; weather?: boolean; clock?: boolean; markBlade?: boolean; promptBlur?: boolean; health?: number | null; align?: string; forceLook?: string; forceEdge?: string; slotLines?: string; theme?: string; weatherWords?: Partial<typeof WEATHER_WORD_TUNE>; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
+      hud: (opts: { hidden?: boolean; overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; fps?: boolean; weather?: boolean; clock?: boolean; markBlade?: boolean; promptBlur?: boolean; barsKept?: boolean; health?: number | null; align?: string; forceLook?: string; forceEdge?: string; slotLines?: string; theme?: string; weatherWords?: Partial<typeof WEATHER_WORD_TUNE>; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
         const S = this.settings;
         let sized = false;
         // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
@@ -8584,7 +8584,7 @@ class App {
         }
         // The interface rewrite's first wave: the three readouts, and the block's three switches (a word not offered is
         // refused out loud, as the menu offers no such word).
-        for (const [k, key] of [['fps', 'hudFps'], ['weather', 'hudWeather'], ['clock', 'hudClock'], ['markBlade', 'hudMarkBlade'], ['promptBlur', 'hudPromptBlur']] as const) {
+        for (const [k, key] of [['fps', 'hudFps'], ['weather', 'hudWeather'], ['clock', 'hudClock'], ['markBlade', 'hudMarkBlade'], ['promptBlur', 'hudPromptBlur'], ['barsKept', 'hudBarsKept']] as const) {
           if (typeof opts[k] === 'boolean') {
             S[key] = opts[k];
             sized = true;
@@ -8705,6 +8705,8 @@ class App {
           // 'pistol', 'sword / knife'), and whether its blade follows the real one (the Interface page's switch).
           mark: foot.mark,
           markBlade: S.hudMarkBlade,
+          // Whether the bars stay up when full (the Interface page's "Keep the bars up when full").
+          barsKept: S.hudBarsKept,
           // The body block (the interface rewrite's first wave): where it stands and how Force meets health, every bar's
           // share as drawn and what it wears (the bars carry no words on the screen, so this is the only way to read them
           // from a tab nobody can see), and the three readouts as they stand ('' while a line is off). `held` is the old
@@ -13965,6 +13967,7 @@ class App {
       case 'hudForceLook':
       case 'hudForceEdge':
       case 'hudMarkBlade':
+      case 'hudBarsKept':
       case 'hudSlotLines':
       case 'hudPromptBlur':
       case 'hudTheme':
@@ -14918,6 +14921,8 @@ class App {
     this.hud.setBlock(align, oneOf(S.hudForceLook, HUD_FORCE_LOOKS, 'over'), oneOf(S.hudForceEdge, HUD_FORCE_EDGES, 'lower'));
     // The weapon mark's blade follows the real one, or stands out always (item 6's switch).
     this.hud.setMarkBlade(S.hudMarkBlade);
+    // The bars stay up when full, or go away a moment after as they begin (the owner's switch of 20 November).
+    this.hud.setBarsKept(S.hudBarsKept);
     // The interface rewrite's second wave: the lines between the action bar's cells and the use prompt's actions at most
     // of the bar's height or all of it, and the blur behind the prompt (both bars and the long line).
     const linesFull = oneOf(S.hudSlotLines, HUD_SLOT_LINES, 'short') === 'full';
