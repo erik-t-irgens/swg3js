@@ -24842,14 +24842,15 @@ class App {
   /**
    * What is held off on WebGPU this step (the GPU port's step 3), each named for `__debug.gpu()`: the effects chain (the
    * scene draws straight to the canvas with three's tone mapping), the far rings (a program of ours: far tiles stand), the
-   * volumetrics' master (its remake is the owner's), the sun's shadow hold and shadow batches (every cascade drawn every
-   * frame, every caster drawing itself), and the leaf cards' shadow skip only where their part (step 4) is left out at load.
+   * volumetrics' master (its remake is the owner's), the shadow batches (every caster drawing itself), and the leaf cards'
+   * shadow skip only where their part (step 4) is left out at load. The sun's shadow hold is on from pass 1's third wave
+   * (`gpu/heldCsm.ts`: the middle and far cascades drawn by age, `SHADOW_PASS_TUNE.cadence` and the `shadowPass` sliders
+   * as on WebGL), and the runtime names it here only where three is not the revision the held node was read against.
    */
   private forceGpuOff(): void {
     const rt = GPU.rt!;
     if (!rt.chain.atLoad) rt.forced('effects', "the effects chain is left out at load (localStorage['swg.gpu.chain'] = '0'): straight to the canvas, three's tone mapping at the game's exposure");
     rt.forced('volumetrics', 'the master is held off: its remake is the owner\'s');
-    rt.forced('shadow hold', 'every cascade is drawn every frame');
     rt.forced('shadow batches', 'every caster draws itself');
     // The far rings are drawn on WebGPU from the port's step 5 (`gpuGround.ts`); with their part left out at load
     // (`localStorage['swg.gpu.rings'] = '0'`) the far ground is drawn as far tiles, as step 3 drew it.
@@ -24858,7 +24859,6 @@ class App {
       HORIZON_TUNE.ground = 'tiles';
     }
     VOL_TUNE.on = false;
-    SHADOW_PASS_TUNE.cadence = false;
     SHADOW_PASS_TUNE.batches = false;
     SHADOW_BATCH_HATCH.on = false;
     // The leaf cards' own shadow skip is ported (step 4, `gpuCard.ts`); with that part left out at load

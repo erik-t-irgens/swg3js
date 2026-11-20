@@ -208,6 +208,10 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ['src/world/portalRender.ts', 'if (GPU.webgpu) return [this.portalStandIn, this.resetQuad, ...this.gpuDoorwayStandIns()];', 'return [this.portalStandIn, this.resetQuad];'],
     // And the sun the occlusion reads: on WebGPU the WebGPU sun's and its cascades, the WebGL branch the line it had.
     ['src/world/world.ts', 'if (GPU.webgpu && csm && csm.lights.length && this.gpuSun && this.renderer && this.camera) this.gpuSun.fillFx(sky, csm, this.renderer, Math.min(this.camera.far, csm.maxFar) - this.camera.near);', 'else if (csm && csm.lights.length) {'],
+    // Pass 1, wave 3: the holds decided on three's own cascades on WebGPU (armed where WebGL decides), and the frame with no
+    // world pass told to the holds' own lights there; the WebGL branch of each the line(s) it had.
+    ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSun) this.gpuSun.arm(now);', 'else {'],
+    ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSun) hold.drawn(hold.lights, drew, whole);', 'else hold.drawn(this.csm?.lights ?? NO_CASCADE_LIGHTS, drew, whole);'],
   ];
   for (const [f, gpu, gl] of pairs) {
     const l = lines(f);
@@ -553,6 +557,41 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     walkAll(SRC);
     const outside = all.filter((f) => !inGpuDir(f)).flatMap((f) => readFileSync(f, 'utf8').split(/\r?\n/).filter((x) => /\b(import|from)\b/.test(x) && /(pipeLedger|keyCensus|gpuTimer)(\.ts)?['"]/.test(x)).map((x) => `${rel(f)}: ${x.trim()}`));
     ok(outside.length === 0, `nothing outside src/core/gpu/ imports wave 1's modules: ${outside.join('; ')}`);
+  }
+  // Pass 1, wave 3: the sun's cascades held by age on WebGPU (`src/core/gpu/heldCsm.ts`). The WebGL decision stands inside
+  // the `else` after the WebGPU arm, its three lines as e9b8e9d had them; the holds are handed to three's cascades inside the
+  // world's WebGPU block alone, after the sun is made; the boot no longer holds the cadence off on WebGPU (the batches it
+  // still does); sun.ts makes the held node only where `heldCsmApplies` says three is the revision it was read against;
+  // and the two methods the holds gained for WebGPU are called from under src/core/gpu/ alone.
+  {
+    const w = lines('src/world/world.ts');
+    const arm = w.indexOf('if (GPU.webgpu && this.gpuSun) this.gpuSun.arm(now);');
+    ok(arm > 0 && w[arm + 1] === 'else {' && w[arm + 2] === 'const drawn = this.shadowHold.decide(csm.lights, csm, this.camera, now, this.shadowMovers);' && w[arm + 3] === 'perf.count(CNT.cascadesDrawn, drawn);' && w[arm + 4] === 'perf.count(CNT.holdsRefused, this.shadowHold.refusedNow);' && w[arm + 5] === '}' && w[arm + 7] === 'refreshCascadeBoxes(csm.lights, this.cascadeBoxes);', "world.ts: WebGL's decision of the holds stands in the else after the WebGPU arm, its three lines as they were, refreshCascadeBoxes after");
+    const sunAt = w.findIndex((x) => x.startsWith('this.gpuSun = GPU.rt!.makeSun(this.scene, camera, '));
+    const handAt = w.indexOf('this.gpuSun.hold(this.shadowHold, this.shadowMovers, (drawn, refused) => {');
+    const block = w.lastIndexOf('if (GPU.webgpu) {', sunAt);
+    ok(sunAt > 0 && handAt > sunAt && handAt - sunAt < 4 && block > 0 && sunAt - block === 2 && w.filter((x) => x.includes('this.gpuSun.hold(')).length === 1, "world.ts: the holds are handed to three's cascades inside the world's WebGPU block alone, right after the sun is made");
+    const m = lines('src/main.ts');
+    const f = m.indexOf('private forceGpuOff(): void {');
+    const end = m.indexOf('}', m.indexOf("CARD_LIGHT_TUNE.shadow = 'all';", f) + 2);
+    const body = m.slice(f, end);
+    ok(f > 0 && !body.some((x) => x.includes('SHADOW_PASS_TUNE.cadence') || x.includes("rt.forced('shadow hold'")) && body.includes('SHADOW_PASS_TUNE.batches = false;') && body.includes("rt.forced('shadow batches', 'every caster draws itself');"), "main.ts: forceGpuOff no longer holds the cadence off on WebGPU, and still holds the shadow batches off");
+    const sun = readFileSync(join(SRC, 'core', 'gpu', 'sun.ts'), 'utf8');
+    ok(sun.includes('const notHeld = heldCsmApplies(THREE.REVISION);') && sun.includes('const node: Any = notHeld === null ? new HeldCsmShadowNode(light, data) : new CSMShadowNode(light, data);'), "sun.ts: the held node is made only at the revision it was read against, three's plain node at any other");
+    ok(existsSync(join(SRC, 'core', 'gpu', 'heldCsm.ts')), "wave 3's heldCsm.ts is under src/core/gpu/");
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes("if (sunNow.notHeld !== null && !forcedOff.has('shadow hold')) forcedOff.set('shadow hold', sunNow.notHeld);"), 'start.ts: gpu() names the hold forced off only where the node is not held');
+    const all: string[] = [];
+    const walkAll = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walkAll(p);
+        else if (CODE.test(n) && !n.endsWith('.d.ts')) all.push(p);
+      }
+    };
+    walkAll(SRC);
+    const callers = all.flatMap((file) => readFileSync(file, 'utf8').split(/\r?\n/).filter((x) => /\.(drawnOne|undrawnDirty)\(/.test(x) && !/^\s*(\/\/|\*)/.test(x)).map((x) => `${rel(file)}: ${x.trim()}`));
+    ok(callers.length === 2 && callers.every((c) => c.startsWith('src/core/gpu/heldCsm.ts:')), `the holds' two methods for WebGPU are called from heldCsm.ts alone: ${callers.join('; ')}`);
   }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');

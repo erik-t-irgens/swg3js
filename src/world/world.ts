@@ -1332,7 +1332,8 @@ export class World {
   /**
    * The sun's cascades drawn by age, each held where its map was drawn (the performance pass's sixth wave,
    * `shadowCadence.ts`): decided in `updateShadows` between `csm.update` and `refreshCascadeBoxes`, told what was drawn by
-   * the portal renderer's hooks, made dirty by the world's own events.
+   * the portal renderer's hooks, made dirty by the world's own events. On WebGPU (the GPU port's pass 1, wave 3) the same
+   * hold is bound to the cascades of three's `CSMShadowNode` and decided inside the render (`src/core/gpu/heldCsm.ts`).
    */
   readonly shadowHold = new ShadowHold();
   /** This frame's fast movers, filled by the game after the shuttles are posed and before `updateShadows`. */
@@ -6723,7 +6724,10 @@ export class World {
         try {
           batches.restore();
         } finally {
-          hold.drawn(this.csm?.lights ?? NO_CASCADE_LIGHTS, drew, whole);
+          // On WebGPU (pass 1, wave 3) the holds are bound to three's own cascades (`heldCsm.ts`), each draw told as it is
+          // made: what reaches here is a frame with no world pass, which makes every one of them dirty, as on WebGL.
+          if (GPU.webgpu && this.gpuSun) hold.drawn(hold.lights, drew, whole);
+          else hold.drawn(this.csm?.lights ?? NO_CASCADE_LIGHTS, drew, whole);
         }
       },
     };
@@ -6754,6 +6758,12 @@ export class World {
     if (GPU.webgpu) {
       for (const l of this.csm.lights) l.visible = false;
       this.gpuSun = GPU.rt!.makeSun(this.scene, camera, { maxFar: this.shadowDistance, mapSize: this.shadowMapSize, lightMargin: LIGHT_MARGIN, splits: (amount, near, far, target) => splitBreaks(amount, near, far, SHADOW_SPLIT_TUNE, target) });
+      // Pass 1, wave 3: the world's holds handed to three's own cascades (`heldCsm.ts`), with the frame's fast movers and the
+      // frame report's two counts; every `dirtyAll` of the world's, the console's and the debug menu's reaches them so.
+      this.gpuSun.hold(this.shadowHold, this.shadowMovers, (drawn, refused) => {
+        perf.count(CNT.cascadesDrawn, drawn);
+        perf.count(CNT.holdsRefused, refused);
+      });
     }
   }
 
@@ -9009,17 +9019,23 @@ export class World {
       // frame has its light and target put back where its map was drawn from before anything works its matrix out, so
       // every reader sees one cascade whose matrix is the one its map was drawn with.
       if (this.camera) {
-        const drawn = this.shadowHold.decide(csm.lights, csm, this.camera, now, this.shadowMovers);
-        perf.count(CNT.cascadesDrawn, drawn);
-        perf.count(CNT.holdsRefused, this.shadowHold.refusedNow);
+        // On WebGPU (pass 1, wave 3) the holds decide on three's own cascades inside the frame's first render that lights
+        // with the sun, once (`heldCsm.ts`): the frame arms them here, where WebGL decides.
+        if (GPU.webgpu && this.gpuSun) this.gpuSun.arm(now);
+        else {
+          const drawn = this.shadowHold.decide(csm.lights, csm, this.camera, now, this.shadowMovers);
+          perf.count(CNT.cascadesDrawn, drawn);
+          perf.count(CNT.holdsRefused, this.shadowHold.refusedNow);
+        }
       }
       refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
     }
     perf.gauge(CNT.batchedCasters, this.shadowBatches.casters);
     perf.gauge(CNT.shadowBatches, this.shadowBatches.standing);
     this.syncGrassShadows();
-    // On WebGPU (the GPU port's step 3) the cascades' own lights are hidden and none is held (their cadence is forced off):
-    // the sun of three's `CSMShadowNode` copies their fit, colour and shadow look, once they have moved this frame.
+    // On WebGPU (the GPU port's step 3) the cascades' own lights are hidden and never held (the holds are three's node's
+    // since pass 1's third wave): the sun of three's `CSMShadowNode` copies their fit, colour and shadow look, once they
+    // have moved this frame.
     if (csm && this.gpuSun && this.camera) this.gpuSun.sync(csm, this.camera, this.renderer?.shadowMap.enabled === true);
     if (now - this.csmScanAt > SCAN_TUNE.everyMs) {
       this.csmScanAt = now;

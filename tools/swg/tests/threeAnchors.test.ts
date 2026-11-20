@@ -22,6 +22,9 @@
 //     records, the program's own fields, the light state's version, the shadow map's parts, the skeleton's bone
 //     texture, the key's run of parameters (shaderWatch.test and programCensus.test hold its order), the
 //     environment three passes through untouched, the loader's plugin hooks, the batched mesh's draw hook;
+//  6b. what the held cascades on WebGPU lean on (`src/core/gpu/heldCsm.ts`, pass 1, wave 3): every method of three's
+//     `CSMShadowNode`, its cascades' shadow nodes, the node frame and the light shadow it overrides or calls, each held to
+//     a hash of its text at the development commit, and what each is relied on for said in its own words;
 //  7. what three does under reversed depth that the game leaves to it: the polygon offset's units turned with
 //     the factor, the opaque and transparent sorts turned by the depth it negates, the always test kept;
 //  8. every function of three's chunks that any shader text of the game's calls (every string under `src/`), each
@@ -38,6 +41,7 @@
 //
 // Run: node tools/swg/tests/threeAnchors.test.ts
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { register } from 'node:module';
 import { dirname, join, relative } from 'node:path';
@@ -399,6 +403,92 @@ const INJECTED: { what: string; lib: 'physical' | 'depth'; shader: Shader; loops
   const ro3 = three('src/renderers/common/RenderObject.js');
   ok(ro3.includes("if ( /^(is[A-Z]|_)|^(visible|version|uuid|name|opacity|userData|iridescenceThicknessRange)$/.test( property ) ) continue;") && ro3.includes("const _enumProperties = [ 'side', 'blending', 'combine', 'normalMapType' ];"), "the material's properties three keys, as the ledger reduces them");
   ok(/cacheKey \+= object\.skeleton\.bones\.length \+ ',';/.test(ro3) && /cacheKey \+= 'morph-' \+ name \+ ',';/.test(ro3) && /getDynamicCacheKey\(\) \{/.test(ro3), 'three keys a program on the bone count and each morph attribute, and checks the environment every draw');
+}
+
+// ---------------------------------------------------------------- 6b. the held cascades (pass 1, wave 3)
+
+{
+  // `src/core/gpu/heldCsm.ts` subclasses three's `CSMShadowNode` with no patch of three's, but it leans on the addon's method
+  // order and on how three's shadow nodes decide a draw, so every method of three's it overrides or calls is held to its
+  // text at three's development commit 577fb27 (REVISION 188dev), the revision `heldCsmApplies` makes it at. The text is
+  // read as `gpuPatches.test.ts` reads it: a method is its class's line from `\t<name>(` to the class's next `\t}`, inside
+  // the block from `class <Class> ` at a line's start to the next declaration at a line's start; line endings folded to
+  // LF; the build files the game loads for three's own classes, the addon's file as it ships (examples are not built).
+  // A hash that moves fails here, naming the method: read heldCsm.ts against it again before recording the new one.
+  const HELD_RECORDED: Record<string, string> = {
+    // Its fields (`lights`, `_shadowNodes`, `breaks`), made empty; `_init` makes the cascade lights and their shadow nodes.
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode.constructor': '565fb1d8e945f7e7',
+    // Overridden (three's run first, then the wraps): one `LwLight` and one `ShadowNode` a cascade, then the frustums.
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode._init': '98213b7f383c4478',
+    // Called by sun.ts as the splits, the reach or the projection move: the boxes and breaks the guards read.
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode.updateFrustums': '0101a6e30c92d395',
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode._updateShadowBounds': '32beb2a89f21826e',
+    // The order the subclass leans on: the node before its cascades' shadow nodes, so its updateBefore runs first.
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode.build': '53af7cb35bf59503',
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode.setup': '2ef6bea2e53b58ac',
+    // Overridden and called (`super.updateBefore`): three's own fit of every cascade light, once a game frame now.
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode.updateBefore': 'fb619c3fa29fac5f',
+    // The band the shader samples each cascade over (the coverage proof's `nodeBand`).
+    'examples/jsm/csm/CSMShadowNode.js CSMShadowNode._setupFade': '09455ce195c76d4b',
+    // A cascade drawn only while asked, once a camera a frame, its ask cleared as it is drawn (`drawnOne`, `undrawnDirty`).
+    'build/three.tsl.js ShadowBaseNode.updateBefore': '669fd4816d14d375',
+    'build/three.tsl.js ShadowBaseNode.needsRefresh': '073ca92faa67bea1',
+    // Wrapped for good (`_heldWrap`): the draw the hold is told of.
+    'build/three.tsl.js ShadowNode.updateShadow': 'b3f7a0d581580332',
+    // The sampling matrix written only as a map is drawn, so a held cascade keeps its map's.
+    'build/three.tsl.js ShadowNode.renderShadow': '777fd3d56e3ec430',
+    'build/three.core.js LightShadow.updateMatrices': '1e8d6ff3a0d29f00',
+    // Three's walk of a node's own fields for child nodes, which steps over a field named with a leading `_`.
+    'build/three.tsl.js Node._getChildren': 'a978aa82ff5c9261',
+    // A render-scoped node's updateBefore once a render (the node is reached once a render that lights with the sun).
+    'build/three.webgpu.js NodeFrame.updateBeforeNode': '77ccdb28aa9fd667',
+  };
+  const heldLines = new Map<string, string[]>();
+  const heldMethod = (file: string, cls: string, method: string): string | null => {
+    let ls = heldLines.get(file);
+    if (!ls) heldLines.set(file, (ls = three(file).replace(/\r\n?/g, '\n').split('\n')));
+    const start = ls.findIndex((l) => l.startsWith(`class ${cls} `) || l.startsWith(`class ${cls}{`));
+    if (start < 0) return null;
+    let end = ls.length;
+    for (let i = start + 1; i < ls.length; i++) {
+      if (/^(class |export |function |const |let |var )/.test(ls[i])) {
+        end = i;
+        break;
+      }
+    }
+    const head = new RegExp(`^\\t(async )?${method}\\(`);
+    const found: number[] = [];
+    for (let i = start; i < end; i++) if (head.test(ls[i])) found.push(i);
+    if (found.length !== 1) return null;
+    for (let i = found[0] + 1; i < end; i++) if (ls[i] === '\t}') return ls.slice(found[0], i + 1).join('\n');
+    return null;
+  };
+  const print = process.argv.includes('--print-held');
+  const moved: string[] = [];
+  const texts: Record<string, string> = {};
+  for (const k of Object.keys(HELD_RECORDED)) {
+    const [file, name] = k.split(' ');
+    const [cls, method] = name.split('.');
+    const t = heldMethod(file, cls, method);
+    const h = t === null ? 'missing' : createHash('sha256').update(t).digest('hex').slice(0, 16);
+    texts[name] = t ?? '';
+    if (print) console.log(`    '${k}': '${h}',`);
+    if (h !== HELD_RECORDED[k]) moved.push(`${k} (${h}, recorded ${HELD_RECORDED[k]})`);
+  }
+  ok(moved.length === 0 || print, `every method of three's the held cascades override or call is the text heldCsm.ts was read against (${Object.keys(HELD_RECORDED).length} of them${moved.length ? `; moved: ${moved.join('; ')}` : ''})`);
+  // What each is relied on for, said in its own words, so a moved hash says what to read again.
+  ok(/builder\.addSequentialNode\( this \);\s*return super\.build\( builder \);/.test(texts['CSMShadowNode.build']), "the node registers itself before its cascades' shadow nodes, so its updateBefore runs first in each render");
+  ok(/_lightDirection\.subVectors\( light\.target\.position, light\.position \)\.normalize\(\);/.test(texts['CSMShadowNode.updateBefore']) && /lwLight\.position\.copy\( _center \);\s*lwLight\.target\.position\.copy\( _center \);\s*lwLight\.target\.position\.add\( _lightDirection \);\s*lwLight\.updateMatrixWorld\(\);\s*lwLight\.target\.updateMatrixWorld\(\);/.test(texts['CSMShadowNode.updateBefore']), "three's fit orients the cascades by the light's own place and target, and moves every cascade light and target and their matrices (what the adapter hands decide, and what the hold puts back)");
+  ok(/this\._shadowNodes\.push\( shadow\( lwLight, lShadow \) \);/.test(texts['CSMShadowNode._init']) && /this\.lights\.push\( lwLight \);/.test(texts['CSMShadowNode._init']), '_init makes one cascade light and one shadow node a cascade (what the wraps go on)');
+  ok(/if \( frame\.renderer\._precompilationState !== null \) return false;/.test(texts['ShadowBaseNode.updateBefore']) && /let needsUpdate = shadow\.needsUpdate \|\| shadow\.autoUpdate;/.test(texts['ShadowBaseNode.updateBefore']) && /this\.updateShadow\( frame \);\s*shadow\.needsUpdate = false;/.test(texts['ShadowBaseNode.updateBefore']), 'a cascade is drawn only while its shadow asks, never in a precompile, and its ask is cleared just after its updateShadow');
+  ok(/if \( this\._cameraFrameId\.get\( camera \) === frameId \) return false;/.test(texts['ShadowBaseNode.needsRefresh']), 'and drawn once a camera a frame (a cascade asked for again in the same frame is not drawn, and the hold finds it dirty)');
+  ok(/shadow\.updateMatrices\( light \);/.test(texts['ShadowNode.renderShadow']) && /this\.renderShadow\( frame \);/.test(texts['ShadowNode.updateShadow']), "the sampling matrix is written as the map is drawn, inside updateShadow");
+  ok(/property\.charCodeAt\( 0 \) === 95/.test(texts['Node._getChildren']), "three's walk for child nodes steps over a field whose name begins with `_` (the subclass's own are `_held...`)");
+  ok(/\} else if \( updateType === NodeUpdateType\.RENDER \) \{[\s\S]*?if \( nodeUpdateBeforeMap\.renderId !== this\.renderId \) \{/.test(texts['NodeFrame.updateBeforeNode']), 'a render-scoped node is updated once a render');
+  ok(/const viewZToOrthographicDepth = \( viewZ, near, far \) => viewZ\.add\( near \)\.div\( near\.sub\( far \) \);/.test(three('build/three.tsl.js')) && /viewZToOrthographicDepth\( positionView\.z, cameraNear, shadowFar \)/.test(three('examples/jsm/csm/CSMShadowNode.js')), "the node's linear depth is counted from the camera's near plane (the band the coverage proof samples, heldCsm.test.ts)");
+  // The subclass itself names what it overrides and calls.
+  const held = read('src/core/gpu/heldCsm.ts');
+  ok(['_init(o: Any): void {', 'updateBefore(frame: Any): boolean | undefined {', 'super.updateBefore(frame)', 'sn.updateShadow = (frame: Any): unknown => {', "export const HELD_CSM_REVISION = '188dev';"].every((s) => held.includes(s)), 'heldCsm.ts overrides _init and updateBefore, calls three\'s own fit, wraps each updateShadow, and names the revision it was read against');
 }
 
 // ---------------------------------------------------------------- 7. reversed depth, left to three

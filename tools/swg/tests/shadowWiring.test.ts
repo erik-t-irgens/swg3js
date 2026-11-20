@@ -133,7 +133,9 @@ const indexOf = (lines: string[], needle: string | RegExp): number => lines.find
 {
   const attach = body(world, /^ {2}attachCamera\(camera/, 'attachCamera');
   const hooks = attach.join('\n');
-  ok(/before: \(\) => batches\.around\(\)/.test(hooks) && /try \{\s*batches\.restore\(\);\s*\} finally \{\s*hold\.drawn\(/.test(hooks), 'the world\'s hooks: the batches follow and swap before, the swap is put back and the holds told after, in a finally');
+  // Since the GPU port's pass 1, wave 3 the holds are bound to three's own cascades on WebGPU (`heldCsm.ts`), so the after
+  // tells them of a frame with no world pass by their own lights there, and by the classic cascades' on WebGL as before.
+  ok(/before: \(\) => batches\.around\(\)/.test(hooks) && /try \{\s*batches\.restore\(\);\s*\} finally \{\s*(\/\/[^\n]*\n\s*)*if \(GPU\.webgpu && this\.gpuSun\) hold\.drawn\(hold\.lights, drew, whole\);\s*else hold\.drawn\(this\.csm\?\.lights \?\? NO_CASCADE_LIGHTS, drew, whole\);/.test(hooks), 'the world\'s hooks: the batches follow and swap before, the swap is put back and the holds told after, in a finally (by their own lights on WebGPU, the classic cascades\' on WebGL)');
   const warm = body(world, /^ {2}private compileShadowDepth\(r/, 'compileShadowDepth');
   ok(warm.some((l) => l.includes('plainDepthCombos(set.name)')) && warm.some((l) => l.includes('batchedDepthCombo(set.name, shadowBatchMaterial())')), 'compileShadowDepth draws the plain casters (instanced and not) and the batches\' one combination');
   const draw = indexOf(warm, 'portals.drawShadowsOnly(this.scene)');

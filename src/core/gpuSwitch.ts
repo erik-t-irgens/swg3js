@@ -19,6 +19,7 @@ import type { BakeGrid } from '../world/horizon/horizonMath.ts';
 import type { PostFX } from './postfx.ts';
 import type { FxSettings } from './fxRegistry.ts';
 import type { FxInstallDeps } from './fx/install.ts';
+import type { ShadowHold, ShadowMovers } from '../world/shadowCadence.ts';
 
 /** How the switch was read. */
 export type RendererChoice = 'webgl' | 'webgpu';
@@ -222,6 +223,19 @@ export interface GpuSunOptions {
 
 export interface GpuSun {
   readonly light: THREE.DirectionalLight;
+  /**
+   * Pass 1, wave 3 (`gpu/heldCsm.ts`): whether the middle and far cascades are held by age, as WebGL's are; false where
+   * three is not the revision the held node was read against (every cascade then drawn every frame), `notHeld` saying why.
+   */
+  readonly holds: boolean;
+  readonly notHeld: string | null;
+  /**
+   * The world's holds handed to the node, bound to its own cascade lights, with the frame's fast movers and who counts
+   * each decision's cascades drawn and holds refused; answers whether it holds. Once, as the sun is made.
+   */
+  hold(hold: ShadowHold, movers: ShadowMovers, counted: ((drawn: number, refused: number) => void) | null): boolean;
+  /** Once a game frame, where WebGL's `updateShadows` decides: the next render that lights with the sun decides, once. */
+  arm(now: number): void;
   /** Every frame after the classic cascades' `update`: direction, colour, intensity, shadow intensity, bias, softness, reach. */
   sync(cascades: { lightDirection: THREE.Vector3; lights: THREE.DirectionalLight[]; maxFar: number }, camera: THREE.PerspectiveCamera, castShadow: boolean): void;
   /** The camera's projection or the splits moved: the cascades refitted. */

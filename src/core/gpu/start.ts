@@ -281,6 +281,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     makeSun(scene: THREE.Scene, camera: THREE.PerspectiveCamera, o: GpuSunOptions) {
       worldScene = scene;
       sunNow = makeSun(renderer, scene, camera, o);
+      // Pass 1, wave 3: the cascades held by age only at the revision the held node was read against (`heldCsm.ts`).
+      if (sunNow.notHeld !== null && !forcedOff.has('shadow hold')) forcedOff.set('shadow hold', sunNow.notHeld);
       return sunNow;
     },
     frameStats(): GpuFrameStats {

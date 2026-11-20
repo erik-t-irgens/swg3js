@@ -12,11 +12,17 @@
 // Three's own bias applies on WebGPU: the sun-shadow-bias hold (`threeHolds.ts`) is a WebGL chunk's and has no node twin.
 // The cascades are fitted to the game's camera, handed over at once (`_init`), so a pass drawn with another camera (a
 // preview's, a compile's) never fits them to itself.
+//
+// Since pass 1's third wave the node is `HeldCsmShadowNode` (`heldCsm.ts`), three's node run by the world's own holds:
+// the middle and far cascades drawn by age and held where their maps were drawn, as WebGL's are, decided once a game frame
+// (`arm`, `hold`). Only at the revision of three it was read against (`heldCsmApplies`); on any other three's plain node
+// draws every cascade every frame, as before, and the runtime says so (`forced`).
 
 import * as THREE from 'three';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { reference, renderGroup } from 'three/tsl';
 import { leafBiasNode } from './gpuCard.ts';
+import { HeldCsmShadowNode, heldCsmApplies } from './heldCsm.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { fillCascades, luminanceOf } from '../fx/lights.ts';
 import type { GpuSun, GpuSunOptions } from '../gpuSwitch.ts';
@@ -33,7 +39,10 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
   light.userData.swgSun = true;
   light.castShadow = true;
   light.shadow.mapSize.set(opts.mapSize, opts.mapSize);
-  const node: Any = new CSMShadowNode(light, { cascades: 3, maxFar: opts.maxFar, mode: 'custom', customSplitsCallback: opts.splits, lightMargin: opts.lightMargin });
+  // The held node at the revision it was read against, three's plain node at any other (pass 1, wave 3).
+  const notHeld = heldCsmApplies(THREE.REVISION);
+  const data = { cascades: 3, maxFar: opts.maxFar, mode: 'custom' as const, customSplitsCallback: opts.splits, lightMargin: opts.lightMargin };
+  const node: Any = notHeld === null ? new HeldCsmShadowNode(light, data) : new CSMShadowNode(light, data);
   // The cascades fade into each other, as the classic cascades do (`csm.fade = true` in the world).
   node.fade = true;
   (light.shadow as Any).shadowNode = node;
@@ -52,6 +61,16 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
   let fittedReversed = camera.reversedDepth === true;
   const sun: GpuSun = {
     light,
+    holds: notHeld === null,
+    notHeld,
+    hold(h, movers, counted) {
+      if (notHeld !== null) return false;
+      (node as HeldCsmShadowNode)._heldAttach(h, movers, counted);
+      return true;
+    },
+    arm(now) {
+      if (notHeld === null) (node as HeldCsmShadowNode)._heldArm(now);
+    },
     sync(cascades, cam, castShadow) {
       const lights = cascades.lights;
       const first = lights[0];
@@ -109,6 +128,8 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
         maxFar: node.maxFar,
         breaks: (node.breaks as number[]).map((b) => Number(b.toFixed(4))),
         fade: node.fade,
+        // Pass 1, wave 3: the holds on three's cascades (decisions a game frame, renders that reached the node, draws).
+        hold: notHeld === null ? (node as HeldCsmShadowNode)._heldReport() : notHeld,
         cascades: own.map((l) => {
           const c = l.shadow.camera;
           return { box: Number((c.right - c.left).toFixed(1)), near: c.near, far: Number(c.far.toFixed(1)), bias: Number(l.shadow.bias.toFixed(6)), normalBias: Number(l.shadow.normalBias.toFixed(4)), radius: l.shadow.radius, mapSize: l.shadow.mapSize.x, map: !!(l.shadow as unknown as { map: unknown }).map };

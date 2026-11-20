@@ -51,6 +51,8 @@ export const SHADOW_PASS_TUNE = {
    * (0-54 m) every frame; the middle (54-115 m) and far (115-320 m) at 144 Hz every 2nd and every 6th frame. It is how
    * far a moving thing's shadow may trail it there: a walker at 6 m/s 8 and 25 cm, under a texel of either map (14 and
    * 40 cm). Counted in time, so the trail is the same at every frame rate. [0, 0, 0] is today exactly. The owner's eye.
+   * But for `stagger`: when the middle and far come due on one frame the older map is drawn and the other is shown one
+   * frame more, past this age by up to a frame (by a slow frame's length after a hitch).
    */
   maxAgeMs: [0, 13, 41] as number[],
   /** Never two far cascades due by age alone on one frame: the older map first, the other a frame later. Technical: a far draw never stacks into a spike. */
@@ -752,7 +754,11 @@ export interface HoldCsm {
 /**
  * The cascades' holds: per cascade where its map was drawn from and when, dirty or not, and why it was drawn last; the
  * view the guards read; what the console reports. `decide` after `csm.update()` and before `refreshCascadeBoxes`; `drawn`
- * after each shadow pass (the portal renderer's hooks); `dirtyAll` for the world's own events.
+ * after each shadow pass (the portal renderer's hooks); `dirtyAll` for the world's own events. On WebGPU (the GPU port's
+ * pass 1, wave 3) the world's one hold is handed the cascade lights of three's `CSMShadowNode` instead, which draws them
+ * inside the render: `decide` runs there once a game frame, right after three's own fit (`src/core/gpu/heldCsm.ts`), each
+ * draw is told as it is made (`drawnOne`) and a cascade asked and never drawn found before the next decision
+ * (`undrawnDirty`).
  */
 export class ShadowHold {
   /** The lights it holds (the CSM's, handed over as it is made). */
@@ -885,7 +891,9 @@ export class ShadowHold {
     // How far the held light stands off this frame's fit, for the console.
     tmpOff.subVectors(pos, l.position);
     const along = tmpOff.x * s.x + tmpOff.y * s.y + tmpOff.z * s.z;
-    const across2 = tmpOff.lengthSq() - along * along;
+    // Written out, never `lengthSq()`: its answer handed back across a call the compiler did not build in made a number on
+    // each guarded cascade, every frame, in one process of twelve (the GPU port's pass 1, wave 3); the same sum to the bit.
+    const across2 = tmpOff.x * tmpOff.x + tmpOff.y * tmpOff.y + tmpOff.z * tmpOff.z - along * along;
     this.offset[i * 2] = across2 > 0 ? Math.sqrt(across2) : 0;
     this.offset[i * 2 + 1] = along;
     const r = holdCoversIn(q, t);
@@ -929,6 +937,39 @@ export class ShadowHold {
       c.dirty[i] = 0;
       c.drawnAt[i] = c.now[0];
       this.windowDraws[i]++;
+    }
+  }
+
+  /**
+   * One cascade three has just drawn, told by the draw itself rather than read after a pass (on WebGPU, where three draws
+   * the cascades inside the render: a wrap of each cascade's own `updateShadow`, `src/core/gpu/heldCsm.ts`): the pose its
+   * map was drawn from and when, as `drawn` records a cascade a pass drew. The WebGL path never calls it.
+   */
+  drawnOne(i: number): void {
+    const c = this.clock;
+    if (!(i >= 0 && i < c.n)) return;
+    const l = this.lights[i];
+    if (!l) return;
+    this.pos[i].copy(l.position);
+    this.tgt[i].copy(l.target.position);
+    c.valid[i] = 1;
+    c.dirty[i] = 0;
+    c.drawnAt[i] = c.now[0];
+    this.windowDraws[i]++;
+  }
+
+  /**
+   * Where each draw is told as it is made (`drawnOne`), the other half of `drawn`, before the next decision: each cascade
+   * the last decision asked for that three never drew (its `needsUpdate` still standing, as three clears it only as it
+   * draws) is made dirty. It records nothing, so a `dirtyAll` made since a draw stands. The WebGL path never calls it.
+   */
+  undrawnDirty(): void {
+    const c = this.clock;
+    for (let i = 0; i < c.n; i++) {
+      const l = this.lights[i];
+      if (!l) continue;
+      const s = l.shadow;
+      if (s.autoUpdate && s.needsUpdate) c.dirty[i] = 1;
     }
   }
 

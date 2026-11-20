@@ -63,7 +63,7 @@ const SHADOW_GROUPS: DialGroup[] = [
   },
   {
     title: 'How old the far shadows may be',
-    note: 'The near map is drawn every frame. The middle and far maps are drawn again once this old: what stands still looks the same, and a moving thing\'s shadow there may trail it by up to this long. 0 is every frame, as before.',
+    note: 'The near map is drawn every frame. The middle and far maps are drawn again once this old: what stands still looks the same, and a moving thing\'s shadow there may trail it by up to this long, a frame longer when both come due on one frame (the older is drawn first, the other the frame after). 0 is every frame, as before.',
     dials: [
       ageDial(1, 'Middle map, at most', 'The middle map is drawn again once its picture is this old. 13 ms is every second frame at 144 Hz: a walker\'s shadow trails 8 cm.'),
       ageDial(2, 'Far map, at most', 'The far map is drawn again once its picture is this old. 41 ms is every sixth frame at 144 Hz: a walker\'s shadow trails 25 cm, under one of its 40 cm texels.'),

@@ -469,8 +469,9 @@ function skinnedUnder(root: THREE.Object3D): THREE.SkinnedMesh[] {
   // The shadow rule: the manager asks the world's boxes with the same slack as the screen, and the world refreshes them after the cascades move.
   ok(/sphere\.radius = radius \+ tune\.shadowSlack;\s*inCascades = reachesCascades\(boxes, sphere\);/.test(manager) && /i\.inCascades = inCascades;/.test(manager), "the manager asks whether a body's sphere, with the shadow slack, reaches a cascade's box");
   // Since the performance pass's sixth wave the cascades' holds are decided between the two (a held light is put back
-  // before its matrix is worked out), and nothing else is.
-  ok(/csm\.update\(\);\s*(\/\/[^\n]*\n\s*)*if \(this\.camera\) \{\s*const drawn = this\.shadowHold\.decide\([^;]*\);\s*perf\.count\([^;]*\);\s*perf\.count\([^;]*\);\s*\}\s*refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);/.test(worldSrc) &&/shadowBoxes: \(\) => \(this\.csm \? this\.cascadeBoxes : null\),/.test(worldSrc), 'and the world hands it the boxes, refreshed right after the cascades move');
+  // before its matrix is worked out), and nothing else is; since the GPU port's pass 1, wave 3, on WebGPU the frame arms
+  // the holds of three's own cascades there instead (`heldCsm.ts`), the classic cascades' boxes the fresh fit's.
+  ok(/csm\.update\(\);\s*(\/\/[^\n]*\n\s*)*if \(this\.camera\) \{\s*(\/\/[^\n]*\n\s*)*if \(GPU\.webgpu && this\.gpuSun\) this\.gpuSun\.arm\(now\);\s*else \{\s*const drawn = this\.shadowHold\.decide\([^;]*\);\s*perf\.count\([^;]*\);\s*perf\.count\([^;]*\);\s*\}\s*\}\s*refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);/.test(worldSrc) &&/shadowBoxes: \(\) => \(this\.csm \? this\.cascadeBoxes : null\),/.test(worldSrc), 'and the world hands it the boxes, refreshed right after the cascades move');
 }
 
 console.log(`\n${checks} checks passed`);
