@@ -226,6 +226,12 @@ export interface Settings extends FxSettings {
   hudForceEdge: string;
   /** The weapon mark's lightsaber draws its blade in and out with the real one; off, its blade stands out always. */
   hudMarkBlade: boolean;
+  /** The lines between the action bar's cells (and the use prompt's actions): 'short' (`slotLineShare` of the bar's height) or 'full'. */
+  hudSlotLines: string;
+  /** A soft blur of the world behind the use prompt and the long prompt line. */
+  hudPromptBlur: boolean;
+  /** The interface's colour theme, by its word in `THEMES` (`src/core/themes.ts`): 'default' is the palette as it stands. */
+  hudTheme: string;
   // Gameplay.
   /**
    * How hard the world's own people and creatures are: one scale on their health and their blows,
@@ -503,6 +509,14 @@ export const DEFAULT_SETTINGS: Settings = {
   hudForceEdge: 'lower',
   // The owner's answer of 19 November 2026 on the weapon mark's blade drawing in and out with the real one: "Start on not off".
   hudMarkBlade: true,
+  // The interface rewrite's second wave: the lines between the action bar's cells start at about 80% of the bar's height,
+  // the full-height line a switch away (the wave's default, not yet answered); the blur behind the use prompt starts off
+  // (the owner's tab: blurring the world behind it costs the graphics card a little every frame).
+  hudSlotLines: 'short',
+  hudPromptBlur: false,
+  // The Colours switch (the second wave, item 11): Default, the palette as it stands (the wave's default, not yet
+  // answered), kept with the other settings in this browser.
+  hudTheme: 'default',
   // Ours, and one: every body stands at its own numbers until the player says otherwise.
   difficulty: 1,
   // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
@@ -614,6 +628,8 @@ export const HUD_MINIMAP_RANGE = { min: 300, max: 3200 } as const;
 export const HUD_BLOCK_ALIGNS = ['left', 'middle', 'right'] as const;
 export const HUD_FORCE_LOOKS = ['over', 'inside'] as const;
 export const HUD_FORCE_EDGES = ['lower', 'upper'] as const;
+/** The words the action bar's lines take (the interface rewrite's second wave): a share of the bar's height, or all of it. */
+export const HUD_SLOT_LINES = ['short', 'full'] as const;
 
 /**
  * The settings this session is playing with: the object `loadSettings` last returned, which the

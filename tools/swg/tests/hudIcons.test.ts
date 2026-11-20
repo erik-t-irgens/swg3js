@@ -418,13 +418,15 @@ const drawn = [...sheet.matchAll(/<symbol\s+id="([^"]+)"/g)].map((m) => m[1]);
   input.bindings.map = ['KeyJ'];
   hudBindingsChanged();
   ok(before === '' && (hud as any).root.querySelector('.hint').innerHTML === '', 'and a rebind of the map writes nothing anywhere for it');
-  // The saber cell's word is the blade's state; it used to be written once as "off" and left there.
+  // The saber cell carries no word (the interface rewrite's second wave, item 7: the action bar has no numbers, and the
+  // saber cell's on and off went with them): it lights while the blade is out, and that is all.
   const saber = built[built.length - 1];
-  ok(saber.querySelector('.cost').textContent === '', 'the saber cell keeps the word its own markup carries until the blade changes');
   hud.update(0.016, 0, 0, 0, kit, 100, 100, '12:00', '', true);
-  ok(saber.querySelector('.cost').textContent === 'on', 'a lit blade says so');
+  ok(saber.classList.contains('active') && saber.querySelector('.cost').textContent === '', 'a lit blade lights its cell, and no word is written under the mark');
   hud.update(0.016, 0, 0, 0, kit, 100, 100, '12:00', '', false);
-  ok(saber.querySelector('.cost').textContent === 'off', 'and a blade put away says that');
+  ok(!saber.classList.contains('active') && saber.querySelector('.cost').textContent === '', 'and a blade put away puts the light out, still with no word');
+  // No cell is built with a number or a word in it: the mark, the key, the cooldown's veil and the flash's light alone.
+  ok(built.slice(-3).every((c) => !/class="cost"|6\/s|>20</.test(c.innerHTML) && (c.innerHTML.match(/<span/g) ?? []).length === 1 && /<span class="key">/.test(c.innerHTML) && /class="veil"/.test(c.innerHTML) && /class="glow"/.test(c.innerHTML)), 'every cell is its mark and its key, with no cost and no word');
 }
 
 // --- a loadout with a hole in it ---------------------------------------------------------------------

@@ -157,6 +157,11 @@ if (ALLOC) {
   const hud = new Hud(parent as Any);
   const kit = testKit();
   kit.resource.value = 61.5;
+  // The action bar's cell cooling with its fill running (the second wave, item 7), and a source the presses are asked of
+  // every frame: the cell's model of its fill is worked out each frame and must make nothing either.
+  let cd = 0;
+  kit.slotCooldown = () => cd;
+  hud.setInput({ bindings: { slot1: ['Digit1'], saberToggle: ['KeyL'] }, pressedAction: () => false });
   hud.setKit(kit);
   hud.setReadouts(true, true, true);
   hud.setBlock('left', 'inside', 'upper');
@@ -170,6 +175,10 @@ if (ALLOC) {
     hud.setWeather('Downpour', true);
     hud.update(0.016, 1, 2, 3, kit, 25.5, 100, '12:00', 'Bantha', false, breath);
   };
+  cd = 1;
+  step();
+  cd = 0.9935;
+  step();
   clock.now += 300;
   for (let w = 0; w < 10; w++) {
     for (let i = 0; i < 6000; i++) step();
@@ -194,7 +203,7 @@ if (ALLOC) {
       clean++;
     }
   }
-  console.log(JSON.stringify({ frame: best, writes: writes(step) }));
+  console.log(JSON.stringify({ frame: best, writes: writes(step), filling: (hud as Any).slots[0].anim === true && (hud as Any).slots[0].ready === false }));
   process.exit(0);
 }
 
@@ -311,8 +320,14 @@ const bottom = (b: BarBox) => (b.clipBottom ? b.y + b.h / 2 : b.y + b.h);
   const looks = [...hud.matchAll(/\{ key: '(\w+)', name: '(--[\w-]+)', unit: '(\w*)' \}/g)].map((m) => ({ key: m[1], name: m[2], unit: m[3] }));
   // Nine for the bars and the block (the ripple's starting strength the wave's fixer's), seven for the weapon mark (item
   // 6): its opacity, its turn to a new stance, and a pair's two marks and the line between them, and four for the corner
-  // (the frame rate's type and drop shadow, the weather's type), each a dial: rule 1, a live dial for every size.
-  ok(looks.length === 20, `the display tells the page twenty of the table's looks (${looks.map((l) => l.name).join(' ')})`);
+  // (the frame rate's type and drop shadow, the weather's type); then the second wave's: two for the frame rate's own
+  // place on the character list and the creator (item 9), fifteen for the action bar (item 7: its cells, mark, key,
+  // corners and lines, the press's dark and its two eases, the cooldown's dark, the ready flash, a lit cell's glow) and
+  // twenty-two for the use prompt (item 8: its strength, corners, gaps and padding, cap and ink, its fades, width and
+  // cross-fade, its quieter self, the blur, the cap's size, side room, corners and type, the words' type and their gap
+  // from the cap), each a dial: rule 1, a live dial for every size. The cap, the words and the lit glow's numbers were
+  // written into the stylesheet with no slider until the wave's review (`capW` and `capH` moved nothing).
+  ok(looks.length === 59, `the display tells the page fifty-nine of the table's looks (${looks.map((l) => l.name).join(' ')})`);
   const drift: string[] = [];
   for (const l of looks) {
     const uses = [...css.matchAll(new RegExp(`var\\(${l.name}, ([0-9.]+)${l.unit}\\)`, 'g'))].map((m) => Number(m[1]));
@@ -525,6 +540,7 @@ const bottom = (b: BarBox) => (b.clipBottom ? b.y + b.h / 2 : b.y + b.h);
   ok(bad.length === 0, `every process answered (${bad.join('; ')})`);
   const got = runs as Record<string, number>[];
   ok(got.every((r) => r.writes === 0), 'the frame measured writes nothing to the page (every look on, every bar up)');
+  ok(got.every((r) => (r as Any).filling === true), "and it is a frame with an action bar cell's cooldown fill running, the presses asked of every cell");
   ok(got.every((r) => Number.isFinite(r.frame) && r.frame < 0.5), `and makes nothing, in 12 of 12 processes (${got.map((r) => r.frame.toFixed(3)).join(' ')} B)`);
 }
 

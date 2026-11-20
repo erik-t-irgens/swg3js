@@ -229,7 +229,7 @@ function testKit(): Any {
 
 const { DEFAULT_BINDINGS, DEV_ONLY_ACTIONS, Input, controlsActions, chosenBindings } = await import('../../../src/core/input.ts');
 const { EDITOR_MUTES } = await import('../../../src/editor/editorKeys.ts');
-const { Hud, HUD_HIDDEN_CLASS, Roster } = await import('../../../src/ui/hud.ts');
+const { Hud, HUD_HIDDEN_CLASS, HUD_STAGE_CLASS, Roster } = await import('../../../src/ui/hud.ts');
 const { ShipHud, newFlightView, newTargetView } = await import('../../../src/ui/shipHud.ts');
 const { Minimap } = await import('../../../src/ui/minimap.ts');
 const { Tracker } = await import('../../../src/ui/tracker.ts');
@@ -509,7 +509,8 @@ standClock(true);
     ['the stamina bar tired', staminaBar.classList.contains('warn')],
     ['the second slot lit', cells[1].classList.contains('active')],
     ['the first slot ready', cells[0].classList.contains('ready')],
-    ["the blade's cell lit", cells[2].classList.contains('active') && cells[2].querySelector('.cost').textContent === 'on'],
+    // The blade's cell lights and carries no word (the interface rewrite's second wave, item 7: the bar has no numbers).
+    ["the blade's cell lit", cells[2].classList.contains('active') && !cells[2].querySelector('.cost').n],
     ['the charge bar up', !chargeEl.hidden],
     ['the mark a pair with the knife in it', mark.classList.contains('pair') && markB.innerHTML.includes('#ic-mark-knife')],
     ["the mark's blade out", mark.classList.contains('lit')],
@@ -536,7 +537,7 @@ standClock(true);
     ['the stamina row down', staminaRow.classList.contains('off')],
     ['the second slot unlit', !cells[1].classList.contains('active')],
     ['the first slot cooling', !cells[0].classList.contains('ready')],
-    ["the blade's cell off", !cells[2].classList.contains('active') && cells[2].querySelector('.cost').textContent === 'off'],
+    ["the blade's cell off", !cells[2].classList.contains('active') && !cells[2].querySelector('.cost').n],
     ['the charge bar down', chargeEl.hidden],
     ['the mark one saber again', !mark.classList.contains('pair') && markB.innerHTML === ''],
     ["the mark's blade in", !mark.classList.contains('lit')],
@@ -800,6 +801,35 @@ standClock(true);
 }
 standClock(false);
 
+// ---------------------------------------------------------------- 2b. the character list and the creator (the second wave, item 9)
+// Nothing of play on either screen but the frame rate while its switch is on: the display's own frame there writes that
+// line at its quarter second and nothing else, and closes its second on time; with the switch off it writes nothing.
+standClock(true);
+{
+  const parent = new El();
+  const hud = new Hud(parent as Any);
+  const root = parent.kids[0] as El;
+  for (const sel of ['.hud-fps', '.hud-weather', '.hud-clock']) root.querySelector(sel).classList.add('gone');
+  const fps = root.querySelector('.hud-fps');
+  const loc = root.querySelector('.loc');
+  const stage = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      clock.now += 16;
+      hud.stageFrame();
+    }
+  };
+  stage(70);
+  const off = writes(() => stage(140));
+  ok(off === 0 && hud.stats().writes === 0 && hud.stats().byDesign === 0, `on the character list with the frame rate off, the display writes nothing at all, and its counters say so (${off})`);
+  hud.setReadouts(true, true, false);
+  const fpsN = fps.n;
+  const locN = loc.n;
+  const on = writes(() => stage(125));
+  ok(on === fps.n - fpsN && on >= 7 && on <= 9 && loc.n === locN && /^\d+ fps$/.test(fps.textContent) && fps.textContent !== '0 fps', `with it on, the frame rate's line is written at its quarter second and nothing else is (${on} writes over two seconds, ${fps.textContent})`);
+  ok(hud.stats().writes === 0 && hud.stats().byDesign > 0 && hud.stats().byDesign <= 5, `counted as by design, a steady second's writes 0 (${hud.stats().byDesign} by design)`);
+}
+standClock(false);
+
 // ---------------------------------------------------------------- 3. the game's wiring, as text
 {
   const main = text('src/main.ts');
@@ -833,8 +863,10 @@ standClock(false);
 // ---------------------------------------------------------------- 4. the stylesheet's rule: what goes and what stays
 {
   const css = text('src/ui/hud.css');
-  const rule = /#ui\.ui-hidden > ((?::not\([^)]+\))+) \{\s*visibility: hidden !important;\s*\}/.exec(css);
-  ok(!!rule, 'the rule hides the interface layer\'s children by `visibility`, as a conversation hides the rest');
+  // One rule for the hide key and for the character list and the creator (the interface rewrite's second wave, item 9),
+  // so the two screens keep exactly the same windows.
+  const rule = /#ui:is\(\.ui-hidden, \.ui-stage\) > ((?::not\([^)]+\))+) \{\s*visibility: hidden !important;\s*\}/.exec(css);
+  ok(!!rule, 'the rule hides the interface layer\'s children by `visibility`, as a conversation hides the rest, under the hide key and on the character list and in the creator alike');
   const kept = new Set([...(rule?.[1] ?? '').matchAll(/:not\(([^)]+)\)/g)].map((m) => m[1]));
   // What stays: what was opened to be used or replaces the world. Every root named here is a child of `#ui`.
   const stays = ['.overlay', '#loading', '#fade', '#death', '#talk', '#emote-wheel', '.dbg-root', '.trade-root', '#creator-bar', '#place-hint', '#place-bar', '.chat-root', '.group-root', '.ed-panel', '#editor-bar', '#edit-chip'];
@@ -859,7 +891,7 @@ standClock(false);
   ];
   const wrong = goes.filter(([sel, file, made]) => kept.has(sel) || !made.test(text(file)));
   ok(wrong.length === 0, `every piece of the display goes: ${goes.map(([s]) => s).join(' ')} (${wrong.map(([s]) => s).join(' ') || 'none kept, each made as named'})`);
-  ok(/#ui\.ui-hidden \.chat-bubbles,\n#ui\.ui-hidden \.group-marks \{\s*visibility: hidden !important;\s*\}/.test(css) && /this\.layer\.className = 'chat-bubbles';/.test(text('src/ui/chatUi.ts')) && /this\.marks\.className = 'group-marks';/.test(text('src/ui/groupUi.ts')), "inside two kept roots, the words over heads and the chevrons go on their own, while the chat line and a group's question stay");
+  ok(/#ui:is\(\.ui-hidden, \.ui-stage\) \.chat-bubbles,\n#ui:is\(\.ui-hidden, \.ui-stage\) \.group-marks \{\s*visibility: hidden !important;\s*\}/.test(css) && /this\.layer\.className = 'chat-bubbles';/.test(text('src/ui/chatUi.ts')) && /this\.marks\.className = 'group-marks';/.test(text('src/ui/groupUi.ts')), "inside two kept roots, the words over heads and the chevrons go on their own, while the chat line and a group's question stay");
   // And every window the game puts in `#ui` is one of the kept: each `overlay` panel by its class.
   const panels = ['appearanceUi', 'backpackUi', 'characterSelect', 'documentUi', 'forceUi', 'housingUi', 'hyperspaceUi', 'journalUi', 'liftMenu', 'mapUi', 'menu', 'npcUi', 'propsUi', 'shipEditUi', 'shipMenu', 'shuttleMenu', 'terminalUi', 'vehiclesUi', 'wardrobeUi', 'weaponsUi'];
   const notPanel = panels.filter((f) => !/this\.root\.className = 'overlay hidden';/.test(text(`src/ui/${f}.ts`)));
@@ -882,6 +914,22 @@ standClock(false);
   ];
   const lost = ids.filter(([, file, made]) => !made.test(text(file)));
   ok(lost.length === 0, `and each kept root is made under the name the rule keeps (${lost.map(([s]) => s).join(' ') || 'all fourteen'})`);
+  // The character list and the creator (the second wave, item 9): the same rule, and the frame rate the one thing of the
+  // display left up there, standing over the list's own dark stage, unless the hide key has everything off.
+  ok(HUD_STAGE_CLASS === 'ui-stage' && HUD_STAGE_CLASS !== HUD_HIDDEN_CLASS, "the character list's and the creator's class is a class of its own");
+  ok(/#ui\.ui-stage:not\(\.ui-hidden\) > #hud > \.hud-fps \{\s*visibility: visible !important;\s*z-index: 1;\s*top: calc\(var\(--hud-stage-fps-top, 12\) \* 1px\);\s*right: calc\(var\(--hud-stage-fps-right, 88\) \* 1px\);\s*\}/.test(css), 'and keeps the frame rate up there, over the list, while the hide key does not have it off, at a place of its own there (it sat on the list\'s "1 of 5" at play\'s place)');
+  const main = text('src/main.ts');
+  const step = /const step = \(\) => \{([\s\S]*?)\n      if \(this\.physicsFailed\) \{/.exec(main)?.[1] ?? '';
+  ok(/const staged = !this\.inWorld \|\| this\.creating;\n\s+if \(staged !== this\.hudStaged\) this\.setHudStage\(staged\);\n[\s\S]*if \(this\.scene3d\) \{\n\s+this\.stepScene\(dt\);\n\s+if \(staged\) this\.hud\.stageFrame\(\);/.test(step), "the frame puts the class on for the character list and the creator, before their own paths, and the creator's place keeps the frame rate going");
+  ok(/if \(!this\.inWorld\) \{[\s\S]*?this\.hud\.stageFrame\(\);\n\s+input\.endFrame\(\);\n\s+return;/.test(step), 'and so does the character list');
+  const set = /private setHudStage\(on: boolean\): void \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
+  ok(/if \(on === this\.hudStaged\) return;/.test(set) && /this\.ui\.classList\.toggle\(HUD_STAGE_CLASS, on\);/.test(set) && !/HUD_HIDDEN_CLASS/.test(set), "one class written when the screen changes, and the hide key's own left alone");
+  // The creator's place: a load left behind when the creator is left is no longer the place shown (the fault that kept
+  // a character at Lars Homestead after Characters, then Play).
+  const show = /private async showScene\(key: string\): Promise<boolean> \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
+  const hide = /private async hideScene\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
+  ok(/this\.sceneTurn\+\+;/.test(hide) && (show.match(/if \(turn !== this\.sceneTurn\) \{\n\s+(?:if \(built\) )?disposePlace\(built, \(mats\) => this\.world\.forgetMaterials\(mats\)\);\n\s+return false;/g) ?? []).length === 3, 'every wait of a place standing up asks whether it is still wanted, and one left behind puts its place down');
+  ok(show.indexOf('if (turn !== this.sceneTurn)', show.indexOf('readyAround')) > 0 && show.indexOf('if (turn !== this.sceneTurn)', show.indexOf('readyAround')) < show.indexOf('this.scene3d = {'), 'the last of them before the place is made the one shown');
 }
 
 // ---------------------------------------------------------------- 5. nothing allocated by a hidden frame's calls, in twelve fresh processes at once

@@ -145,8 +145,6 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
     ['.hud-msgs', 'bottom', 'messageBottom'],
     ['.hud-msgs', 'max-width', 'messageW'],
     ['.hud-acts', 'bottom', 'actionBottom'],
-    ['.hud-cap', 'min-width', 'capW'],
-    ['.hud-cap', 'height', 'capH'],
     ['.hud-minimap', 'width', 'minimap'],
     ['.hud-minimap', 'height', 'minimap'],
     ['.hud-mm-name', 'top', 'minimapNameTop'],
@@ -168,6 +166,18 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
     if (Number(m[1]) !== HUD_SIZES[key]) drift.push(`${selector} ${prop}: stylesheet ${m[1]}, table ${key}=${HUD_SIZES[key]}`);
   }
   ok(drift.length === 0, `every size hud.css states again is the one in HUD_SIZES${drift.length ? `: ${drift.join('; ')}` : ''}`);
+  // The use prompt's cap (the interface rewrite's second wave, item 8) is sized on the prompt's own scale, the HUD's and a
+  // little smaller while the bar is quiet aboard and in vehicles (`--hud-acts-s`), from the table's own looks (the
+  // display writes them, so a slider moves it: the wave's review found the cap's size written in as numbers that the
+  // table's `capW` and `capH` only stated again), falling back on the table's start values.
+  {
+    const cap = new RegExp('(?:^|\\n)\\.hud-cap\\s*\\{([^}]*)\\}').exec(css)?.[1] ?? '';
+    const on = (prop: string, look: string) => Number(new RegExp(`(?:^|;|\\s)${prop}\\s*:[^;]*?calc\\(\\s*var\\(${look}, ([0-9.]+)\\)\\s*\\*\\s*1px\\s*\\*\\s*var\\(--hud-acts-s\\)`).exec(cap)?.[1]);
+    ok(on('min-width', '--hud-cap-w') === HUD_SIZES.capW && on('height', '--hud-cap-h') === HUD_SIZES.capH && on('font-size', '--hud-cap-key') === HUD_SIZES.capKeySize && on('border-radius', '--hud-cap-radius') === HUD_SIZES.capRadius, `the prompt's cap reads the table's looks on the prompt's own scale (${on('min-width', '--hud-cap-w')} by ${on('height', '--hud-cap-h')}, type ${on('font-size', '--hud-cap-key')})`);
+    const longCap = new RegExp('(?:^|\\n)\\.prompt b\\s*\\{([^}]*)\\}').exec(css)?.[1] ?? '';
+    ok(/min-width: calc\(var\(--hud-cap-w, 22\) \* 1px \* var\(--hud-scale\)\);/.test(longCap) && /height: calc\(var\(--hud-cap-h, 18\) \* 1px \* var\(--hud-scale\)\);/.test(longCap) && !/calc\(\s*[0-9.]+px/.test(longCap), "and the long line's caps read the same looks, on the HUD's scale, with no size of their own");
+    ok(/\.hud-acts \{\s*--hud-acts-s: var\(--hud-scale\);/.test(css) && /\.hud-acts\.quiet \{\s*--hud-acts-s: calc\(var\(--hud-scale\) \* var\(--hud-prompt-quiet-size, 0\.9\)\);/.test(css), "and that scale is the HUD's, a little smaller while quiet");
+  }
 
   // The top-left block's height with the minimap up is stated again, inside a sum, by what docks under the block: the
   // world editor's window (`#hud.minimap-on ~ .ed-panel` in editorWindow.ts), at the block's top, the sum and a gap of 8.
@@ -436,15 +446,19 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   ok(fadeOut(0.5, 1, 0) === 1, 'a fade of nothing never divides by nothing');
 }
 
-// The grapple's diamond and the mark at its anchor (the design's §7, `HUD_SIZES`): the owner's own smaller sizes
-// (2026-10-17, still being tried), which put the diamond and the rope's arc inside the charge ring rather than round
-// it. Held at his numbers, so a change to them is a choice; where they now meet the ring is said, not held.
+// The crosshair, the grapple's diamond and the rope ring (the interface rewrite's second wave, item 10, `HUD_SIZES`): the
+// owner's own sizes, held so a change to them is a choice. The crosshair's lines run 7 to 11 (they ran 9 to 14), clear
+// of the dot; the diamond is 6 out and 1.4 thick (it was 12 and 0.8), its stroke inside the lines' inner ends; the rope
+// ring is drawn like the charge ring, at its size, and steps out by its own width while a shot charges.
 {
-  ok(HUD_SIZES.grappleMark === 12 && HUD_SIZES.grappleMarkWidth === 0.8 && HUD_SIZES.grappleMarkAlpha === 0.85 && HUD_SIZES.grappleAnchor === 3, 'the diamond is 12 px out on its axes with a 0.8 px stroke at 0.85, and the anchor\'s mark 3 px');
-  ok(HUD_SIZES.grappleRopeArc === 10 && HUD_SIZES.grappleRopeArcWidth === 0.5 && HUD_SIZES.grappleRopeWarn === 0.5, "the rope's arc is 10 px out with a 0.5 px stroke, and turns to warn past half the longest rope");
+  ok(HUD_SIZES.footTickFrom === 7 && HUD_SIZES.footTickFrom + HUD_SIZES.footTickLen === 11, `the crosshair's four lines run from 7 px out to 11 (${HUD_SIZES.footTickFrom} to ${HUD_SIZES.footTickFrom + HUD_SIZES.footTickLen})`);
+  ok(HUD_SIZES.footTickFrom > HUD_SIZES.dotRadius / 2 + 2, "and still do not touch the dot, its under-stroke included");
+  ok(HUD_SIZES.grappleMark === 6 && HUD_SIZES.grappleMarkWidth === 1.4 && HUD_SIZES.grappleMarkAlpha === 0.85 && HUD_SIZES.grappleAnchor === 3, "the diamond is 6 px out on its axes with a 1.4 px stroke at 0.85, and the anchor's mark 3 px");
+  ok(HUD_SIZES.grappleMark + HUD_SIZES.grappleMarkWidth / 2 <= HUD_SIZES.footTickFrom, `the diamond, its stroke included, stands inside the crosshair's lines (${HUD_SIZES.grappleMark + HUD_SIZES.grappleMarkWidth / 2} against the lines' inner ends at ${HUD_SIZES.footTickFrom})`);
+  ok(HUD_SIZES.grappleRopeArc === HUD_SIZES.chargeRadius && HUD_SIZES.grappleRopeArcWidth === HUD_SIZES.chargeWidth && HUD_SIZES.grappleRopeWarn === 0.5 && HUD_SIZES.grappleRopeStep === 1, "the rope ring starts at the charge ring's own size, turns to warn past half the longest rope, and steps out by its own width");
+  ok(HUD_SIZES.chargeTrackAlpha === 0.35 && HUD_SIZES.chargeArcAlpha === 0.95, "and both rings are drawn at the charge ring's two alphas, the faint circle and the filled arc");
   const corner = HUD_SIZES.grappleMark + HUD_SIZES.grappleMarkWidth / 2 + 2;
   const ringInside = HUD_SIZES.chargeRadius - HUD_SIZES.chargeWidth / 2 - 2;
   console.log(`note at scale 1 the diamond's corners reach ${corner.toFixed(2)} px with their under-stroke and the charge ring's inner edge stands at ${ringInside.toFixed(2)} px: ${corner > ringInside ? 'they meet while a shot charges' : 'they stay apart'}`);
 }
-
 console.log(`\n${checks} checks passed`);

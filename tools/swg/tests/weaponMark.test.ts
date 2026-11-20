@@ -333,9 +333,8 @@ const ask = (o: Partial<MarkIn>) => {
   ok(mark.style['--mk-open'] === '0.25' && mark.style['--mk-close'] === '0.3' && mark.style['--mk-open2'] === '0.2' && mark.style['--mk-close2'] === '0.2', "with each hand's blade timing as the blade runs it");
   ok(writes(frame) === 0 && writes(frame) === 0, 'and a steady frame writes nothing');
   saberOn = true;
-  // Three writes: the mark's one class, and the action bar's saber cell lighting and its word (the cell's own, which wave 2
-  // takes the word off).
-  ok(writes(frame) === 3 && mark.names.has('lit'), 'the saber lit: one class on the mark, and the stylesheet draws the blade out');
+  // Two writes: the mark's one class, and the action bar's saber cell lighting (its on and off word went in wave 2, item 7).
+  ok(writes(frame) === 2 && mark.names.has('lit'), 'the saber lit: one class on the mark, and the stylesheet draws the blade out');
   ok(writes(frame) === 0, 'and nothing more while it stays lit');
   src.saber.style = 'fast';
   ok(writes(frame) === 1 && A.style['--mk-tilt'] === '45' && A.innerHTML === markSvg('saber', false), 'a new stance: one property, the saber turns to 45, its markup kept');

@@ -14,6 +14,14 @@ import { makeMarkIn, makeMarkOut, markSvg, markWords, weaponMark, type MarkKey }
 export const HUD_HIDDEN_CLASS = 'ui-hidden';
 
 /**
+ * The class `#ui` wears on the character list and in the creator (`App.setHudStage`, the interface rewrite's second wave,
+ * item 9): nothing of play is up there, so the stylesheet takes the display off by the hide key's own rule and keeps the
+ * same windows, and leaves one thing of the display up, the frame rate while its switch is on. A class of its own rather
+ * than `ui-hidden` again, so the hide key's state and the screen's never write over each other.
+ */
+export const HUD_STAGE_CLASS = 'ui-stage';
+
+/**
  * The muted words after the weather's own while the weather is held or forced (the old corner note's job, in two
  * words). Written once into its own span; the line only puts it on or takes it off.
  */
@@ -31,10 +39,12 @@ const HELD_WORDS = ' · held';
  * what it was before this pass, so what reaches the screen is what reached it before. The rest are
  * the steps the display already rounded to (`toFixed(0)` on a percentage is a step of 100).
  *
- * `cooldownSteps` is the one that is also a look: the cell's wedge is drawn from a number written in
- * these steps, so 100 of them is a wedge that moves in 3.6-degree jumps and costs at most a hundred
- * writes over a whole cooldown, and nothing at all while no cooldown is running. A steady second is
- * still 0 writes; a second with a cooldown in it is not steady and is not meant to read as 0.
+ * `coolSlack` is how far, in seconds, a cell's cooldown as the stylesheet draws it may run from the
+ * kit's own before the cell's animation is put back where the kit says (one property written). The
+ * fill is one CSS animation over the cooldown's time (the interface rewrite's second wave, item 7), so
+ * it runs on the page's clock while the kit's runs on the game's; a hitch, a pause or a cooldown begun
+ * again moves the two apart, and this is how far apart they may be. A quarter of a second is ours: under
+ * it a correction is a jump nobody would see, over it the fill says something the key would not do.
  *
  * The two alphas are the crosshair's ticks, at rest and while a shot is being aimed. They are here
  * rather than in `hudMath` because they are this file's own drawing and not a size anything else
@@ -51,7 +61,7 @@ export const HUD_TUNE = {
    * lasts, rather than 320.
    */
   breathPixels: 160,
-  cooldownSteps: 100,
+  coolSlack: 0.25,
   chargeSteps: 100,
   hurtSteps: 100,
   /**
@@ -63,6 +73,12 @@ export const HUD_TUNE = {
   aimTickAlpha: 1,
 };
 
+/**
+ * The longest a whole share of a cooldown may be read as taking, in seconds: a share that fell slower than this over one
+ * frame barely moved, and is not taken as the cooldown's pace (the game's longest is a few seconds). A guard, not a look.
+ */
+const COOL_LONGEST = 600;
+
 /** The two steps above that a value of 0 is a real answer for; every other one wants a number above it. */
 const ZERO_OK: readonly string[] = ['tickAlpha', 'aimTickAlpha'];
 
@@ -70,7 +86,7 @@ const ZERO_OK: readonly string[] = ['tickAlpha', 'aimTickAlpha'];
  * The keys `tune` takes. A key that is not one of these is a mistake at the console, and saying so is
  * worth more than quietly accepting it: `Object.assign` took `{ barPixel: 1 }` without a word.
  */
-const TUNE_KEYS = ['barPixels', 'breathPixels', 'cooldownSteps', 'chargeSteps', 'hurtSteps', 'tickAlpha', 'aimTickAlpha'] as const;
+const TUNE_KEYS = ['barPixels', 'breathPixels', 'coolSlack', 'chargeSteps', 'hurtSteps', 'tickAlpha', 'aimTickAlpha'] as const;
 
 /** What `Hud.stats()` reports, filled in place so asking for it allocates nothing. */
 export interface HudStats {
@@ -148,9 +164,14 @@ export interface BarReadout {
   readonly max: number;
 }
 
-/** Where the keys on the cells come from: the game's own `Input` satisfies it. */
+/**
+ * Where the keys on the cells come from: the game's own `Input` satisfies it. `pressedAction` (the game's own, which
+ * answers this frame's presses and takes nothing away from anyone else who asks) is how a cell hears its key was
+ * pressed, for the press's darkening (item 7); a source without it has cells that never darken on a press.
+ */
 export interface HudBindings {
   readonly bindings: Record<string, string[]>;
+  pressedAction?(action: string): boolean;
 }
 
 /** What a hand is holding, as the rack keeps it (`WeaponDef`), declared structurally: the mark reads its class. */
@@ -187,18 +208,51 @@ export function hudBindingsChanged(): void {
   for (const hud of LIVE) hud.refreshKeys(true);
 }
 
-/** A cell in the number row: its key-cap, and what was last written to it. */
+/**
+ * A cell in the action bar: its key, and what was last written to it.
+ *
+ * Its cooldown (item 7) is one CSS animation the stylesheet runs over the cooldown's time (`cool`, the dark veil drawing
+ * up from the bottom), and the kit only says how much of a cooldown is left as a share (`Kit.slotCooldown`, 1 just used,
+ * 0 ready). So the cell learns the cooldown's length from the share's own fall, one frame's seconds over one frame's fall
+ * (`perShare`, the seconds a whole share takes: NaN until it has been seen to move), and only then starts the animation,
+ * written as its length (`--cool-s`) and how far into it the share already is (`--cool-at`, as a negative delay). From
+ * then on the animation is modelled here (`animStart`, `animAt`, both on the page's clock, the game's pauses taken out)
+ * and compared with the kit each frame; drifted more than `HUD_TUNE.coolSlack`, it is put back by `--cool-at` alone,
+ * since a running animation takes a new delay as if it had had it from the start. Everything begins as a fraction, so
+ * each field is a double from its first write (docs/lessons: a frame allocates nothing).
+ */
 interface SlotCell {
   root: HTMLElement;
   cap: HTMLElement;
   /** The action whose key it shows, and the code that action was bound to when it was written. */
   action: string;
   code: string;
+  /** In the bar at all: the saber's cell only for a kit that has a saber. */
+  shown: boolean;
   lit: boolean;
   ready: boolean;
-  /** How far through its cooldown it is, as the last frame read it, and as the cell last wore it. */
-  cool: number;
-  coolDrawn: number;
+  /** The kit's share left as this frame read it, and as the frame before did. */
+  share: number;
+  /** Seconds a whole share takes, read off the share's fall; NaN while not yet seen. */
+  perShare: number;
+  /** The fill's animation running (`cool` on the cell), when it began on the page's clock, the seconds already in at that moment, and the game's paused time then. */
+  anim: boolean;
+  animStart: number;
+  animAt: number;
+  animPaused: number;
+  /** `--cool-s` and `--cool-at` as last written; NaN is "nothing written yet". */
+  durDrawn: number;
+  atDrawn: number;
+  /** The ready flash (`flash` on the cell), as last written. */
+  flash: boolean;
+  /** The press's darkening (`pressed` on the cell), and until when on the page's clock. */
+  pressed: boolean;
+  pressUntil: number;
+}
+
+/** A cell's record, as built: ready, nothing pressed, nothing measured. */
+function newSlotCell(root: HTMLElement, cap: HTMLElement, action: string, code: string, shown: boolean): SlotCell {
+  return { root, cap, action, code, shown, lit: false, ready: true, share: 0.5, perShare: Number.NaN, anim: false, animStart: 0.5, animAt: 0.5, animPaused: 0.5, durDrawn: Number.NaN, atDrawn: Number.NaN, flash: false, pressed: false, pressUntil: 0.5 };
 }
 
 /** What the mark last read in a hand after `refresh` or a new source: nothing the rack hands over is this, so the next frame reads the hands afresh. */
@@ -290,6 +344,52 @@ const LOOK_VARS: readonly { key: keyof typeof HUD_SIZES; name: string; unit: str
   { key: 'fpsShadowY', name: '--hud-fps-shadow-y', unit: '' },
   { key: 'fpsShadowBlur', name: '--hud-fps-shadow-blur', unit: '' },
   { key: 'weatherSize', name: '--hud-weather-size', unit: '' },
+  // The frame rate's own place on the character list and the creator (the second wave, item 9).
+  { key: 'stageFpsTop', name: '--hud-stage-fps-top', unit: '' },
+  { key: 'stageFpsRight', name: '--hud-stage-fps-right', unit: '' },
+  // The action bar's (the second wave, item 7): its cells, the mark and the key in each, its corners and the lines between
+  // cells; the press's dark and its two eases; the cooldown's dark; the ready flash's length and light; a lit cell's glow.
+  { key: 'slotSize', name: '--hud-slot-h', unit: '' },
+  { key: 'slotW', name: '--hud-slot-w', unit: '' },
+  { key: 'slotGlyph', name: '--hud-slot-glyph', unit: '' },
+  { key: 'slotKeySize', name: '--hud-slot-key', unit: '' },
+  { key: 'slotRadius', name: '--hud-slot-radius', unit: '' },
+  { key: 'slotLineShare', name: '--hud-slot-line', unit: '' },
+  { key: 'slotLineWidth', name: '--hud-slot-line-w', unit: '' },
+  { key: 'pressInSeconds', name: '--hud-press-in', unit: 's' },
+  { key: 'pressOutSeconds', name: '--hud-press-out', unit: 's' },
+  { key: 'pressDark', name: '--hud-press-dark', unit: '' },
+  { key: 'coolDark', name: '--hud-cool-dark', unit: '' },
+  { key: 'readyFlashSeconds', name: '--hud-ready-flash', unit: 's' },
+  { key: 'readyFlashGlow', name: '--hud-ready-glow', unit: '' },
+  { key: 'slotLitPx', name: '--hud-slot-lit-px', unit: '' },
+  { key: 'slotLitGlow', name: '--hud-slot-lit', unit: '' },
+  // The use prompt's (item 8; `ActionBar` in prompt.ts, and the long "Full prompts" line): its strength, corners, gaps
+  // and padding, the cap's light and the words' ink, its fades, its width's ease and the words' cross-fade, its quieter
+  // self aboard and in vehicles, and the blur behind it; then the cap's size, side room, corners and type, and the words'
+  // type and their gap from the cap.
+  { key: 'promptStrength', name: '--hud-prompt-bg', unit: '' },
+  { key: 'promptRadius', name: '--hud-prompt-radius', unit: '' },
+  { key: 'promptGap', name: '--hud-prompt-gap', unit: '' },
+  { key: 'promptPadX', name: '--hud-prompt-pad-x', unit: '' },
+  { key: 'promptPadY', name: '--hud-prompt-pad-y', unit: '' },
+  { key: 'promptCapLight', name: '--hud-prompt-cap', unit: '' },
+  { key: 'promptInk', name: '--hud-prompt-ink', unit: '' },
+  { key: 'promptInSeconds', name: '--hud-prompt-in', unit: 's' },
+  { key: 'promptOutSeconds', name: '--hud-prompt-out', unit: 's' },
+  { key: 'promptWidthSeconds', name: '--hud-prompt-width', unit: 's' },
+  { key: 'promptSwapSeconds', name: '--hud-prompt-swap', unit: 's' },
+  { key: 'promptQuiet', name: '--hud-prompt-quiet', unit: '' },
+  { key: 'promptQuietSize', name: '--hud-prompt-quiet-size', unit: '' },
+  { key: 'promptQuietBottom', name: '--hud-prompt-quiet-bottom', unit: '' },
+  { key: 'promptBlurPx', name: '--hud-prompt-blur', unit: '' },
+  { key: 'capW', name: '--hud-cap-w', unit: '' },
+  { key: 'capH', name: '--hud-cap-h', unit: '' },
+  { key: 'capPad', name: '--hud-cap-pad', unit: '' },
+  { key: 'capRadius', name: '--hud-cap-radius', unit: '' },
+  { key: 'capKeySize', name: '--hud-cap-key', unit: '' },
+  { key: 'promptWordSize', name: '--hud-prompt-size', unit: '' },
+  { key: 'promptKeyGap', name: '--hud-prompt-key-gap', unit: '' },
 ];
 
 /**
@@ -301,8 +401,9 @@ const LOOK_VARS: readonly { key: keyof typeof HUD_SIZES; name: string; unit: str
  *
  * Every value is written to the DOM only when what it shows has changed, and what was last written is
  * held in a field here rather than read back off the element. What moves every frame and is a shape
- * — the crosshair, the charge ring, a cooldown's sweep — is drawn on the overlay instead, where a
- * stroke costs nothing to repeat and no layout follows it.
+ * — the crosshair, the charge ring — is drawn on the overlay instead, where a stroke costs nothing to
+ * repeat and no layout follows it; what moves on the page (a bar's ghost, a cooldown's fill, a press's
+ * dark, a flash) is a transition or an animation the stylesheet runs, started by a class or a property.
  */
 export class Hud {
   private readonly root: HTMLElement;
@@ -421,10 +522,24 @@ export class Hud {
   /** How many of the slot row's cells are the kit's own powers; the one after them is the saber. */
   private kitSlotCount = 0;
   private saberEl: HTMLElement | null = null;
+  /** Whether the blade's cell is lit (`active`), as last written: it lights while the blade is out, and carries no word (item 7). */
   private saberLit = false;
-  /** The saber cell's own word, and what it says now: a cell that reads "off" with the blade out is worse than one that says nothing. */
-  private saberCostEl: HTMLElement | null = null;
-  private saberCostText = '';
+  /**
+   * Whether the game is simulating (`setLive`), as the action bar last wore it (`paused` on the bar while it is not, which
+   * holds every cooldown's fill where it is, as the kit's own cooldowns hold), and the game's paused time so far on the
+   * page's clock, so a cell's model of its fill leaves the pauses out as the page does. A cell's press is read only while
+   * it simulates: a key pressed in a menu is the menu's.
+   */
+  private liveNow = true;
+  private pausedTotal = 0.5;
+  private pauseBegan = 0.5;
+  /** This frame's reading of the page's clock, a field so no number is handed to a call (`coolCell`, the presses). */
+  private nowMs = 0.5;
+  /** The ready flash is played only for a cooldown seen to end: not on the first frame back after the hide key (`refresh`). */
+  private flashOk = true;
+  /** The action bar's switch (`setKitLook`): its lines at the bar's full height, or `slotLineShare` of it; and the prompt's blur. */
+  private linesFull = false;
+  private promptBlur = false;
   /**
    * Whether the kit has a Force pool (the bar in the block or `gone`), as last written. `NaN` elsewhere is "nothing
    * written yet", because it is the one value that is never equal to itself.
@@ -484,7 +599,7 @@ export class Hud {
   /** The grapple's mark, written by the game each frame it is simulated and drawn on the overlay with the crosshair. */
   readonly grappleMark: HudGrappleMark = newHudGrappleMark();
   /** What `report` hands back: one object, filled in place. */
-  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, mark: '', breath: '', stamina: '', bars: '', block: '', fps: '', weather: '', clock: '' };
+  private readonly out = { ops: 0, icons: 0, keys: '', kit: '', attached: false, crosshair: false, mark: '', breath: '', stamina: '', bars: '', block: '', fps: '', weather: '', clock: '' };
 
   /**
    * The display's markup. The top-left block holds, in order, the weather's line (first, so with the minimap off it
@@ -608,6 +723,40 @@ export class Hud {
    */
   setMarkBlade(follow: boolean): void {
     this.markFollows = follow;
+  }
+
+  /**
+   * The action bar's switch and the prompt's (the Interface page's, item 7 and 8): the lines between cells at the bar's
+   * full height (`lines-full` on the display, which the use prompt's own bar wears too, `ActionBar.setLook`) or at
+   * `slotLineShare` of it, and the soft blur behind the long prompt line (`prompt-blur`). Not in a frame.
+   */
+  setKitLook(linesFull: boolean, blur: boolean): void {
+    if (linesFull !== this.linesFull) {
+      this.linesFull = linesFull;
+      this.root.classList.toggle('lines-full', linesFull);
+      this.byDesign++;
+    }
+    if (blur !== this.promptBlur) {
+      this.promptBlur = blur;
+      this.root.classList.toggle('prompt-blur', blur);
+      this.byDesign++;
+    }
+  }
+
+  /**
+   * Whether the game is simulating, each frame before `update`: while it is not, the action bar wears `paused`, which holds
+   * every cooldown's fill where it stands (the kit's own cooldowns hold too), the time is left out of each cell's model of
+   * its fill, and no key's press darkens a cell. One class when it changes and nothing otherwise; nothing is handed but a
+   * switch.
+   */
+  setLive(live: boolean): void {
+    if (live === this.liveNow) return;
+    const now = performance.now();
+    if (live) this.pausedTotal += now - this.pauseBegan;
+    else this.pauseBegan = now;
+    this.liveNow = live;
+    this.slotsEl.classList.toggle('paused', !live);
+    this.writes++;
   }
 
   /** The HUD scale, for the shapes this file draws; the page's own sizes follow `--hud-scale`. */
@@ -797,10 +946,11 @@ export class Hud {
   }
 
   /**
-   * The kit in play: its number slots with the keys you have bound. A rebuild of the row, so every
-   * write here is counted apart as one that is meant to happen -- counted where each one is made, so
-   * the figure is the number and not an estimate of it. The kit's name is not written anywhere: the
-   * class words left the screen in the port's pass 1 (a character will learn rather than be a class).
+   * The kit in play: its action bar, a cell an ability with the key you have bound under its mark. A rebuild of the row,
+   * so every write here is counted apart as one that is meant to happen -- counted where each one is made, so the figure
+   * is the number and not an estimate of it. The kit's name is not written anywhere: the class words left the screen in
+   * the port's pass 1 (a character will learn rather than be a class). No cell carries a number (the interface rewrite's
+   * second wave, item 7): the cost went, and so did the saber cell's on and off, which is its light.
    */
   setKit(kit: Kit): void {
     this.slotsEl.innerHTML = '';
@@ -818,28 +968,26 @@ export class Hud {
       // The ability's own name, for a mark that cannot be read at a glance: written once with the
       // cell and never again, and worth its one attribute whenever the mouse is free.
       el.setAttribute('title', s.name);
-      // One write for the cell's whole inside: our own mark for the ability, the key you have bound,
-      // and what it costs. The mark takes its colour from the cell, so it is never written again.
-      el.innerHTML = `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#${glyphFor(s.name)}"></use></svg><span class="key">${esc(keyLabel(code))}</span><span class="cost">${esc(s.cost)}</span>`;
+      // One write for the cell's whole inside: our own mark for the ability with the key you have bound under it, and
+      // the cooldown's veil and the ready flash's light (`slotCell`). The mark takes its colour from the cell, so it is
+      // never written again.
+      el.innerHTML = slotCell(glyphFor(s.name), keyLabel(code));
       this.slotsEl.appendChild(el);
       this.byDesign += 4;
-      this.slots.push({ root: el, cap: keyOf(el), action, code, lit: false, ready: true, cool: 0, coolDrawn: 0 });
+      this.slots.push(newSlotCell(el, keyOf(el), action, code, true));
     }
     this.kitSlotCount = this.slots.length;
     const saber = document.createElement('div');
     saber.className = 'slot saber ready';
     const saberCode = this.codeOf('saberToggle');
     saber.setAttribute('title', 'Lightsaber');
-    saber.innerHTML = `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#ic-saber"></use></svg><span class="key">${esc(keyLabel(saberCode))}</span><span class="cost">off</span>`;
+    saber.innerHTML = slotCell('ic-saber', keyLabel(saberCode));
     saber.hidden = kit.id !== 'jedi';
     this.slotsEl.appendChild(saber);
     this.byDesign += 5;
-    this.slots.push({ root: saber, cap: keyOf(saber), action: 'saberToggle', code: saberCode, lit: false, ready: true, cool: 0, coolDrawn: 0 });
+    this.slots.push(newSlotCell(saber, keyOf(saber), 'saberToggle', saberCode, kit.id === 'jedi'));
     this.saberEl = saber;
     this.saberLit = false;
-    // The cell's word is the blade's state, not a label: it said "off" with the blade lit before.
-    this.saberCostEl = saber.querySelector<HTMLElement>('.cost');
-    this.saberCostText = 'off';
     // A new kit's bars and charge are written again whatever they held for the last one.
     this.hp.cur = NaN;
     this.res.cur = NaN;
@@ -879,6 +1027,28 @@ export class Hud {
   }
 
   /**
+   * A frame on the character list or in the creator (item 9; `HUD_STAGE_CLASS`): nothing of play is shown or written
+   * there, but the frame rate is, while its switch is on, so its frames are counted and its line written at its own
+   * quarter second as `update` writes it (one write by design, a few times a second). The second of writes is closed
+   * as `rest` closes it. Called in `update`'s place; nothing is handed but the frame itself.
+   */
+  stageFrame(): void {
+    this.frames++;
+    const now = performance.now();
+    const acc = (now - this.lastFps) / 1000;
+    if (acc >= 0.25 || this.tickNow) {
+      this.tickNow = false;
+      this.lastFps = now;
+      if (this.fpsShown) {
+        this.fps.textContent = `${acc > 0 ? Math.round(this.frames / acc) : 0} fps`;
+        this.byDesign++;
+      }
+      this.frames = 0;
+    }
+    this.roll(now);
+  }
+
+  /**
    * The interface shown again after the hide key: every "write only when changed" record let go, so the next
    * `update` writes every value afresh from what is true now -- a bar that moved while hidden shows where it
    * is, a cooldown that ran out shows ready, the weapon mark shows what the hands hold, and the quarter-second lines
@@ -911,14 +1081,24 @@ export class Hud {
     this.weatherShown = !hasClass(this.weatherEl, 'gone');
     this.weatherHeld = hasClass(this.weatherEl, 'held');
     this.clockText = '\u0000';
+    // The action bar's cells: the two-state records read back (lit, ready, the fill running, the flash, the press), the
+    // fill's two numbers let go so the next frame writes them afresh from the cell's model (which ran on the page's clock
+    // all the while, as the page's own animation did), and the share's last reading let go so no fall is measured across
+    // the hidden time. A cooldown that ended while hidden is not flashed after the fact (`flashOk`).
     for (const cell of this.slots) {
       cell.lit = hasClass(cell.root, 'active');
       cell.ready = hasClass(cell.root, 'ready');
-      cell.coolDrawn = Number.NaN;
+      cell.anim = hasClass(cell.root, 'cool');
+      cell.flash = hasClass(cell.root, 'flash');
+      cell.pressed = hasClass(cell.root, 'pressed');
+      cell.durDrawn = Number.NaN;
+      cell.atDrawn = Number.NaN;
+      cell.share = Number.NaN;
       cell.code = '\u0000';
     }
+    this.flashOk = false;
+    this.liveNow = !hasClass(this.slotsEl, 'paused');
     this.saberLit = this.saberEl ? hasClass(this.saberEl, 'active') : false;
-    this.saberCostText = '';
     this.chargeShown = !this.chargeEl.hidden;
     this.chargeDrawn = Number.NaN;
     // A blow taken while hidden is not flashed after the fact: the fade is put at its end, and the next frame
@@ -1006,8 +1186,12 @@ export class Hud {
    * bar's share as drawn and what it wears; `block` the three switches; the three readouts as they
    * stand ('' while a line is off); and `mark` the weapon mark in words, which carries none on the screen
    * ('saber 22.5° lit', 'staff 45° in', 'dual X 45° lit', 'pistol', 'sword / knife'; '' before its first frame).
+   * `kit` is the action bar in words, which carries none of its own now (item 7): each cell's key and whether it is
+   * ready, cooling (with how much of the cooldown is filled and the length read off the kit, once the fill runs), lit or
+   * pressed, and the blade's cell; then the bar's two switches ('lines 80%' or 'lines full', and 'paused' while the game
+   * stands still).
    */
-  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; mark: string; breath: string; stamina: string; bars: string; block: string; fps: string; weather: string; clock: string } {
+  report(): { ops: number; icons: number; keys: string; kit: string; attached: boolean; crosshair: boolean; mark: string; breath: string; stamina: string; bars: string; block: string; fps: string; weather: string; clock: string } {
     const o = this.out;
     o.icons = iconCount();
     o.crosshair = this.crosshairShown();
@@ -1023,6 +1207,15 @@ export class Hud {
     let keys = '';
     for (let i = 0; i < this.kitSlotCount; i++) keys += (keys ? ' ' : '') + keyLabel(this.slots[i].code);
     o.keys = keys;
+    // The console's reading, never the frame's: words built only when asked.
+    const cells: string[] = [];
+    for (let i = 0; i < this.slots.length; i++) {
+      const c = this.slots[i];
+      if (!c.shown) continue;
+      const state = c.ready ? 'ready' : `cooling ${Math.round((1 - (c.share === c.share ? c.share : 1)) * 100)}%${c.anim ? ` of ${c.perShare.toFixed(2)} s` : ''}`;
+      cells.push(`${keyLabel(c.code === '\u0000' ? '' : c.code)} ${i < this.kitSlotCount ? state : 'blade'}${c.lit || (i >= this.kitSlotCount && this.saberLit) ? ' lit' : ''}${c.pressed ? ' pressed' : ''}`);
+    }
+    o.kit = `${cells.join(' · ')} | lines ${this.linesFull ? 'full' : `${Math.round(HUD_SIZES.slotLineShare * 100)}%`}${this.liveNow ? '' : ' | paused'}`;
     o.mark = this.markDrawn.a === '\u0000' ? '' : markWords(this.markOut, this.markDrawn.lit);
     return o;
   }
@@ -1195,9 +1388,13 @@ export class Hud {
     this.readMark(kit.id, saberOn);
     // The ghosts' eases ending: once a frame, and nothing is written in a steady one.
     this.ageBars();
-    // The slot row: `kit.slots` is the kit's own array and is not rebuilt here, and the row's own
+    // The action bar: `kit.slots` is the kit's own array and is not rebuilt here, and the row's own
     // count is used rather than the kit's, so a loadout changed without the row being rebuilt cannot
-    // reach past the end of it.
+    // reach past the end of it. Each cell's light and cooldown are classes and a property or two the
+    // stylesheet animates (`coolCell`), written when they change and never per frame; the press's dark
+    // is a class on and a class off (`pressCell`). Nothing is drawn on the overlay: the overlay is the
+    // first child of the interface layer, so every cell paints over it.
+    this.nowMs = now;
     for (let i = 0; i < this.kitSlotCount; i++) {
       const cell = this.slots[i];
       const lit = kit.slotActive(i);
@@ -1206,42 +1403,23 @@ export class Hud {
         cell.root.classList.toggle('active', lit);
         this.writes++;
       }
-      // How far through a cooldown a cell is, is one number on the cell, which the stylesheet draws
-      // as a dark wedge turning clockwise from twelve. It is written only when it has moved by a
-      // step, so a whole cooldown costs at most `cooldownSteps` writes and a cell with none costs
-      // nothing at all. It is not drawn on the overlay: the overlay is the first child of the
-      // interface layer, so every cell paints over it and the sweep would be under the cell.
-      const steps = Math.max(1, HUD_TUNE.cooldownSteps);
-      cell.cool = Math.round(Math.max(0, Math.min(1, kit.slotCooldown(i))) * steps) / steps;
-      const ready = cell.cool <= 0;
-      if (ready !== cell.ready) {
-        cell.ready = ready;
-        cell.root.classList.toggle('ready', ready);
-        this.writes++;
-      }
-      if (cell.cool !== cell.coolDrawn) {
-        cell.coolDrawn = cell.cool;
-        setVar(cell.root, '--cool', `${cell.cool}`);
-        this.writes++;
-      }
+      this.shareIn = kit.slotCooldown(i);
+      this.coolCell(cell);
     }
     // A charging shot: a ring round the crosshair, drawn on the overlay; with no overlay, the bar
     // the display has always had.
     this.charge = kit.charge?.() ?? 0;
     if (!this.canvas) this.writeChargeBar();
+    // The blade's cell lights while the blade is out (its on and off words went with the numbers). One write a toggle.
     const saber = this.saberEl;
     if (saber && !saber.hidden && saberOn !== this.saberLit) {
       this.saberLit = saberOn;
       saber.classList.toggle('active', saberOn);
       this.writes++;
-      // And the word under the mark says which it is. One write a toggle, none otherwise.
-      const word = saberOn ? 'on' : 'off';
-      if (this.saberCostEl && word !== this.saberCostText) {
-        this.saberCostText = word;
-        this.saberCostEl.textContent = word;
-        this.writes++;
-      }
     }
+    // A key pressed darkens its cell for a moment, the blade's cell's included: read while the game simulates.
+    this.pressCells();
+    this.flashOk = true;
     if (this.hurtLevel > 0) {
       this.hurtLevel = Math.max(0, this.hurtLevel - dt * 2);
       const shown = Math.round(this.hurtLevel * HUD_TUNE.hurtSteps);
@@ -1292,6 +1470,120 @@ export class Hud {
     bar.shown = show;
     bar.root.classList.toggle('off', !show);
     this.writes++;
+  }
+
+  /**
+   * One cell's cooldown (item 7), its share left in `shareIn` (a field: no fraction is handed to the call). The moment a
+   * cooldown begins the cell is no longer `ready` and the stylesheet darkens it whole; from the next frame the share's
+   * fall over that frame's seconds says how long a whole share takes, and the fill starts: `--cool-s` (that length),
+   * `--cool-at` (how far into it the share already is) and `cool`, one CSS animation drawing the dark up from the bottom
+   * as the cell's own colour fills back. Then each frame the share the page is drawing (the cell's model, on the page's
+   * clock less the game's pauses) is compared with the kit's: more than `HUD_TUNE.coolSlack` seconds apart, `--cool-at`
+   * alone puts it back. Ready: `ready` on, `cool` off, and the flash (`flash`, an animation that runs once as the class
+   * comes on; it was taken off as the cooldown began). A steady cooldown writes nothing between its start and its end.
+   */
+  private coolCell(cell: SlotCell): void {
+    const raw = this.shareIn;
+    const share = raw > 0 ? (raw < 1 ? raw : 1) : 0;
+    const prev = cell.share;
+    cell.share = share;
+    const ready = share <= 0;
+    if (ready !== cell.ready) {
+      cell.ready = ready;
+      cell.root.classList.toggle('ready', ready);
+      this.writes++;
+      if (ready) {
+        if (cell.anim) {
+          cell.anim = false;
+          cell.root.classList.toggle('cool', false);
+          this.writes++;
+        }
+        if (!cell.flash && this.flashOk) {
+          cell.flash = true;
+          cell.root.classList.toggle('flash', true);
+          this.writes++;
+        }
+        return;
+      }
+      // A cooldown begins: dark at once (no longer `ready`); its flash taken off so it can run again at the end. Its fill
+      // waits for the share to be seen to fall, from the next frame.
+      if (cell.flash) {
+        cell.flash = false;
+        cell.root.classList.toggle('flash', false);
+        this.writes++;
+      }
+      return;
+    }
+    if (ready) return;
+    if (!cell.anim) {
+      // Not yet filling: the share's fall over this frame's seconds is the cooldown's pace. Not while the game stands
+      // still (nothing falls then), and never across a frame the share was not read in (`refresh`).
+      const fell = prev - share;
+      if (!this.liveNow || !(fell > 0) || !(this.frameDt > 0)) return;
+      const per = this.frameDt / fell;
+      if (!(per > 0) || per > COOL_LONGEST) return;
+      cell.perShare = per;
+      cell.anim = true;
+      cell.animStart = this.nowMs;
+      cell.animPaused = this.pausedTotal;
+      cell.animAt = (1 - share) * per;
+      this.writeCool(cell);
+      cell.root.classList.toggle('cool', true);
+      this.writes++;
+      return;
+    }
+    // Filling: where the page has got to against where the kit is, while the game runs (both stand still otherwise).
+    if (this.liveNow) {
+      const ran = (this.nowMs - cell.animStart - (this.pausedTotal - cell.animPaused)) / 1000;
+      // The page holds the ends, as the animation's `both` does: all dark before it starts, all filled once it is done.
+      const at = 1 - (ran + cell.animAt) / cell.perShare;
+      const drawn = at > 1 ? 1 : at < 0 ? 0 : at;
+      const off = (drawn - share) * cell.perShare;
+      const slack = HUD_TUNE.coolSlack;
+      if (off > slack || off < -slack) cell.animAt = (1 - share) * cell.perShare - ran;
+    }
+    this.writeCool(cell);
+  }
+
+  /** A filling cell's two numbers, each written only when it is not what the page already holds. */
+  private writeCool(cell: SlotCell): void {
+    if (cell.perShare !== cell.durDrawn) {
+      cell.durDrawn = cell.perShare;
+      setVar(cell.root, '--cool-s', `${cell.perShare}`);
+      this.writes++;
+    }
+    if (cell.animAt !== cell.atDrawn) {
+      cell.atDrawn = cell.animAt;
+      setVar(cell.root, '--cool-at', `${cell.animAt}`);
+      this.writes++;
+    }
+  }
+
+  /**
+   * The presses (item 7): a key pressed this frame darkens its cell (`pressed`, which the stylesheet eases in over
+   * `pressInSeconds`), and `pressInSeconds` later the class comes off and the stylesheet eases it back over
+   * `pressOutSeconds`. Read only while the game simulates, from the bindings' own `pressedAction`, which takes nothing
+   * from the kit that acts on the same press. Two writes a press, none otherwise.
+   */
+  private pressCells(): void {
+    const input = this.input;
+    const reads = this.liveNow && !!input && typeof input.pressedAction === 'function';
+    const now = this.nowMs;
+    for (let i = 0; i < this.slots.length; i++) {
+      const cell = this.slots[i];
+      if (reads && cell.shown && input!.pressedAction!(cell.action)) {
+        cell.pressUntil = now + HUD_SIZES.pressInSeconds * 1000;
+        if (!cell.pressed) {
+          cell.pressed = true;
+          cell.root.classList.toggle('pressed', true);
+          this.writes++;
+        }
+      } else if (cell.pressed && now >= cell.pressUntil) {
+        cell.pressed = false;
+        cell.root.classList.toggle('pressed', false);
+        this.writes++;
+      }
+    }
   }
 
   /**
@@ -1537,7 +1829,7 @@ export class Hud {
    * The shapes, on the overlay, after the world is drawn: the crosshair and its charge ring. One
    * call a frame, and none at all while the game is not simulating — the caller does not call it
    * then, and the canvas is cleared once instead. A cooldown is not here: the cells paint over the
-   * overlay, so the sweep is the cell's own, one number written on it when it moves.
+   * overlay, so its fill is the cell's own animation (`coolCell`).
    *
    * Nothing is allocated: every call takes numbers and a colour index.
    */
@@ -1572,10 +1864,10 @@ export class Hud {
       if (this.charge > 0) {
         const r = S.chargeRadius * s;
         const w = S.chargeWidth * s;
-        c.ring(cx, cy, r, w, col.muted, 0.35);
+        c.ring(cx, cy, r, w, col.muted, S.chargeTrackAlpha);
         // Clockwise from twelve, and a charge that is full burns rather than sitting in the cool
         // colour, so a held shot says when it is worth letting go.
-        c.arc(cx, cy, r, 0, 360 * Math.min(1, this.charge), w, this.charge >= 1 ? col.hot : col.accent, 0.95);
+        c.arc(cx, cy, r, 0, 360 * Math.min(1, this.charge), w, this.charge >= 1 ? col.hot : col.accent, S.chargeArcAlpha);
         this.out.ops += 2;
       }
     }
@@ -1585,10 +1877,13 @@ export class Hud {
   /**
    * The grapple's mark: a diamond with its corners on the axes where the dart would bite -- `good` when a press
    * fires, `warn` when that is a vehicle's hull (wave 3), at half alpha from the snap hold, `muted` while attached for
-   * the next anchor, `bad` for a refused press's moment -- and a small `accent` mark at the anchor while the rope is out. While the rope is attached, a
-   * thin arc round the crosshair says how much of the longest rope is out, clockwise from twelve, in `muted` and in
-   * `warn` past `grappleRopeWarn`. Drawn whatever the Jedi's crosshair switch says, behind its own; never at a ship's
-   * controls or with the mouse free. Palette indices and kept numbers only.
+   * the next anchor, `bad` for a refused press's moment -- and a small `accent` mark at the anchor while the rope is out.
+   * While the rope is attached, the rope ring says how much of the longest rope is out (the interface rewrite's second
+   * wave, item 10): drawn like the charge ring, a faint full circle with the filled arc on it clockwise from twelve, at
+   * its own radius and width (the charge ring's to begin with), the arc in `muted` and in `warn` past `grappleRopeWarn`;
+   * while a shot charges as well, it steps out by `grappleRopeStep` of its own width so the two never lie on each other.
+   * Drawn whatever the Jedi's crosshair switch says, behind its own; never at a ship's controls or with the mouse free.
+   * Palette indices and kept numbers only.
    */
   private drawGrappleMark(m: HudGrappleMark): void {
     const c = this.canvas;
@@ -1605,8 +1900,15 @@ export class Hud {
     if (m.anchorOn) this.diamond(m.ax, m.ay, S.grappleAnchor * s, width, col.accent, S.grappleMarkAlpha);
     if (m.ropeUsed > 0) {
       const used = m.ropeUsed < 1 ? m.ropeUsed : 1;
-      c.arc(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2), S.grappleRopeArc * s, 0, 360 * used, S.grappleRopeArcWidth * s, used > S.grappleRopeWarn ? col.warn : col.muted, S.grappleMarkAlpha);
-      this.out.ops++;
+      const w = S.grappleRopeArcWidth * s;
+      // Out by its own width while the charge ring shows; the charge ring shows only with the crosshair (`draw`).
+      const out = this.charge > 0 && this.crosshairShown() ? w * S.grappleRopeStep : 0;
+      const r = S.grappleRopeArc * s + out;
+      const cx = Math.round(window.innerWidth / 2);
+      const cy = Math.round(window.innerHeight / 2);
+      c.ring(cx, cy, r, w, col.muted, S.chargeTrackAlpha);
+      c.arc(cx, cy, r, 0, 360 * used, w, used > S.grappleRopeWarn ? col.warn : col.muted, S.chargeArcAlpha);
+      this.out.ops += 2;
     }
   }
 
@@ -1647,6 +1949,16 @@ function hasClass(el: { classList?: { contains?: (name: string) => boolean } }, 
 /** A cell's key-cap element. Built into the cell's own markup, so it is always there. */
 function keyOf(cell: HTMLElement): HTMLElement {
   return cell.querySelector<HTMLElement>('.key') ?? cell;
+}
+
+/**
+ * An action bar cell's inside (item 7), in the order it paints: the cooldown's veil (the dark that draws up from the
+ * bottom as the cell's own colour fills back), the ready flash's light, our own mark, and the key it is on under the
+ * mark, inside the bar. No cost and no word: the bar carries no numbers. The line before a cell and the press's dark are
+ * the cell's own two pseudo-elements (`hud.css`).
+ */
+function slotCell(glyph: string, key: string): string {
+  return `<i class="veil"></i><i class="glow"></i><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#${glyph}"></use></svg><span class="key">${esc(key)}</span>`;
 }
 
 /**

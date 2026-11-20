@@ -209,36 +209,123 @@ export const HUD_SIZES = {
   killRingFrom: 6,
   killRingTo: 22,
   // --- on foot -----------------------------------------------------------------------------------
-  /** The crosshair: a dot, four ticks, and the charge as a ring. */
+  /**
+   * The crosshair: a dot, four ticks, and the charge as a ring. The ticks run from `footTickFrom` out to
+   * `footTickFrom + footTickLen`: 7 to 11 since the interface rewrite's second wave (item 10, the owner's "closer to the
+   * center dot and a little shorter, though still not touching"; they ran 9 to 14), so the dot's 3 and its dark
+   * under-stroke still stand clear of their inner ends. The charge ring is a faint full circle (`muted` at
+   * `chargeTrackAlpha`) with the filled arc on it (at `chargeArcAlpha`); both alphas are the ones the ring always had,
+   * and the rope ring is drawn at the same two.
+   */
   dotRadius: 3,
-  footTickFrom: 9,
-  footTickLen: 5,
+  footTickFrom: 7,
+  footTickLen: 4,
   chargeRadius: 16,
   chargeWidth: 2.5,
+  chargeTrackAlpha: 0.35,
+  chargeArcAlpha: 0.95,
   /**
    * The grapple's mark: a diamond with its corners on the axes this far out, this wide, at this alpha, drawn
-   * where the dart would bite, and the small mark at the anchor while it is in front of the view. The owner's own
-   * smaller sizes (2026-10-17, still being tried): at 12 it sits inside the charge ring rather than round it, its
-   * corners meeting the ring's dark under-stroke while a shot charges; at 32 it cleared the ring from outside.
+   * where the dart would bite, and the small mark at the anchor while it is in front of the view. Since the interface
+   * rewrite's second wave (item 10, the owner's "smaller and fatter, definitely within the current reticle's four
+   * lines"): corners 6 out (they were 12, the owner's earlier smaller size) and 1.4 thick (0.8), so the whole diamond,
+   * its stroke included, stands inside the crosshair's ticks, whose inner ends are 7 out. Its colours stay.
    */
-  grappleMark: 12,
-  grappleMarkWidth: 0.8,
+  grappleMark: 6,
+  grappleMarkWidth: 1.4,
   grappleMarkAlpha: 0.85,
   grappleAnchor: 3,
   /**
-   * The rope used over the longest, while the rope is in: a thin arc round the crosshair at this radius and this
-   * width, `muted`, turning `warn` past this share. The owner's own sizes, as the diamond's: at 10 it runs inside the
-   * charge ring and the diamond's corners, where at 22 it ran between them.
+   * The rope used over the longest, while the rope is in (item 10): a ring drawn like the charge ring -- a faint full
+   * circle with the filled arc on it, clockwise from twelve -- at the charge ring's own radius and width to begin with
+   * (the owner's "at the charge ring's size"; it was a thin arc at 10), the arc `muted` and turning `warn` (amber) past
+   * `grappleRopeWarn` of the longest rope. While a shot charges on the rope the two would lie on each other, so the
+   * rope ring steps out by `grappleRopeStep` of its own width (1, the owner's "by its own width").
    */
-  grappleRopeArc: 10,
-  grappleRopeArcWidth: 0.5,
+  grappleRopeArc: 16,
+  grappleRopeArcWidth: 2.5,
   grappleRopeWarn: 0.5,
-  /** An ability cell and its glyph. */
-  slotSize: 40,
-  slotGlyph: 28,
-  /** A key-cap. */
+  grappleRopeStep: 1,
+  /**
+   * The action bar (the interface rewrite's second wave, item 7; `.slots` in `hud.css`): one bar of `plate` with slightly
+   * rounded corners (`slotRadius`), its cells `slotW` wide and `slotSize` high (the bar's own height), smaller than the
+   * 40 px squares they were, each the ability's mark (`slotGlyph`, from 28) with the key it is on under it, inside the
+   * bar, in type `slotKeySize` (ours, all five: a cell a little narrower than it is tall, so the key fits under a mark a
+   * glance still reads). Between two cells a line `slotLineWidth` thick and `slotLineShare` of the bar's height (the
+   * owner's "about 80%"; the Interface page's switch puts it at the bar's full height instead).
+   */
+  slotSize: 36,
+  slotW: 32,
+  slotGlyph: 20,
+  slotKeySize: 9,
+  slotRadius: 6,
+  slotLineShare: 0.8,
+  slotLineWidth: 1,
+  /**
+   * A press darkens the cell (`void` at `pressDark`, ours) over `pressInSeconds` and brings it back over
+   * `pressOutSeconds` (the second wave's defaults: about 80 ms and 200 ms). A cooldown darkens the cell at once (`void` at
+   * `coolDark`, the old turning wedge's own 60%) and the cell's own colour fills back up from the bottom over the
+   * cooldown's time; when it is ready, a flash of `ink` up to `readyFlashGlow` and back, eased in and out over
+   * `readyFlashSeconds` (the defaults: about a quarter brighter, about a third of a second).
+   */
+  pressInSeconds: 0.08,
+  pressOutSeconds: 0.2,
+  pressDark: 0.45,
+  coolDark: 0.6,
+  readyFlashSeconds: 0.33,
+  readyFlashGlow: 0.25,
+  /**
+   * A lit cell (a toggle running, a power holding, the blade out): its mark in `accent` and a soft light of the same
+   * inside the cell, `slotLitPx` across at `slotLitGlow` of the colour (ours: inside, since the bar's corners clip what is
+   * outside it; the separate square cells had worn an outer glow of 45%).
+   */
+  slotLitPx: 10,
+  slotLitGlow: 0.35,
+  /**
+   * A key-cap: the use prompt's soft cap (item 8), and the long line's caps, which are the same. At least `capW` wide,
+   * `capH` high (the long line is as tall as its caps, so a cap sits in it), `capPad` in at each side for a long key's
+   * word, its corners `capRadius` round, the key in type `capKeySize` high; the words beside it in type `promptWordSize`
+   * high, `promptKeyGap` from the cap. Ours, all seven, the sizes the prompt's caps and words had before the wave but the
+   * corners, which went from 2 to 4 as the hard border went. On the bar's own scale (`--hud-acts-s`), and the long line's
+   * on the HUD's.
+   */
   capW: 22,
   capH: 18,
+  capPad: 4,
+  capRadius: 4,
+  capKeySize: 11,
+  promptWordSize: 13,
+  promptKeyGap: 5,
+  /**
+   * The use prompt (the interface rewrite's second wave, item 8; `ActionBar` in `prompt.ts`, `.hud-acts` in `hud.css`):
+   * one rounded see-through bar, the palette's `panel` at `promptStrength` of itself (the owner's "about half"), corners
+   * `promptRadius`, every action on offer side by side `promptGap` apart with the action bar's lines between them, the bar
+   * padded `promptPadX` and `promptPadY` round them (ours, the four). The key in a soft cap of `ink` at `promptCapLight`
+   * over the bar (ours: "slightly lighter than the bar", no border); the words in `ink` at `promptInk` (the owner's "about
+   * 85%"), no outline round each letter. It fades in over `promptInSeconds` and out over `promptOutSeconds` (the owner's
+   * "about 150 ms" and "about 200 ms"); when the actions change its width eases over `promptWidthSeconds` and the words
+   * cross-fade over `promptSwapSeconds` (ours). Aboard and in vehicles it is the same bar at `promptQuiet` of its
+   * strength on foot (the default answer, "about 60%"), `promptQuietSize` of its size ("slightly smaller", ours), and
+   * `promptQuietBottom` up from the floor at the HUD scale, raised clear of the flight display: the ship's condition
+   * block stands 96 up and is 63 tall in the browser at scale 1 (measured at a fighter's controls, 1600 by 900), so it
+   * reaches 159, and 168 clears it by 9 (ours; the on-foot bar's 155 touched it). The blur behind it, a switch that
+   * starts off, is `promptBlurPx` across (ours).
+   */
+  promptStrength: 0.5,
+  promptRadius: 8,
+  promptGap: 12,
+  promptPadX: 6,
+  promptPadY: 4,
+  promptCapLight: 0.12,
+  promptInk: 0.85,
+  promptInSeconds: 0.15,
+  promptOutSeconds: 0.2,
+  promptWidthSeconds: 0.18,
+  promptSwapSeconds: 0.15,
+  promptQuiet: 0.6,
+  promptQuietSize: 0.9,
+  promptQuietBottom: 168,
+  promptBlurPx: 6,
   // --- the world's own places ---------------------------------------------------------------------
   /** The minimap's circle, across, at the top left. */
   minimap: 168,
@@ -263,6 +350,18 @@ export const HUD_SIZES = {
   fpsShadowY: 1,
   fpsShadowBlur: 2,
   weatherSize: 10,
+  /**
+   * The frame rate on the character list and the creator (the second wave, item 9), where it stands by itself: its own
+   * top and right, in plain pixels as its place in play is. In play it stands 12 in from the top and the right, and
+   * there on the list it sat on the list's "1 of 5", which stands at the head's bottom right, in from the right by the
+   * list's own side padding (at most 40) and its own width (about 36), and down by under 30 on a window under about 720
+   * high (the wave's review, at 1280 by 720). So on those two screens it keeps the top's 12 and stands 88 in from the
+   * right: the most that padding and that counter reach, and 12 to spare, so it clears the counter at every window size
+   * and grows leftward at a larger scale. On the creator that is inside the top of its window on the right, clear of the
+   * window's words. Both the owner's to move by eye.
+   */
+  stageFpsTop: 12,
+  stageFpsRight: 88,
   /** A waypoint's mark in the world: this far from its middle to each of its points. */
   waypointMark: 7,
   // --- the blocks --------------------------------------------------------------------------------

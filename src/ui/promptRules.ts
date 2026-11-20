@@ -325,6 +325,16 @@ export function resetPromptState(s: PromptState): PromptState {
 }
 
 /**
+ * Whether the bar is the quieter one (the interface rewrite's second wave, item 8: the owner's "while in a ship or
+ * vehicles as well, those tooltips should be more muted"): seated in a vehicle or flying one from its bridge, standing
+ * in a ship's rooms, a shuttle's passenger, or in a jump's tunnel. On foot it is the plain bar, adrift in space and on a
+ * hull in the gravity boots included, since neither is a vehicle. Pure, and reads nothing but the state.
+ */
+export function promptQuiet(s: PromptState): boolean {
+  return s.mounted || s.piloting || s.aboard || s.ride !== '' || s.jump !== 'none';
+}
+
+/**
  * Every word the bar can say, frozen at module scope so that filling it allocates nothing, ever. They
  * are ours: short, lower case, and in the voice the rest of the game speaks in. A label is the thing
  * that happens, not the thing you are looking at — "set it down", never "landing gear".

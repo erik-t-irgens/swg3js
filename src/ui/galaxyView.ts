@@ -9,6 +9,7 @@
 // view never disposes anything the game is using.
 
 import { projectedBehind } from '../core/depthMode.ts';
+import { colourHex, onPaletteChange } from '../core/palette.ts';
 import * as THREE from 'three';
 import { drawnSystems, GALAXY_TUNE, systemPlace, type GalaxySystemDef, type GalaxyRoute } from '../data/galaxy.ts';
 
@@ -191,7 +192,10 @@ export class GalaxyView {
     // The routes: one set of segments whose buffer is made when the file arrives (once a session).
     const routeGeometry = new THREE.BufferGeometry();
     routeGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
-    this.routeLines = new THREE.LineSegments(routeGeometry, new THREE.LineBasicMaterial({ color: 0x7fd7ff, transparent: true, opacity: GALAXY_VIEW_TUNE.routeOpacity }));
+    // The routes, the picked ring and the ring round where you are wear the palette's (the interface rewrite's second wave,
+    // item 11: they were colours of their own; the ring round you is the map's own colour for you, `chassis`), and are
+    // read again when a colour theme is switched (`repaint`). The globes and the lights are the galaxy's own.
+    this.routeLines = new THREE.LineSegments(routeGeometry, new THREE.LineBasicMaterial({ color: colourHex('accent'), transparent: true, opacity: GALAXY_VIEW_TUNE.routeOpacity }));
     this.routeLines.frustumCulled = false;
     this.routeLines.visible = false;
     this.scene.add(this.routeLines);
@@ -199,19 +203,28 @@ export class GalaxyView {
     // frame and lighting a different set of routes later never compiles anything.
     const mutedGeometry = new THREE.BufferGeometry();
     mutedGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
-    this.mutedLines = new THREE.LineSegments(mutedGeometry, new THREE.LineBasicMaterial({ color: 0x7fd7ff, transparent: true, opacity: GALAXY_VIEW_TUNE.routeOpacity * GALAXY_VIEW_TUNE.muteShare }));
+    this.mutedLines = new THREE.LineSegments(mutedGeometry, new THREE.LineBasicMaterial({ color: colourHex('accent'), transparent: true, opacity: GALAXY_VIEW_TUNE.routeOpacity * GALAXY_VIEW_TUNE.muteShare }));
     this.mutedLines.frustumCulled = false;
     this.mutedLines.visible = false;
     this.scene.add(this.mutedLines);
     const ring = new THREE.RingGeometry(0.84, 1, 40);
-    this.here = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: 0xff9d5a, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
-    this.picked = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: 0x7fd7ff, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
+    this.here = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: colourHex('chassis'), transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
+    this.picked = new THREE.Mesh(ring, new THREE.MeshBasicMaterial({ color: colourHex('accent'), transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide }));
     this.here.renderOrder = 2;
     this.picked.renderOrder = 2;
     this.here.visible = false;
     this.picked.visible = false;
     this.scene.add(this.here, this.picked);
     this.place();
+    onPaletteChange(() => this.repaint());
+  }
+
+  /** A colour theme switched: the routes and the two rings read the palette again. Never in a frame. */
+  private repaint(): void {
+    (this.routeLines.material as THREE.LineBasicMaterial).color.setHex(colourHex('accent'));
+    (this.mutedLines.material as THREE.LineBasicMaterial).color.setHex(colourHex('accent'));
+    (this.here.material as THREE.MeshBasicMaterial).color.setHex(colourHex('chassis'));
+    (this.picked.material as THREE.MeshBasicMaterial).color.setHex(colourHex('accent'));
   }
 
   /**

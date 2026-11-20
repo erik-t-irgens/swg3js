@@ -227,16 +227,112 @@ count.transform = 0;
   ok(writes(() => { for (let i = 0; i < 10; i++) frame(98.799); }) === 0, 'a slot row that has not changed writes nothing');
   kit.lit = true;
   ok(writes(() => frame(98.799)) === 1, 'a power coming on lights its cell with one write');
-  // A cooldown is one number on the cell, which the stylesheet draws as a wedge: the cell loses its
-  // ready mark and takes that number, and nothing else on the page hears about it.
+  // A cooldown (the interface rewrite's second wave, item 7) is one animation the stylesheet runs: the cell loses its
+  // ready mark the moment it begins (the stylesheet darkens it whole), the fill starts once the share has been seen to
+  // fall (its length, how far into it the share is, and the class that runs it), and ready is the mark back, the fill
+  // off and the flash. The wedge drawn from a number written step by step is gone.
   kit.cd = 0.5;
-  ok(writes(() => frame(98.799)) === 2, 'a cooldown starting is the ready mark off the cell and the number the wedge is drawn from');
+  ok(writes(() => frame(98.799)) === 1, 'a cooldown beginning is the ready mark off the cell, and nothing else');
   kit.cd = 0.5004;
-  ok(writes(() => frame(98.799)) === 0, 'and a cooldown that has not moved by a step of its own writes nothing at all');
+  ok(writes(() => frame(98.799)) === 0, 'a share that has not fallen starts nothing');
   kit.cd = 0.46;
-  ok(writes(() => frame(98.799)) === 1, 'a step of it writes that one number and nothing more');
+  ok(writes(() => frame(98.799)) === 3, 'seen to fall, the fill starts: its length, how far into it, and the class that runs it');
   kit.cd = 0;
-  ok(writes(() => frame(98.799)) === 2, 'and coming back ready is the mark and the number going to nothing');
+  ok(writes(() => frame(98.799)) === 3, 'and ready is the mark back, the fill off and the flash');
+}
+
+// ---------------------------------------------------------------------------------------------
+// A whole cooldown at the kit's own pace, on a clock of the test's own (`performance.now` stood in): nothing is written
+// between its start and its end, a pause of the game holds it without a write, a hitch that moves the kit's cooldown on
+// past the page's is put back with one property, and a press darkens the cell and lets it go. Every write counted here is
+// the cell's own.
+{
+  const realNow = performance.now;
+  let t = 2000;
+  Object.defineProperty(performance, 'now', { value: () => t, configurable: true, writable: true });
+  try {
+    const h3 = new Hud(makeEl());
+    const k3 = testKit();
+    let pressed = false;
+    h3.setInput({ bindings: { slot1: ['Digit1'], slot2: ['Digit2'], saberToggle: ['KeyL'] }, pressedAction: (a: string) => pressed && a === 'slot1' });
+    h3.setKit(k3);
+    const cell = (h3 as any).slots[0];
+    const own = { n: 0, names: new Set<string>(), props: {} as Record<string, string> };
+    cell.root.classList = {
+      toggle: (name: string, on?: boolean) => {
+        own.n++;
+        const want = on === undefined ? !own.names.has(name) : on;
+        if (want) own.names.add(name);
+        else own.names.delete(name);
+        return want;
+      },
+      contains: (name: string) => own.names.has(name),
+    };
+    cell.root.style = { setProperty: (k: string, v: string) => { own.n++; own.props[k] = v; } };
+    own.names.add('ready');
+    const step = (ms = 16) => {
+      t += ms;
+      h3.update(ms / 1000, 1, 2, 3, k3, 100, 100, '12:00', '', false);
+    };
+    for (let i = 0; i < 30; i++) step();
+    const per = 2; // the kit's whole share takes two seconds
+    k3.cd = 1;
+    own.n = 0;
+    step();
+    ok(own.n === 1 && !own.names.has('ready'), `a cooldown beginning darkens the cell with one class (${own.n})`);
+    own.n = 0;
+    k3.cd -= 0.016 / per;
+    step();
+    ok(own.n === 3 && own.names.has('cool') && Math.abs(Number(own.props['--cool-s']) - per) < 1e-6 && Math.abs(Number(own.props['--cool-at']) - 0.016) < 1e-6, `seen to fall, its fill starts at the kit's own pace, ${own.props['--cool-s']} s, already ${own.props['--cool-at']} s in (${own.n} writes)`);
+    own.n = 0;
+    for (let i = 0; i < 40; i++) {
+      k3.cd -= 0.016 / per;
+      step();
+    }
+    ok(own.n === 0, `running at the kit's pace it writes nothing at all (${own.n} in 40 frames)`);
+    // The game stands still (a menu): the kit's cooldown holds, so does the page's (`paused` on the bar), and the time is
+    // left out of the cell's model, so running on again writes nothing.
+    h3.setLive(false);
+    for (let i = 0; i < 60; i++) step();
+    h3.setLive(true);
+    for (let i = 0; i < 20; i++) {
+      k3.cd -= 0.016 / per;
+      step();
+    }
+    ok(own.n === 0 && (h3 as any).slotsEl !== undefined, `a pause of a second holds it, and running on afterwards writes nothing (${own.n})`);
+    // A hitch: the kit's cooldown moves on by 0.4 s the page never saw. More than `coolSlack` apart, one property puts the
+    // page's fill where the kit is.
+    k3.cd -= 0.4 / per;
+    step();
+    ok(own.n === 1 && 'coolSlack' in HUD_TUNE, `a hitch past the slack is one property, the fill put where the kit is (${own.n})`);
+    own.n = 0;
+    for (let i = 0; i < 20; i++) {
+      k3.cd -= 0.016 / per;
+      step();
+    }
+    ok(own.n === 0, `and then it writes nothing again (${own.n})`);
+    // Ready: the mark back, the fill off, the flash.
+    k3.cd = 0;
+    step();
+    ok(own.n === 3 && own.names.has('ready') && !own.names.has('cool') && own.names.has('flash'), `ready, the mark back, the fill off and the flash (${own.n})`);
+    // A press: darkened for `pressInSeconds`, then let go; read only while the game runs.
+    own.n = 0;
+    pressed = true;
+    step();
+    pressed = false;
+    ok(own.n === 1 && own.names.has('pressed'), 'a press darkens its cell with one class');
+    for (let i = 0; i < 10; i++) step();
+    ok(own.n === 2 && !own.names.has('pressed'), `and lets it go a moment later with one more (${own.n})`);
+    h3.setLive(false);
+    pressed = true;
+    step();
+    pressed = false;
+    ok(own.n === 2 && !own.names.has('pressed'), 'a key pressed while the game stands still (a menu) darkens nothing');
+    h3.setLive(true);
+    ok(/ready/.test(h3.report().kit), `and the console reads the bar in words (${h3.report().kit})`);
+  } finally {
+    Object.defineProperty(performance, 'now', { value: realNow, configurable: true, writable: true });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

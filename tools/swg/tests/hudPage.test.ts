@@ -164,8 +164,8 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
 // which is the one change in this package that can shift a panel quietly, and nothing else watches
 // it: `palette.test.ts` reads the `:root` block and stops there. So the rest of the file is checked
 // here -- every tint is a named colour at an alpha, every name it uses is declared, and the only
-// literal colours left are the three that are deliberate. A future edit that types a colour in by
-// hand fails this rather than being noticed a week later.
+// literal colour left is the one that is deliberate. A future edit that types a colour in by hand
+// fails this rather than being noticed a week later.
 {
   const css = readFileSync(new URL('../../../src/style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
   const open = css.indexOf(':root');
@@ -189,20 +189,23 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   const values = [...rest.matchAll(/(?:^|[;{])\s*[-a-zA-Z]+\s*:\s*([^;{}]+)/g)].map((m) => m[1]);
   const literals: string[] = [];
   for (const v of values) for (const m of v.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)) literals.push(m[0].replace(/\s+/g, ''));
-  // The three the hand-off names, each with its reason written beside it in the stylesheet: the
-  // travel curtain, which is meant to reach black, and the two lit wells behind a picture.
-  const allowed = new Set(['#000', 'rgba(40,62,86,0.9)', 'rgba(30,48,70,0.95)']);
+  // The one the hand-off names, with its reason written beside it in the stylesheet: the travel
+  // curtain, which is meant to reach black. The two lit wells behind a picture and the creator were
+  // let off here too until the colour themes (the interface rewrite's second wave, item 11), under
+  // which a typed light stayed navy in a red theme; they are the palette's light in its dark now
+  // (`--well-pic`, `--well-creation` on `:root`), and typing either back in fails here.
+  const allowed = new Set(['#000']);
   const typed = [...new Set(literals.filter((l) => !allowed.has(l)))];
   ok(typed.length === 0, `no colour is typed into a panel by hand${typed.length ? `: ${typed.join(', ')}` : ''}`);
-  ok(literals.length > 0 && literals.length <= 4, `and the deliberate few are still few (${literals.length})`);
+  ok(literals.length === 1, `and the deliberate one is the only one (${literals.length})`);
 }
 
 // ---------------------------------------------------------------------------------------------
 // The top-left corner. Its plate and the planet's tagline are gone everywhere, in space too, and what
 // stands there now -- the minimap's face, the world's name and the coordinates laid over its circle, the
 // nearby line, the bare name and `/loc` line with their halo -- is held to the palette like every panel:
-// `hud.css` as a whole still carries one literal of its own elsewhere, so the minimap's section of it is
-// what is read here, together with the rules `style.css` gives the corner's lines.
+// the minimap's section of `hud.css` is what is read here, together with the rules `style.css` gives the
+// corner's lines (`hud.css` as a whole carries no literal colour any more, which `themes.test.ts` holds).
 {
   const hudTs = readFileSync(new URL('../../../src/ui/hud.ts', import.meta.url), 'utf8');
   const style = readFileSync(new URL('../../../src/style.css', import.meta.url), 'utf8');

@@ -2,7 +2,9 @@
 //
 // The values live in `src/style.css` on `:root`, between the `palette` markers, so the first paint is
 // right before any script runs and the panels' 231 `var(--…)` uses keep reading the same declarations
-// the canvas does. This module reads them once at boot and keeps them as an array of ready CSS strings
+// the canvas does. This module reads them once at boot, and again whenever a colour theme is switched
+// (`applyTheme` in `themes.ts`, which writes a theme's eighteen over these on the root's own style), and
+// keeps them as an array of ready CSS strings
 // indexed by `COL`, so nothing on the screen builds a colour string in a frame. If a declaration is
 // missing (a half-edited stylesheet) the literal below is used instead, so the canvas can never be
 // handed `undefined` for a colour.
@@ -95,9 +97,9 @@ export function paletteRead(): boolean {
 }
 
 /**
- * Read the eighteen from `:root` once, at boot. Safe to call again (the second call is the same work
- * and the same answer) and safe to call with no document at all, which is how a node test imports this
- * module. Returns how many names the stylesheet supplied.
+ * Read the eighteen from `:root` at boot, and again when a colour theme is switched (`applyTheme`). Safe to
+ * call again (the same work, and the theme's answer once one is on) and safe to call with no document at
+ * all, which is how a node test imports this module. Returns how many names the page supplied.
  */
 export function initPalette(root?: Element): number {
   const el = root ?? (typeof document === 'undefined' ? null : document.documentElement);
@@ -112,6 +114,48 @@ export function initPalette(root?: Element): number {
   }
   readFromCss = found > 0;
   return found;
+}
+
+/**
+ * Who reads the palette into something of their own (a three material's colour, the hull flash's numbers, a label drawn
+ * once onto a canvas) and must read it again when a theme is switched (the Colours switch, `applyTheme` in
+ * `themes.ts`; the interface rewrite's second wave, item 11). The page's own `var(--…)` uses and every stroke the
+ * overlay makes read the table live and need nothing. A plain list, called after the table is read again and never in
+ * a frame; a listener that throws does not stop the others.
+ */
+const changeListeners: (() => void)[] = [];
+
+/** Hear about a theme switched. Returns the call that stops hearing about it. */
+export function onPaletteChange(fn: () => void): () => void {
+  changeListeners.push(fn);
+  return () => {
+    const i = changeListeners.indexOf(fn);
+    if (i >= 0) changeListeners.splice(i, 1);
+  };
+}
+
+/** The palette has been read again: everything that keeps a copy of it takes the new values. */
+export function paletteChanged(): void {
+  for (let i = 0; i < changeListeners.length; i++) {
+    try {
+      changeListeners[i]();
+    } catch (err) {
+      console.warn('a palette listener threw', err);
+    }
+  }
+}
+
+/**
+ * Two palette entries mixed, `t` of the first over the second, as a 24-bit number: a shade three wants as one number
+ * and the palette has no name for (the space map's faint grid is the pool's blue far down toward `void`). Alpha is
+ * left out, as `colourHex` leaves it.
+ */
+export function colourMix(a: PaletteName, b: PaletteName, t: number): number {
+  const x = colourHex(a);
+  const y = colourHex(b);
+  const k = t < 0 ? 0 : t > 1 ? 1 : t;
+  const ch = (shift: number) => Math.round(((x >> shift) & 255) * k + ((y >> shift) & 255) * (1 - k));
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0);
 }
 
 /** One colour as a CSS string. Out of range gives `ink`, so a bad index cannot blank a stroke. */

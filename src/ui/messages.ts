@@ -514,4 +514,4 @@ function styled(el: HTMLElement): boolean {
 const ROOT_FALLBACK =
   'position:absolute;left:16px;bottom:16px;display:flex;flex-direction:column;align-items:flex-start;gap:3px;max-width:40vw;pointer-events:none;';
 const LINE_FALLBACK =
-  'padding:2px 4px 2px 6px;border-left:2px solid var(--ink, #e8f1f8);background:rgba(6,10,18,0.35);font-size:13px;line-height:1.35;color:var(--text, #e8f1f8);text-shadow:0 0 2px #060a12;';
+  'padding:2px 4px 2px 6px;border-left:2px solid var(--ink, #e8f1f8);background:color-mix(in srgb, var(--void, #060a12) 35%, transparent);font-size:13px;line-height:1.35;color:var(--text, #e8f1f8);text-shadow:0 0 2px var(--void, #060a12);';

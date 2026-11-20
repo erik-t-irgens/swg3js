@@ -30,7 +30,7 @@ const BINDINGS = (() => {
   return names;
 })();
 
-const { PROMPT, PROMPT_MAX_SLOTS, PROMPT_WORDS, fillActions, newPromptActions, newPromptState, resetPromptState, tunePrompt } = await import('../../../src/ui/promptRules.ts');
+const { PROMPT, PROMPT_MAX_SLOTS, PROMPT_WORDS, fillActions, newPromptActions, newPromptState, promptQuiet, resetPromptState, tunePrompt } = await import('../../../src/ui/promptRules.ts');
 
 /** The numbers back as they were, so one block cannot colour the next. */
 const DEFAULTS = { ...PROMPT };
@@ -715,18 +715,31 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 {
   const dom = { writes: 0 };
   const makeEl = (): any => {
-    const el: any = { children: [] as any[] };
+    const el: any = { children: [] as any[], names: new Set<string>() };
     let text = '';
     let hidden = false;
     let cls = '';
     el.appendChild = (child: any) => el.children.push(child);
     Object.defineProperty(el, 'textContent', { get: () => text, set: (v) => { dom.writes++; text = String(v); } });
     Object.defineProperty(el, 'hidden', { get: () => hidden, set: (v) => { dom.writes++; hidden = !!v; } });
-    Object.defineProperty(el, 'className', { get: () => cls, set: (v) => { cls = String(v); } });
+    // The class a cell is built with is the markup's, before the bar can count anything; every class written after it
+    // (the bar up, a cell out of the row, two faces cross-fading, the quieter bar) is a write the page takes.
+    Object.defineProperty(el, 'className', { get: () => cls, set: (v) => { cls = String(v); for (const x of String(v).split(/\s+/)) if (x) el.names.add(x); } });
+    el.classList = {
+      toggle: (name: string, on?: boolean) => {
+        dom.writes++;
+        const want = on === undefined ? !el.names.has(name) : on;
+        if (want) el.names.add(name);
+        else el.names.delete(name);
+        return want;
+      },
+      contains: (name: string) => el.names.has(name),
+    };
+    el.style = { setProperty: () => void dom.writes++ };
     return el;
   };
-  // `hidden` is written once when a cell is built, before the bar can count anything; the count that
-  // matters starts after construction.
+  // Building the cells is the markup's own, before the bar can count anything; the count that matters starts after
+  // construction.
   (globalThis as any).document = { createElement: () => makeEl() };
 
   const { ActionBar } = await import('../../../src/ui/prompt.ts');
@@ -776,11 +789,83 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   }
 
   {
-    // A cell that goes down and comes back unchanged writes only the attribute that hides it.
+    // A bar that goes down and comes back unchanged writes only its own class, off and on (the interface rewrite's second
+    // wave, item 8: it fades out with the words it had, and in again with the same words, nothing else touched).
     const before = stats.writes;
     bar.clear();
+    ok(stats.on === false && !bar.root.names.has('on') && stats.writes === before + 1, `down, the bar fades: one class off, its words left where they were (${stats.writes - before})`);
     bar.set(beside());
-    ok(stats.writes === before + 4, `two cells down and up again is four writes and no more (${stats.writes - before})`);
+    ok(stats.writes === before + 2 && bar.root.names.has('on'), `down and up again is two writes and no more (${stats.writes - before})`);
+  }
+
+  {
+    // The look (item 8): its words change by a cross-fade, a cell with nothing to say leaves the row, a bar fading in is
+    // written straight, and aboard or in a vehicle it is the quieter bar. Each is a class and only what changed.
+    const row = bar.root.children[0];
+    const cell0 = row.children[0];
+    const cell1 = row.children[1];
+    const faceText = (cell: any, which: number) => `${cell.children[which].children[0].textContent} ${cell.children[which].children[1].textContent}`;
+    ok(!cell0.names.has('none') && !cell1.names.has('none') && row.children[2].names.has('none'), 'two actions on offer: two cells in the row, the rest out of it');
+    const flipWas = cell0.names.has('flip');
+    const showingWas = flipWas ? 1 : 0;
+    const key = bar.keyAt(0);
+    ok(faceText(cell0, showingWas) === `${key} board`, `the face showing says what the cell says (${faceText(cell0, showingWas)})`);
+    // A person in front of you in place of the ship: the same key, new words, cross-faded.
+    let w = stats.writes;
+    bar.set(at({ talk: true, shipMenu: 'here' }));
+    ok(bar.labelAt(0) === 'talk' && cell0.names.has('flip') !== flipWas && faceText(cell0, 1 - showingWas) === `${key} talk` && faceText(cell0, showingWas) === `${key} board`, `new words go into the face not showing and the two cross-fade, the old words left to fade (${faceText(cell0, 1 - showingWas)} over ${faceText(cell0, showingWas)})`);
+    ok(stats.writes - w === 3, `that is the key and the words into a face that never held them, and the one class (${stats.writes - w})`);
+    w = stats.writes;
+    bar.set(at({ talk: true, shipMenu: 'here' }));
+    ok(stats.writes === w, 'the same again writes nothing');
+    bar.set(beside());
+    ok(bar.labelAt(0) === 'board' && cell0.names.has('flip') === flipWas && stats.writes - w === 1, `and back to the words the other face still holds is the one class alone (${stats.writes - w})`);
+    w = stats.writes;
+    bar.set(at({ talk: true, shipMenu: 'here' }));
+    ok(stats.writes - w === 1, `as is the way back to the person: both faces hold their words now (${stats.writes - w})`);
+    // Nothing but the menu: the second cell leaves the row and the first is the menu's.
+    w = stats.writes;
+    bar.set(at({ shipMenu: 'here' }));
+    ok(stats.shown === 1 && bar.labelAt(0) === 'ship menu' && cell1.names.has('none'), 'one action on offer: the second cell out of the row');
+    // The bar down, and up with other words: written straight into the faces showing, since nobody sees them change.
+    bar.clear();
+    w = stats.writes;
+    const flips = cell0.names.has('flip');
+    bar.set(beside());
+    ok(cell0.names.has('flip') === flips && !cell1.names.has('none') && bar.root.names.has('on'), 'a bar fading in takes its words straight, with no cross-fade, and the cell back in the row');
+    // Aboard and in a vehicle: the quieter bar, one class each way.
+    w = stats.writes;
+    bar.set(at({ mounted: true, vehicle: { kind: 'ground', ship: false, hop: true } }));
+    ok(bar.root.names.has('quiet') && stats.quiet, 'in a vehicle the bar is the quieter one');
+    bar.set(beside());
+    ok(!bar.root.names.has('quiet') && !stats.quiet, 'and on foot again the plain one');
+    // The two switches, one class each, written only when they move.
+    w = stats.writes;
+    bar.setLook(true, true);
+    bar.setLook(true, true);
+    ok(bar.root.names.has('lines-full') && bar.root.names.has('blur') && stats.writes - w === 2, 'the lines at full height and the blur: one class each, once');
+    bar.setLook(false, false);
+    ok(!bar.root.names.has('lines-full') && !bar.root.names.has('blur'), 'and off again');
+    ok(dom.writes - domAtStart === stats.writes, `and still every write the bar counted is one the page took, every class included (${dom.writes - domAtStart} against ${stats.writes})`);
+  }
+
+  {
+    // Which states are the quieter bar: aboard and in vehicles, as the owner put it, and nothing on foot.
+    const quietIn: [string, boolean][] = [
+      ['seated in a speeder', promptQuiet(at({ mounted: true, vehicle: { kind: 'ground' } }))],
+      ['at a bridge\'s controls', promptQuiet(at({ piloting: true, vehicle: { kind: 'ship', ship: true } }))],
+      ['in a ship\'s rooms', promptQuiet(at({ aboard: true }))],
+      ['a shuttle\'s passenger', promptQuiet(at({ ride: 'board' }))],
+      ['in a jump\'s tunnel', promptQuiet(at({ jump: 'lift' }))],
+    ];
+    const plainIn: [string, boolean][] = [
+      ['on foot beside a ship', promptQuiet(at({ near: 'board' }))],
+      ['adrift in space', promptQuiet(at({ eva: true }))],
+      ['on a hull in the boots', promptQuiet(at({ boots: true }))],
+      ['talking to someone', promptQuiet(at({ talk: true }))],
+    ];
+    ok(quietIn.every(([, q]) => q), `the quieter bar aboard and in vehicles (${quietIn.filter(([, q]) => !q).map(([w]) => w).join(', ') || 'all five'})`);
+    ok(plainIn.every(([, q]) => !q), `and the plain bar on foot, adrift and in the boots included (${plainIn.filter(([, q]) => q).map(([w]) => w).join(', ') || 'all four'})`);
   }
 
   {
