@@ -58,13 +58,26 @@
  * later goes with the display unless it is named here. Hidden by `visibility` rather than taken out
  * of the layout, as a conversation hides the rest (`#ui.talking`), so nothing is laid out again or
  * resized by it and a canvas keeps its backing store. The words over heads and the chevrons over far
- * members are inside two of the kept roots, and go on their own. `hudHide.test.ts` holds the list. */
-#ui.ui-hidden > :not(.overlay):not(#loading):not(#fade):not(#death):not(#talk):not(#emote-wheel):not(.dbg-root):not(.trade-root):not(#creator-bar):not(#place-hint):not(#place-bar):not(.chat-root):not(.group-root):not(.ed-panel):not(#editor-bar):not(#edit-chip) {
+ * members are inside two of the kept roots, and go on their own. `hudHide.test.ts` holds the list.
+ *
+ * The character list and the creator take the display off by the same rule (`ui-stage`, `HUD_STAGE_CLASS`,
+ * `App.setHudStage`; the interface rewrite's second wave, item 9): no place block or minimap, no bars, weapon mark or
+ * action bar, no crosshair, only their own panels -- and the frame rate while its switch is on, which stands over the
+ * list's dark stage (a z-index of its own there, since the list is a later child that would paint over it), at a place
+ * of its own there (`stageFpsTop`, `stageFpsRight`): at play's 12 and 12 it sat on the list's "1 of 5", which stands
+ * at the head's bottom right. The hide key wins over that one exception: hidden is hidden on any screen. */
+#ui:is(.ui-hidden, .ui-stage) > :not(.overlay):not(#loading):not(#fade):not(#death):not(#talk):not(#emote-wheel):not(.dbg-root):not(.trade-root):not(#creator-bar):not(#place-hint):not(#place-bar):not(.chat-root):not(.group-root):not(.ed-panel):not(#editor-bar):not(#edit-chip) {
   visibility: hidden !important;
 }
-#ui.ui-hidden .chat-bubbles,
-#ui.ui-hidden .group-marks {
+#ui:is(.ui-hidden, .ui-stage) .chat-bubbles,
+#ui:is(.ui-hidden, .ui-stage) .group-marks {
   visibility: hidden !important;
+}
+#ui.ui-stage:not(.ui-hidden) > #hud > .hud-fps {
+  visibility: visible !important;
+  z-index: 1;
+  top: calc(var(--hud-stage-fps-top, 12) * 1px);
+  right: calc(var(--hud-stage-fps-right, 88) * 1px);
 }
 
 /* --- the overlay canvas ---------------------------------------------------------------------------
@@ -78,11 +91,11 @@
 }
 
 /* --- rule 2, for words: a 1 px dark shadow on four sides ------------------------------------------
- * A cyan hairline over a noon dune is unreadable without it and obvious with it. One rule, no cost. */
+ * A cyan hairline over a noon dune is unreadable without it and obvious with it. One rule, no cost. (The use prompt's
+ * caps and words are not here since the interface rewrite's second wave: the see-through bar behind them gives the
+ * contrast, and the owner asked for them without the hard outline round each letter.) */
 .hud-msg,
 .hud-num,
-.hud-cap,
-.hud-act .label,
 .hud-plate .name,
 .hud-cond .label,
 .hud-cond .pct,
@@ -352,57 +365,134 @@
 .hud-msg.note { border-left-color: var(--muted); color: var(--muted); }
 .hud-msg.story { border-left-color: var(--component); }
 
-/* --- key-caps and the action bar -------------------------------------------------------------------
- * At most four things you can do right now, each a cap and two or three words. The cap shows the key
- * you have bound, not a key written into the code. */
+/* --- the use prompt (the interface rewrite's second wave, item 8; `ActionBar` in prompt.ts) --------------------------
+ * At most four things you can do right now, each a cap and two or three words, in one rounded see-through bar: the
+ * palette's `panel` at `promptStrength` of itself, the action bar's thin lines between the actions, the key in a soft cap
+ * of `ink` over the bar with no border (it shows the key you have bound, not a key written into the code), the words in
+ * `ink` at `promptInk` with no outline round each letter. One look everywhere: on foot, aboard and in a vehicle, where
+ * it is the same bar quieter (`quiet`: `promptQuiet` of its strength, `promptQuietSize` of its size, `promptQuietBottom`
+ * up, clear of the flight display). Centred, above the bottom block in all three of its places.
+ *
+ * Nothing moves by a write per frame. `on` fades it in over `promptInSeconds` and out over `promptOutSeconds` (each way
+ * the transition of the state it goes to); its width eases over `promptWidthSeconds` to its row's own (`--hud-acts-w`,
+ * written by the bar when the row has changed size); a cell's two faces cross-fade over `promptSwapSeconds` when its
+ * words change (`flip`), the one going out of the row's flow so the width eases to the one coming in; a cell with
+ * nothing to say (`none`) takes no room. Every size and timing is a `HUD_SIZES` number the display writes as a property
+ * (`LOOK_VARS` in hud.ts), the fallbacks the start values; every size inside is on the bar's own scale, `--hud-acts-s`,
+ * which is the HUD's and a little smaller while quiet. */
 .hud-acts {
+  --hud-acts-s: var(--hud-scale);
   position: absolute;
   left: 50%;
   /* Clear of whichever block stands under it, at every scale the settings allow. On foot that is
-   * `.bottom` in `src/style.css`, which starts 14px up and stacks the class name, the two bars and
-   * the 40px ability cells: about 33px + 74px per scale. At a ship's controls the on-foot block is
-   * down and the ship's condition is up instead, which starts 96px per scale off the floor and is
-   * about 49px per scale tall, so it reaches 145px per scale -- the taller of the two at every scale
-   * the settings allow, and so the one that decides this number. 155 clears it by 4px at 0.75, 10px
-   * at 1 and 15px at 1.5. Invented, kept beside the other placements in `HUD_SIZES`
-   * (`actionBottom`), and the one number to change if the bar reads too high or too low. */
+   * `.bottom` in `src/style.css`, which starts 14px up and stacks the weapon mark, the bars and the
+   * action bar: in the middle, the tallest of its three places, about 20px + 96px per scale, which 155
+   * clears. At a ship's controls the on-foot block is down and the ship's condition is up instead,
+   * which starts 96px per scale off the floor and is 63px per scale tall in the browser (it was written
+   * here as about 49, which put this bar 4px into it): it reaches 159px per scale. The bar is always the
+   * quieter one there (`.hud-acts.quiet`), which stands at its own `promptQuietBottom`, 168, clear of it.
+   * Invented, kept beside the other placements in `HUD_SIZES` (`actionBottom`), and the one number to
+   * change if the bar reads too high or too low on foot. It stays in the middle with the block at
+   * either side, so it never moves when the block does. */
   bottom: calc(155px * var(--hud-scale));
   transform: translateX(-50%);
-  display: flex;
-  gap: calc(14px * var(--hud-scale));
+  width: var(--hud-acts-w, auto);
+  overflow: hidden;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--panel) calc(var(--hud-prompt-bg, 0.5) * 100%), transparent);
+  border-radius: calc(var(--hud-prompt-radius, 8) * 1px * var(--hud-acts-s));
   font-family: var(--hud-font);
-  font-size: calc(13px * var(--hud-scale));
+  font-size: calc(var(--hud-prompt-size, 13) * 1px * var(--hud-acts-s));
   white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--hud-prompt-out, 0.2s) ease-in, width var(--hud-prompt-width, 0.18s) ease;
 }
+.hud-acts.on {
+  opacity: 1;
+  transition: opacity var(--hud-prompt-in, 0.15s) ease-out, width var(--hud-prompt-width, 0.18s) ease;
+}
+/* Aboard and in vehicles: the same bar, quieter, a little smaller, and clear of the flight display. */
+.hud-acts.quiet {
+  --hud-acts-s: calc(var(--hud-scale) * var(--hud-prompt-quiet-size, 0.9));
+  bottom: calc(var(--hud-prompt-quiet-bottom, 168) * 1px * var(--hud-scale));
+}
+.hud-acts.on.quiet { opacity: var(--hud-prompt-quiet, 0.6); }
+/* The soft blur behind it, a switch that starts off: it costs the graphics card a little every frame it shows. */
+.hud-acts.blur { backdrop-filter: blur(calc(var(--hud-prompt-blur, 6) * 1px)); }
 /* A window too short to hold the bar up there at all -- a docked devtools, a phone laid on its side:
  * it goes back under the block, where it sat before there was anything under it to clear. The same
  * two numbers are `HUD_SIZES.actionLow` and `actionShortH`. */
 @media (max-height: 269px) {
-  .hud-acts { bottom: calc(52px * var(--hud-scale)); }
+  .hud-acts,
+  .hud-acts.quiet { bottom: calc(52px * var(--hud-scale)); }
   /* The long line comes down with it, since it stands above the bar. */
   .prompt { bottom: calc(88px * var(--hud-scale)); }
 }
-.hud-act {
+/* The row, at its own width: the bar's width eases to it. */
+.hud-acts-in {
   display: flex;
   align-items: center;
-  gap: calc(5px * var(--hud-scale));
+  width: max-content;
+  padding: calc(var(--hud-prompt-pad-y, 4) * 1px * var(--hud-acts-s)) calc(var(--hud-prompt-pad-x, 6) * 1px * var(--hud-acts-s));
 }
-.hud-act[hidden] { display: none; }
-.hud-act .label { color: var(--ink); }
+/* An action: half the gap on either side of it, the line between two of them. */
+.hud-act {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 calc(var(--hud-prompt-gap, 12) * 0.5px * var(--hud-acts-s));
+}
+.hud-act + .hud-act:not(.none)::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: calc((1 - var(--hud-slot-line, 0.8)) * 50%);
+  width: calc(var(--hud-slot-line-w, 1) * 1px * var(--hud-scale));
+  height: calc(var(--hud-slot-line, 0.8) * 100%);
+  background: var(--edge);
+}
+.hud-acts.lines-full .hud-act + .hud-act:not(.none)::before { top: 0; height: 100%; }
+/* Its two faces: the one showing in the row's flow, the other out of it and faded, so a change of words cross-fades
+   and the width eases to the words coming in. */
+.hud-act > .face {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--hud-prompt-key-gap, 5) * 1px * var(--hud-acts-s));
+  transition: opacity var(--hud-prompt-swap, 0.15s) linear;
+}
+.hud-act > .face.b,
+.hud-act.flip > .face.a,
+.hud-act.none > .face {
+  position: absolute;
+  left: calc(var(--hud-prompt-gap, 12) * 0.5px * var(--hud-acts-s));
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+.hud-act.flip:not(.none) > .face.b {
+  position: static;
+  transform: none;
+  opacity: 1;
+}
+/* Nothing to say: out of the row, taking no room, its face fading out where it stood. */
+.hud-act.none { padding: 0; }
+.hud-act .label { color: color-mix(in srgb, var(--ink) calc(var(--hud-prompt-ink, 0.85) * 100%), transparent); }
+/* The soft cap: its size, side room, corners and type are `HUD_SIZES` looks (`capW`, `capH`, `capPad`, `capRadius`,
+   `capKeySize`), as the words' type and their gap from it are (`promptWordSize`, `promptKeyGap`). */
 .hud-cap {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  min-width: calc(22px * var(--hud-scale));
-  height: calc(18px * var(--hud-scale));
-  padding: 0 calc(4px * var(--hud-scale));
-  background: var(--plate);
-  border: 1px solid var(--edge);
-  border-radius: calc(2px * var(--hud-scale));
+  min-width: calc(var(--hud-cap-w, 22) * 1px * var(--hud-acts-s));
+  height: calc(var(--hud-cap-h, 18) * 1px * var(--hud-acts-s));
+  padding: 0 calc(var(--hud-cap-pad, 4) * 1px * var(--hud-acts-s));
+  background: color-mix(in srgb, var(--ink) calc(var(--hud-prompt-cap, 0.12) * 100%), transparent);
+  border-radius: calc(var(--hud-cap-radius, 4) * 1px * var(--hud-acts-s));
   font-family: var(--hud-font);
   font-variant-numeric: tabular-nums;
-  font-size: calc(11px * var(--hud-scale));
+  font-size: calc(var(--hud-cap-key, 11) * 1px * var(--hud-acts-s));
   color: var(--accent);
 }
 
@@ -426,126 +516,237 @@
 /* The sheet itself is a store and never a thing on screen. */
 #hud-icons { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 
-/* --- the body block: the bars, the number row, the hands ------------------------------------------
- * The block keeps its place at the bottom middle (`.bottom` in `src/style.css`) and stands down while
- * the player is at a ship's controls, where the ship's own condition takes its place. */
-.hud-body {
+/* --- the body block: the weapon mark, the bars, the action bar ---------------------------------------
+ * The interface rewrite's first wave. The block stands at the bottom middle (`.bottom` in `src/style.css`), or at
+ * the bottom left or right (`align-left`, `align-right`, the Interface page's switch), and stands down while the
+ * player is at a ship's controls, where the ship's own condition takes its place. Its top part (`.hud-top`) is the
+ * weapon mark's box and the bars' box: the mark over the bars in the middle, and at either side the mark at the
+ * screen's edge with the bars beside it, running toward the middle (the right a mirror of the left). The action bar
+ * (`.hud-kit`) is under both, always the lowest thing. The block's side margin, the mark's box and its gap are
+ * `HUD_SIZES` numbers the display writes as properties (`LOOK_VARS` in hud.ts); the fallbacks are the start values. */
+#hud .bottom.align-left {
+  left: calc(var(--hud-block-side, 14) * 1px * var(--hud-scale));
+  transform: none;
+  align-items: flex-start;
+}
+#hud .bottom.align-right {
+  left: auto;
+  right: calc(var(--hud-block-side, 14) * 1px * var(--hud-scale));
+  transform: none;
+  align-items: flex-end;
+}
+.hud-top {
   display: flex;
   flex-direction: column;
-  gap: calc(4px * var(--hud-scale));
-}
-.hud-brow {
-  display: flex;
   align-items: center;
-  gap: calc(8px * var(--hud-scale));
-  font-family: var(--hud-font);
-  font-stretch: var(--hud-stretch);
-  font-variant-numeric: tabular-nums;
-  font-size: calc(11px * var(--hud-scale));
-  letter-spacing: 0.06em;
-  white-space: nowrap;
+  gap: calc(var(--hud-mark-gap, 6) * 1px * var(--hud-scale));
 }
-.hud-brow[hidden] { display: none; }
-.hud-brow .val {
+.bottom.align-left .hud-top { flex-direction: row; }
+.bottom.align-right .hud-top { flex-direction: row-reverse; }
+/* --- the weapon mark (item 6; `weaponMark.ts`, `Hud.readMark`) ---------------------------------------------------------
+ * Our own mark for what the hands hold, in the block's mark box at every alignment: the palette's ink, slightly
+ * see-through (`markAlpha`), no name. One inline drawing on the sheet's 24 box with two slots: `mk-a` (the right hand's,
+ * or the only one) and `mk-b` (the left hand's in a pair). Nothing here moves per frame: a slot's markup is written when
+ * what it shows changes, a lightsaber turns to its stance's tilt from one property on its slot (`--mk-tilt`, easing over
+ * `markTurnSeconds`), and its blade draws in and out from one class on the mark (`lit`), at the blade's own timing in
+ * each hand (`--mk-open`/`--mk-close`, the left's `--mk-open2`/`--mk-close2`, seconds, written when the hands change).
+ * Inside the drawing a px is one unit of the 24 box. */
+.hud-mark {
   flex: none;
-  width: calc(76px * var(--hud-scale));
-  color: var(--muted);
-  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  width: calc(var(--hud-mark, 40) * 1px * var(--hud-scale));
+  height: calc(var(--hud-mark, 40) * 1px * var(--hud-scale));
+  color: var(--ink);
+  opacity: var(--hud-mark-alpha, 0.75);
 }
-.hud-brow .hud-bar.hp {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(10px * var(--hud-scale));
+.hud-mark > .mk {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
-.hud-brow .hud-bar.pool {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(6px * var(--hud-scale));
+/* A lightsaber stands at its stance's tilt about the middle of the box (clockwise from upright). */
+.hud-mark .tilt {
+  transform-origin: 12px 12px;
+  transform: rotate(calc(var(--mk-tilt, 0) * 1deg));
+  transition: transform var(--hud-mark-turn, 0.15s) ease-out;
 }
-/* Breath, the row that is only there while you are under water. Its width is the other two bars' so
-   the three line up; its height is between theirs (`breathBarW`, `breathBarH`, which the display's own
-   test checks against this file). It is given no fill colour of its own on purpose: a bar with no band
-   wears `.hud-bar > .fill`, which is the interface's accent, and that is the one colour on the block
-   that is neither the health ramp nor the class pool's. The display puts `warn` and `bad` on it as it
-   empties, and `.hud-bar.warn > .fill` names one class more than the default does, so it wins on its
-   own without this file having to say anything about breath's colour at all. */
-.hud-brow .hud-bar.breath {
+/* Two sabers crossed: the right hand's leaning left with its hilt at the lower right, the left hand's the other way. */
+.hud-mark .x1,
+.hud-mark .x2 { transform-origin: 12px 12px; }
+.hud-mark .x1 { transform: rotate(calc(var(--mk-tilt, 45) * -1deg)); }
+.hud-mark .x2 { transform: rotate(calc(var(--mk-tilt, 45) * 1deg)); }
+/* The blade draws in toward its emitter (just over the collar, `ic-mark-blade`; the double-bladed saber's toward its
+   own end of the hilt) and out again: squeezed along its own length to nothing while the real blade is in, whole while it
+   is lit. Going out takes the blade's opening time and going in its closing time, linear, as the blade itself runs. */
+.hud-mark .blade {
+  transform-origin: 12px 13.25px;
+  transform: scaleY(0);
+  transition: transform calc(var(--mk-close, 0.32) * 1s) linear;
+}
+.hud-mark .blade.staff { transform-origin: 12px 7.75px; }
+.hud-mark .blade.b2 { transition-duration: calc(var(--mk-close2, 0.32) * 1s); }
+.hud-mark.lit .blade {
+  transform: none;
+  transition-duration: calc(var(--mk-open, 0.32) * 1s);
+}
+.hud-mark.lit .blade.b2 { transition-duration: calc(var(--mk-open2, 0.32) * 1s); }
+/* A pair: each mark at `markPairScale` of the box, its middle `markPairAt` along the diagonal from the top left (the
+   right hand's) and from the bottom right (the left hand's), and between them a muted slanted line. */
+.hud-mark .mk-b,
+.hud-mark .mk-split { display: none; }
+.hud-mark.pair .mk-b,
+.hud-mark.pair .mk-split { display: inline; }
+.hud-mark.pair .mk-a {
+  transform: translate(calc(var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px), calc(var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px)) scale(var(--hud-mark-pair, 0.333));
+}
+.hud-mark.pair .mk-b {
+  transform: translate(calc(24px - var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px), calc(24px - var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px)) scale(var(--hud-mark-pair, 0.333));
+}
+/* The line: a unit stroke across the middle of the box, stretched to `markSplitLength` and turned to `markSplitAngle`
+   from level (rising to the right), square-ended so the stretch leaves its ends as they are. */
+.hud-mark .mk-split {
+  stroke: var(--muted);
+  stroke-width: calc(var(--hud-mark-split-w, 1.2) * 1px);
+  stroke-linecap: butt;
+  transform-origin: 12px 12px;
+  transform: rotate(calc(var(--hud-mark-split-angle, 45) * -1deg)) scaleX(var(--hud-mark-split, 11));
+}
+/* The bars' box, the size `barLayout` works out (the display writes it, at scale 1): the bars stand in it at the places
+   it gives, so none of them moves when another comes or goes, and the mark and the action bar lay out round it. */
+.hud-bars {
+  position: relative;
   flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(8px * var(--hud-scale));
+  width: calc(var(--hud-bars-w, 160) * 1px * var(--hud-scale));
+  height: calc(var(--hud-bars-h, 13) * 1px * var(--hud-scale));
+}
+/* Each bar at its box (`--bx`, `--by`, `--bw`, `--bh`, at scale 1), rounded at an end where `--rl`/`--rr` say 1 and
+   flat where 0: away from the screen's edge and flat at it, in the middle at both. Drawn in the markup's order, each
+   over the one before: health, Force, stamina, breath. No words and no numbers: the bar is the reading.
+   Each bar is a layer of its own (`isolation`): the shared bar's fill, ghost and quarter marks carry z-indices (2, 1, 3)
+   that, with no layer round them, paint every bar's fill over every bar's background, so health's fill and marks
+   covered the inside look's Force (a clip-path makes a layer of its own) and showed through the laid-over Force's empty
+   half. Health's ripple is its own shadow and still spreads outside it. */
+.hud-bars > .hud-bar {
+  isolation: isolate;
+  position: absolute;
+  left: calc(var(--bx, 0) * 1px * var(--hud-scale));
+  top: calc(var(--by, 0) * 1px * var(--hud-scale));
+  width: calc(var(--bw, 160) * 1px * var(--hud-scale));
+  height: calc(var(--bh, 6) * 1px * var(--hud-scale));
+  border-radius:
+    calc(var(--rl, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rr, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rr, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rl, 1) * var(--bh, 6) * 0.5px * var(--hud-scale));
+  /* Coming and going is a fade (`barFadeSeconds`); nothing about a bar's place moves. */
+  transition: border-color 0.12s linear, opacity var(--hud-bar-fade, 0.2s) linear;
+}
+/* Going away when full (health and Force, `fullLinger`), stamina and breath down: unseen, its place kept. */
+.hud-bars > .hud-bar.off { opacity: 0; }
+/* Not in the block at all: Force with a kit that has none, stamina with the speed classes off. */
+.hud-bars > .hud-bar.gone { display: none; }
+/* The inside look: the half of the pill outside the health bar is not drawn, so its round ends seem to curve on over
+   the edge. Only a bar that wears one of these is clipped, since a clip would also cut health's ripple. */
+.hud-bars > .hud-bar.clip-top { clip-path: inset(50% 0 0 0); }
+.hud-bars > .hud-bar.clip-bottom { clip-path: inset(0 0 50% 0); }
+/* At the right the bars run from the screen's edge toward the middle, so they fill from the right: the mirror. */
+.bottom.align-right .hud-bars .hud-bar > .fill,
+.bottom.align-right .hud-bars .hud-bar > .ghost { transform-origin: right center; }
+.bottom.align-right .hud-bars .hud-bar.pool > .fill { background: linear-gradient(270deg, var(--pool), var(--accent)); }
+/* Health (the owner's): the palette's muted down to `hpLow`, the dark red at it and below, eased over `hpEaseSeconds`. */
+.hud-bars .hud-bar.hp > .fill {
+  background: var(--muted);
+  transition: background-color var(--hud-hp-ease, 0.25s) ease;
+}
+.hud-bars .hud-bar.hp.low > .fill { background: var(--health); }
+/* Under `hpRipple`: a ripple of the bright red spreads `ripplePx` out from the bar and fades, once every
+   `rippleSeconds`. The bar's own shadow, so its own clipping of its fill does not cut it. */
+.hud-bars .hud-bar.hp.ripple { animation: hud-ripple var(--hud-ripple, 1s) ease-out infinite; }
+/* It starts at `rippleStrength` of the bright red against the bar's edge and fades to nothing as it spreads. */
+@keyframes hud-ripple {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) calc(var(--hud-ripple-alpha, 0.75) * 100%), transparent); }
+  to { box-shadow: 0 0 0 calc(var(--hud-ripple-px, 6) * 1px * var(--hud-scale)) color-mix(in srgb, var(--bad) 0%, transparent); }
+}
+/* Breath wears the bar's own default fill, the accent's bright blue; under `breathFlashBelow` it flashes white (ink,
+   never pure white), slowly in and out, `breathFlashSeconds` each way. Stamina wears `good`, and `warn` while tired. */
+.hud-bars .hud-bar.breath.low > .fill { animation: hud-breath-flash var(--hud-breath-flash, 1s) ease-in-out infinite alternate; }
+@keyframes hud-breath-flash {
+  from { background-color: var(--accent); }
+  to { background-color: var(--ink); }
 }
 
-/* Stamina, the third bar, under health and the class pool (the speed classes). Its width is the other bars' so they
-   line up, and it is the thinnest of them (`staminaBarW`, `staminaBarH`). It wears the `good` band at rest and the
-   display puts `warn` on it while the body is tired, both from the palette, so this file names no colour for it.
-   While the speed classes are in force the row keeps its place when it is down (`off` hides it and never takes it out
-   of the block): a row that came and went under the two bars above would move both each time a sprint began. With
-   the classes off it is not in the block at all (`gone`), and the bars stand where they stood before the classes.
-   The row is held shorter than its number's line (`staminaRowH`), which overhangs into the gaps either side of it, so
-   that with the breath row up as well the block still clears the action bar at the smallest scale. */
-.hud-brow.stamina-row {
-  height: calc(8px * var(--hud-scale));
-}
-.hud-brow .hud-bar.stamina {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(4px * var(--hud-scale));
-}
-.hud-brow.off { visibility: hidden; }
-.hud-brow.gone { display: none; }
-
-/* The number row and the hands, side by side under the bars. */
+/* The action bar, under the mark and the bars, always the lowest thing; at the right, mirrored. (The two hand cells, a
+   picture and a name each, stood beside it until the weapon mark took their place.) */
 .hud-kit {
   display: flex;
   align-items: flex-end;
   gap: calc(14px * var(--hud-scale));
 }
-.hud-hands {
-  display: flex;
-  gap: calc(6px * var(--hud-scale));
+.bottom.align-right .hud-kit { flex-direction: row-reverse; }
+
+/* --- the corner's readouts: the frame rate, the weather's word, the clock ---------------------------------------------
+ * Each a switch on the Interface page (`gone` while off). The frame rate alone at the top right, no box, a small drop
+ * shadow. The weather's line is the top-left block's first child after the minimap's wrap: under the circle while the
+ * minimap shows, and in its place when it does not; a word or two, small, with a muted "· held" while the weather is
+ * held or forced. The clock just above the coordinates, the same size of type, muted: over the minimap's while it
+ * shows (placed over the circle's foot, a line above the coordinates: 168 - 8 - 13.2 - 13.2 = 133.6 at scale 1), and
+ * between the world's name and `/loc` while it does not. The frame rate's type and shadow and the weather's type are
+ * `HUD_SIZES` numbers (`fpsSize`, `fpsShadowY`, `fpsShadowBlur`, `weatherSize`), written as properties like the bars'
+ * looks; the weather's line keeps its own 13 whatever its type, so the block's sum never moves. */
+.hud-fps {
+  position: absolute;
+  top: 12px;
+  right: 12px;
   font-family: var(--hud-font);
   font-stretch: var(--hud-stretch);
-  font-size: calc(11px * var(--hud-scale));
-}
-.hud-hand {
-  display: flex;
-  align-items: center;
-  gap: calc(5px * var(--hud-scale));
-  box-sizing: border-box;
-  height: calc(40px * var(--hud-scale));
-  max-width: calc(150px * var(--hud-scale));
-  padding: 0 calc(7px * var(--hud-scale));
-  background: var(--plate);
-  border: 1px solid var(--edge);
-  border-radius: calc(3px * var(--hud-scale));
+  font-variant-numeric: tabular-nums;
+  font-size: calc(var(--hud-fps-size, 12) * 1px * var(--hud-scale));
+  letter-spacing: 0.04em;
   color: var(--ink);
-}
-.hud-hand[hidden] { display: none; }
-.hud-hand .pic {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(22px * var(--hud-scale));
-  height: calc(22px * var(--hud-scale));
-  color: var(--accent);
-  font-size: calc(22px * var(--hud-scale));
-}
-.hud-hand .pic img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  image-rendering: auto;
-}
-.hud-hand .name {
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
+  text-shadow: 0 calc(var(--hud-fps-shadow-y, 1) * 1px) calc(var(--hud-fps-shadow-blur, 2) * 1px) var(--shade);
+}
+.hud-fps.gone,
+.hud-weather.gone,
+.hud-clock.gone { display: none; }
+.hud-weather {
+  height: calc(13px * var(--hud-scale));
+  line-height: calc(13px * var(--hud-scale));
+  white-space: nowrap;
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(var(--hud-weather-size, 10) * 1px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  color: var(--ink);
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
 }
-/* The left hand is the quieter of the two: what is in the main hand is what is being used. */
-.hud-hand.left { color: var(--muted); }
-.hud-hand.left .pic { color: var(--muted); }
+#hud.minimap-on .hud-weather { text-align: center; }
+.hud-weather .held { color: var(--muted); }
+.hud-weather:not(.held) .held { display: none; }
+.hud-clock {
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+#hud.minimap-on .hud-clock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(133.6px * var(--hud-scale));
+  text-align: center;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+}
+
+/* The message line, at the bottom right while the block stands at the bottom left (the block takes its corner). */
+.hud-msgs.right {
+  left: auto;
+  right: calc(14px * var(--hud-scale));
+  align-items: flex-end;
+}
 
 /* --- the look-at nameplate ------------------------------------------------------------------------
  * Pooled eight, moved by `translate3d` only, on nothing but its own shadow. */
@@ -742,10 +943,12 @@
 }
 /* With the minimap up the top-left block is its top (12, `.top-left` in style.css) and everything it then
  * holds, all of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the city name's margin (3) and
- * line (16.9), the wrap's own margin (6), and the nearby line's padding (3) and line (14.5), 211.4 rounded
- * up to 212. The block's own name and `/loc` lines are hidden then and take no room. The world editor's
- * window docks under that sum (`#hud.minimap-on ~ .ed-panel` in `editorWindow.ts`), and `hudMath.test.ts`
- * adds it up again from both stylesheets. (The help block stood by it until the hide key took its key.) */
+ * line (16.9), the wrap's own margin (6), the weather's line (13, `.hud-weather`, the interface rewrite's
+ * first wave), and the nearby line's padding (3) and line (14.5), 224.4 rounded up to 225. The block's own
+ * name and `/loc` lines are hidden then and take no room, and the clock stands over the circle's foot and
+ * takes none either. The world editor's window docks under that sum (`#hud.minimap-on ~ .ed-panel` in
+ * `editorWindow.ts`), and `hudMath.test.ts` adds it up again from both stylesheets. (The help block stood
+ * by it until the hide key took its key.) */
 
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {
@@ -767,77 +970,130 @@
  * they keep working exactly as they did until the code that uses them goes. The one change is rule 1
  * of the design: nothing is drawn in pure white, so `#ffffff` is `--ink`. */
 
-/* The ability cells: one square each, our own mark in the middle, the key you have bound in the
- * corner, and what it costs under it. A cell's border says whether the ability is ready; how far
- * through a cooldown it is, is the wedge below, drawn by the page from one number (`--cool`) the
- * display writes on the cell only when it has moved by a step of its own.
+/* --- the action bar (the interface rewrite's second wave, item 7) --------------------------------------------------
+ * One bar of `plate` with slightly rounded corners, a cell an ability: our own mark with the key it is on under it,
+ * inside the bar, and no numbers (the cost went, and the saber cell's on and off: it lights while the blade is out). The
+ * ability's name is the cell's `title`, shown on hover. Between two cells a thin line of `edge`, `slotLineShare` of the
+ * bar's height, or its full height while the display wears `lines-full` (the Interface page's switch). Every size and
+ * timing is a `HUD_SIZES` number the display writes as a property (`LOOK_VARS` in hud.ts), the fallbacks its start value.
  *
- * Not on the overlay: the overlay is the first child of `#ui` so that every panel draws over it, and
- * with neither of them carrying a `z-index` the cell — which is positioned, and is painted later in
- * the tree — paints over the canvas. A sweep drawn there would sit under a cell whose own background
- * is nearly opaque, which is to say nowhere. */
+ * Each cell is a layer of its own (`isolation`), so its layers' z-indices stay inside it (the bars' lesson): the mark,
+ * the cooldown's veil over it, the ready flash's light, the key over both, the line, and the press's dark over all.
+ * Nothing here moves per frame. A cooldown darkens the cell the moment it is no longer `ready`; then one animation
+ * (`cool`) draws the veil up from the bottom over `--cool-s` seconds, begun `--cool-at` seconds in (a negative delay),
+ * so the cell's own colour fills back from the bottom (`Hud.coolCell`); while the game stands still the bar wears
+ * `paused` and every fill holds, as the kit's cooldowns do. Ready, `flash` runs once: a light of `ink` up and back, eased
+ * in and out. A press is a transition into `pressed` and one back out of it.
+ *
+ * Not on the overlay: the overlay is the first child of `#ui` so that every panel draws over it, and with neither of
+ * them carrying a `z-index` the cell paints over the canvas; a fill drawn there would sit under the bar. */
 .slots {
   display: flex;
-  gap: calc(4px * var(--hud-scale));
+  background: var(--plate);
+  border-radius: calc(var(--hud-slot-radius, 6) * 1px * var(--hud-scale));
+  overflow: hidden;
 }
 .slot {
   position: relative;
+  isolation: isolate;
   box-sizing: border-box;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: calc(40px * var(--hud-scale));
-  height: calc(40px * var(--hud-scale));
-  background: var(--plate);
-  /* Not ready: the border and the mark fall back to the secondary colour, under the sweep the
-     overlay draws over the cell. */
-  border: 1px solid color-mix(in srgb, var(--muted) 40%, transparent);
-  border-radius: calc(3px * var(--hud-scale));
-  color: var(--muted);
+  gap: calc(1px * var(--hud-scale));
+  width: calc(var(--hud-slot-w, 32) * 1px * var(--hud-scale));
+  height: calc(var(--hud-slot-h, 36) * 1px * var(--hud-scale));
+  color: var(--ink);
   font-family: var(--hud-font);
   font-stretch: var(--hud-stretch);
   font-variant-numeric: tabular-nums;
-  transition: border-color 0.12s linear, color 0.12s linear;
+  transition: color 0.12s linear, box-shadow 0.12s linear;
 }
 .slot[hidden] { display: none; }
-/* The cooldown: a dark wedge turning clockwise from twelve, over the mark and under the key-cap, and
-   nothing at all at `--cool: 0`, which is what a cell with no cooldown carries. */
-.slot::before {
+/* The line before every cell but the first: `slotLineShare` of the bar's height, centred, or all of it. */
+.slot + .slot::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: calc((1 - var(--hud-slot-line, 0.8)) * 50%);
+  width: calc(var(--hud-slot-line-w, 1) * 1px * var(--hud-scale));
+  height: calc(var(--hud-slot-line, 0.8) * 100%);
+  z-index: 4;
+  pointer-events: none;
+  background: var(--edge);
+}
+#hud.lines-full .slot + .slot::before { top: 0; height: 100%; }
+/* The mark, in the cell's own colour, and the key it is on under it. */
+.slot .ic {
+  position: relative;
+  z-index: 1;
+  width: calc(var(--hud-slot-glyph, 20) * 1px * var(--hud-scale));
+  height: calc(var(--hud-slot-glyph, 20) * 1px * var(--hud-scale));
+}
+.slot .key {
+  position: relative;
+  z-index: 3;
+  font-size: calc(var(--hud-slot-key, 9) * 1px * var(--hud-scale));
+  line-height: 1;
+  font-weight: 700;
+  color: var(--accent);
+}
+/* The cooldown's veil and the ready flash's light, each the whole cell. */
+.slot > .veil,
+.slot > .glow {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+/* Nothing while ready; the whole cell dark (`coolDark` of the palette's darkest) the moment a cooldown begins; drawn up
+   from the bottom as the fill runs. */
+.slot > .veil {
+  background: color-mix(in srgb, var(--void) calc(var(--hud-cool-dark, 0.6) * 100%), transparent);
+  transform-origin: center top;
+  transform: scaleY(0);
+}
+.slot:not(.ready) > .veil { transform: scaleY(1); }
+.slot.cool > .veil { animation: hud-cool calc(var(--cool-s, 1) * 1s) linear calc(var(--cool-at, 0) * -1s) both; }
+.slots.paused .slot.cool > .veil { animation-play-state: paused; }
+@keyframes hud-cool {
+  from { transform: scaleY(1); }
+  to { transform: scaleY(0); }
+}
+/* Ready: a light of `ink` up to `readyFlashGlow` and back, eased in and out, once as `flash` comes on. */
+.slot > .glow {
+  background: var(--ink);
+  opacity: 0;
+}
+.slot.flash > .glow { animation: hud-ready var(--hud-ready-flash, 0.33s) ease-in-out; }
+@keyframes hud-ready {
+  0% { opacity: 0; }
+  50% { opacity: var(--hud-ready-glow, 0.25); }
+  100% { opacity: 0; }
+}
+/* A press: the cell darkens (`pressDark` of the palette's darkest) over `pressInSeconds` and comes back over
+   `pressOutSeconds`; each way is the transition of the state it goes to. */
+.slot::after {
   content: '';
   position: absolute;
   inset: 0;
-  border-radius: inherit;
+  z-index: 5;
   pointer-events: none;
-  background: conic-gradient(color-mix(in srgb, var(--void) 60%, transparent) calc(var(--cool, 0) * 360deg), transparent 0);
+  background: var(--void);
+  opacity: 0;
+  transition: opacity var(--hud-press-out, 0.2s) ease-out;
 }
-/* The mark: 28 px in a 40 px cell at scale 1, in the cell's own colour. */
-.slot .ic {
-  width: calc(28px * var(--hud-scale));
-  height: calc(28px * var(--hud-scale));
+.slot.pressed::after {
+  opacity: var(--hud-press-dark, 0.45);
+  transition: opacity var(--hud-press-in, 0.08s) ease-in;
 }
-.slot .key {
-  position: absolute;
-  top: calc(1px * var(--hud-scale));
-  left: calc(3px * var(--hud-scale));
-  font-size: calc(10px * var(--hud-scale));
-  font-weight: 700;
-  color: var(--accent);
-  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
-}
-.slot .cost {
-  position: absolute;
-  bottom: calc(1px * var(--hud-scale));
-  right: calc(3px * var(--hud-scale));
-  font-size: calc(9px * var(--hud-scale));
-  color: var(--muted);
-}
-/* Ready: the border takes the instrument's own colour and the mark comes up to full. */
-.slot.ready { border-color: var(--accent); color: var(--ink); }
-/* On: a toggle that is running, or a power holding. */
+/* Lit: a toggle that is running, a power holding, or the blade out: the mark in the instrument's own colour and a soft
+   light of it inside the cell (inside, since the bar's corners clip what is outside it), `slotLitPx` across at
+   `slotLitGlow` of the colour. */
 .slot.active {
-  border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 calc(10px * var(--hud-scale)) color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: inset 0 0 calc(var(--hud-slot-lit-px, 10) * 1px * var(--hud-scale)) color-mix(in srgb, var(--accent) calc(var(--hud-slot-lit, 0.35) * 100%), transparent);
 }
 
 /* With the overlay attached the crosshair and the charge are drawn on it, and these two — the
@@ -848,7 +1104,7 @@
 /* The flight display: the aim circle, the cursor's ring, a crosshair, and the cursor as an arrow or a pip. */
 .flight { position: absolute; left: 50%; top: 50%; margin: -160px 0 0 -160px; pointer-events: none; }
 .flight .ring { fill: none; stroke: var(--rule); stroke-width: 1; }
-.flight .cross { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px rgba(127, 215, 255, 0.8)); }
+.flight .cross { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 80%, transparent)); }
 .flight .stick-line { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; filter: drop-shadow(0 0 3px var(--shade)); }
 .flight .stick-head { fill: var(--ink); filter: drop-shadow(0 0 3px var(--shade)); }
 .flight .stick-dot { fill: var(--ink); filter: drop-shadow(0 0 3px var(--shade)); }
@@ -864,21 +1120,52 @@
 .targets .tbox.friend { stroke: var(--good); }
 .targets .tbox.neutral { stroke: var(--ink); }
 
-/* The long prompt line, kept behind a setting for one round of play and then dropped. */
+/* The long prompt line ("Full prompts" on the Interface page; a jump's countdown and a passenger's line use it too), in
+ * the use prompt's look (the interface rewrite's second wave, item 8): the same see-through rounded bar with no border,
+ * its words in `ink` at `promptInk`, each key (`<b>`) in the same soft cap, fading in over `promptInSeconds` as it comes
+ * up (an animation that runs as the line stops being empty), and the same blur behind it while the display wears
+ * `prompt-blur`. */
 .prompt {
   position: absolute;
   left: 50%;
   /* The long line of every key is on while the short bar is judged against it, so it has to stand
-   * clear of the bar at every scale rather than at one: the bar's top is 155px + its own 24px per
-   * scale, and 190 clears that by 11px at 0.75, 11px at 1 and 16px at 1.5. Invented, and it goes
-   * with the long line whenever the long line goes. */
-  bottom: calc(190px * var(--hud-scale));
+   * clear of the bar at every scale rather than at one, the quieter bar aboard and in vehicles
+   * included: that one's top is 168px + its own 26px at nine tenths, about 191px per scale, and 200
+   * clears it by about 7px at 0.75, 9px at 1 and 13px at 1.5 (the plain bar's top, 181px per scale,
+   * by more). Invented, and it goes with the long line whenever the long line goes. */
+  bottom: calc(200px * var(--hud-scale));
   transform: translateX(-50%);
-  padding: 6px 14px;
-  background: var(--panel);
-  border: 1px solid var(--edge);
-  border-radius: 6px;
-  font-size: 13px;
+  padding: calc(var(--hud-prompt-pad-y, 4) * 1px * var(--hud-scale)) calc((var(--hud-prompt-pad-x, 6) + var(--hud-prompt-gap, 12) * 0.5) * 1px * var(--hud-scale));
+  background: color-mix(in srgb, var(--panel) calc(var(--hud-prompt-bg, 0.5) * 100%), transparent);
+  border-radius: calc(var(--hud-prompt-radius, 8) * 1px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-size: calc(var(--hud-prompt-size, 13) * 1px * var(--hud-scale));
+  /* As tall as its caps, so a cap sits in the line. */
+  line-height: calc(var(--hud-cap-h, 18) * 1px * var(--hud-scale));
+  color: color-mix(in srgb, var(--ink) calc(var(--hud-prompt-ink, 0.85) * 100%), transparent);
   white-space: nowrap;
+  pointer-events: none;
+  animation: hud-prompt-up var(--hud-prompt-in, 0.15s) ease-out;
 }
 .prompt:empty { display: none; }
+/* Each key the long line names, in the bar's own soft cap: its size, its light and its type. */
+.prompt b {
+  display: inline-block;
+  box-sizing: border-box;
+  min-width: calc(var(--hud-cap-w, 22) * 1px * var(--hud-scale));
+  height: calc(var(--hud-cap-h, 18) * 1px * var(--hud-scale));
+  line-height: calc(var(--hud-cap-h, 18) * 1px * var(--hud-scale));
+  padding: 0 calc(var(--hud-cap-pad, 4) * 1px * var(--hud-scale));
+  border-radius: calc(var(--hud-cap-radius, 4) * 1px * var(--hud-scale));
+  background: color-mix(in srgb, var(--ink) calc(var(--hud-prompt-cap, 0.12) * 100%), transparent);
+  color: var(--accent);
+  font-size: calc(var(--hud-cap-key, 11) * 1px * var(--hud-scale));
+  font-weight: 400;
+  text-align: center;
+  vertical-align: middle;
+}
+#hud.prompt-blur .prompt { backdrop-filter: blur(calc(var(--hud-prompt-blur, 6) * 1px)); }
+@keyframes hud-prompt-up {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

@@ -1,6 +1,7 @@
 // The other players: each one a rig of its species, stood where the relay last said, gliding to
 // each new place, playing the state the other's rig plays, with a name over its head.
 import * as THREE from 'three';
+import { COL, colourOf, onPaletteChange } from '../core/palette.ts';
 import { CharacterRig, loadPlayerRig, type RigState } from '../player/rig';
 import { markActor } from '../world/portalRender';
 import { isDanceClip, isFlourishClip, isMusicLoop, loopsEmote } from '../core/emotes';
@@ -499,6 +500,13 @@ export class RemotePlayers {
   ) {
     // The knob at the foot of this file has no other way to reach the peers; there is one set.
     thePeers = this;
+    // A colour theme switched: every name over a head drawn again in the new colours (never in a frame).
+    onPaletteChange(() => this.relabelAll());
+  }
+
+  /** Every live name over a head drawn again on its own canvas, as a new name is: no material or texture made. */
+  private relabelAll(): void {
+    for (const r of this.remotes.values()) relabel(r.label, String(r.label.userData.labelText ?? ''));
   }
 
   /** What the last state said about the hull this player stands in; written once per message at most, never in a frame. */
@@ -1963,19 +1971,25 @@ export function aboardKnob(opts?: { carrier?: number; glideSeconds?: number }): 
 const noPrepare = (): Promise<void> => Promise.resolve();
 const noPrepareRoots = (_roots: THREE.Object3D[]): Promise<void> => Promise.resolve();
 
-/** A name drawn onto a label's canvas, over whatever was there. */
+/**
+ * A name drawn onto a label's canvas, over whatever was there: the palette's dark at the 0.55 its plate always had, and
+ * the name in `ink` (the interface rewrite's second wave, item 11: they were a black and a pale blue of their own). A
+ * colour theme switched draws every live label again (`RemotePlayers.relabelAll`).
+ */
 function drawLabel(canvas: HTMLCanvasElement, name: string): void {
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = '600 28px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = colourOf(COL.void);
   const w = Math.min(250, ctx.measureText(name).width + 24);
   ctx.beginPath();
   ctx.roundRect(128 - w / 2, 12, w, 40, 8);
   ctx.fill();
-  ctx.fillStyle = '#dff1ff';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = colourOf(COL.ink);
   ctx.fillText(name, 128, 33);
 }
 

@@ -83,7 +83,8 @@ const built: any[] = [];
   },
 };
 
-const { ICON_IDS, ICON_FALLBACK, glyphFor, handGlyph, iconKey, WING_GLYPHS } = await import('../../../src/ui/hudIcons.ts');
+const { ICON_IDS, ICON_FALLBACK, glyphFor, iconKey, WING_GLYPHS } = await import('../../../src/ui/hudIcons.ts');
+const { MARK_SYMBOLS } = await import('../../../src/ui/weaponMark.ts');
 const { Hud, keyLabel, hudBindingsChanged } = await import('../../../src/ui/hud.ts');
 const { pickPlate, projectPoint, healthShare, makeProjected, plateLabel, Nameplates } = await import('../../../src/ui/nameplate.ts');
 
@@ -362,13 +363,11 @@ const drawn = [...sheet.matchAll(/<symbol\s+id="([^"]+)"/g)].map((m) => m[1]);
   ok(glyphFor('Wookiee Flame Thrower') === 'ic-flame', 'and one whose name says what it is gets the right one');
 }
 
-// What a hand is holding.
+// What a hand is holding: the block's weapon mark (the interface rewrite's first wave). Which mark stands for what is
+// `weaponMark.test.ts`'s; here, only that every symbol it is drawn from is on the sheet.
 {
-  ok(handGlyph('two_handed_saber', 'a blade') === 'ic-saber', 'a saber in a hand is a saber');
-  ok(handGlyph('rifle', 'a gun') === 'ic-blaster', 'a rifle is a blaster');
-  ok(handGlyph('carbine', null) === 'ic-blaster', 'so is a carbine');
-  ok(handGlyph(null, null) === 'ic-hand', 'and an empty hand is an open hand');
-  ok(drawn.includes(handGlyph('thrown', 'Thermal Detonator')), 'whatever it decides is a mark that is drawn');
+  const missing = MARK_SYMBOLS.filter((id) => !drawn.includes(id));
+  ok(MARK_SYMBOLS.length >= 18 && missing.length === 0, `every symbol the weapon mark is drawn from is on the sheet (${MARK_SYMBOLS.length}${missing.length ? `; missing ${missing.join(', ')}` : ''})`);
   ok(WING_GLYPHS.filter((g) => g).every((g) => drawn.includes(g as string)), 'the four wing states have their marks too');
 }
 
@@ -411,19 +410,23 @@ const drawn = [...sheet.matchAll(/<symbol\s+id="([^"]+)"/g)].map((m) => m[1]);
   hud.update(0.016, 0, 0, 0, kit, 100, 100, '12:00', '', false);
   ok(hud.report().keys === 'MMB F', `but the next tick takes it up whether or not anyone said so (${hud.report().keys})`);
   ok(hud.report().icons === 0, 'with no page to fetch the sheet from, the glyph count is nothing and nothing throws');
-  // The corner strip's letters come from the same bindings as the cells', not from its markup.
-  const hint = () => (hud as any).root.querySelector('.hint').innerHTML as string;
-  ok(hint().includes('<b>M</b> Map'), `the corner strip says the keys that are bound (${hint()})`);
+  // The corner strip that named the map's, the inventory's and the spawner's keys went with the top-right box (the
+  // interface rewrite's first wave): the keys are the Controls page's. Nothing of it is asked for or written now.
+  const hudText = readFileSync(new URL('../../../src/ui/hud.ts', import.meta.url), 'utf8');
+  ok(!/HINT_ACTIONS|writeHint|class="hint"|class="panel top-right"/.test(hudText), 'the corner strip and its box are gone from the display');
+  const before = (hud as any).root.querySelector('.hint').innerHTML as string;
   input.bindings.map = ['KeyJ'];
   hudBindingsChanged();
-  ok(hint().includes('<b>J</b> Map') && !hint().includes('<b>M</b> Map'), `and follows a rebind with them (${hint()})`);
-  // The saber cell's word is the blade's state; it used to be written once as "off" and left there.
+  ok(before === '' && (hud as any).root.querySelector('.hint').innerHTML === '', 'and a rebind of the map writes nothing anywhere for it');
+  // The saber cell carries no word (the interface rewrite's second wave, item 7: the action bar has no numbers, and the
+  // saber cell's on and off went with them): it lights while the blade is out, and that is all.
   const saber = built[built.length - 1];
-  ok(saber.querySelector('.cost').textContent === '', 'the saber cell keeps the word its own markup carries until the blade changes');
   hud.update(0.016, 0, 0, 0, kit, 100, 100, '12:00', '', true);
-  ok(saber.querySelector('.cost').textContent === 'on', 'a lit blade says so');
+  ok(saber.classList.contains('active') && saber.querySelector('.cost').textContent === '', 'a lit blade lights its cell, and no word is written under the mark');
   hud.update(0.016, 0, 0, 0, kit, 100, 100, '12:00', '', false);
-  ok(saber.querySelector('.cost').textContent === 'off', 'and a blade put away says that');
+  ok(!saber.classList.contains('active') && saber.querySelector('.cost').textContent === '', 'and a blade put away puts the light out, still with no word');
+  // No cell is built with a number or a word in it: the mark, the key, the cooldown's veil and the flash's light alone.
+  ok(built.slice(-3).every((c) => !/class="cost"|6\/s|>20</.test(c.innerHTML) && (c.innerHTML.match(/<span/g) ?? []).length === 1 && /<span class="key">/.test(c.innerHTML) && /class="veil"/.test(c.innerHTML) && /class="glow"/.test(c.innerHTML)), 'every cell is its mark and its key, with no cost and no word');
 }
 
 // --- a loadout with a hole in it ---------------------------------------------------------------------

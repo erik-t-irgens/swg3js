@@ -32,7 +32,7 @@
 // not the one it was placed at last.
 
 import * as THREE from 'three';
-import { COL, colourHex, colourOf, type PaletteName } from '../core/palette.ts';
+import { COL, colourHex, colourMix, colourOf, onPaletteChange, type PaletteName } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
 import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark, type WaypointMark } from './spaceMapLayers.ts';
 import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
@@ -191,13 +191,22 @@ function mapPixelRatio(): number {
 const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships', 'group', 'waypoints'];
 
 /**
- * The colour each layer is drawn and named in, as three wants it and as CSS wants it. The group's is
- * a rose: far enough round from the violet a nebula's shell wears to be told from it at a glance, and
- * not the amber of a station, the cyan of a ship or the orange your own hull is drawn in. A waypoint
- * wears its own palette colour; the layer's is only the one its box is named in.
+ * The palette colour each layer is drawn and named in (the interface rewrite's second wave, item 11: they were seven
+ * colours of the map's own, and a colour theme now reaches them). The nearest of the eighteen by look and by meaning:
+ * a station keeps its amber (`component`, the very value it had), a hyperspace point its green (`good`, from a paler
+ * one), the launch point white's `ink`, a field its grey (`muted`), a ship its cyan (`accent`); a nebula, violet
+ * before, takes the pool's blue (`pool`) and the group, a rose before, takes `armour`, the palette having no violet or
+ * rose. Your own hull and the planet map's arrow, an orange of their own before, are `chassis` (`MAP_YOU`), which the
+ * themes' check keeps apart from a station's colour. A waypoint wears its own palette colour; the layer's is only the
+ * one its box is named in.
  */
-const LAYER_COLOURS: Record<LayerId, number> = { stations: 0xffd27f, points: 0x9fe8a0, launch: 0xffffff, fields: 0x9aa7b8, nebulae: 0xc08fff, ships: 0x7fd7ff, group: 0xff5f9e, waypoints: colourHex('accent') };
-const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8a0', launch: '#ffffff', fields: '#9aa7b8', nebulae: '#c08fff', ships: '#7fd7ff', group: '#ff5f9e', waypoints: 'var(--accent)' };
+const LAYER_PALETTE: Record<LayerId, PaletteName> = { stations: 'component', points: 'good', launch: 'ink', fields: 'muted', nebulae: 'pool', ships: 'accent', group: 'armour', waypoints: 'accent' };
+/** The same as CSS has it, for the labels over the canvas: a `var(--…)`, so a theme switched reaches them with no write. */
+const LAYER_CSS = Object.fromEntries(Object.entries(LAYER_PALETTE).map(([k, v]) => [k, `var(--${v})`])) as Record<LayerId, string>;
+/** Your own mark on both views: the hull in space and its fall line, the arrow on a planet's map, and its height's words. */
+const MAP_YOU: PaletteName = 'chassis';
+/** How far the space view's faint grid lines sit from `void` toward the pool's blue (its middle lines are `pool` itself). */
+const GRID_FAINT = 0.4;
 
 /** A waypoint's palette name as an index the canvas draws with: an unknown name reads as `accent`. */
 function waypointCol(name: string): number {
@@ -358,10 +367,14 @@ export class MapUi {
   private testGroup = 0;
   private testFill: ((out: GroupList) => void) | null = null;
   private readonly testNames: string[] = [];
-  /** The marks' own looks: one material a layer, made once. */
+  /** The marks' own looks: one material a layer, made once, and each layer's colour as three takes it (`repaint`). */
   private readonly markMaterials = new Map<LayerId, THREE.MeshBasicMaterial>();
-  private readonly shipMine = new THREE.MeshBasicMaterial({ color: 0xff6a3d });
-  private readonly shipOther = new THREE.MeshBasicMaterial({ color: 0x7fd7ff });
+  private readonly layerHex = {} as Record<LayerId, number>;
+  private readonly shipMine = new THREE.MeshBasicMaterial({ color: colourHex(MAP_YOU) });
+  private readonly shipOther = new THREE.MeshBasicMaterial({ color: colourHex('accent') });
+  /** The group's members' one material, and the space view's grid (rebuilt on a theme switched: its colours are its vertices'). */
+  private memberMaterial: THREE.MeshBasicMaterial | null = null;
+  private grid: THREE.GridHelper | null = null;
   /** The layer bar, the labels over the canvas, and the panel for what is picked. */
   private readonly layerBar = document.createElement('div');
   private readonly labelLayer = document.createElement('div');
@@ -431,14 +444,15 @@ export class MapUi {
     // attribute every time it is called, which a frame must not do, so the attribute is made here
     // and the far end's distance is written straight into it each frame.
     drop.setAttribute('lineDistance', new THREE.BufferAttribute(new Float32Array(2), 1));
-    this.drop = new THREE.Line(drop, new THREE.LineDashedMaterial({ color: 0xff6a3d, dashSize: 40, gapSize: 25 }));
+    this.drop = new THREE.Line(drop, new THREE.LineDashedMaterial({ color: colourHex(MAP_YOU), dashSize: 40, gapSize: 25 }));
     this.scene3d.add(this.markGroup, this.shellGroup, this.splineGroup, this.shipMarks, this.groupMarks, this.drop);
     this.pickGroups.push(this.markGroup, this.shellGroup, this.splineGroup);
-    const grid = new THREE.GridHelper(MAP_BUILD.gridSize, MAP_BUILD.gridSquares, 0x2d7fd6, 0x1a3a55);
-    (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.5;
-    this.scene3d.add(grid, new THREE.AxesHelper(MAP_BUILD.axes));
+    this.buildGrid();
+    this.scene3d.add(new THREE.AxesHelper(MAP_BUILD.axes));
+    for (const layer of LAYERS) this.layerHex[layer.id] = colourHex(LAYER_PALETTE[layer.id]);
     this.buildPools();
+    // A colour theme switched (item 11): every colour this view keeps of its own is read again. Never in a frame.
+    onPaletteChange(() => this.repaint());
     // F follows the ship again. The window has the mouse while the map is open, so the game reads no
     // key of its own meanwhile; this listener does nothing unless the space view is the one showing.
     window.addEventListener('keydown', (e) => {
@@ -534,11 +548,44 @@ export class MapUi {
     });
   }
 
+  /** The space view's grid: its middle lines in the pool's blue and the rest far down toward `void`, half seen. */
+  private buildGrid(): void {
+    if (this.grid) {
+      this.scene3d.remove(this.grid);
+      this.grid.geometry.dispose();
+      (this.grid.material as THREE.Material).dispose();
+    }
+    const grid = new THREE.GridHelper(MAP_BUILD.gridSize, MAP_BUILD.gridSquares, colourHex('pool'), colourMix('pool', 'void', GRID_FAINT));
+    (grid.material as THREE.Material).transparent = true;
+    (grid.material as THREE.Material).opacity = 0.5;
+    this.grid = grid;
+    this.scene3d.add(grid);
+  }
+
+  /**
+   * A colour theme switched (item 11): every colour the space view keeps of its own read again from the palette -- each
+   * layer's, the marks' materials, your hull and its fall line, the other ships, the group's members, the waypoints',
+   * the fields' lines and rocks, and the grid (made again, its colours being its vertices'). The planet's map and the
+   * labels read the palette as they are drawn and need nothing. Never in a frame.
+   */
+  private repaint(): void {
+    for (const layer of LAYERS) this.layerHex[layer.id] = colourHex(LAYER_PALETTE[layer.id]);
+    for (const [id, mat] of this.markMaterials) mat.color.setHex(this.layerHex[id]);
+    this.shipMine.color.setHex(colourHex(MAP_YOU));
+    this.shipOther.color.setHex(colourHex('accent'));
+    (this.drop.material as THREE.LineDashedMaterial).color.setHex(colourHex(MAP_YOU));
+    this.memberMaterial?.color.setHex(this.layerHex.group);
+    for (const [name, mat] of this.waypointMaterials) mat.color.setHex(colourHex(name as PaletteName));
+    for (const line of this.splinePool?.items ?? []) (line.material as THREE.LineBasicMaterial).color.setHex(this.layerHex.fields);
+    if (this.rocks) (this.rocks.material as THREE.PointsMaterial).color.setHex(this.layerHex.fields);
+    this.buildGrid();
+  }
+
   /** Every drawn thing the space view can want, made the first frame that wants it and moved after. */
   private buildPools(): void {
     // One material a layer for the zone's own marks. The group is not one of them: nothing a pack
     // holds is ever in that layer, and its members wear a solid material of their own below.
-    for (const layer of LAYERS) if (layer.id !== 'group' && layer.id !== 'waypoints') this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: LAYER_COLOURS[layer.id], wireframe: true }));
+    for (const layer of LAYERS) if (layer.id !== 'group' && layer.id !== 'waypoints') this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: this.layerHex[layer.id], wireframe: true }));
     const markGeometry = new THREE.OctahedronGeometry(1);
     this.markPool = new Pool<THREE.Mesh>(
       () => {
@@ -554,7 +601,7 @@ export class MapUi {
         // A shell owns its material, because a nebula wears its own colour; it is made once and only
         // ever has its colour and its opacity written. It is drawn from the back as well as the
         // front, so a nebula the view is inside still shows, and can still be named and picked.
-        const m = new THREE.Mesh(shellGeometry, new THREE.MeshBasicMaterial({ color: 0x9aa7b8, wireframe: true, transparent: true, opacity: MARK_TUNE.fieldOpacity, depthWrite: false, side: THREE.DoubleSide }));
+        const m = new THREE.Mesh(shellGeometry, new THREE.MeshBasicMaterial({ color: this.layerHex.fields, wireframe: true, transparent: true, opacity: MARK_TUNE.fieldOpacity, depthWrite: false, side: THREE.DoubleSide }));
         this.shellGroup.add(m);
         return m;
       },
@@ -574,7 +621,7 @@ export class MapUi {
       () => {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(SPLINE_POINTS * 3), 3));
-        const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x9aa7b8, transparent: true, opacity: 0.5 }));
+        const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: this.layerHex.fields, transparent: true, opacity: 0.5 }));
         line.frustumCulled = false;
         this.splineGroup.add(line);
         return line;
@@ -589,7 +636,8 @@ export class MapUi {
     // zone full of labels and neither pool is the other's cap. Both are made to the group's size here,
     // when the map is built, rather than by the frame somebody joins.
     const memberGeometry = new THREE.OctahedronGeometry(1);
-    const memberMaterial = new THREE.MeshBasicMaterial({ color: LAYER_COLOURS.group });
+    const memberMaterial = new THREE.MeshBasicMaterial({ color: this.layerHex.group });
+    this.memberMaterial = memberMaterial;
     // Both pools are shown and hidden only when that has changed, so a group standing still over a
     // drawn frame touches neither the scene graph nor the page.
     this.groupPool = new Pool<THREE.Mesh>(
@@ -1258,7 +1306,7 @@ export class MapUi {
     if (!this.followed || !this.scale) this.fit();
     const ctx = this.ctx;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#060a12';
+    ctx.fillStyle = colourOf(COL.void);
     ctx.fillRect(0, 0, w, h);
     // The picture's ground, about the point under its middle (`mapFrame`): the launch worlds' pictures
     // cover the whole terrain about the origin, the expansion zones' a composite rectangle of their own.
@@ -1270,8 +1318,8 @@ export class MapUi {
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(this.image.image, tl.x, tl.y, px, px);
     } else {
-      // No image converted: the ground's extent as a grid, a kilometre a square.
-      ctx.strokeStyle = 'rgba(127,215,255,0.18)';
+      // No image converted: the ground's extent as a grid, a kilometre a square, in the palette's hairline.
+      ctx.strokeStyle = colourOf(COL.rule);
       ctx.lineWidth = 1;
       const step = 1000 / this.scale;
       for (let i = 0; i <= extent / 1000; i++) {
@@ -1283,9 +1331,12 @@ export class MapUi {
         ctx.stroke();
       }
     }
-    ctx.strokeStyle = 'rgba(127,215,255,0.45)';
+    // The picture's edge, `accent` a little under half seen (the alpha the line always had, as `globalAlpha`).
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = colourOf(COL.accent);
     ctx.lineWidth = 1;
     ctx.strokeRect(tl.x, tl.y, px, px);
+    ctx.globalAlpha = 1;
     // The places: cities as rings the size of their reach with their names, the rest as dots
     // named once the map is close enough to read them.
     const labelsFrom = 20;
@@ -1298,10 +1349,13 @@ export class MapUi {
       const travel = p.kind === 'starport' || p.kind === 'shuttleport';
       // The client's own named places wear `ink`, the palette's name for a neutral mark, which is
       // what they are; it is brighter than the landmark grey below so they read first. The four
-      // signal colours would separate further but they mean state and nothing else. The last two
-      // literals here are the map's own colours with a second home: neither `muted` nor `ink` is
-      // that value, so moving them is a change to how the map looks and not this wave's to make.
-      const colour = city ? colourOf(COL.accent) : travel ? colourOf(COL.component) : p.kind === 'place' ? colourOf(COL.ink) : p.kind === 'region' || p.kind === 'area' ? 'rgba(180,200,220,0.6)' : '#c8d8e8';
+      // signal colours would separate further but they mean state and nothing else. A landmark is
+      // `muted` and a region or an area `muted` at the 0.6 it always had (the interface rewrite's
+      // second wave, item 11, moved those two from colours of the map's own onto the palette).
+      const faint = p.kind === 'region' || p.kind === 'area';
+      const colour = city ? colourOf(COL.accent) : travel ? colourOf(COL.component) : p.kind === 'place' ? colourOf(COL.ink) : colourOf(COL.muted);
+      const alpha = faint ? 0.6 : 1;
+      ctx.globalAlpha = alpha;
       const r = p.r / this.scale;
       // A place of ours drawn by its own shape (Map-maker II's eighth wave): a rectangle or an outline as itself.
       if (p.shape && p.shape.kind !== 'circle') {
@@ -1324,12 +1378,16 @@ export class MapUi {
       // world's zones they are every name there is, and a map of unnamed dots would be no map at
       // all. A port's or a landmark's once the map is close enough that it does not sit on a city's.
       if (city || p.kind === 'place' || this.scale < labelsFrom) {
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        // The name's shadow in the palette's dark at 0.7, as it always was in black.
+        ctx.globalAlpha = alpha * 0.7;
+        ctx.fillStyle = colourOf(COL.void);
         ctx.fillText(p.name, s.x + 7, s.y + 1);
+        ctx.globalAlpha = alpha;
         ctx.fillStyle = colour;
         ctx.fillText(p.name, s.x + 6, s.y);
       }
     }
+    ctx.globalAlpha = 1;
     // The game's own services (Map-maker II's eighth wave), under every mark of yours and theirs.
     this.drawServices2d(w, h);
     // Your waypoints, then the people you are grouped with, both under your own mark so yours is never
@@ -1345,8 +1403,9 @@ export class MapUi {
     ctx.save();
     ctx.translate(s.x, s.y);
     ctx.rotate(Math.atan2(ay, ax) + Math.PI / 2);
-    ctx.fillStyle = '#ff6a3d';
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    // Your arrow in your own colour (`MAP_YOU`), its outline the palette's dark at 0.8.
+    ctx.fillStyle = colourOf(COL[MAP_YOU]);
+    ctx.strokeStyle = colourOf(COL.void);
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(0, -9);
@@ -1355,15 +1414,18 @@ export class MapUi {
     ctx.lineTo(-6, 7);
     ctx.closePath();
     ctx.fill();
+    ctx.globalAlpha = 0.8;
     ctx.stroke();
     ctx.restore();
     if (p.altitude !== null) {
       const text = `${Math.round(p.altitude)} m up`;
       ctx.font = 'bold 11px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = colourOf(COL.void);
       ctx.fillText(text, s.x + 1, s.y + 17);
-      ctx.fillStyle = '#ff6a3d';
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = colourOf(COL[MAP_YOU]);
       ctx.fillText(text, s.x, s.y + 16);
       ctx.textAlign = 'left';
     }
@@ -1486,10 +1548,12 @@ export class MapUi {
       // Off the canvas by more than a name's width, or a line's height: the same margin the places use.
       if (sx < -60 || sy < -20 || sx > w + 60 || sy > h + 20) continue;
       const r = GROUP_MAP_TUNE.memberPixels * (m.leader ? GROUP_MAP_TUNE.leaderScale : 1);
+      // The group's palette colour (a canvas takes no `var(--…)`), outlined and shadowed in the palette's dark.
+      const groupColour = colourOf(COL[LAYER_PALETTE.group]);
       ctx.save();
       ctx.translate(sx, sy);
-      ctx.fillStyle = LAYER_CSS.group;
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillStyle = groupColour;
+      ctx.strokeStyle = colourOf(COL.void);
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(0, -r);
@@ -1498,20 +1562,24 @@ export class MapUi {
       ctx.lineTo(-r, 0);
       ctx.closePath();
       ctx.fill();
+      ctx.globalAlpha = 0.8;
       ctx.stroke();
+      ctx.globalAlpha = 1;
       if (m.leader) {
         // The ring is a multiple of the leader's own mark, so widening a member widens it too.
         ctx.beginPath();
         ctx.arc(0, 0, r * GROUP_MAP_TUNE.leaderRing, 0, Math.PI * 2);
-        ctx.strokeStyle = LAYER_CSS.group;
+        ctx.strokeStyle = groupColour;
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
       ctx.restore();
       const gap = GROUP_MAP_TUNE.labelGap;
-      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = colourOf(COL.void);
       ctx.fillText(m.label, sx + gap + 1, sy + 1);
-      ctx.fillStyle = LAYER_CSS.group;
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = groupColour;
       ctx.fillText(m.label, sx + gap, sy);
       this.groupDrawn.planet++;
     }
@@ -1717,7 +1785,7 @@ export class MapUi {
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos.subarray(0, n), 3));
-    this.rocks = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x9aa7b8, size: 3, sizeAttenuation: false }));
+    this.rocks = new THREE.Points(g, new THREE.PointsMaterial({ color: this.layerHex.fields, size: 3, sizeAttenuation: false }));
     this.scene3d.add(this.rocks);
     // While the zone's pack has named no station, its placed hulls stand in for them: they are
     // counted here, where they arrive, rather than by the frame that first draws them.
@@ -1877,7 +1945,7 @@ export class MapUi {
         const mat = shell.material as THREE.MeshBasicMaterial;
         // The table's colours are the ones the game's artists picked on screen, so they are read as sRGB.
         if (mk.colour) mat.color.setRGB(mk.colour[0], mk.colour[1], mk.colour[2], THREE.SRGBColorSpace);
-        else mat.color.setHex(LAYER_COLOURS[mk.layer]);
+        else mat.color.setHex(this.layerHex[mk.layer]);
         mat.opacity = mk.layer === 'nebulae' ? MARK_TUNE.nebulaOpacity : MARK_TUNE.fieldOpacity;
         shell.userData.markIndex = i;
       } else {

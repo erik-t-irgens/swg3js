@@ -661,7 +661,20 @@ export class Menu {
           control = `<select data-preset="${k.key}">${other}${sets.map((p) => `<option value="${p.name}"${p.name === now ? ' selected' : ''}>${p.label}</option>`).join('')}</select>`;
         } else if (k.kind === 'toggle') control = `<label class="switch"><input type="checkbox" data-key="${k.key}"${v ? ' checked' : ''} /><span></span></label>`;
         else if (k.kind === 'select') control = `<select data-key="${k.key}">${k.options!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
-        else if (k.kind === 'choice') control = `<select data-key="${k.key}">${k.choices!.map((o) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`).join('')}</select>`;
+        else if (k.kind === 'choice') {
+          // A choice whose words carry a group (the Colours switch's themes) lists each run of one group under its heading.
+          const opt = (o: { value: string; label: string }) => `<option value="${o.value}"${o.value === v ? ' selected' : ''}>${o.label}</option>`;
+          let rows = '';
+          for (let i = 0; i < k.choices!.length; ) {
+            const g = k.choices![i].group;
+            let j = i;
+            while (j < k.choices!.length && k.choices![j].group === g) j++;
+            const run = k.choices!.slice(i, j).map(opt).join('');
+            rows += g ? `<optgroup label="${g}">${run}</optgroup>` : run;
+            i = j;
+          }
+          control = `<select data-key="${k.key}">${rows}</select>`;
+        }
         else control = `<input type="range" data-key="${k.key}" min="${k.min}" max="${k.maxOf ? k.maxOf(this.settings) : k.max}" step="${k.step}" value="${v}" /><span class="value">${k.format ? k.format(v as number) : String(v)}</span>`;
         // What this knob waits on: it is greyed, and says so, while any of them is off.
         const off = k.requires?.filter((key) => !this.settings[key]) ?? [];

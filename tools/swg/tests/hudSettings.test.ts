@@ -51,6 +51,18 @@ const HUD_KEYS = [
   // The jobs followed, on foot and in flight.
   ['hudTracker', 'boolean'],
   ['hudTrackerInFlight', 'boolean'],
+  // The interface rewrite's first wave: the corner's three readouts, and where the block stands and how Force meets health.
+  ['hudFps', 'boolean'],
+  ['hudWeather', 'boolean'],
+  ['hudClock', 'boolean'],
+  ['hudBlockAlign', 'string'],
+  ['hudForceLook', 'string'],
+  ['hudForceEdge', 'string'],
+  // The second wave: the lines between the action bar's cells, and the blur behind the use prompt.
+  ['hudSlotLines', 'string'],
+  ['hudPromptBlur', 'boolean'],
+  // And the Colours switch: a theme's word (`THEMES` in src/core/themes.ts), Default to begin with.
+  ['hudTheme', 'string'],
 ] as const;
 
 // -------------------------------------------------------------------------------------------

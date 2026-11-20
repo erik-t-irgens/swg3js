@@ -233,7 +233,7 @@ import { WeaponCatalogue, type WeaponDef } from './player/weapons';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
-import { distanceWords, Hud, HUD_HIDDEN_CLASS, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
+import { distanceWords, Hud, HUD_HIDDEN_CLASS, HUD_STAGE_CLASS, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
 import { BIG_SHIP_TURN, bigShipTurnShare, HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
@@ -347,9 +347,12 @@ import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
+import { applyTheme, themeById, THEMES } from './core/themes.ts';
 import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
 import type { DialSet } from './ui/dials.ts';
 import { HUD_SIZES, layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
+import { WEATHER_WORD_TUNE, tuneWeatherWords, weatherLineWord } from './ui/weatherWords.ts';
+import { HUD_DIALS_HOST, hudDialsFor } from './ui/hudDials.ts';
 import { ActionBar } from './ui/prompt';
 import { PROMPT, newPromptState, resetPromptState, tunePrompt, type PromptState } from './ui/promptRules';
 import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from './ui/hudFeedback';
@@ -429,8 +432,8 @@ import { remoteBlades } from './net/remoteBlades.ts';
 import { remoteRopes } from './net/remoteRopes.ts';
 import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
-import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
-import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
+import { HUD_BLOCK_ALIGNS, HUD_DPR_RANGE, HUD_FORCE_EDGES, HUD_FORCE_LOOKS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, HUD_SLOT_LINES, loadSettings, saveSettings, type Settings } from './core/settings';
+import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
@@ -762,6 +765,11 @@ const WAYPOINT_ROOM_SLACK = 20;
 const OWN_REV_KEEP_MS = 10_000;
 
 /** A world in words, from the pack it loads from: the planet's name, and the zone's after it. */
+/** A setting's word if it is one of those offered, else the default: a store from before a switch, or edited by hand, cannot put the display in a state nobody offers. */
+function oneOf<T extends string>(value: string, offered: readonly T[], fallback: T): T {
+  return (offered as readonly string[]).includes(value) ? (value as T) : fallback;
+}
+
 function worldNameOf(pack: string): string {
   for (const p of PLANETS) {
     if (p.zones?.length) {
@@ -1880,6 +1888,12 @@ class App {
   private spaceGate: 'up' | 'down' | null = null;
   private readonly settings: Settings = loadSettings();
   /**
+   * The colour theme now on (the Colours switch, `applyTheme`; the interface rewrite's second wave, item 11): put on here,
+   * straight after the settings are read and before anything of the interface is built, so the first thing drawn is in
+   * it; again by `applyHudSettings` when the switch moves.
+   */
+  private themeOn = applyTheme(this.settings.hudTheme);
+  /**
    * The mixer. Declared after `settings`, whose value its constructor reads, and assigned at the
    * top of the constructor so anything made later can ask it to play. Its context is made
    * suspended and unlocked on the first press, as browsers require.
@@ -2675,8 +2689,9 @@ class App {
     this.hud.attach(this.overlay, COL);
     this.hud.setInput(this.input);
     onBindingsChanged(hudBindingsChanged);
-    // What is in each hand: the live object the player keeps, and the rack's own picture for an item.
-    this.hud.setHandSource({ equipped: this.player.equipped, icon: (item) => (this.weapons ? this.weapons.iconUrl(item as WeaponDef) : null) });
+    // What the weapon mark reads: the player as it stands -- what each hand holds, the bare-hands switch, the stand-in
+    // blaster's kind, the saber's stance and each hand's blade timing (`HandSource`). No picture of the rack's is shown.
+    this.hud.setHandSource(this.player);
     // The waypoints' marks go on the same overlay; the minimap is the top-left panel's first child, a
     // canvas of its own, with the planet's picture from the one loader every map shares.
     this.waypointHud.attach(this.overlay);
@@ -5300,9 +5315,15 @@ class App {
         this.breakFrames = on;
         return this.breakFrames;
       },
-      look: (yaw: number, pitch: number) => {
+      look: (yaw: number, pitch?: number) => {
+        // Numbers only: `look()` with nothing in it once set the yaw to undefined, the heading followed it to NaN, and
+        // the save that came after kept the character out of the world.
+        if (typeof yaw !== 'number' || !Number.isFinite(yaw) || (pitch !== undefined && (typeof pitch !== 'number' || !Number.isFinite(pitch)))) {
+          return 'look(yaw, pitch) takes the turn and the tilt in radians, for example look(0, -0.2); the pitch may be left off';
+        }
         this.cam.yaw = yaw;
-        this.cam.pitch = pitch;
+        if (pitch !== undefined) this.cam.pitch = pitch;
+        return `yaw ${yaw}, pitch ${this.cam.pitch}`;
       },
       zoom: (distance: number) => {
         this.cam.distance = distance;
@@ -8147,7 +8168,7 @@ class App {
           if (typeof o.draw === 'boolean') w.drawPass = o.draw;
           emitters = o.emitters === true;
         }
-        this.hud.setWeatherNote(this.heldNote());
+        if (!this.hudHidden) this.hud.setWeather(this.weatherWordNow(), this.world.weather.held);
         return w.describe({ emitters });
       },
       /** The lens flare this frame: every source slot the sky has, whether it is on, its visibility ([smoothed, depth open, cloud transmittance]) and `turn`, the degrees right and up to face it whatever steers the view. */
@@ -8598,7 +8619,7 @@ class App {
        * beside it. `lineWrites` is the message line's, counted apart because a line said or fading
        * is a write that is meant to happen.
        */
-      hud: (opts: { hidden?: boolean; overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
+      hud: (opts: { hidden?: boolean; overlay?: boolean; scale?: number; dpr?: number; boxes?: boolean; condition?: boolean; target?: boolean; arcs?: boolean; line?: boolean; lines?: number; fullPrompts?: boolean; damageArc?: boolean; damageNumbers?: boolean; nameplate?: boolean; jediCrosshair?: boolean; fps?: boolean; weather?: boolean; clock?: boolean; markBlade?: boolean; promptBlur?: boolean; health?: number | null; align?: string; forceLook?: string; forceEdge?: string; slotLines?: string; theme?: string; weatherWords?: Partial<typeof WEATHER_WORD_TUNE>; flight?: Partial<FlightTune>; tune?: Parameters<Hud['tune']>[0]; messages?: Partial<typeof MESSAGES>; wiring?: Partial<typeof HUD_WIRING>; under?: Partial<typeof OVERLAY_TUNE>; sizes?: Partial<HudSizes>; feedback?: Partial<FeedbackTune>; prompt?: Partial<typeof PROMPT>; plates?: Partial<typeof PLATE_TUNE> } = {}) => {
         const S = this.settings;
         let sized = false;
         // Clamped here, at the door, and not only on the way to the canvas: whatever is typed in the
@@ -8646,6 +8667,27 @@ class App {
           S.hudJediCrosshair = opts.jediCrosshair;
           sized = true;
         }
+        // The interface rewrite's first wave: the three readouts, and the block's three switches (a word not offered is
+        // refused out loud, as the menu offers no such word).
+        for (const [k, key] of [['fps', 'hudFps'], ['weather', 'hudWeather'], ['clock', 'hudClock'], ['markBlade', 'hudMarkBlade'], ['promptBlur', 'hudPromptBlur']] as const) {
+          if (typeof opts[k] === 'boolean') {
+            S[key] = opts[k];
+            sized = true;
+          }
+        }
+        // The Colours switch (item 11) takes a theme's word, as the Interface page's list does (`THEMES` in themes.ts).
+        for (const [k, key, offered] of [['align', 'hudBlockAlign', HUD_BLOCK_ALIGNS], ['forceLook', 'hudForceLook', HUD_FORCE_LOOKS], ['forceEdge', 'hudForceEdge', HUD_FORCE_EDGES], ['slotLines', 'hudSlotLines', HUD_SLOT_LINES], ['theme', 'hudTheme', THEMES.map((t) => t.id)]] as const) {
+          const v = opts[k];
+          if (typeof v !== 'string') continue;
+          if (!(offered as readonly string[]).includes(v)) console.warn(`hud: ${k} takes ${offered.join(', ')}, not ${v}`);
+          else {
+            S[key] = v;
+            sized = true;
+          }
+        }
+        if (opts.weatherWords) tuneWeatherWords(opts.weatherWords);
+        // The console's health, for looking at the bars at a share (`Player.holdHealth`): held until `health: null` or a blow.
+        if (opts.health !== undefined) this.player.holdHealth(opts.health);
         if (sized) this.applyHudSettings();
         // The hide key's own switch, as H sets it (`setHudHidden`): for a tab nobody can press a key in.
         if (typeof opts.hidden === 'boolean') this.setHudHidden(opts.hidden);
@@ -8716,8 +8758,15 @@ class App {
           // The bar of things you can press: what it is showing, with the key on each cap, and what
           // the state behind it says. `writes` is the bar's own lifetime total, not a rate, since it
           // only writes when what it shows has changed; walking about is what makes it rise.
+          // `on` is the bar faded in, `quiet` its quieter self aboard and in vehicles, `width` the width it eases to (the
+          // second wave, item 8); `promptBlur` and `slotLines` the Interface page's two switches for the bars' look.
           actions: {
             shown: bar.shown,
+            on: bar.on,
+            quiet: bar.quiet,
+            width: bar.width,
+            promptBlur: S.hudPromptBlur,
+            slotLines: S.hudSlotLines,
             slots: this.actions.size,
             writes: bar.writes,
             changed: bar.changed,
@@ -8731,10 +8780,29 @@ class App {
           // yours told and killed (-1 for "not since the world loaded").
           feedback: { arcs: fb.arcs, numbers: fb.numbers, ops: fb.ops, writes: fb.writes, attached: fb.attached, projector: fb.projector, sinceHit: fb.tick, sinceKill: fb.kill, shown: this.feedback.shown, tune: { ...FEEDBACK_TUNE } },
           // On foot: the glyphs the sheet holds, the keys the number slots are showing (which is how
-          // a rebind is checked from a tab nobody can see), what is in each hand, and whether the
-          // crosshair is drawn for the class in play.
+          // a rebind is checked from a tab nobody can see), and whether the crosshair is drawn for the
+          // class in play. (What is in each hand is the weapon mark's, `mark` below.)
           // (`stamina`: '' while the row is not in the block, the speed classes off; 'down' while it keeps its place unseen.)
-          onFoot: { icons: foot.icons, keys: foot.keys, hands: foot.hands, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops, stamina: foot.stamina },
+          // (`kit`: the action bar in words, which carries none of its own now: each cell's key and whether it is ready,
+          // cooling (how much is filled back, and the length read off the kit), lit or pressed; the lines and a pause.)
+          onFoot: { icons: foot.icons, keys: foot.keys, kit: foot.kit, crosshair: foot.crosshair, attached: foot.attached, ops: foot.ops, stamina: foot.stamina },
+          // The weapon mark (item 6) in words, which it carries none of on the screen ('saber 22.5° lit', 'dual X 45° in',
+          // 'pistol', 'sword / knife'), and whether its blade follows the real one (the Interface page's switch).
+          mark: foot.mark,
+          markBlade: S.hudMarkBlade,
+          // The body block (the interface rewrite's first wave): where it stands and how Force meets health, every bar's
+          // share as drawn and what it wears (the bars carry no words on the screen, so this is the only way to read them
+          // from a tab nobody can see), and the three readouts as they stand ('' while a line is off). `held` is the old
+          // corner note's whole line, which the screen no longer shows: the weather's and the day's, god mode's, a reach's.
+          block: foot.block,
+          bars: foot.bars,
+          readouts: { fps: foot.fps, weather: foot.weather, clock: foot.clock, switches: { fps: S.hudFps, weather: S.hudWeather, clock: S.hudClock } },
+          held: this.heldNote(),
+          // The Colours switch (item 11): the theme on, and whether `#ui` wears the character list's and the creator's
+          // class (item 9), which shows nothing of play but the frame rate.
+          theme: this.themeOn,
+          stage: this.hudStaged,
+          weatherWords: { ...WEATHER_WORD_TUNE },
           // The plate over a head, and the line in the corner it replaced.
           plates: { shown: plate.shown, label: plate.label, writes: plate.writes, enabled: plate.enabled, tune: { ...PLATE_TUNE } },
           nearby: { name: this.nearbyName, hz: HUD_WIRING.nearbyHz },
@@ -12619,12 +12687,14 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
     LANDMARK_SWITCH.set = (on) => void this.setLandmarks(on).then((said) => console.info(`landmarks: ${said}`));
+    // The display's dials (`hud`): a size moved is taken up as `__debug.hud({ sizes })` takes it, by the settings applied again.
+    HUD_DIALS_HOST.apply = () => this.applyHudSettings();
     if (debugRoot) {
       // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
       // tab with no keyboard, a run being waited on before the report comes back. `{ pin, atStart }`
@@ -13469,12 +13539,20 @@ class App {
    * screen that already works, never a thing the screen needs.
    */
   private async showScene(key: string): Promise<boolean> {
+    // A place takes seconds to stand up, and the creator can be left while it does (Characters, then Play): every wait
+    // below is followed by asking whether this load is still the one wanted (`sceneTurn`, moved by every `hideScene`),
+    // and one that is not puts down what it built and touches nothing more. Without it a load left behind finished after
+    // Play had stood the character in its world, set `scene3d`, and from then every frame was the place's: the character
+    // stood at the place's spot (Lars Homestead's 1194, 0, -1929) and a teleport moved nothing.
+    const asked = this.sceneTurn;
     const man = await sceneManifest();
-    if (!man || !man.places.some((p) => p.key === key)) return false;
+    if (asked !== this.sceneTurn || !man || !man.places.some((p) => p.key === key)) return false;
     const row = man.places.find((p) => p.key === key)!;
     const where = packPlanet(row.pack);
     if (!where) return false;
     await this.hideScene();
+    // This load's own turn, taken after the place before it is let go (which moves the turn).
+    const turn = this.sceneTurn;
     // The streamer is what a scene skips, and only that: the ground, the sky, the water and the
     // weather all load as they always do, since those are what make the hour real.
     this.bindPlaceInput();
@@ -13489,6 +13567,11 @@ class App {
       breath: () => this.world.breath(),
       defer: true,
     });
+    // Left while it built: the place goes, and the world is whoever's now (`hideScene` gave its settings back already).
+    if (turn !== this.sceneTurn) {
+      if (built) disposePlace(built, (mats) => this.world.forgetMaterials(mats));
+      return false;
+    }
     if (!built) {
       this.world.sceneOnly = false;
       return false;
@@ -13514,6 +13597,10 @@ class App {
     // the two are brought together by standing the figure at the origin and putting the ground
     // there too (see `sceneGroundOffset`).
     await this.world.loadPack(stand);
+    if (turn !== this.sceneTurn) {
+      disposePlace(built, (mats) => this.world.forgetMaterials(mats));
+      return false;
+    }
     // The place's leaf cards ruled now its world's pack is in (its card table, or its flora's names), then its
     // materials adopted and the place stood up, so the wait below compiles it as it will be drawn.
     this.world.preparePlace(built.sources, built.group);
@@ -13522,6 +13609,11 @@ class App {
     // what is left and links every program still queued, so the first frame drawn is the finished
     // picture rather than the first instalment of it.
     const whole = await this.world.readyAround(stand, SCENE_REACH.waitMs);
+    // Left during the wait: the place comes out of the scene and goes, and no frame is ever the place's.
+    if (turn !== this.sceneTurn) {
+      disposePlace(built, (mats) => this.world.forgetMaterials(mats));
+      return false;
+    }
     if (!whole) console.info(`place: ${key} was still building after ${(SCENE_REACH.waitMs / 1000) | 0}s; showing it as it stands`);
     this.scene3d = { key, built, stand, facing: (built.place.stand.heading * Math.PI) / 180, orbit: orbitFor(built.place), view: restView() };
     // The hour the place was captured at, with the day stopped on it (`DayCycle.paused`), so it does
@@ -13535,8 +13627,16 @@ class App {
     return true;
   }
 
+  /**
+   * Which load of a place is the one wanted: moved by every `hideScene`, so a load still standing its place up when the
+   * creator is left (or another place is asked for) sees that it is no longer wanted at its next wait (`showScene`).
+   */
+  private sceneTurn = 0;
+
   /** Let go of the place, its models and the world behind it, and give the day back. */
   private async hideScene(): Promise<void> {
+    // Any place still loading is no longer wanted, whoever asked for it.
+    this.sceneTurn++;
     const s = this.scene3d;
     this.scene3d = null;
     if (s) disposePlace(s.built, (mats) => this.world.forgetMaterials(mats));
@@ -13909,7 +14009,7 @@ class App {
       case 'lifeDay':
         // Uniforms and rates only: nothing here compiles a shader.
         this.world.weather.configure(S);
-        this.hud.setWeatherNote(this.heldNote());
+        if (!this.hudHidden) this.hud.setWeather(this.weatherWordNow(), this.world.weather.held);
         break;
       case 'soundMaster':
       case 'soundAmbience':
@@ -13947,6 +14047,16 @@ class App {
       case 'hudWaypointMarksInFlight':
       case 'hudTracker':
       case 'hudTrackerInFlight':
+      case 'hudFps':
+      case 'hudWeather':
+      case 'hudClock':
+      case 'hudBlockAlign':
+      case 'hudForceLook':
+      case 'hudForceEdge':
+      case 'hudMarkBlade':
+      case 'hudSlotLines':
+      case 'hudPromptBlur':
+      case 'hudTheme':
         // A size, a backing store and a few switches: no shader and no element is made.
         this.applyHudSettings();
         break;
@@ -14897,6 +15007,28 @@ class App {
     // Turned off, the long line would otherwise stand at whatever it last said: the frame loop stops
     // writing it, so it is emptied here.
     if (!S.hudFullPrompts) this.hud.setPrompt('');
+    // The interface rewrite's first wave: the frame rate, the weather's word and the clock, each a switch; and where the
+    // block stands and how the Force bar meets health. A word nobody offers (an old or hand-edited store) is the default.
+    this.hud.setReadouts(S.hudFps, S.hudWeather, S.hudClock);
+    const align = oneOf(S.hudBlockAlign, HUD_BLOCK_ALIGNS, 'middle');
+    this.hud.setBlock(align, oneOf(S.hudForceLook, HUD_FORCE_LOOKS, 'over'), oneOf(S.hudForceEdge, HUD_FORCE_EDGES, 'lower'));
+    // The weapon mark's blade follows the real one, or stands out always (item 6's switch).
+    this.hud.setMarkBlade(S.hudMarkBlade);
+    // The interface rewrite's second wave: the lines between the action bar's cells and the use prompt's actions at most
+    // of the bar's height or all of it, and the blur behind the prompt (both bars and the long line).
+    const linesFull = oneOf(S.hudSlotLines, HUD_SLOT_LINES, 'short') === 'full';
+    this.hud.setKitLook(linesFull, S.hudPromptBlur);
+    this.actions.setLook(linesFull, S.hudPromptBlur);
+    // The Colours switch (item 11): a theme switched is put on at once, every panel with it; the same theme again is
+    // nothing. A word nobody offers is Default.
+    const theme = themeById(S.hudTheme).id;
+    if (theme !== this.themeOn) this.themeOn = applyTheme(theme);
+    // The block on the left takes the message line's corner, so the line goes to the bottom right (one class).
+    const right = align === 'left';
+    if (right !== this.messagesRight) {
+      this.messagesRight = right;
+      this.messages.root.classList.toggle('right', right);
+    }
   }
 
   /**
@@ -15041,10 +15173,43 @@ class App {
   }
   private horizonReachApplied = Number.NaN;
 
-  /** The display's quiet line: the weather's and the day's, god mode's and a held reach's, joined only when one changes. */
+  /**
+   * The old corner's quiet line, the weather's and the day's notes with god mode's and a held reach's, joined only when
+   * one changes. The line went with the top-right box (the interface rewrite's first wave); the weather's half of its
+   * job is the "· held" after the weather's word, and the console reads the whole line in `__debug.hud().held`.
+   */
   private heldNote(): string {
     return this.heldNotes.join(this.world.weather.heldNote(), this.player.god, holding(this.reachHold));
   }
+
+  /**
+   * The weather's word for the line under the minimap (`weatherLineWord`, `src/ui/weatherWords.ts`): nothing in space,
+   * in a dungeon's copies, before a world, or where the weather has no sky or no table to read; "Clear" with the
+   * Weather setting off, at once, while the level walks down behind it. One of a few kept strings, so a frame that asks
+   * makes nothing.
+   */
+  private weatherWordNow(): string {
+    const planet = this.world.planet;
+    if (!this.inWorld || !planet || planet.space || planet.instances) return '';
+    return weatherLineWord(this.world.weather.state);
+  }
+
+  /**
+   * The world's time of day as the clock's line says it (`DayCycle.clock`), made again only when the minute turns, so
+   * the frame hands the display a kept string: the day's own `clock()` builds a new one at every call.
+   */
+  private clockWords(): string {
+    const minute = Math.floor(this.world.day.time * 1440);
+    if (minute !== this.clockMinute) {
+      this.clockMinute = minute;
+      this.clockKept = this.world.day.clock();
+    }
+    return this.clockKept;
+  }
+  private clockMinute = -1;
+  private clockKept = '';
+  /** Whether the message line stands at the bottom right, as last written (it does while the block is on the left). */
+  private messagesRight = false;
 
   /**
    * God mode on or off (`__debug.god`, `src/player/godMode.ts`): the sentence to say back. Always
@@ -18587,6 +18752,9 @@ class App {
 
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
+    // A place saved broken (a heading that went NaN is written as null) is mended before anything reads it, and written
+    // back mended, so one bad save cannot keep a character out of the world.
+    if (mendPlace(c)) upsertCharacter(c);
     this.current = c;
     // A hairstyle still loading for whoever stood here before is not this character's.
     this.dropHairChanges();
@@ -19607,7 +19775,7 @@ class App {
       c.planet = keptThere.id;
       c.zone = keptThere.zones?.find((z) => z.pack === kept.pack)?.id;
       c.pos = [Number(kept.x.toFixed(2)), Number(kept.y.toFixed(2)), Number(kept.z.toFixed(2))];
-      c.heading = Number(p.heading.toFixed(3));
+      if (Number.isFinite(p.heading)) c.heading = Number(p.heading.toFixed(3));
       c.played = Date.now();
       upsertCharacter(c);
       return;
@@ -19625,8 +19793,11 @@ class App {
     }
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
-    c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
-    c.heading = Number((edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading).toFixed(3));
+    // Never a NaN into the record: JSON writes it as null, and a null place kept the character out of the world. A place
+    // that is not finite leaves the last good one standing.
+    if (Number.isFinite(at.x) && Number.isFinite(at.y) && Number.isFinite(at.z)) c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
+    const heading = edRet ? (this.editor?.returnHeading ?? p.heading) : p.heading;
+    if (Number.isFinite(heading)) c.heading = Number(heading.toFixed(3));
     c.played = Date.now();
     upsertCharacter(c);
   }
@@ -23061,6 +23232,23 @@ class App {
 
   /** Whether the hide key has the interface off the screen (`setHudHidden`). Not kept: a reload shows it. */
   private hudHidden = false;
+
+  /** Whether `#ui` wears the character list's and the creator's class (`setHudStage`), as last written. */
+  private hudStaged = false;
+
+  /**
+   * The character list and the creator show nothing of play (the interface rewrite's second wave, item 9): no place
+   * block or minimap, no bars, weapon mark or action bar, no crosshair, only their own panels and the frame rate while
+   * its switch is on. The hide key's way (`setHudHidden`): `#ui` wears `ui-stage`, and the stylesheet hides every child
+   * of it but the same windows by the same rule (`hud.css`), with the frame rate the one thing of the display kept. The
+   * frame calls this when the screen changes (`!inWorld || creating`), and on those screens it writes the display no
+   * more than the frame rate's line (`Hud.stageFrame`). The hide key's own class is left alone, so hidden stays hidden.
+   */
+  private setHudStage(on: boolean): void {
+    if (on === this.hudStaged) return;
+    this.hudStaged = on;
+    this.ui.classList.toggle(HUD_STAGE_CLASS, on);
+  }
 
   /**
    * The hide key (H, `hideHud`, rebindable): everything drawn over the world off the screen, and back. `#ui` wears
@@ -35998,11 +36186,16 @@ class App {
       // a race's start): the world stays, and so do the editor, its selection and its history (Map-maker II's third wave
       // found every curtain of the editor's own turning it off and dropping its history).
       if (this.editor?.on && ((this.traveling && !this.curtainOnly) || !this.inWorld)) this.editor.worldGone();
+      // The character list and the creator show nothing of play but the frame rate (item 9, `setHudStage`): one class
+      // on `#ui` when the screen changes, nothing in a steady frame. Before the two paths below, which are those screens'.
+      const staged = !this.inWorld || this.creating;
+      if (staged !== this.hudStaged) this.setHudStage(staged);
       // A character standing in one of the captured places takes a path of its own: the world is
       // loaded and drawn and its sky runs, but nobody is playing, so none of the rest of this
       // frame -- the keys, the body, the fight, the streaming, the relay -- applies.
       if (this.scene3d) {
         this.stepScene(dt);
+        if (staged) this.hud.stageFrame();
         input.endFrame();
         return;
       }
@@ -36012,6 +36205,8 @@ class App {
         // The mixer still steps: the select screen and the creator have their own clicks, and the
         // bank's slices and the loops' clocks must go on whether a world is up or not.
         this.stepAudio(dt);
+        // The frame rate, the one thing of the display these screens show (while its switch is on).
+        this.hud.stageFrame();
         input.endFrame();
         return;
       }
@@ -36276,8 +36471,10 @@ class App {
         aim.dy = aimLook.y;
         aim.dz = aimLook.z;
       }
-      // Not while the hide key has the interface off the screen (`setHudHidden`): it is written afresh when it comes back.
-      if (!this.hudHidden) this.hud.setWeatherNote(this.heldNote());
+      // The weather's word under the minimap and its "· held" (one of a few kept strings and a boolean, compared, so a
+      // steady frame writes nothing). Not while the hide key has the interface off the screen (`setHudHidden`): it is
+      // written afresh when it comes back.
+      if (!this.hudHidden) this.hud.setWeather(this.weatherWordNow(), this.world.weather.held);
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       // While the world editor flies, the character is its body's return point, never the camera: the followers wait by
       // it, and nothing targets it, as nothing targets noclip.
@@ -36634,10 +36831,14 @@ class App {
       // The stamina's row (the speed classes), up while the pool is not full and for a moment after: nothing is written
       // while it is down, and with the classes not in force for the body the row is not in the block at all.
       const staminaPool = player.staminaPool;
+      // Whether the game runs, for the action bar (the second wave, item 7): a cooldown's fill holds while it stands still,
+      // as the kit's own cooldown does, and a key pressed in a menu darkens no cell. One class on a change; not while the
+      // hide key has the interface off (the display rests, and is written afresh when it comes back).
+      if (!hudOff) this.hud.setLive(simulate);
       if (hudOff) this.hud.rest();
       else {
         this.hud.setStamina(player.loco.stamina, staminaPool, player.loco.stamina.shown(staminaPool, LOCO_TUNE), player.loco.on);
-        this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
+        this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.clockWords(), this.nearbyName, player.saberOn, player.breath);
       }
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not. (Its second
       // of writes closes when it is read, so a hidden one reads its own 0 with no call.)

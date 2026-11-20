@@ -47,6 +47,24 @@ export const ICON_IDS = [
   'ic-saber',
   'ic-blaster',
   'ic-hand',
+  // The weapon mark's (the interface rewrite's first wave, `weaponMark.ts`): a lightsaber's two parts, the double-bladed
+  // saber's two, then a mark for each kind of blaster and every other class a hand holds.
+  'ic-mark-hilt',
+  'ic-mark-blade',
+  'ic-mark-staff-hilt',
+  'ic-mark-staff-blade',
+  'ic-mark-pistol',
+  'ic-mark-carbine',
+  'ic-mark-rifle',
+  'ic-mark-heavy',
+  'ic-mark-sword',
+  'ic-mark-knife',
+  'ic-mark-sword2h',
+  'ic-mark-polearm',
+  'ic-mark-fist',
+  'ic-mark-thrown',
+  'ic-mark-instrument',
+  'ic-mark-prop',
   'ic-hit',
   'ic-system',
   'ic-pencil',
@@ -162,30 +180,9 @@ export function glyphFor(name: string): IconId {
   return ICON_FALLBACK;
 }
 
-/**
- * The mark for a weapon in a hand. The weapon's class is what the rack calls it (`WeaponDef.class`:
- * `rifle`, `pistol`, `carbine`, `sword`, `polearm`, …); with none, its name is tried, and a weapon
- * whose name and class say nothing gets the open hand.
- *
- * A hand holding nothing never reaches here: an empty hand's cell is taken off the screen rather
- * than shown holding a mark for nothing, so the open hand is the last resort for something that is
- * held and not recognised.
- */
-export function handGlyph(weaponClass?: string | null, name?: string | null): IconId {
-  const cls = weaponClass ? iconKey(weaponClass) : '';
-  if (cls) {
-    if (cls.includes('saber')) return 'ic-saber';
-    if (cls.includes('rifle') || cls.includes('pistol') || cls.includes('carbine') || cls.includes('heavy')) return 'ic-blaster';
-    if (cls.includes('thrown') || cls.includes('grenade')) return 'ic-grenade';
-    if (cls.includes('sword') || cls.includes('polearm') || cls.includes('axe') || cls.includes('baton') || cls.includes('knife')) return 'ic-saber';
-    if (cls.includes('unarmed')) return 'ic-fists';
-  }
-  if (name) {
-    const key = iconKey(name);
-    for (const [word, id] of BY_WORD) if (key.includes(word)) return id;
-  }
-  return 'ic-hand';
-}
+// What is in a hand is not chosen here: the two hand cells, with their picture and their name, went in the interface
+// rewrite's first wave, and the block's weapon mark (`weaponMark.ts`) picks its own marks (`ic-mark-*`) from the
+// rack's class, the kit and the saber's stance.
 
 /**
  * The four wing states, in the order the flight display numbers them (none, closed, opening, open,

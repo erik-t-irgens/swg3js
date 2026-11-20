@@ -35,6 +35,16 @@
   --ramp-health: linear-gradient(90deg, var(--health), var(--bad));
   --ramp-pool: linear-gradient(90deg, var(--pool), var(--accent));
 
+  /* The two lit wells, built from the eighteen the same way: the light at the middle of an item's picture (a backpack
+     cell, the examined one, the give window's) and at the middle of the creator's backdrop. Each is a light rather than
+     a surface, so it is the palette's light, `accent`, let into its dark, `void`. They were typed in as a blue-grey
+     (rgba(40, 62, 86, 0.9) and rgba(30, 48, 70, 0.95)) and kept off the palette on purpose until the colour themes (the
+     interface rewrite's second wave, item 11), under which a typed light stayed navy in a red theme; now a theme's own
+     light lights them. The shares are the ones that land nearest those two in Default: 27% of the accent at 0.9, and
+     20% at 0.95. */
+  --well-pic: color-mix(in srgb, color-mix(in srgb, var(--accent) 27%, var(--void)) 90%, transparent);
+  --well-creation: color-mix(in srgb, color-mix(in srgb, var(--accent) 20%, var(--void)) 95%, transparent);
+
   /* The names the panels already use, kept pointing at the eighteen so every `var(--…)` in this file
      keeps working and there is still only one place a colour is written down. */
   --text: var(--ink);
@@ -72,10 +82,8 @@ b { color: var(--accent); font-weight: 600; }
 /* The top-left block wears no plate (`#hud .top-left` in hud.css takes the panel's off it): its lines
    stand bare over the world on a halo of the palette's darkest, as the city's name always has. */
 .top-left { top: 12px; left: 12px; min-width: 170px; }
-.top-right { top: 12px; right: 12px; text-align: right; }
 .planet-name { font-size: 16px; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
 .loc { margin-top: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
-.fps { font-family: ui-monospace, Menlo, monospace; }
 .hint { color: var(--muted); }
 
 .bottom { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -405,10 +413,10 @@ b { color: var(--accent); font-weight: 600; }
 .bp-cell:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
 .bp-cell:focus { outline: none; }
 .bp-cell.sel { border-color: var(--accent); box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent); }
-/* The lit centre behind an item's picture, and behind the examined one below, is a blue-grey a
-   shade lighter than `plate` and is not one of the eighteen: it is a light in a well rather than a
-   surface, and nothing else on the screen is drawn in it. The same goes for the creator's backdrop. */
-.bp-pic { position: relative; flex: none; height: 60px; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 40%, rgba(40,62,86,0.9), color-mix(in srgb, var(--void) 95%, transparent)); }
+/* The lit centre behind an item's picture, and behind the examined one below, is a light in a well
+   rather than a surface: the palette's light let into its dark (`--well-pic` on `:root`), so a colour
+   theme lights it too. The same goes for the creator's backdrop (`--well-creation`). */
+.bp-pic { position: relative; flex: none; height: 60px; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 40%, var(--well-pic), color-mix(in srgb, var(--void) 95%, transparent)); }
 .bp-pic img { width: 58px; height: 58px; object-fit: contain; pointer-events: none; }
 .bp-initials { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 50%; background: color-mix(in srgb, var(--pool) 35%, transparent); border: 1px solid var(--panel-border); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; color: var(--text); }
 .bp-name { flex: 1; padding: 2px 3px; font-size: 10px; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
@@ -436,7 +444,7 @@ b { color: var(--accent); font-weight: 600; }
 .bp-standin { position: absolute; left: 0; right: 0; bottom: 2px; font-size: 8px; color: var(--muted); line-height: 1.1; padding: 0 2px; }
 .bp-examine { display: flex; gap: 12px; align-items: flex-start; margin: 0 14px; padding: 8px 10px; min-height: 104px; border: 1px solid var(--panel-border); border-radius: 6px; background: color-mix(in srgb, var(--void) 22%, transparent); }
 .bp-examine-empty { align-self: center; font-size: 11px; color: var(--muted); }
-.bp-examine-pic { flex: none; width: 96px; height: 96px; display: flex; align-items: center; justify-content: center; border-radius: 5px; background: radial-gradient(circle at 50% 40%, rgba(40,62,86,0.9), color-mix(in srgb, var(--void) 95%, transparent)); }
+.bp-examine-pic { flex: none; width: 96px; height: 96px; display: flex; align-items: center; justify-content: center; border-radius: 5px; background: radial-gradient(circle at 50% 40%, var(--well-pic), color-mix(in srgb, var(--void) 95%, transparent)); }
 .bp-examine-pic img { width: 96px; height: 96px; object-fit: contain; }
 .bp-examine-text { flex: 1; min-width: 0; max-height: 150px; overflow-y: auto; font-size: 12px; line-height: 1.45; }
 .bp-examine-text p { margin: 4px 0 0; color: var(--muted); }
@@ -663,7 +671,7 @@ b { color: var(--accent); font-weight: 600; }
 }
 
 /* The creator: the appearance panel at full size, the close button out of the way, a bar below. */
-.overlay.creation { align-items: flex-start; padding-top: 10px; background: radial-gradient(ellipse at 50% 30%, rgba(30,48,70,0.95), color-mix(in srgb, var(--void) 98%, transparent)); backdrop-filter: none; }
+.overlay.creation { align-items: flex-start; padding-top: 10px; background: radial-gradient(ellipse at 50% 30%, var(--well-creation), color-mix(in srgb, var(--void) 98%, transparent)); backdrop-filter: none; }
 .overlay.creation .wardrobe-panel, .overlay.creation .wardrobe-panel.wide, #wardrobe.creation .wardrobe-panel { width: min(1500px, 97vw); max-width: none; height: calc(100vh - 92px); max-height: none; }
 .overlay.creation .wardrobe-preview { flex: 0 0 min(42%, 620px); }
 /* Making a character is one screen: the look. The clothes, the guns, the skills, the backpack and

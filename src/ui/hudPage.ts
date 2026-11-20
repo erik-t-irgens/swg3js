@@ -7,6 +7,7 @@
 // parameters, which node's type stripping will not take). Nothing in this file touches the page, so
 // the test needs no browser at all.
 import { HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, type Settings } from '../core/settings.ts';
+import { THEME_GROUPS, THEMES } from '../core/themes.ts';
 
 /**
  * One control on a settings page. `choice` is a list whose values are words rather than numbers. `preset` is a list
@@ -29,7 +30,8 @@ export interface Knob {
   max?: number;
   step?: number;
   options?: { value: number; label: string }[];
-  choices?: { value: string; label: string }[];
+  /** A choice's words; those carrying a `group` are listed under that group's heading (the Colours switch's themes). */
+  choices?: { value: string; label: string; group?: string }[];
   format?: (v: number) => string;
   /** Greyed while any of these is off; still usable, so a strength can be set before its toggle. */
   requires?: readonly (keyof Settings)[];
@@ -49,10 +51,34 @@ export interface Knob {
  */
 export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
   {
+    title: 'Colours',
+    knobs: [
+      { key: 'hudTheme', label: 'Colours', kind: 'choice', choices: THEMES.map((t) => ({ value: t.id, label: t.name, group: THEME_GROUPS.find((g) => g.id === t.group)?.label })), hint: "The whole interface's colours: the display, the menus, every panel, the map's marks and the loading screen's words, all at once and without a reload. Every theme keeps its words readable over a bright desert and a night sky, and keeps ready, caution and danger apart. Default is the colours as they always were. The world's own colours (the loading picture, the map pictures, the dyes) stay their own." },
+    ],
+  },
+  {
     title: 'Size',
     knobs: [
       { key: 'hudScale', label: 'Display scale', kind: 'range', min: HUD_SCALE_RANGE.min, max: HUD_SCALE_RANGE.max, step: 0.05, format: (v) => `${v.toFixed(2)}×`, hint: 'How large everything on the screen is drawn, the reticle and its arcs with it. 1 is the size it was drawn at; the two ends are ours, and nothing should overlap or leave the screen at either of them.' },
       { key: 'hudDpr', label: 'Sharper hairlines', kind: 'select', options: [{ value: 1, label: 'One dot per screen pixel' }, { value: 2, label: 'Two (sharper, dearer)' }], hint: 'How many dots the overlay draws for each pixel of the screen. One is cheap and is where it starts; two sharpens every thin line on a dense screen and gives the browser four times as many dots to clear each frame.' },
+    ],
+  },
+  {
+    title: 'The bars and the action bar',
+    knobs: [
+      { key: 'hudBlockAlign', label: 'Where they stand', kind: 'choice', choices: [{ value: 'left', label: 'Bottom left' }, { value: 'middle', label: 'Bottom middle' }, { value: 'right', label: 'Bottom right' }], hint: 'The bars, the weapon mark and the action bar together. In the middle the mark stands over the health bar; at either side the mark stands at the screen\'s edge with the bars beside it, running toward the middle, and the two sides are mirror images. With them on the left, the message line goes to the bottom right.' },
+      { key: 'hudForceLook', label: 'The Force bar', kind: 'choice', choices: [{ value: 'over', label: 'Laid over the health bar' }, { value: 'inside', label: 'Inside the health bar' }], hint: 'Laid over: against the health bar with no gap, half over its edge and drawn in front. Inside: the same rounded bar with its middle on the health bar\'s edge and the half outside it not drawn, so its ends seem to curve on over the edge. Stamina does the same to the Force bar, or sits inside the health bar on the other edge.' },
+      { key: 'hudForceEdge', label: 'On which edge', kind: 'choice', choices: [{ value: 'lower', label: 'The lower edge' }, { value: 'upper', label: 'The upper edge' }], hint: 'Which of the health bar\'s two long edges the Force bar is on. Breath, under water, stands on top of whichever bar is highest.' },
+      { key: 'hudMarkBlade', label: "The mark's blade follows the saber", kind: 'toggle', hint: "The weapon mark shows a lightsaber's stance by its tilt. On, the blade on the mark draws in and out with the real one, at the saber's own pace; off, the mark keeps its blade out whether the saber is lit or not. On to begin with." },
+      { key: 'hudSlotLines', label: 'Lines between the cells', kind: 'choice', choices: [{ value: 'short', label: 'Most of the bar\'s height' }, { value: 'full', label: 'The bar\'s full height' }], hint: "The thin line between two of the action bar's cells, and between two of the actions the use prompt offers: about four fifths of the bar's height to begin with (how much is a slider in the debug menu), or all of it." },
+    ],
+  },
+  {
+    title: 'The corner',
+    knobs: [
+      { key: 'hudFps', label: 'Frame rate', kind: 'toggle', hint: 'The frame rate alone at the top right, with no box round it. Off to begin with.' },
+      { key: 'hudWeather', label: 'Weather', kind: 'toggle', hint: 'The weather in a word or two, small, under the minimap (where the minimap would be when it is off): Clear, Rain, Dust Storm. Not in space or in a dungeon. While the weather is held from the Graphics page or the console, a quiet "held" follows the word.' },
+      { key: 'hudClock', label: 'Clock', kind: 'toggle', hint: "The world's time of day just above the minimap's coordinates, in the same size of type. Off to begin with." },
     ],
   },
   {
@@ -70,6 +96,7 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'hudMessages', label: 'The message line', kind: 'toggle', hint: 'The lines at the bottom left: what hit you, what you hit, a crash, a part going down, a jump, the relay. Off, those notices are not said anywhere else, so leave it on unless it is in the way.' },
       { key: 'hudMessageLines', label: 'Lines kept', kind: 'range', min: HUD_LINES_RANGE.min, max: HUD_LINES_RANGE.max, step: 1, format: (v) => `${v}`, requires: ['hudMessages'], hint: 'How many stand at once before the oldest goes. Ours: eight is what a busy fight fills.' },
       { key: 'hudFullPrompts', label: 'Full prompts', kind: 'toggle', hint: 'The long line naming every key, under the short bar of four actions. Off to begin with, since the bar already puts your own key on everything it offers; turn it on when you want to check whether the bar has hidden something you use, and say what is missing.' },
+      { key: 'hudPromptBlur', label: 'Blur behind the prompt', kind: 'toggle', hint: 'A soft blur of the world behind the bar of things you can press, and behind the long line. Off to begin with: blurring what is behind it costs the graphics card a little every frame it shows.' },
     ],
   },
   {

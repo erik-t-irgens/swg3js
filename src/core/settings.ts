@@ -212,6 +212,26 @@ export interface Settings extends FxSettings {
   hudTracker: boolean;
   /** The same while flying a ship. */
   hudTrackerInFlight: boolean;
+  /** The frame rate alone at the top right, no box, as `62 fps`. */
+  hudFps: boolean;
+  /** The weather in a word or two under the minimap (in its place when it is off); never in space or a dungeon. */
+  hudWeather: boolean;
+  /** The world's time of day just above the minimap's coordinates. */
+  hudClock: boolean;
+  /** Where the bars, the weapon mark and the action bar stand: 'left', 'middle' or 'right' (left and right mirror each other). */
+  hudBlockAlign: string;
+  /** How the Force bar meets the health bar: 'over' (laid over its edge, in front) or 'inside' (half a pill along the edge). */
+  hudForceLook: string;
+  /** Which of the health bar's edges the Force bar is on: 'lower' or 'upper'. */
+  hudForceEdge: string;
+  /** The weapon mark's lightsaber draws its blade in and out with the real one; off, its blade stands out always. */
+  hudMarkBlade: boolean;
+  /** The lines between the action bar's cells (and the use prompt's actions): 'short' (`slotLineShare` of the bar's height) or 'full'. */
+  hudSlotLines: string;
+  /** A soft blur of the world behind the use prompt and the long prompt line. */
+  hudPromptBlur: boolean;
+  /** The interface's colour theme, by its word in `THEMES` (`src/core/themes.ts`): 'default' is the palette as it stands. */
+  hudTheme: string;
   // Gameplay.
   /**
    * How hard the world's own people and creatures are: one scale on their health and their blows,
@@ -478,6 +498,25 @@ export const DEFAULT_SETTINGS: Settings = {
   // the flight display has the right edge's attention.
   hudTracker: true,
   hudTrackerInFlight: false,
+  // The interface rewrite's first wave (the owner's, 19 November 2026): the frame rate and the clock are switches that
+  // start off, the weather's word one that starts on. The block stands in the middle, where it always stood; the Force
+  // bar's two switches the owner did not name start where today's look is closest: laid over, on health's lower edge.
+  hudFps: false,
+  hudWeather: true,
+  hudClock: false,
+  hudBlockAlign: 'middle',
+  hudForceLook: 'over',
+  hudForceEdge: 'lower',
+  // The owner's answer of 19 November 2026 on the weapon mark's blade drawing in and out with the real one: "Start on not off".
+  hudMarkBlade: true,
+  // The interface rewrite's second wave: the lines between the action bar's cells start at about 80% of the bar's height,
+  // the full-height line a switch away (the wave's default, not yet answered); the blur behind the use prompt starts off
+  // (the owner's tab: blurring the world behind it costs the graphics card a little every frame).
+  hudSlotLines: 'short',
+  hudPromptBlur: false,
+  // The Colours switch (the second wave, item 11): Default, the palette as it stands (the wave's default, not yet
+  // answered), kept with the other settings in this browser.
+  hudTheme: 'default',
   // Ours, and one: every body stands at its own numbers until the player says otherwise.
   difficulty: 1,
   // The owner's (2026-10-19, the pass's design §10 Q1): Restuss stands as its ruins, how SOE's live game ended.
@@ -585,6 +624,12 @@ export const HUD_DPR_RANGE = { min: 1, max: 2 } as const;
 export const HUD_LINES_RANGE = { min: 3, max: 8 } as const;
 /** The minimap's reach, in metres from its middle to its rim: the menu and `__debug.minimap` clamp to it. */
 export const HUD_MINIMAP_RANGE = { min: 300, max: 3200 } as const;
+/** The words the block's three switches take; the menu offers these and `__debug.hud` refuses anything else. */
+export const HUD_BLOCK_ALIGNS = ['left', 'middle', 'right'] as const;
+export const HUD_FORCE_LOOKS = ['over', 'inside'] as const;
+export const HUD_FORCE_EDGES = ['lower', 'upper'] as const;
+/** The words the action bar's lines take (the interface rewrite's second wave): a share of the bar's height, or all of it. */
+export const HUD_SLOT_LINES = ['short', 'full'] as const;
 
 /**
  * The settings this session is playing with: the object `loadSettings` last returned, which the

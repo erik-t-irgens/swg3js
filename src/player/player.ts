@@ -2159,6 +2159,16 @@ export class Player {
     return this.swing >= 0.25 && this.swing <= 0.8;
   }
 
+  /**
+   * Seconds the blade in a hand takes to come out, or with `closing` to go back, as that hand's own blade runs it (the
+   * right's carries the single blade and the staff's, the left's the dual style's second; `SaberBlade.openSeconds`).
+   * What the display's weapon mark draws its blade in and out over; NaN for a hand with no blade of its own.
+   */
+  bladeSeconds(hand: 'right' | 'left', closing: boolean): number {
+    for (const b of this.blades) if (b.hand === hand && !b.snap) return closing ? b.blade.closeSeconds : b.blade.openSeconds;
+    return Number.NaN;
+  }
+
   /** How many blades are lit: the staff and the dual style carry two. */
   get bladeCount(): number {
     return this.saber.style === 'staff' || this.saber.style === 'dual' ? 2 : 1;
@@ -2551,6 +2561,20 @@ export class Player {
 
   heal(amount: number): void {
     this.hp = Math.min(this.maxHp, this.hp + amount);
+  }
+
+  /**
+   * The console's health, for looking at the display (`__debug.hud({ health: 0.35 })`): set to a share of full (never
+   * nought, so it is not a death) with its regeneration held, so a steady second at that share can be read; `null` lets
+   * the regeneration go again, and so does the next blow (which sets its own delay). Never the game's own path.
+   */
+  holdHealth(share: number | null): void {
+    if (share === null || !Number.isFinite(share)) {
+      this.regenDelay = 0;
+      return;
+    }
+    this.hp = Math.max(1, Math.min(1, share) * this.maxHp);
+    this.regenDelay = Number.POSITIVE_INFINITY;
   }
 
   /**

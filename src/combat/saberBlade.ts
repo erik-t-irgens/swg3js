@@ -170,6 +170,19 @@ export class SaberBlade {
     return this.lit;
   }
 
+  /**
+   * Seconds the blade takes to come out: its spec's, held between a twentieth of a second and `IGNITE`, which is the
+   * rate `update` runs it at. The display's weapon mark draws its own blade out over the same time.
+   */
+  get openSeconds(): number {
+    return Math.max(0.05, Math.min(IGNITE, this.spec.open));
+  }
+
+  /** Seconds the blade takes to go back, held the same way. */
+  get closeSeconds(): number {
+    return Math.max(0.05, Math.min(IGNITE, this.spec.close));
+  }
+
   /** Drawn this frame, with its group and every parent visible up to a scene: a blade that gives light. */
   get glowing(): boolean {
     if (!this.drawn) return false;
@@ -273,8 +286,8 @@ export class SaberBlade {
     this.tipSpeed = 0;
     // The give from a clash springs out whether the blade is drawn this frame or not.
     this.recoil = recoilAfter(this.recoil, dt);
-    const openRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.open));
-    const closeRate = 1 / Math.max(0.05, Math.min(IGNITE, this.spec.close));
+    const openRate = 1 / this.openSeconds;
+    const closeRate = 1 / this.closeSeconds;
     this.lit = snap ? (on ? 1 : 0) : THREE.MathUtils.clamp(this.lit + (on ? openRate : -closeRate) * dt, 0, 1);
     // The sweep is remembered in a frame: the world's, or aboard a moving ship the hull's, so the
     // ship's own motion is no smear. A change of frame forgets the path.
