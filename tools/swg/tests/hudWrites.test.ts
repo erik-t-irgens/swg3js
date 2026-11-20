@@ -7,7 +7,7 @@
 // that work on this file cannot see one.
 //
 // What is pinned here: a frame in which nothing has changed writes nothing at all; a bar moves by a
-// transform and never by a width; the prompt and the weather note are compared against what was
+// transform and never by a width; the prompt and the weather's word are compared against what was
 // written and never read back off the element; the nearby line is written when its name changes and
 // never on a clock; a rebuild of the slot row counts exactly as many
 // writes as it makes; the invented steps take only the names they know; and each class keeps one
@@ -117,6 +117,11 @@ function makeEl(): any {
 (globalThis as any).document = { createElement: () => makeEl() };
 
 const { Hud, HUD_TUNE } = await import('../../../src/ui/hud.ts');
+const { HUD_SIZES } = await import('../../../src/ui/hudMath.ts');
+// Health and Force go away a while after they are full (the interface rewrite's first wave): that one write a bar is
+// counted on its own in `hudBars.test.ts`, so the counts here are not left to where a frame's clock happens to fall.
+const lingerWas = HUD_SIZES.fullLinger;
+HUD_SIZES.fullLinger = 1e9;
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -180,22 +185,23 @@ frame();
 }
 
 // ---------------------------------------------------------------------------------------------
-// The bars: a transform, never a width, and the bar and its number guarded apart.
+// The bars: a transform, never a width, and no number beside them any more.
 count.width = 0;
 count.transform = 0;
 {
   // The on-foot bars carry the ghost the rest of the interface's bars carry: a fall leaves it where
   // the bar was and the stylesheet walks it down, which is what makes the size of a blow legible.
-  // So a fall costs four writes -- the ghost off its snap, the ghost's own value, the fill and the
-  // number -- and every frame after it costs nothing, which is the half that matters.
+  // So a fall costs three writes -- the ghost off its snap, the ghost's own value and the fill (the
+  // number beside it went with the interface rewrite: the bar is the reading) -- and every frame
+  // after it costs nothing, which is the half that matters.
   const made = writes(() => frame(99));
-  ok(made === 4, `a point of health off is the ghost off its snap, the ghost, the bar and the number (wrote ${made})`);
+  ok(made === 3, `a point of health off is the ghost off its snap, the ghost and the bar, and no number (wrote ${made})`);
   ok(count.transform > 0, 'the bar moved by a transform');
   ok(count.width === 0, 'and never by a width');
   ok(writes(() => { for (let i = 0; i < 30; i++) frame(99); }) === 0, 'and holding there writes nothing more, the easing ghost included');
-  // A fifth of a point moves the bar by a pixel of its own length but leaves the number alone; the
-  // ghost is already off its snap, so this fall is the bar and the ghost and nothing else.
-  ok(writes(() => frame(98.8)) === 2, 'the bar and its number are guarded apart');
+  // A fifth of a point moves the bar by a pixel of its own length; the ghost is already off its
+  // snap, so this fall is the bar and the ghost and nothing else.
+  ok(writes(() => frame(98.8)) === 2, 'a pixel of the bar is the bar and its ghost');
   ok(writes(() => frame(98.799)) === 0, 'a change under a pixel of the bar leaves both alone');
   // The ease ending puts the ghost back behind the fill: one class, and no value, because a fall
   // wrote the ghost to where the bar was going and it is already there.
@@ -203,7 +209,7 @@ count.transform = 0;
   ok(settle === 1, `a ghost's ease ending writes once and no more (wrote ${settle})`);
   ok(writes(() => { for (let i = 0; i < 30; i++) frame(98.799); }) === 0, 'and the bar is steady again');
   kit.resource.value = 60;
-  ok(writes(() => frame(98.799)) === 4, 'the class pool falling is its ghost off its snap, its ghost, its bar and its number');
+  ok(writes(() => frame(98.799)) === 3, 'the class pool falling is its ghost off its snap, its ghost and its bar');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -245,12 +251,13 @@ count.transform = 0;
   ok(made === 1, `the prompt is written once for three of the same line (wrote ${made})`);
   ok(count.readHtml === 0, `and its element is never read back (${count.readHtml} reads)`);
   count.readText = 0;
-  const note = writes(() => {
-    hud.setWeatherNote('held');
-    hud.setWeatherNote('held');
-    hud.setWeatherNote('held');
+  const word = writes(() => {
+    hud.setWeather('Rain', false);
+    hud.setWeather('Rain', false);
+    hud.setWeather('Rain', false);
   });
-  ok(note === 2, `the weather note is written once, text and hidden (wrote ${note})`);
+  ok(word === 2, `the weather's word is written once, the word and its line coming up (wrote ${word})`);
+  ok(writes(() => { hud.setWeather('Rain', true); hud.setWeather('Rain', true); }) === 1, 'held, the muted words after it are one class, once');
   ok(count.readText === 0, `and its element is never read back either (${count.readText} reads)`);
 }
 
@@ -341,6 +348,8 @@ count.transform = 0;
   kit.slots.length = 0;
   ok(writes(() => frame(98.799)) === 0, 'and a loadout emptied under it does not reach past the row either');
 }
+
+HUD_SIZES.fullLinger = lingerWas;
 
 // The two classes themselves cannot be driven from node: `src/combat/jedi.ts` and
 // `src/combat/bountyHunter.ts` use constructor parameter properties and extensionless imports, which

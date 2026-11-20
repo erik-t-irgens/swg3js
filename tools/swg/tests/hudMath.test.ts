@@ -196,7 +196,14 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   const nearbyEm = Number(/(?:^|;|\s)height\s*:\s*([0-9.]+)em/.exec(nearby)?.[1]);
   // Its gap is padding: a margin there would collapse into the wrap's own and the sum would be out.
   const nearbyLine = scaled(nearby, 'padding-top') + nearbyEm * scaled(nearby, 'font-size');
-  const wrapAdds = scaled(blockOf(css, '.hud-minimap'), 'height') + scaled(city, 'margin-top') + cityLine + scaled(blockOf(css, '.hud-minimap-wrap'), 'margin-bottom');
+  // The weather's line (the interface rewrite's first wave), under the wrap and over the nearby line: one line of fixed
+  // height, so a word coming or going never moves the block either, and in the sum whenever it stands. Its height is its
+  // own number on the HUD scale and not its type's, since its type is a dial (`weatherSize`): moving the dial never
+  // moves the block or what docks under it.
+  const weather = blockOf(css, '.hud-weather');
+  const weatherLine = scaled(weather, 'height');
+  ok(Number.isFinite(weatherLine) && weatherLine > 0 && scaled(weather, 'line-height') === weatherLine && /white-space:\s*nowrap/.test(weather) && !/(?:^|;|\s)(?:line-)?height\s*:[^;]*em\b/.test(weather), `the weather's line is one line of fixed height on the HUD scale, whatever its type (${weatherLine.toFixed(1)} at scale 1)`);
+  const wrapAdds = scaled(blockOf(css, '.hud-minimap'), 'height') + scaled(city, 'margin-top') + cityLine + scaled(blockOf(css, '.hud-minimap-wrap'), 'margin-bottom') + weatherLine;
   const blockTop = plain(blockOf(style, '.top-left'), 'top');
   const dockRule = /#hud\.minimap-on ~ \.ed-panel \{ top: calc\(\s*([0-9.]+)px\s*\+\s*([0-9.]+)px\s*\*\s*var\(--hud-scale\)\s*\);/.exec(win);
   // The sum with the minimap up leaves the block's own name and `/loc` lines out, which is right only
@@ -212,8 +219,18 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   const onTerm = wrapAdds + nearbyLine;
   ok(
     Number.isFinite(onTerm) && Number.isFinite(blockTop) && !!dockRule && Number(dockRule[1]) === blockTop + 8 && Number(dockRule[2]) >= onTerm && Number(dockRule[2]) - onTerm < 1,
-    `with the minimap up the editor's window docks under the block's top and a gap of 8, the whole wrap and the nearby line on the HUD scale (${dockRule ? `${dockRule[1]} + ${dockRule[2]}` : 'no rule'} against ${blockTop} + 8 + ${onTerm.toFixed(1)})`,
+    `with the minimap up the editor's window docks under the block's top and a gap of 8, the whole wrap, the weather's line and the nearby line on the HUD scale (${dockRule ? `${dockRule[1]} + ${dockRule[2]}` : 'no rule'} against ${blockTop} + 8 + ${onTerm.toFixed(1)})`,
   );
+  // The clock (the interface rewrite's first wave) stands over the minimap's foot while it shows, a line above the
+  // coordinates, and so takes no room in the sum: its place is the circle, less the coordinates' foot and two of their
+  // lines (its own and theirs), all on the HUD scale, from the two rules that say so.
+  const mmLoc = blockOf(css, '.hud-mm-loc');
+  const locLine = scaled(mmLoc, 'font-size') * Number(/(?:^|;|\s)line-height\s*:\s*([0-9.]+)\s*;/.exec(mmLoc)?.[1]);
+  const clockOn = blockOf(css, '#hud.minimap-on .hud-clock');
+  const clockLine = scaled(clockOn, 'font-size') * Number(/(?:^|;|\s)line-height\s*:\s*([0-9.]+)\s*;/.exec(blockOf(css, '.hud-clock'))?.[1]);
+  const clockTop = scaled(clockOn, 'top');
+  const wantTop = HUD_SIZES.minimap - HUD_SIZES.minimapLocBottom - locLine - clockLine;
+  ok(/position:\s*absolute/.test(clockOn) && Math.abs(clockTop - wantTop) < 0.05 && scaled(clockOn, 'font-size') === scaled(mmLoc, 'font-size'), `and the clock stands just above the minimap's coordinates in their size of type, taking no room (${clockTop} against ${wantTop.toFixed(1)})`);
   const live = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '');
   ok(!/(?:^|\n|\}|,)\s*(?:#hud\.minimap-on\s+)?\.help\b/.test(live(style)) && !/(?:^|\n|\}|,)\s*(?:#hud\.minimap-on\s+)?\.help\b/.test(live(css)), "and the help block's own rules are gone from both stylesheets, with the block (the port's pass 1)");
   ok(/(?:^|;|\s)line-height\s*:\s*1\.3em/.test(city) && /white-space:\s*nowrap/.test(city), "and the city's line is one line of fixed height, so a name coming and going never moves the panel");

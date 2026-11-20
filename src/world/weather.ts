@@ -37,6 +37,10 @@ import {
   stepLevel,
   stepWet,
   windAt,
+  addFall,
+  clearFalls,
+  createFallTally,
+  readFalls,
   type EffectChoice,
   type FamilyRows,
   type ForcedKind,
@@ -105,6 +109,15 @@ export interface WeatherState {
   forced: WeatherForce | null;
   /** The heaviest effect's kind. */
   kind: WeatherKind | 'clear';
+  /**
+   * What the display's word is read from (`src/ui/weatherWords.ts`): the share of the mix (0..1) whose rows fall the
+   * heaviest kind, the strength carrying the most of that share (one of the converter's: 0.35 very light, 0.6 light,
+   * 0.7 plain, 1 heavy; the heavier on a tie), and rain's and lightning's own shares, for "rain with lightning".
+   */
+  fallShare: number;
+  fallStrength: number;
+  rainShare: number;
+  lightningShare: number;
   /** 0..1 falling now, mix-weighted strengths. */
   rain: number;
   snow: number;
@@ -282,6 +295,7 @@ const ONE = new THREE.Vector3(1, 1, 1);
 const PLACE_FAMILY = -2;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
 const smoothstep = (a: number, b: number, x: number) => {
   const t = clamp01((x - a) / (b - a));
   return t * t * (3 - 2 * t);
@@ -313,6 +327,11 @@ export class Weather {
     nextChangeSeconds: null,
     forced: null,
     kind: 'clear',
+    // Begun as fractions, so each field is a double from its first write (copyState writes them every frame).
+    fallShare: 0.5,
+    fallStrength: 0.5,
+    rainShare: 0.5,
+    lightningShare: 0.5,
     rain: 0,
     snow: 0,
     dust: 0,
@@ -451,6 +470,11 @@ export class Weather {
   private dust = 0;
   private overcast = 0;
   private kind: WeatherKind | 'clear' = 'clear';
+  /**
+   * What the mix falls, kind by kind and strength by strength (`FallTally` in weatherSchedule.ts): what the display's
+   * word reads (`WeatherState.fallShare` and the rest, through `readFalls`). Kept, emptied at each collect.
+   */
+  private readonly falls = createFallTally();
   private readonly choice: EffectChoice = { file: '', kind: 'other', strength: 0 };
   private readonly wantFile: string[] = [];
   private readonly wantKind: WeatherKind[] = [];
@@ -750,6 +774,18 @@ export class Weather {
     return this.noteText;
   }
 
+  /**
+   * Whether the weather is held or forced just now, for the display's muted "· held" after the weather's word: the
+   * Graphics page's held level or kind, a force from the console, or the console's move of the weather's clock. Not a
+   * place's own weather, which is that place's and not held (the interface rewrite's lead's call), nor the Life Day
+   * setting, which chooses a season rather than holding the weather. Nothing while the Weather setting is off.
+   */
+  get held(): boolean {
+    const s = this.settings;
+    if (!s.weather) return false;
+    return s.weatherForce >= 0 || (FORCED_KINDS[s.weatherKind] ?? null) !== null || this.forced !== null || this.timeScale !== 1 || this.offsetSeconds !== 0;
+  }
+
   private updateHeldNote(): void {
     const parts: string[] = [];
     const s = this.settings;
@@ -950,6 +986,7 @@ export class Weather {
       sky?.setOvercast(0);
       this.wantCount = 0;
       this.kind = 'clear';
+      clearFalls(this.falls);
       this.copyState(false);
       this.cpu.update += (performance.now() - t0 - this.cpu.update) / 60;
       return;
@@ -1168,6 +1205,7 @@ export class Weather {
     this.rain = this.snow = this.dust = 0;
     this.wantCount = 0;
     this.kind = 'clear';
+    clearFalls(this.falls);
     const sky = this.sky;
     if (!active || !sky) return;
     const forced = this.forcedKind();
@@ -1204,6 +1242,8 @@ export class Weather {
     if (c.kind === 'rain') this.rain += s;
     else if (c.kind === 'snow') this.snow += s;
     else if (c.kind === 'dust') this.dust += s;
+    this.falls.weight = w;
+    addFall(this.falls, c);
     if (w > this.heaviest) {
       this.heaviest = w;
       this.kind = c.kind;
@@ -1493,6 +1533,9 @@ export class Weather {
     s.nextChangeSeconds = this.sched.nextChangeSeconds;
     s.forced = this.forced;
     s.kind = this.kind;
+    // What the display's word reads: the heaviest kind's share, its strength (the heavier on a tie, the midpoint of a
+    // crossfade), rain's and lightning's (`readFalls`, written straight into the state).
+    readFalls(this.falls, this.kind, s);
     s.rain = this.rain;
     s.snow = this.snow;
     s.dust = this.dust;

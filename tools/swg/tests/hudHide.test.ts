@@ -363,9 +363,12 @@ standClock(true);
   const parent = new El();
   const hud = new Hud(parent as Any);
   const root = parent.kids[0] as El;
-  // The stand-in reads no markup, so it plays the markup's part: the breath row starts `hidden`, the stamina row `off gone`.
-  root.querySelector('.breath-row').hidden = true;
-  root.querySelector('.stamina-row').classList.add('off', 'gone');
+  // The stand-in reads no markup, so it plays the markup's part: the breath bar starts `off`, the stamina bar `off gone`,
+  // and the three readouts `gone` until their switches say otherwise; here all three are switched on.
+  root.querySelector('.hud-bar.breath').classList.add('off');
+  root.querySelector('.hud-bar.stamina').classList.add('off', 'gone');
+  for (const sel of ['.hud-fps', '.hud-weather', '.hud-clock']) root.querySelector(sel).classList.add('gone');
+  hud.setReadouts(true, true, true);
   const kit = testKit();
   hud.setKit(kit);
   let hp = 80;
@@ -390,33 +393,35 @@ standClock(true);
   hp = 35;
   kit.resource.value = 100;
   const fill = root.querySelector('.hud-bar.hp > .fill');
-  const hpText = root.querySelector('.hp-val');
-  const fps = root.querySelector('.fps');
+  const hpBar = root.querySelector('.hud-bar.hp');
+  const fps = root.querySelector('.hud-fps');
   const loc = root.querySelector('.loc');
-  const clockEl = root.querySelector('.clock');
+  const clockEl = root.querySelector('.hud-clock');
   const slot0 = root.querySelector('.hud-bar.pool > .fill');
-  const before = { hp: hpText.n, fps: fps.n, loc: loc.n, clock: clockEl.n, fill: fill.n };
+  const before = { fps: fps.n, loc: loc.n, clock: clockEl.n, fill: fill.n };
   hud.refresh();
   const back = writes(() => frame());
-  ok(back > 6 && fill.style.transform === 'scaleX(0.35)' && hpText.textContent === 'Health 35', `shown again, the first frame writes the bar that moved while hidden where it is (${fill.style.transform}, ${hpText.textContent}; ${back} writes)`);
-  ok(root.querySelector('.res-val').textContent === 'Force 100' && slot0.style.transform === 'scaleX(1)', 'and the pool that filled while hidden');
-  ok(fps.n > before.fps && loc.n > before.loc && clockEl.n > before.clock && /^\d+ fps$/.test(fps.textContent) && fps.textContent !== '0 fps', `the quarter-second lines on that very frame, the frame rate a real one (${fps.textContent}, ${loc.textContent})`);
+  ok(back > 4 && fill.style.transform === 'scaleX(0.35)' && hpBar.classList.contains('low'), `shown again, the first frame writes the bar that moved while hidden where it is, in the dark red below 40% (${fill.style.transform}; ${back} writes)`);
+  ok(slot0.style.transform === 'scaleX(1)', 'and the pool that filled while hidden');
+  ok(fps.n > before.fps && loc.n > before.loc && clockEl.n > before.clock && /^\d+ fps$/.test(fps.textContent) && fps.textContent !== '0 fps' && clockEl.textContent === '12:00', `the quarter-second lines and the clock on that very frame, the frame rate a real one (${fps.textContent}, ${loc.textContent}, ${clockEl.textContent})`);
   for (let i = 0; i < 130; i++) frame();
   ok(hud.stats().writes === 0, `and then it is steady again: a whole second of nothing but the lines that are meant to be written (no ghost walking down after a blow it never showed: ${hud.stats().writes})`);
   // An unchanged value written afresh after a refresh: the record was let go, not only the moved ones.
   for (let i = 0; i < 120; i++) frame();
-  const hpN = hpText.n;
+  const clockN = clockEl.n;
+  // The stand-in's style keeps no count of its own: its value is blanked by hand, so a frame that writes it again shows.
+  (fill.style as Any).transform = '';
   hud.refresh();
   frame();
-  ok(hpText.n === hpN + 1 && hpText.textContent === 'Health 35', `with nothing moved, a refresh still has the next frame write every value afresh (the health line once more: ${hpText.n - hpN})`);
-  const hpAfter = hpText.n;
+  ok(fill.style.transform === 'scaleX(0.35)' && clockEl.n === clockN + 1, `with nothing moved, a refresh still has the next frame write every value afresh (the health bar ${fill.style.transform}, the clock once more: ${clockEl.n - clockN})`);
+  (fill.style as Any).transform = '';
   for (let i = 0; i < 10; i++) frame();
-  ok(hpText.n === hpAfter, 'and the frames after write it no more, as before');
-  // Two-state records whose truth changed while hidden: the breath row comes up (gone under water) and the pool goes
+  ok(fill.style.transform === '' && clockEl.n === clockN + 1, 'and the frames after write them no more, as before');
+  // Two-state records whose truth changed while hidden: the breath bar comes up (gone under water) and the pool goes
   // (another kit) while nothing is written; shown again, both are written as they now stand.
-  const breathRow = root.querySelector('.breath-row');
-  const resRow = root.querySelector('.res-row');
-  ok(breathRow.hidden && !resRow.hidden, 'on dry land with a pool: no breath row, a pool row');
+  const breathBar = root.querySelector('.hud-bar.breath');
+  const resBar = root.querySelector('.hud-bar.pool');
+  ok(breathBar.classList.contains('off') && !resBar.classList.contains('gone'), 'on dry land with a pool: no breath bar, a pool bar');
   for (let i = 0; i < 70; i++) {
     clock.now += 16;
     hud.rest();
@@ -425,7 +430,21 @@ standClock(true);
   hud.refresh();
   clock.now += 16;
   hud.update(0.016, 1234, 5, -77, kitless, hp, 100, '12:00', '', false, { label: 'Breath', value: 20, max: 30 });
-  ok(!breathRow.hidden && resRow.hidden && root.querySelector('.breath-val').textContent === 'Breath 20', `under water and with no pool by the time it is shown again: the breath row up and the pool's row down on that frame (${root.querySelector('.breath-val').textContent})`);
+  ok(!breathBar.classList.contains('off') && resBar.classList.contains('gone') && hud.report().breath === 'Breath 67%', `under water and with no pool by the time it is shown again: the breath bar up and the pool's bar out on that frame (${hud.report().breath})`);
+  // The weather's line, its held words and its switch, each turned while hidden.
+  const weatherEl = root.querySelector('.hud-weather');
+  hud.setWeather('Clear', false);
+  ok(!weatherEl.classList.contains('gone') && !weatherEl.classList.contains('held') && root.querySelector('.hud-weather .word').textContent === 'Clear', 'the weather says its word');
+  for (let i = 0; i < 70; i++) {
+    clock.now += 16;
+    hud.rest();
+  }
+  hud.refresh();
+  hud.setWeather('Downpour', true);
+  ok(root.querySelector('.hud-weather .word').textContent === 'Downpour' && weatherEl.classList.contains('held'), 'and a word and a hold that changed while hidden are written on the first frame back');
+  hud.refresh();
+  hud.setWeather('', false);
+  ok(weatherEl.classList.contains('gone') && !weatherEl.classList.contains('held'), 'and so is going where there is no weather (space, a dungeon), the held words with it');
   ok(HUD_HIDDEN_CLASS === 'ui-hidden', "the class `#ui` wears while hidden is not `hidden`, whose page rule is `display: none !important`");
 }
 {
@@ -436,16 +455,16 @@ standClock(true);
   const parent = new El();
   const hud = new Hud(parent as Any);
   const root = parent.kids[0] as El;
-  // The stand-in reads no markup: the rows the markup starts down are put down by hand.
-  root.querySelector('.breath-row').hidden = true;
-  root.querySelector('.stamina-row').classList.add('off', 'gone');
+  // The stand-in reads no markup: the bars the markup starts down are put down by hand.
+  root.querySelector('.hud-bar.breath').classList.add('off');
+  root.querySelector('.hud-bar.stamina').classList.add('off', 'gone');
   root.querySelector('.charge').hidden = true;
   const kit = testKit();
   kit.cd = 0.5;
   let charge = 0;
   kit.charge = () => charge;
   hud.setKit(kit);
-  const hands: Any = { equipped: { right: null, left: null }, icon: () => null };
+  const hands: Any = { equipped: { right: null, left: null } };
   hud.setHandSource(hands);
   const pool = { value: 40, tired: false };
   const st = { show: false, on: false };
@@ -456,21 +475,24 @@ standClock(true);
     hud.update(0.016, 0, 0, 0, kit, 80, 100, '12:00', '', saberOn);
   };
   for (let i = 0; i < 80; i++) frame();
-  const staminaRow = root.querySelector('.stamina-row');
-  const staminaBar = root.querySelector('.hud-bar.stamina');
+  // The stamina bar is its own row now (the interface rewrite): `gone` and `off` are its own classes.
+  const staminaRow = root.querySelector('.hud-bar.stamina');
+  const staminaBar = staminaRow;
   const cells = root.querySelector('.slots').kids;
   const chargeEl = root.querySelector('.charge');
-  const rightHand = root.querySelector('.hud-hand.right');
+  // The weapon mark (item 6), in place of the two hand cells: the Jedi's stand-in saber alone, its blade in.
+  const mark = root.querySelector('.hud-mark');
+  const markB = root.querySelector('.hud-mark .mk-b');
   ok(
-    staminaRow.classList.contains('gone') && staminaRow.classList.contains('off') && !cells[0].classList.contains('ready') && !cells[1].classList.contains('active') && !cells[2].classList.contains('active') && chargeEl.hidden && rightHand.hidden,
-    'shown and steady: no stamina row, the first slot cooling, the second not lit, the blade off, no charge, nothing in the hands',
+    staminaRow.classList.contains('gone') && staminaRow.classList.contains('off') && !cells[0].classList.contains('ready') && !cells[1].classList.contains('active') && !cells[2].classList.contains('active') && chargeEl.hidden && !mark.classList.contains('pair') && !mark.classList.contains('lit') && hud.report().mark === 'saber 22.5° in',
+    'shown and steady: no stamina row, the first slot cooling, the second not lit, the blade off, no charge, the mark one saber with its blade in',
   );
   for (let i = 0; i < 70; i++) {
     clock.now += 16;
     hud.rest();
   }
   // While hidden: the speed classes come into force with the pool up and tired, the second ability is lit, the first one's
-  // cooldown runs out, the blade is lit, a shot is charging and the right hand takes a blaster.
+  // cooldown runs out, the blade is lit, a shot is charging and the left hand takes a knife (a pair on the mark).
   st.on = true;
   st.show = true;
   pool.tired = true;
@@ -478,7 +500,7 @@ standClock(true);
   kit.cd = 0;
   saberOn = true;
   charge = 0.5;
-  hands.equipped.right = { name: 'A test blaster', id: 'test_blaster', class: 'carbine' };
+  hands.equipped.left = { name: 'A test knife', id: 'test_knife', class: 'knife' };
   hud.refresh();
   frame();
   const turned: [string, boolean][] = [
@@ -489,10 +511,11 @@ standClock(true);
     ['the first slot ready', cells[0].classList.contains('ready')],
     ["the blade's cell lit", cells[2].classList.contains('active') && cells[2].querySelector('.cost').textContent === 'on'],
     ['the charge bar up', !chargeEl.hidden],
-    ['the right hand shown with what it holds', !rightHand.hidden && root.querySelector('.hud-hand.right .name').textContent === 'A test blaster'],
+    ['the mark a pair with the knife in it', mark.classList.contains('pair') && markB.innerHTML.includes('#ic-mark-knife')],
+    ["the mark's blade out", mark.classList.contains('lit')],
   ];
   const missed = turned.filter(([, right]) => !right).map(([what]) => what);
-  ok(missed.length === 0, `shown again, the first frame writes every two-state record that turned while hidden (${missed.join(', ') || 'all eight'})`);
+  ok(missed.length === 0, `shown again, the first frame writes every two-state record that turned while hidden (${missed.join(', ') || 'all nine'})`);
   // And back the other way, hidden a second time: each turned off again while hidden is written off on the first frame.
   for (let i = 0; i < 70; i++) {
     clock.now += 16;
@@ -505,7 +528,7 @@ standClock(true);
   kit.cd = 0.5;
   saberOn = false;
   charge = 0;
-  hands.equipped.right = null;
+  hands.equipped.left = null;
   hud.refresh();
   frame();
   const back: [string, boolean][] = [
@@ -515,10 +538,11 @@ standClock(true);
     ['the first slot cooling', !cells[0].classList.contains('ready')],
     ["the blade's cell off", !cells[2].classList.contains('active') && cells[2].querySelector('.cost').textContent === 'off'],
     ['the charge bar down', chargeEl.hidden],
-    ['the right hand empty', rightHand.hidden],
+    ['the mark one saber again', !mark.classList.contains('pair') && markB.innerHTML === ''],
+    ["the mark's blade in", !mark.classList.contains('lit')],
   ];
   const missedBack = back.filter(([, right]) => !right).map(([what]) => what);
-  ok(missedBack.length === 0, `and turned back while hidden a second time, each is written back on the first frame (${missedBack.join(', ') || 'all seven'})`);
+  ok(missedBack.length === 0, `and turned back while hidden a second time, each is written back on the first frame (${missedBack.join(', ') || 'all eight'})`);
 }
 {
   // The roster down the side.
@@ -795,7 +819,7 @@ standClock(false);
     'if (!hudOff) this.stepMinimap();',
     'if (!hudOff) this.courseLabels?.frame(this.cam.camera);',
     'if (simulate && !hudOff && this.settings.hudNameplate && !this.editor?.on) {',
-    'if (!this.hudHidden) this.hud.setWeatherNote(this.heldNote());',
+    'if (!this.hudHidden) this.hud.setWeather(this.weatherWordNow(), this.world.weather.held);',
     'if (!simulate || this.hudHidden || !o.begin()) {',
     "const show = S.hudTracker && this.inWorld && !this.dying && !this.hudHidden && (!flying || S.hudTrackerInFlight);",
   ];

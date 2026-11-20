@@ -426,126 +426,237 @@
 /* The sheet itself is a store and never a thing on screen. */
 #hud-icons { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 
-/* --- the body block: the bars, the number row, the hands ------------------------------------------
- * The block keeps its place at the bottom middle (`.bottom` in `src/style.css`) and stands down while
- * the player is at a ship's controls, where the ship's own condition takes its place. */
-.hud-body {
+/* --- the body block: the weapon mark, the bars, the action bar ---------------------------------------
+ * The interface rewrite's first wave. The block stands at the bottom middle (`.bottom` in `src/style.css`), or at
+ * the bottom left or right (`align-left`, `align-right`, the Interface page's switch), and stands down while the
+ * player is at a ship's controls, where the ship's own condition takes its place. Its top part (`.hud-top`) is the
+ * weapon mark's box and the bars' box: the mark over the bars in the middle, and at either side the mark at the
+ * screen's edge with the bars beside it, running toward the middle (the right a mirror of the left). The action bar
+ * (`.hud-kit`) is under both, always the lowest thing. The block's side margin, the mark's box and its gap are
+ * `HUD_SIZES` numbers the display writes as properties (`LOOK_VARS` in hud.ts); the fallbacks are the start values. */
+#hud .bottom.align-left {
+  left: calc(var(--hud-block-side, 14) * 1px * var(--hud-scale));
+  transform: none;
+  align-items: flex-start;
+}
+#hud .bottom.align-right {
+  left: auto;
+  right: calc(var(--hud-block-side, 14) * 1px * var(--hud-scale));
+  transform: none;
+  align-items: flex-end;
+}
+.hud-top {
   display: flex;
   flex-direction: column;
-  gap: calc(4px * var(--hud-scale));
-}
-.hud-brow {
-  display: flex;
   align-items: center;
-  gap: calc(8px * var(--hud-scale));
-  font-family: var(--hud-font);
-  font-stretch: var(--hud-stretch);
-  font-variant-numeric: tabular-nums;
-  font-size: calc(11px * var(--hud-scale));
-  letter-spacing: 0.06em;
-  white-space: nowrap;
+  gap: calc(var(--hud-mark-gap, 6) * 1px * var(--hud-scale));
 }
-.hud-brow[hidden] { display: none; }
-.hud-brow .val {
+.bottom.align-left .hud-top { flex-direction: row; }
+.bottom.align-right .hud-top { flex-direction: row-reverse; }
+/* --- the weapon mark (item 6; `weaponMark.ts`, `Hud.readMark`) ---------------------------------------------------------
+ * Our own mark for what the hands hold, in the block's mark box at every alignment: the palette's ink, slightly
+ * see-through (`markAlpha`), no name. One inline drawing on the sheet's 24 box with two slots: `mk-a` (the right hand's,
+ * or the only one) and `mk-b` (the left hand's in a pair). Nothing here moves per frame: a slot's markup is written when
+ * what it shows changes, a lightsaber turns to its stance's tilt from one property on its slot (`--mk-tilt`, easing over
+ * `markTurnSeconds`), and its blade draws in and out from one class on the mark (`lit`), at the blade's own timing in
+ * each hand (`--mk-open`/`--mk-close`, the left's `--mk-open2`/`--mk-close2`, seconds, written when the hands change).
+ * Inside the drawing a px is one unit of the 24 box. */
+.hud-mark {
   flex: none;
-  width: calc(76px * var(--hud-scale));
-  color: var(--muted);
-  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  width: calc(var(--hud-mark, 40) * 1px * var(--hud-scale));
+  height: calc(var(--hud-mark, 40) * 1px * var(--hud-scale));
+  color: var(--ink);
+  opacity: var(--hud-mark-alpha, 0.75);
 }
-.hud-brow .hud-bar.hp {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(10px * var(--hud-scale));
+.hud-mark > .mk {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
-.hud-brow .hud-bar.pool {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(6px * var(--hud-scale));
+/* A lightsaber stands at its stance's tilt about the middle of the box (clockwise from upright). */
+.hud-mark .tilt {
+  transform-origin: 12px 12px;
+  transform: rotate(calc(var(--mk-tilt, 0) * 1deg));
+  transition: transform var(--hud-mark-turn, 0.15s) ease-out;
 }
-/* Breath, the row that is only there while you are under water. Its width is the other two bars' so
-   the three line up; its height is between theirs (`breathBarW`, `breathBarH`, which the display's own
-   test checks against this file). It is given no fill colour of its own on purpose: a bar with no band
-   wears `.hud-bar > .fill`, which is the interface's accent, and that is the one colour on the block
-   that is neither the health ramp nor the class pool's. The display puts `warn` and `bad` on it as it
-   empties, and `.hud-bar.warn > .fill` names one class more than the default does, so it wins on its
-   own without this file having to say anything about breath's colour at all. */
-.hud-brow .hud-bar.breath {
+/* Two sabers crossed: the right hand's leaning left with its hilt at the lower right, the left hand's the other way. */
+.hud-mark .x1,
+.hud-mark .x2 { transform-origin: 12px 12px; }
+.hud-mark .x1 { transform: rotate(calc(var(--mk-tilt, 45) * -1deg)); }
+.hud-mark .x2 { transform: rotate(calc(var(--mk-tilt, 45) * 1deg)); }
+/* The blade draws in toward its emitter (just over the collar, `ic-mark-blade`; the double-bladed saber's toward its
+   own end of the hilt) and out again: squeezed along its own length to nothing while the real blade is in, whole while it
+   is lit. Going out takes the blade's opening time and going in its closing time, linear, as the blade itself runs. */
+.hud-mark .blade {
+  transform-origin: 12px 13.25px;
+  transform: scaleY(0);
+  transition: transform calc(var(--mk-close, 0.32) * 1s) linear;
+}
+.hud-mark .blade.staff { transform-origin: 12px 7.75px; }
+.hud-mark .blade.b2 { transition-duration: calc(var(--mk-close2, 0.32) * 1s); }
+.hud-mark.lit .blade {
+  transform: none;
+  transition-duration: calc(var(--mk-open, 0.32) * 1s);
+}
+.hud-mark.lit .blade.b2 { transition-duration: calc(var(--mk-open2, 0.32) * 1s); }
+/* A pair: each mark at `markPairScale` of the box, its middle `markPairAt` along the diagonal from the top left (the
+   right hand's) and from the bottom right (the left hand's), and between them a muted slanted line. */
+.hud-mark .mk-b,
+.hud-mark .mk-split { display: none; }
+.hud-mark.pair .mk-b,
+.hud-mark.pair .mk-split { display: inline; }
+.hud-mark.pair .mk-a {
+  transform: translate(calc(var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px), calc(var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px)) scale(var(--hud-mark-pair, 0.333));
+}
+.hud-mark.pair .mk-b {
+  transform: translate(calc(24px - var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px), calc(24px - var(--hud-mark-pair-at, 0.3) * 24px - var(--hud-mark-pair, 0.333) * 12px)) scale(var(--hud-mark-pair, 0.333));
+}
+/* The line: a unit stroke across the middle of the box, stretched to `markSplitLength` and turned to `markSplitAngle`
+   from level (rising to the right), square-ended so the stretch leaves its ends as they are. */
+.hud-mark .mk-split {
+  stroke: var(--muted);
+  stroke-width: calc(var(--hud-mark-split-w, 1.2) * 1px);
+  stroke-linecap: butt;
+  transform-origin: 12px 12px;
+  transform: rotate(calc(var(--hud-mark-split-angle, 45) * -1deg)) scaleX(var(--hud-mark-split, 11));
+}
+/* The bars' box, the size `barLayout` works out (the display writes it, at scale 1): the bars stand in it at the places
+   it gives, so none of them moves when another comes or goes, and the mark and the action bar lay out round it. */
+.hud-bars {
+  position: relative;
   flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(8px * var(--hud-scale));
+  width: calc(var(--hud-bars-w, 160) * 1px * var(--hud-scale));
+  height: calc(var(--hud-bars-h, 13) * 1px * var(--hud-scale));
+}
+/* Each bar at its box (`--bx`, `--by`, `--bw`, `--bh`, at scale 1), rounded at an end where `--rl`/`--rr` say 1 and
+   flat where 0: away from the screen's edge and flat at it, in the middle at both. Drawn in the markup's order, each
+   over the one before: health, Force, stamina, breath. No words and no numbers: the bar is the reading.
+   Each bar is a layer of its own (`isolation`): the shared bar's fill, ghost and quarter marks carry z-indices (2, 1, 3)
+   that, with no layer round them, paint every bar's fill over every bar's background, so health's fill and marks
+   covered the inside look's Force (a clip-path makes a layer of its own) and showed through the laid-over Force's empty
+   half. Health's ripple is its own shadow and still spreads outside it. */
+.hud-bars > .hud-bar {
+  isolation: isolate;
+  position: absolute;
+  left: calc(var(--bx, 0) * 1px * var(--hud-scale));
+  top: calc(var(--by, 0) * 1px * var(--hud-scale));
+  width: calc(var(--bw, 160) * 1px * var(--hud-scale));
+  height: calc(var(--bh, 6) * 1px * var(--hud-scale));
+  border-radius:
+    calc(var(--rl, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rr, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rr, 1) * var(--bh, 6) * 0.5px * var(--hud-scale))
+    calc(var(--rl, 1) * var(--bh, 6) * 0.5px * var(--hud-scale));
+  /* Coming and going is a fade (`barFadeSeconds`); nothing about a bar's place moves. */
+  transition: border-color 0.12s linear, opacity var(--hud-bar-fade, 0.2s) linear;
+}
+/* Going away when full (health and Force, `fullLinger`), stamina and breath down: unseen, its place kept. */
+.hud-bars > .hud-bar.off { opacity: 0; }
+/* Not in the block at all: Force with a kit that has none, stamina with the speed classes off. */
+.hud-bars > .hud-bar.gone { display: none; }
+/* The inside look: the half of the pill outside the health bar is not drawn, so its round ends seem to curve on over
+   the edge. Only a bar that wears one of these is clipped, since a clip would also cut health's ripple. */
+.hud-bars > .hud-bar.clip-top { clip-path: inset(50% 0 0 0); }
+.hud-bars > .hud-bar.clip-bottom { clip-path: inset(0 0 50% 0); }
+/* At the right the bars run from the screen's edge toward the middle, so they fill from the right: the mirror. */
+.bottom.align-right .hud-bars .hud-bar > .fill,
+.bottom.align-right .hud-bars .hud-bar > .ghost { transform-origin: right center; }
+.bottom.align-right .hud-bars .hud-bar.pool > .fill { background: linear-gradient(270deg, var(--pool), var(--accent)); }
+/* Health (the owner's): the palette's muted down to `hpLow`, the dark red at it and below, eased over `hpEaseSeconds`. */
+.hud-bars .hud-bar.hp > .fill {
+  background: var(--muted);
+  transition: background-color var(--hud-hp-ease, 0.25s) ease;
+}
+.hud-bars .hud-bar.hp.low > .fill { background: var(--health); }
+/* Under `hpRipple`: a ripple of the bright red spreads `ripplePx` out from the bar and fades, once every
+   `rippleSeconds`. The bar's own shadow, so its own clipping of its fill does not cut it. */
+.hud-bars .hud-bar.hp.ripple { animation: hud-ripple var(--hud-ripple, 1s) ease-out infinite; }
+/* It starts at `rippleStrength` of the bright red against the bar's edge and fades to nothing as it spreads. */
+@keyframes hud-ripple {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) calc(var(--hud-ripple-alpha, 0.75) * 100%), transparent); }
+  to { box-shadow: 0 0 0 calc(var(--hud-ripple-px, 6) * 1px * var(--hud-scale)) color-mix(in srgb, var(--bad) 0%, transparent); }
+}
+/* Breath wears the bar's own default fill, the accent's bright blue; under `breathFlashBelow` it flashes white (ink,
+   never pure white), slowly in and out, `breathFlashSeconds` each way. Stamina wears `good`, and `warn` while tired. */
+.hud-bars .hud-bar.breath.low > .fill { animation: hud-breath-flash var(--hud-breath-flash, 1s) ease-in-out infinite alternate; }
+@keyframes hud-breath-flash {
+  from { background-color: var(--accent); }
+  to { background-color: var(--ink); }
 }
 
-/* Stamina, the third bar, under health and the class pool (the speed classes). Its width is the other bars' so they
-   line up, and it is the thinnest of them (`staminaBarW`, `staminaBarH`). It wears the `good` band at rest and the
-   display puts `warn` on it while the body is tired, both from the palette, so this file names no colour for it.
-   While the speed classes are in force the row keeps its place when it is down (`off` hides it and never takes it out
-   of the block): a row that came and went under the two bars above would move both each time a sprint began. With
-   the classes off it is not in the block at all (`gone`), and the bars stand where they stood before the classes.
-   The row is held shorter than its number's line (`staminaRowH`), which overhangs into the gaps either side of it, so
-   that with the breath row up as well the block still clears the action bar at the smallest scale. */
-.hud-brow.stamina-row {
-  height: calc(8px * var(--hud-scale));
-}
-.hud-brow .hud-bar.stamina {
-  flex: none;
-  width: calc(160px * var(--hud-scale));
-  height: calc(4px * var(--hud-scale));
-}
-.hud-brow.off { visibility: hidden; }
-.hud-brow.gone { display: none; }
-
-/* The number row and the hands, side by side under the bars. */
+/* The action bar, under the mark and the bars, always the lowest thing; at the right, mirrored. (The two hand cells, a
+   picture and a name each, stood beside it until the weapon mark took their place.) */
 .hud-kit {
   display: flex;
   align-items: flex-end;
   gap: calc(14px * var(--hud-scale));
 }
-.hud-hands {
-  display: flex;
-  gap: calc(6px * var(--hud-scale));
+.bottom.align-right .hud-kit { flex-direction: row-reverse; }
+
+/* --- the corner's readouts: the frame rate, the weather's word, the clock ---------------------------------------------
+ * Each a switch on the Interface page (`gone` while off). The frame rate alone at the top right, no box, a small drop
+ * shadow. The weather's line is the top-left block's first child after the minimap's wrap: under the circle while the
+ * minimap shows, and in its place when it does not; a word or two, small, with a muted "· held" while the weather is
+ * held or forced. The clock just above the coordinates, the same size of type, muted: over the minimap's while it
+ * shows (placed over the circle's foot, a line above the coordinates: 168 - 8 - 13.2 - 13.2 = 133.6 at scale 1), and
+ * between the world's name and `/loc` while it does not. The frame rate's type and shadow and the weather's type are
+ * `HUD_SIZES` numbers (`fpsSize`, `fpsShadowY`, `fpsShadowBlur`, `weatherSize`), written as properties like the bars'
+ * looks; the weather's line keeps its own 13 whatever its type, so the block's sum never moves. */
+.hud-fps {
+  position: absolute;
+  top: 12px;
+  right: 12px;
   font-family: var(--hud-font);
   font-stretch: var(--hud-stretch);
-  font-size: calc(11px * var(--hud-scale));
-}
-.hud-hand {
-  display: flex;
-  align-items: center;
-  gap: calc(5px * var(--hud-scale));
-  box-sizing: border-box;
-  height: calc(40px * var(--hud-scale));
-  max-width: calc(150px * var(--hud-scale));
-  padding: 0 calc(7px * var(--hud-scale));
-  background: var(--plate);
-  border: 1px solid var(--edge);
-  border-radius: calc(3px * var(--hud-scale));
+  font-variant-numeric: tabular-nums;
+  font-size: calc(var(--hud-fps-size, 12) * 1px * var(--hud-scale));
+  letter-spacing: 0.04em;
   color: var(--ink);
-}
-.hud-hand[hidden] { display: none; }
-.hud-hand .pic {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(22px * var(--hud-scale));
-  height: calc(22px * var(--hud-scale));
-  color: var(--accent);
-  font-size: calc(22px * var(--hud-scale));
-}
-.hud-hand .pic img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  image-rendering: auto;
-}
-.hud-hand .name {
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
+  text-shadow: 0 calc(var(--hud-fps-shadow-y, 1) * 1px) calc(var(--hud-fps-shadow-blur, 2) * 1px) var(--shade);
+}
+.hud-fps.gone,
+.hud-weather.gone,
+.hud-clock.gone { display: none; }
+.hud-weather {
+  height: calc(13px * var(--hud-scale));
+  line-height: calc(13px * var(--hud-scale));
+  white-space: nowrap;
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(var(--hud-weather-size, 10) * 1px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  color: var(--ink);
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
 }
-/* The left hand is the quieter of the two: what is in the main hand is what is being used. */
-.hud-hand.left { color: var(--muted); }
-.hud-hand.left .pic { color: var(--muted); }
+#hud.minimap-on .hud-weather { text-align: center; }
+.hud-weather .held { color: var(--muted); }
+.hud-weather:not(.held) .held { display: none; }
+.hud-clock {
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+#hud.minimap-on .hud-clock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(133.6px * var(--hud-scale));
+  text-align: center;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+}
+
+/* The message line, at the bottom right while the block stands at the bottom left (the block takes its corner). */
+.hud-msgs.right {
+  left: auto;
+  right: calc(14px * var(--hud-scale));
+  align-items: flex-end;
+}
 
 /* --- the look-at nameplate ------------------------------------------------------------------------
  * Pooled eight, moved by `translate3d` only, on nothing but its own shadow. */
@@ -742,10 +853,12 @@
 }
 /* With the minimap up the top-left block is its top (12, `.top-left` in style.css) and everything it then
  * holds, all of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the city name's margin (3) and
- * line (16.9), the wrap's own margin (6), and the nearby line's padding (3) and line (14.5), 211.4 rounded
- * up to 212. The block's own name and `/loc` lines are hidden then and take no room. The world editor's
- * window docks under that sum (`#hud.minimap-on ~ .ed-panel` in `editorWindow.ts`), and `hudMath.test.ts`
- * adds it up again from both stylesheets. (The help block stood by it until the hide key took its key.) */
+ * line (16.9), the wrap's own margin (6), the weather's line (13, `.hud-weather`, the interface rewrite's
+ * first wave), and the nearby line's padding (3) and line (14.5), 224.4 rounded up to 225. The block's own
+ * name and `/loc` lines are hidden then and take no room, and the clock stands over the circle's foot and
+ * takes none either. The world editor's window docks under that sum (`#hud.minimap-on ~ .ed-panel` in
+ * `editorWindow.ts`), and `hudMath.test.ts` adds it up again from both stylesheets. (The help block stood
+ * by it until the hide key took its key.) */
 
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {

@@ -72,10 +72,8 @@ b { color: var(--accent); font-weight: 600; }
 /* The top-left block wears no plate (`#hud .top-left` in hud.css takes the panel's off it): its lines
    stand bare over the world on a halo of the palette's darkest, as the city's name always has. */
 .top-left { top: 12px; left: 12px; min-width: 170px; }
-.top-right { top: 12px; right: 12px; text-align: right; }
 .planet-name { font-size: 16px; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
 .loc { margin-top: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
-.fps { font-family: ui-monospace, Menlo, monospace; }
 .hint { color: var(--muted); }
 
 .bottom { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }

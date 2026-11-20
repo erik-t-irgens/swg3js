@@ -51,6 +51,13 @@ const HUD_KEYS = [
   // The jobs followed, on foot and in flight.
   ['hudTracker', 'boolean'],
   ['hudTrackerInFlight', 'boolean'],
+  // The interface rewrite's first wave: the corner's three readouts, and where the block stands and how Force meets health.
+  ['hudFps', 'boolean'],
+  ['hudWeather', 'boolean'],
+  ['hudClock', 'boolean'],
+  ['hudBlockAlign', 'string'],
+  ['hudForceLook', 'string'],
+  ['hudForceEdge', 'string'],
 ] as const;
 
 // -------------------------------------------------------------------------------------------

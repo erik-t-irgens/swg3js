@@ -356,6 +356,115 @@ export function effectFor(
   return o;
 }
 
+// ---- what falls, as the display's word reads it (the interface rewrite's first wave) ----------------------------------
+
+/** How many kinds of fall `kindSlot` tells apart, and the two the display's word asks for by name. */
+export const KIND_SLOTS = 8;
+export const RAIN_SLOT = 0;
+export const LIGHTNING_SLOT = 5;
+/**
+ * The converter's strengths, read off an effect's file name (`cameraEffectStrength` in `tools/swg/sky.mjs`): very light,
+ * light, a plain name, heavy. A fall's strength for the display's word is the one of these carrying the most of the mix,
+ * so a crossfade between two rows names the second once it has half the mix, whichever two they are.
+ */
+export const FALL_STRENGTHS = [0.35, 0.6, 0.7, 1] as const;
+
+/** A kind of fall's place in the kept per-kind arrays. A switch, so asking makes nothing. */
+export function kindSlot(kind: WeatherKind): number {
+  switch (kind) {
+    case 'rain':
+      return RAIN_SLOT;
+    case 'snow':
+      return 1;
+    case 'dust':
+      return 2;
+    case 'fog':
+      return 3;
+    case 'leaves':
+      return 4;
+    case 'lightning':
+      return LIGHTNING_SLOT;
+    case 'smoke':
+      return 6;
+    default:
+      return 7;
+  }
+}
+
+/** The nearest of `FALL_STRENGTHS` to a strength, as its index: the midpoints between them are the cuts. */
+export function strengthSlot(s: number): number {
+  return s < 0.475 ? 0 : s < 0.65 ? 1 : s < 0.85 ? 2 : 3;
+}
+
+/**
+ * What the mix falls, kind by kind, kept by the weather and emptied at each collect: `share` is each kind's share of
+ * the mix (`KIND_SLOTS` long) and `at` each kind's share at each of the converter's strengths (`kindSlot * 4 +
+ * strengthSlot`). `weight` is the share the next `addFall` carries: a field and never an argument, since a fraction
+ * handed to a call the compiler leaves out is a number made a frame (docs/lessons, "A frame allocates nothing"). It
+ * begins as a fraction, so the field is a double from its first write.
+ */
+export interface FallTally {
+  share: Float32Array;
+  at: Float32Array;
+  weight: number;
+}
+
+export function createFallTally(): FallTally {
+  return { share: new Float32Array(KIND_SLOTS), at: new Float32Array(KIND_SLOTS * FALL_STRENGTHS.length), weight: 0.5 };
+}
+
+/** Emptied, for the next collect. */
+export function clearFalls(t: FallTally): void {
+  t.share.fill(0);
+  t.at.fill(0);
+}
+
+/**
+ * One row's effect (its kind and its strength, as `effectFor` chose it), carrying `t.weight` of the mix. The strength's
+ * place is worked out here rather than through `strengthSlot`, so no fraction is handed to a call.
+ */
+export function addFall(t: FallTally, e: { readonly kind: WeatherKind; readonly strength: number }): void {
+  const slot = kindSlot(e.kind);
+  const w = t.weight;
+  const s = e.strength;
+  t.share[slot] += w;
+  t.at[slot * FALL_STRENGTHS.length + (s < 0.475 ? 0 : s < 0.65 ? 1 : s < 0.85 ? 2 : 3)] += w;
+}
+
+/** What the display's word reads of a tally (`WeatherState`'s four fields), written into the caller's own record. */
+export interface FallReading {
+  fallShare: number;
+  fallStrength: number;
+  rainShare: number;
+  lightningShare: number;
+}
+
+/**
+ * The heaviest kind's share of the mix, the strength carrying the most of it (the heavier on a tie, which is the
+ * midpoint of a crossfade between two rows), and rain's and lightning's own shares. `kind` is the weather's heaviest
+ * effect's kind, 'clear' with none. Allocates nothing.
+ */
+export function readFalls(t: FallTally, kind: WeatherKind | 'clear', out: FallReading): FallReading {
+  const slot = kind === 'clear' ? -1 : kindSlot(kind);
+  const n = FALL_STRENGTHS.length;
+  out.fallShare = slot < 0 ? 0 : t.share[slot];
+  let at = -1;
+  let most = 0;
+  if (slot >= 0) {
+    for (let k = n - 1; k >= 0; k--) {
+      const w = t.at[slot * n + k];
+      if (w > most) {
+        most = w;
+        at = k;
+      }
+    }
+  }
+  out.fallStrength = at < 0 ? 0 : FALL_STRENGTHS[at];
+  out.rainShare = t.share[RAIN_SLOT];
+  out.lightningShare = t.share[LIGHTNING_SLOT];
+  return out;
+}
+
 /**
  * The heaviest and the next heaviest of the first `n` weights, as indices into out[0] and out[1]
  * (-1 for none); a tie keeps the earlier. What the sky's dome and cloud sheets draw of the mix.

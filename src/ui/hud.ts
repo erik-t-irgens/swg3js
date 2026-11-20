@@ -2,8 +2,9 @@ import type { Kit } from '../combat/kit';
 // The game's own table of worlds, so a roster row names a planet and a zone the way the rest of the
 // game names them rather than inventing words from an id. It is plain data and imports nothing.
 import { PLANETS, type PlanetDef } from '../data/planets.ts';
-import { HUD_SIZES, barBand, breathRow, clamp01, distanceWords as metreWords, makeBreathRow } from './hudMath.ts';
-import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
+import { HUD_SIZES, barBand, barLayout, breathOf, clamp01, distanceWords as metreWords, makeBarLayout, makeBreathRow, noBreath, type BarBox, type BlockAlign, type ForceEdge, type ForceLook } from './hudMath.ts';
+import { glyphFor, iconCount, installIcons } from './hudIcons.ts';
+import { makeMarkIn, makeMarkOut, markSvg, markWords, weaponMark, type MarkKey } from './weaponMark.ts';
 
 /**
  * The class `#ui` wears while the hide key has the interface off the screen (`App.setHudHidden`). Not `hidden`: the
@@ -13,16 +14,10 @@ import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 export const HUD_HIDDEN_CLASS = 'ui-hidden';
 
 /**
- * The words in the corner strip, as actions rather than letters. The strip used to spell M, I, B and
- * H into its own markup, which went wrong the moment any of them was rebound. The fourth word, Help,
- * went with the help panel (the port's pass 1, where H became the hide key): what a key does is the
- * Controls page's to say, and what a number slot does is its cell's hover name.
+ * The muted words after the weather's own while the weather is held or forced (the old corner note's job, in two
+ * words). Written once into its own span; the line only puts it on or takes it off.
  */
-const HINT_ACTIONS: readonly { action: string; word: string }[] = [
-  { action: 'map', word: 'Map' },
-  { action: 'inventory', word: 'Inventory' },
-  { action: 'spawner', word: 'Spawner' },
-];
+const HELD_WORDS = ' · held';
 
 /**
  * How finely a value has to change before the display writes it to the DOM, and what a bar's fill is
@@ -81,7 +76,7 @@ const TUNE_KEYS = ['barPixels', 'breathPixels', 'cooldownSteps', 'chargeSteps', 
 export interface HudStats {
   /** DOM writes in the last full second that were not by design: 0 in a steady frame. */
   writes: number;
-  /** DOM writes in the last full second that are meant to happen: the 4 Hz clock, /loc and frame rate, and a rebuild of the slot row. */
+  /** DOM writes in the last full second that are meant to happen: the 4 Hz /loc and frame rate, the clock's minute, a rebuild of the slot row, a new placing of the bars. */
   byDesign: number;
   /** How far into the second now being counted. */
   seconds: number;
@@ -158,27 +153,35 @@ export interface HudBindings {
   readonly bindings: Record<string, string[]>;
 }
 
-/** What a hand is holding, as the rack keeps it (`WeaponDef`), declared structurally. */
+/** What a hand is holding, as the rack keeps it (`WeaponDef`), declared structurally: the mark reads its class. */
 export interface HandItem {
   readonly id?: string;
   readonly name?: string | null;
   readonly class?: string;
-  readonly icon?: string | null;
 }
 
-/** Where the hands read from: the live object the player keeps, and how an item becomes a picture. */
+/**
+ * Where the weapon mark reads from (`weaponMark.ts`), declared structurally: the player satisfies it as it stands. What
+ * each hand holds (read by identity, so nothing is worked out while nothing has changed), the bare-hands switch, the
+ * stand-in blaster's kind (`gunClass`), the saber's stance, and how long the blade in a hand takes to come out or go back
+ * (`bladeSeconds`, the blade's own timing; a source without it, or an answer that is not a number, is the default,
+ * `HUD_SIZES.markBladeSeconds`). The kit in play is the one `update` is handed.
+ */
 export interface HandSource {
   readonly equipped: { right: HandItem | null; left: HandItem | null };
-  icon(item: HandItem): string | null;
+  readonly fists?: boolean;
+  readonly gunClass?: string;
+  readonly saber?: { readonly style: string };
+  bladeSeconds?(hand: 'right' | 'left', closing: boolean): number;
 }
 
 /** Every live display, so a rebind in the Controls page reaches the cells at once. */
 const LIVE: Hud[] = [];
 
 /**
- * The bindings changed: every display puts the new keys on its cells and in its corner strip. Called by
- * whoever rebinds — one line in the Controls page. Nothing breaks without it: the cells notice a
- * changed binding at the four-times-a-second tick anyway, and this only makes it immediate.
+ * The bindings changed: every display puts the new keys on its cells. Called by whoever rebinds — one
+ * line in the Controls page. Nothing breaks without it: the cells notice a changed binding at the
+ * four-times-a-second tick anyway, and this only makes it immediate.
  */
 export function hudBindingsChanged(): void {
   for (const hud of LIVE) hud.refreshKeys(true);
@@ -198,27 +201,39 @@ interface SlotCell {
   coolDrawn: number;
 }
 
-/** What a hand cell holds after `refresh`: nothing the rack hands over is this, so the next read writes the hand afresh. */
+/** What the mark last read in a hand after `refresh` or a new source: nothing the rack hands over is this, so the next frame reads the hands afresh. */
 const NOT_READ: HandItem = {};
 
-/** One of the two hands. */
-interface HandCell {
-  root: HTMLElement;
-  pic: HTMLElement;
-  name: HTMLElement;
-  /** The item last shown, by identity, and the words and the picture written for it. */
-  item: HandItem | null;
-  label: string;
-  glyph: string;
+/**
+ * The weapon mark as last written, so a frame compares and writes nothing while nothing has changed: what each slot
+ * shows, each slot's tilt, whether it is a pair, whether the blade is out, and the four blade timings (`NaN` is
+ * "nothing written yet").
+ */
+interface MarkDrawn {
+  a: MarkKey | '\u0000';
+  b: MarkKey | '\u0000';
+  tiltA: number;
+  tiltB: number;
+  pair: boolean;
+  lit: boolean;
+  openR: number;
+  closeR: number;
+  openL: number;
+  closeL: number;
 }
 
 /**
- * One of the two on-foot bars. The ghost costs two writes a fall and nothing at all otherwise: while
- * it is not easing it carries `snap` — the stylesheet's "no transition" — and is written straight to
- * the fill's own value, where it sits behind the fill and is never seen; a fall takes `snap` off and
- * writes the new value, and the stylesheet walks it down from where the bar was over `ghostSeconds`.
+ * One of the two bars that carry a ghost, health and Force. The ghost costs two writes a fall and nothing at all
+ * otherwise: while it is not easing it carries `snap` — the stylesheet's "no transition" — and is written straight to
+ * the fill's own value, where it sits behind the fill and is never seen; a fall takes `snap` off and writes the new
+ * value, and the stylesheet walks it down from where the bar was over `ghostSeconds`.
+ *
+ * Each goes away `HUD_SIZES.fullLinger` seconds after it is full (the class `off`, a fade the stylesheet runs) and
+ * comes back the moment it drops: `sinceFull` is how long it has been full as drawn, and `shown` whether it wears
+ * `off` or not, as last written.
  */
 interface BodyBar {
+  root: HTMLElement;
   fill: HTMLElement;
   ghost: HTMLElement;
   /** The fill and the ghost as last written, in steps of `barPixels`; NaN is "nothing written yet". */
@@ -226,11 +241,60 @@ interface BodyBar {
   ghostAt: number;
   snap: boolean;
   ghostFor: number;
+  shown: boolean;
+  sinceFull: number;
+}
+
+/** What one bar's box was last written as (`barLayout`), so a placing writes only what moved; NaN is "nothing yet". */
+interface BoxDrawn {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rl: number;
+  rr: number;
+  clipTop: boolean;
+  clipBottom: boolean;
+}
+
+function newBoxDrawn(): BoxDrawn {
+  return { x: Number.NaN, y: Number.NaN, w: Number.NaN, h: Number.NaN, rl: Number.NaN, rr: Number.NaN, clipTop: false, clipBottom: false };
 }
 
 /**
- * The slow half of the head-up display: the planet block, the clock and the frame rate, the weather
- * note, the on-foot bars, the number slots with the keys you have bound, what is in each hand, the
+ * The display's own looks that are numbers in `HUD_SIZES` and are drawn by the stylesheet, as the custom properties
+ * it reads (each with its start value as the stylesheet's fallback): written at boot and again only when one is moved
+ * live, as the ghost's ease is. `unit` is what follows the number.
+ */
+const LOOK_VARS: readonly { key: keyof typeof HUD_SIZES; name: string; unit: string }[] = [
+  { key: 'markSize', name: '--hud-mark', unit: '' },
+  { key: 'markGap', name: '--hud-mark-gap', unit: '' },
+  { key: 'blockSide', name: '--hud-block-side', unit: '' },
+  { key: 'hpEaseSeconds', name: '--hud-hp-ease', unit: 's' },
+  { key: 'rippleSeconds', name: '--hud-ripple', unit: 's' },
+  { key: 'ripplePx', name: '--hud-ripple-px', unit: '' },
+  { key: 'rippleStrength', name: '--hud-ripple-alpha', unit: '' },
+  { key: 'breathFlashSeconds', name: '--hud-breath-flash', unit: 's' },
+  { key: 'barFadeSeconds', name: '--hud-bar-fade', unit: 's' },
+  // The weapon mark's (item 6): how see-through it is, how fast it turns to a new stance, and a pair's two small marks
+  // and the line between them.
+  { key: 'markAlpha', name: '--hud-mark-alpha', unit: '' },
+  { key: 'markTurnSeconds', name: '--hud-mark-turn', unit: 's' },
+  { key: 'markPairScale', name: '--hud-mark-pair', unit: '' },
+  { key: 'markPairAt', name: '--hud-mark-pair-at', unit: '' },
+  { key: 'markSplitLength', name: '--hud-mark-split', unit: '' },
+  { key: 'markSplitWidth', name: '--hud-mark-split-w', unit: '' },
+  { key: 'markSplitAngle', name: '--hud-mark-split-angle', unit: '' },
+  // The corner's readouts: the frame rate's type and its drop shadow, and the weather word's type.
+  { key: 'fpsSize', name: '--hud-fps-size', unit: '' },
+  { key: 'fpsShadowY', name: '--hud-fps-shadow-y', unit: '' },
+  { key: 'fpsShadowBlur', name: '--hud-fps-shadow-blur', unit: '' },
+  { key: 'weatherSize', name: '--hud-weather-size', unit: '' },
+];
+
+/**
+ * The slow half of the head-up display: the planet block with the weather's word and the clock, the
+ * frame rate, the body block's bars, the number slots with the keys you have bound, the weapon mark for what the hands hold, the
  * crosshair and its charge, the prompt, the hurt fade and the mouse-free line. The
  * flight display -- the reticle, the aim circle and the target's bracket -- is `ShipHud`'s, drawn on
  * the same overlay canvas; nothing here knows about flying.
@@ -252,59 +316,97 @@ export class Hud {
    */
   private readonly nearby: HTMLElement;
   private nearbyText = '';
+  /** The frame rate alone at the top right, as `62 fps`, while its switch is on (`setReadouts`). */
   private readonly fps: HTMLElement;
-  /** A quiet line under the frame rate while the weather is not the shared schedule's. */
-  private readonly weatherNote: HTMLElement;
-  /** What that line holds, kept here rather than read back off the element. */
-  private weatherNoteText = '';
+  /**
+   * The weather in a word or two under the minimap (in its place when it is off), and the muted " · held" after it
+   * while the weather is held or forced: the word written when it changes, the held part a class. What was written is
+   * kept here rather than read back off the element.
+   */
+  private readonly weatherEl: HTMLElement;
+  private readonly weatherWordEl: HTMLElement;
+  private weatherText = '';
+  private weatherHeld = false;
+  private weatherShown = false;
+  /** The world's time of day just above the minimap's coordinates (or the corner's `/loc` with no minimap). */
   private readonly clock: HTMLElement;
-  /** The corner strip: three words whose letters come from the bindings. */
-  private readonly hint: HTMLElement;
-  private hintText = '';
+  private clockText = '';
+  /** The three switches (`setReadouts`) and what each line wears: `gone` while its switch is off. */
+  private wantFps = false;
+  private wantWeather = true;
+  private wantClock = false;
+  private fpsShown = false;
+  private clockShown = false;
   /** The body block, whose standing down is how this file knows the player is at a ship's controls. */
   private readonly bottom: HTMLElement;
+  /** The box the bars stand in: its size is the bars' layout's, so the weapon mark and the action bar lay out round it. */
+  private readonly barsEl: HTMLElement;
   private readonly hp: BodyBar;
-  private readonly hpText: HTMLElement;
   private readonly res: BodyBar;
-  private readonly resRow: HTMLElement;
-  private readonly resText: HTMLElement;
   /**
-   * The breath row: the bar, its number, and the row that carries both. It is the **first** row of
-   * the body block, above the health bar, and that is a choice rather than an accident. The block is
-   * anchored at the bottom of the screen and grows upward, so a row put in at the top moves nothing
-   * that is already on the screen: the health bar, the class pool, the ability cells and the hands
-   * all stay exactly where they were, and only the block's own top moves up. A row put in
-   * under the pool would have shifted both bars upward the moment you went under, which is the worst
-   * possible time to move what someone is watching.
-   *
-   * It carries no ghost. The ghost behind the other two bars is there so the size of a *blow* reads,
-   * and breath is not taken in blows: it drains. A ghost would ease down behind it on every frame of
-   * a dive, would never once be seen, and would double the writes the row makes.
+   * Health's two looks below a share (`HUD_SIZES.hpLow`, `hpRipple`): the dark red in place of `muted`, and the
+   * ripple of `bad` spreading out from the bar, each one class the stylesheet runs. As last written.
+   */
+  private hpLow = false;
+  private hpRipple = false;
+  /**
+   * The breath bar, on top of the top-most bar while you are under water (`barLayout`). Its place is kept whether it
+   * shows or not, so its coming and going moves nothing on the screen; it carries no ghost, since breath drains and is
+   * not taken in blows. Below `breathFlashBelow` it flashes white (the class `low`, an animation the stylesheet runs).
    */
   private readonly breathBar: HTMLElement;
   private readonly breathFill: HTMLElement;
-  private readonly breathRowEl: HTMLElement;
-  private readonly breathText: HTMLElement;
   /**
-   * The stamina row: the third bar, under health and the class pool, as the speed classes' design asks. While the
-   * classes are in force it is in the block and only ever made visible or not (the class `off`), never taken out of
-   * it: the block is anchored at the bottom and grows upward, so a row that came and went under the other two would
-   * move both every time a sprint began, which is the breath row's own lesson. With the classes off it is not in the
-   * block at all (`gone`), and the display stands as it did before them. It carries no ghost, for the breath row's
-   * reason: stamina drains and comes back, it is not taken in blows.
+   * The stamina bar, attached to Force (or to health with no Force) as the layout says. While the speed classes are in
+   * force it is in the block and only made visible or not (`off`); with them off it is not in the block at all
+   * (`gone`), and the bars are placed without it. No ghost: stamina drains and comes back, it is not taken in blows.
    */
-  private readonly staminaRowEl: HTMLElement;
   private readonly staminaBar: HTMLElement;
   private readonly staminaFill: HTMLElement;
-  private readonly staminaText: HTMLElement;
-  /** The stamina row as last written: in the block or not, up or not, the bar in steps of its own pixels, the number, and whether it wears the tired band. */
+  /** The stamina bar as last written: in the block or not, up or not, the bar in steps of its own pixels, and whether it wears the tired band. */
   private staminaOn = false;
   private staminaShown = false;
   private staminaCur = NaN;
-  private staminaTextDrawn = NaN;
   private staminaTired = false;
+  /**
+   * Where the block stands and how Force meets health (the Interface page's three switches, `setBlock`), the layout
+   * worked out from them (`barLayout`, a kept struct) and what each bar's box was last written as.
+   */
+  private align: BlockAlign = 'middle';
+  private look: ForceLook = 'over';
+  private edge: ForceEdge = 'lower';
+  private readonly bars = makeBarLayout();
+  private readonly hpBox = newBoxDrawn();
+  private readonly poolBox = newBoxDrawn();
+  private readonly staminaBox = newBoxDrawn();
+  private readonly breathBox = newBoxDrawn();
+  private barsW = Number.NaN;
+  private barsH = Number.NaN;
+  /** The `HUD_SIZES` looks as the page was last told them (`LOOK_VARS`), so a live change reaches it and nothing else does. */
+  private readonly lookWritten: number[] = LOOK_VARS.map(() => Number.NaN);
   private readonly slotsEl: HTMLElement;
-  private readonly hands: HandCell[] = [];
+  /**
+   * The weapon mark (the interface rewrite's first wave, item 6; `weaponMark.ts`): our own mark for what the hands hold,
+   * in the block's mark box, slightly see-through and with no name. Its two slots (`a`, and `b` for the left hand in a
+   * pair) are written when what they show changes; a lightsaber's tilt is a custom property on its slot, which the
+   * stylesheet turns it by; the blade draws in and out by one class on the mark (`lit`), at the blade's own timing (four
+   * custom properties, written when the hands change). What the hands held, the kit, the bare-hands switch, the stand-in
+   * blaster's kind and the stance, as last read (`mk*`), so a frame with none of them changed compares and writes nothing.
+   */
+  private readonly markEl: HTMLElement;
+  private readonly markA: HTMLElement;
+  private readonly markB: HTMLElement;
+  private readonly markIn = makeMarkIn();
+  private readonly markOut = makeMarkOut();
+  private readonly markDrawn: MarkDrawn = { a: '\u0000', b: '\u0000', tiltA: Number.NaN, tiltB: Number.NaN, pair: false, lit: false, openR: Number.NaN, closeR: Number.NaN, openL: Number.NaN, closeL: Number.NaN };
+  private mkRight: HandItem | null = NOT_READ;
+  private mkLeft: HandItem | null = NOT_READ;
+  private mkKit = '\u0000';
+  private mkBare = false;
+  private mkGun = '\u0000';
+  private mkStyle = '\u0000';
+  /** The Interface page's switch: the mark's blade follows the real one (on), or stands out whatever the real one does. */
+  private markFollows = true;
   /** The plain dot, which stands in for the drawn crosshair until the overlay is attached. */
   private readonly crosshair: HTMLElement;
   private readonly chargeEl: HTMLElement;
@@ -324,33 +426,27 @@ export class Hud {
   private saberCostEl: HTMLElement | null = null;
   private saberCostText = '';
   /**
-   * What was last written, in the steps of `HUD_TUNE`. `NaN` is "nothing written yet", because it is
-   * the one value that is never equal to itself: -1 is a number a health that has gone below zero
-   * really rounds to, and that reading would then never be written.
+   * Whether the kit has a Force pool (the bar in the block or `gone`), as last written. `NaN` elsewhere is "nothing
+   * written yet", because it is the one value that is never equal to itself.
    */
-  private hpTextDrawn = NaN;
   private resShown = true;
-  private resTextDrawn = NaN;
-  private resLabelDrawn = '';
   /**
-   * The breath row as it stands: whether it is up, the bar in steps of `breathPixels`, the number and
-   * the word last written, and the band the fill wears (`''` is the resting one, which is no class at
-   * all and so the bar's own colour). `NaN` is "nothing written yet", as it is for the other bars.
+   * The breath bar as it stands: whether it is up, the bar in steps of `breathPixels`, and whether it flashes. `NaN`
+   * is "nothing written yet", as it is for the other bars. `breathLow` is not reset when the bar goes down, since the
+   * element keeps its classes while it is hidden and the two would then disagree.
    */
   private breathShown = false;
   private breathCur = NaN;
-  private breathTextDrawn = NaN;
-  private breathLabelDrawn = '';
-  /**
-   * The band the bar is wearing. It starts at `good` rather than at nothing because the markup above
-   * carries neither `warn` nor `bad`, which *is* the resting band: starting it empty would have the
-   * row spend two writes on the frame it first comes up toggling two classes off that were never on.
-   * It is deliberately not reset when the row goes down, since the element keeps its classes while it
-   * is hidden and the two would then disagree.
-   */
-  private breathBandDrawn = 'good';
-  /** What `breathRow` fills, kept so that asking about breath allocates nothing in a frame. */
+  private breathLow = false;
+  /** What `breathOf` fills, kept so that asking about breath allocates nothing in a frame. */
   private readonly breathOut = makeBreathRow();
+  /**
+   * This frame's seconds and the share the next `setBar` writes: fields and never arguments, since a fraction handed to
+   * a call the compiler leaves out is a number made a frame (docs/lessons, "A frame allocates nothing"; measured in
+   * `hudBars.test.ts`). Begun as fractions, so each is a double from its first write.
+   */
+  private frameDt = 0.5;
+  private shareIn = 0.5;
   private chargeShown = false;
   private chargeDrawn = NaN;
   private charge = 0;
@@ -373,7 +469,7 @@ export class Hud {
   /** The overlay and the palette's indices, once they are attached; until then the plain dot shows. */
   private canvas: HudOverlay | null = null;
   private colours: HudColours | null = null;
-  /** Where the keys on the cells come from, and what the hands read. */
+  /** Where the keys on the cells come from, and what the weapon mark reads. */
   private input: HudBindings | null = null;
   private handSource: HandSource | null = null;
   private scale = 1;
@@ -388,53 +484,48 @@ export class Hud {
   /** The grapple's mark, written by the game each frame it is simulated and drawn on the overlay with the crosshair. */
   readonly grappleMark: HudGrappleMark = newHudGrappleMark();
   /** What `report` hands back: one object, filled in place. */
-  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '', breath: '', stamina: '' };
+  private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, mark: '', breath: '', stamina: '', bars: '', block: '', fps: '', weather: '', clock: '' };
 
+  /**
+   * The display's markup. The top-left block holds, in order, the weather's line (first, so with the minimap off it
+   * stands in the minimap's place; the minimap's own wrap is put in ahead of it, and it then stands under the circle),
+   * the world's name, the clock, the `/loc` line and the nearby line. The clock stands just above the coordinates: over
+   * the minimap's while it shows (the stylesheet places it there), above `/loc` while it does not.
+   *
+   * The body block (`.bottom`) is the weapon mark's box and the bars' box (`.hud-top`: the mark over the bars in the
+   * middle, beside them at the screen's edge at either side), with the action bar under both, always the lowest thing.
+   * The bars are placed in their box by `barLayout`, in the order they are drawn, each over the one before it:
+   * health, Force, stamina, breath.
+   */
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'hud';
     this.root.innerHTML = `
       <div class="hurt"></div>
       <div class="panel top-left">
+        <div class="hud-weather gone"><span class="word"></span><span class="held"></span></div>
         <div class="planet-name"></div>
+        <div class="hud-clock gone"></div>
         <div class="loc"></div>
         <div class="hud-nearby"></div>
       </div>
-      <div class="panel top-right">
-        <div class="clock"></div>
-        <div class="fps"></div>
-        <div class="weather-note" style="font-size: 11px; opacity: 0.75" hidden></div>
-        <div class="hint"></div>
-      </div>
+      <div class="hud-fps gone"></div>
       <div class="crosshair"></div>
       <div class="charge" hidden><div class="fill"></div></div>
       <div class="mouse-free hidden">Mouse free · <b>click</b> to look again</div>
       <div class="prompt"></div>
       <div class="bottom">
-        <div class="hud-body">
-          <div class="hud-brow breath-row" hidden>
-            <div class="hud-bar breath"><div class="fill"></div></div>
-            <div class="val breath-val"></div>
-          </div>
-          <div class="hud-brow hp-row">
+        <div class="hud-top">
+          <div class="hud-mark"><svg class="ic mk" viewBox="0 0 24 24" aria-hidden="true"><g class="mk-a"></g><path class="mk-split" d="M11.5 12h1"></path><g class="mk-b"></g></svg></div>
+          <div class="hud-bars">
             <div class="hud-bar hp"><div class="ghost snap"></div><div class="fill"></div></div>
-            <div class="val hp-val"></div>
-          </div>
-          <div class="hud-brow res-row">
             <div class="hud-bar pool"><div class="ghost snap"></div><div class="fill"></div></div>
-            <div class="val res-val"></div>
-          </div>
-          <div class="hud-brow stamina-row off gone">
-            <div class="hud-bar stamina good"><div class="fill"></div></div>
-            <div class="val stamina-val"></div>
+            <div class="hud-bar stamina good off gone"><div class="fill"></div></div>
+            <div class="hud-bar breath off"><div class="fill"></div></div>
           </div>
         </div>
         <div class="hud-kit">
           <div class="slots"></div>
-          <div class="hud-hands">
-            <div class="hud-hand right"><span class="pic"></span><span class="name"></span></div>
-            <div class="hud-hand left"><span class="pic"></span><span class="name"></span></div>
-          </div>
         </div>
       </div>`;
     parent.appendChild(this.root);
@@ -442,24 +533,20 @@ export class Hud {
     this.planetName = q('.planet-name');
     this.loc = q('.loc');
     this.nearby = q('.hud-nearby');
-    this.fps = q('.fps');
-    this.weatherNote = q('.weather-note');
-    this.clock = q('.clock');
-    this.hint = q('.hint');
+    this.fps = q('.hud-fps');
+    this.weatherEl = q('.hud-weather');
+    this.weatherWordEl = q('.hud-weather .word');
+    this.clock = q('.hud-clock');
     this.bottom = q('.bottom');
-    this.hp = { fill: q('.hud-bar.hp > .fill'), ghost: q('.hud-bar.hp > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: 0 };
-    this.hpText = q('.hp-val');
-    this.res = { fill: q('.hud-bar.pool > .fill'), ghost: q('.hud-bar.pool > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: 0 };
-    this.resRow = q('.res-row');
-    this.resText = q('.res-val');
-    this.breathRowEl = q('.breath-row');
+    this.barsEl = q('.hud-bars');
+    // `sinceFull` and `ghostFor` begin as fractions, so each field is a double from its first write (each is moved by a
+    // frame's seconds); a ghost's ease below nought is no ease at all.
+    this.hp = { root: q('.hud-bar.hp'), fill: q('.hud-bar.hp > .fill'), ghost: q('.hud-bar.hp > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: -0.5, shown: true, sinceFull: 0.5 };
+    this.res = { root: q('.hud-bar.pool'), fill: q('.hud-bar.pool > .fill'), ghost: q('.hud-bar.pool > .ghost'), cur: NaN, ghostAt: NaN, snap: true, ghostFor: -0.5, shown: true, sinceFull: 0.5 };
     this.breathBar = q('.hud-bar.breath');
     this.breathFill = q('.hud-bar.breath > .fill');
-    this.breathText = q('.breath-val');
-    this.staminaRowEl = q('.stamina-row');
     this.staminaBar = q('.hud-bar.stamina');
     this.staminaFill = q('.hud-bar.stamina > .fill');
-    this.staminaText = q('.stamina-val');
     this.slotsEl = q('.slots');
     this.crosshair = q('.crosshair');
     this.chargeEl = q('.charge');
@@ -467,19 +554,22 @@ export class Hud {
     this.mouseFree = q('.mouse-free');
     this.prompt = q('.prompt');
     this.hurtEl = q('.hurt');
-    for (const side of ['right', 'left'] as const) {
-      const root = q(`.hud-hand.${side}`);
-      root.hidden = true;
-      this.hands.push({ root, pic: q(`.hud-hand.${side} .pic`), name: q(`.hud-hand.${side} .name`), item: null, label: '', glyph: '' });
-    }
+    this.markEl = q('.hud-mark');
+    this.markA = q('.hud-mark .mk-a');
+    this.markB = q('.hud-mark .mk-b');
     LIVE.push(this);
-    this.writeHint();
+    // The held words, once: the line only ever puts them on or takes them off.
+    q('.hud-weather .held').textContent = HELD_WORDS;
+    // The bars placed as the defaults say, until the game hands over the Interface page's switches.
+    this.layoutBars();
     // Everything the constructor puts on the page is the display's own markup and is not counted:
     // the two counts are about what it writes while the game is running, not about building itself.
     this.byDesign = 0;
     // The ghost's ease is one number (`HUD_SIZES.ghostSeconds`) and the stylesheet reads it, so the
-    // timer this file runs and the walk the page draws can never say different things.
+    // timer this file runs and the walk the page draws can never say different things; the bars' own
+    // looks (`LOOK_VARS`) are told the page the same way.
     this.syncGhost();
+    this.syncLooks();
     // The glyphs, once. Nothing waits for them: a cell written before the sheet lands draws its mark
     // the moment it does, and a sheet that never lands costs the marks and nothing else.
     void installIcons();
@@ -499,16 +589,25 @@ export class Hud {
     this.byDesign++;
   }
 
-  /** Where the keys on the cells come from. The cells and the corner strip take them at once. */
+  /** Where the keys on the cells come from. The cells take them at once. */
   setInput(input: HudBindings): void {
     this.input = input;
     this.refreshKeys(true);
   }
 
-  /** What the hands read: the live object the player keeps, and how an item becomes a picture. */
+  /** What the weapon mark reads: the live object the player keeps. The next frame reads the hands afresh. */
   setHandSource(source: HandSource | null): void {
     this.handSource = source;
-    for (const hand of this.hands) hand.item = null;
+    this.mkRight = NOT_READ;
+  }
+
+  /**
+   * The Interface page's switch for the mark's blade (on to begin with, the owner's "Start on not off"): on, a
+   * lightsaber's mark draws its blade in and out with the real one; off, it shows the stance with the blade out whether
+   * the real one is out or not. Not in a frame; the next frame writes the class if it has to.
+   */
+  setMarkBlade(follow: boolean): void {
+    this.markFollows = follow;
   }
 
   /** The HUD scale, for the shapes this file draws; the page's own sizes follow `--hud-scale`. */
@@ -532,15 +631,163 @@ export class Hud {
   // -------------------------------------------------------------------------------------------
   // The slow DOM.
 
-  /** A quiet line when the weather is not the shared schedule's (held, swapped, forced); empty hides it. Cheap to call every frame. */
-  setWeatherNote(text: string): void {
-    // Compared against what was written, not against the element: this is called every frame, and an
-    // object that remembers what it put somewhere need never ask for it back.
-    if (this.weatherNoteText === text) return;
-    this.weatherNoteText = text;
-    this.weatherNote.textContent = text;
-    this.weatherNote.hidden = text === '';
-    this.writes += 2;
+  /**
+   * The weather's word (`weatherWord` in `weatherWords.ts`: "Rain", never "Weather: Rain"), or '' where there is none
+   * to say (space, a dungeon, a world with no weather), and whether it is held or forced, which puts the muted
+   * " · held" after it. Cheap to call every frame: the word is one of a few kept strings, compared against what was
+   * written rather than against the element, and nothing is written while neither has changed.
+   */
+  setWeather(word: string, held: boolean): void {
+    if (word !== this.weatherText) {
+      this.weatherText = word;
+      if (word) {
+        this.weatherWordEl.textContent = word;
+        this.writes++;
+      }
+    }
+    if (held !== this.weatherHeld) {
+      this.weatherHeld = held;
+      this.weatherEl.classList.toggle('held', held);
+      this.writes++;
+    }
+    this.showWeather();
+  }
+
+  /** The weather's line up while its switch is on and there is a word to say, and down otherwise: one class. */
+  private showWeather(): void {
+    const show = this.wantWeather && this.weatherText !== '' && this.weatherText !== '\u0000';
+    if (show === this.weatherShown) return;
+    this.weatherShown = show;
+    this.weatherEl.classList.toggle('gone', !show);
+    this.writes++;
+  }
+
+  /**
+   * The three readouts' switches (the Interface page's Frame rate, Weather and Clock): each line is in the page or
+   * `gone`, one class each, written only when its switch moves. Not in a frame.
+   */
+  setReadouts(fps: boolean, weather: boolean, clock: boolean): void {
+    this.wantFps = fps;
+    this.wantWeather = weather;
+    this.wantClock = clock;
+    if (fps !== this.fpsShown) {
+      this.fpsShown = fps;
+      this.fps.classList.toggle('gone', !fps);
+      this.byDesign++;
+      // Coming up, it is written on the next frame rather than a quarter second later.
+      if (fps) this.tickNow = true;
+    }
+    if (clock !== this.clockShown) {
+      this.clockShown = clock;
+      this.clock.classList.toggle('gone', !clock);
+      this.byDesign++;
+      // Written afresh when it comes up: while it was down nothing kept it.
+      this.clockText = '\u0000';
+    }
+    this.showWeather();
+  }
+
+  /**
+   * Where the block stands and how the Force bar meets the health bar (the Interface page's three switches): the
+   * block's class, and the bars placed again (`layoutBars`). Called with the settings and never in a frame; a size
+   * moved live (`HUD_SIZES`) is taken up by calling it again with the same three, which `applyHudSettings` does.
+   */
+  setBlock(align: BlockAlign, look: ForceLook, edge: ForceEdge): void {
+    if (align !== this.align) {
+      this.bottom.classList.toggle('align-left', align === 'left');
+      this.bottom.classList.toggle('align-right', align === 'right');
+      this.byDesign += 2;
+    }
+    this.align = align;
+    this.look = look;
+    this.edge = edge;
+    this.layoutBars();
+    this.syncLooks();
+    // A stance's tilt moved at a dial reaches the mark the same way: the next frame works the mark out again (and writes
+    // only what changed).
+    this.mkStyle = '\u0000';
+  }
+
+  /**
+   * The bars placed in their box (`barLayout`), at scale 1 as custom properties the stylesheet multiplies by the HUD
+   * scale: each box's place, size and two ends' rounding, the inside look's clipped half as a class, and the box's own
+   * size, which the weapon mark and the action bar lay out round. Only what moved is written. Called when the switches,
+   * the kit's Force pool, the speed classes or a size changes; never in a steady frame.
+   */
+  private layoutBars(): void {
+    const L = barLayout(this.align, this.look, this.edge, this.resShown, this.staminaOn, this.bars);
+    if (L.w !== this.barsW) {
+      this.barsW = L.w;
+      setVar(this.barsEl, '--hud-bars-w', `${L.w}`);
+      this.byDesign++;
+    }
+    if (L.h !== this.barsH) {
+      this.barsH = L.h;
+      setVar(this.barsEl, '--hud-bars-h', `${L.h}`);
+      this.byDesign++;
+    }
+    this.placeBar(this.hp.root, L.hp, this.hpBox);
+    this.placeBar(this.res.root, L.pool, this.poolBox);
+    this.placeBar(this.staminaBar, L.stamina, this.staminaBox);
+    this.placeBar(this.breathBar, L.breath, this.breathBox);
+  }
+
+  private placeBar(el: HTMLElement, b: BarBox, d: BoxDrawn): void {
+    const rl = b.roundL ? 1 : 0;
+    const rr = b.roundR ? 1 : 0;
+    if (b.x !== d.x) {
+      d.x = b.x;
+      setVar(el, '--bx', `${b.x}`);
+      this.byDesign++;
+    }
+    if (b.y !== d.y) {
+      d.y = b.y;
+      setVar(el, '--by', `${b.y}`);
+      this.byDesign++;
+    }
+    if (b.w !== d.w) {
+      d.w = b.w;
+      setVar(el, '--bw', `${b.w}`);
+      this.byDesign++;
+    }
+    if (b.h !== d.h) {
+      d.h = b.h;
+      setVar(el, '--bh', `${b.h}`);
+      this.byDesign++;
+    }
+    if (rl !== d.rl) {
+      d.rl = rl;
+      setVar(el, '--rl', `${rl}`);
+      this.byDesign++;
+    }
+    if (rr !== d.rr) {
+      d.rr = rr;
+      setVar(el, '--rr', `${rr}`);
+      this.byDesign++;
+    }
+    if (b.clipTop !== d.clipTop) {
+      d.clipTop = b.clipTop;
+      el.classList.toggle('clip-top', b.clipTop);
+      this.byDesign++;
+    }
+    if (b.clipBottom !== d.clipBottom) {
+      d.clipBottom = b.clipBottom;
+      el.classList.toggle('clip-bottom', b.clipBottom);
+      this.byDesign++;
+    }
+  }
+
+  /** The bars' own looks (`LOOK_VARS`) told the page as custom properties on the root: at boot, and when one moves. */
+  private syncLooks(): void {
+    const root = typeof document !== 'undefined' ? document.documentElement : null;
+    if (!root) return;
+    for (let i = 0; i < LOOK_VARS.length; i++) {
+      const v = LOOK_VARS[i];
+      const n = HUD_SIZES[v.key];
+      if (n === this.lookWritten[i]) continue;
+      this.lookWritten[i] = n;
+      setVar(root, v.name, `${n}${v.unit}`);
+    }
   }
 
   /** The world's name in the corner. The minimap's own line over its circle is told beside this (`Minimap.setName`). */
@@ -595,10 +842,7 @@ export class Hud {
     this.saberCostText = 'off';
     // A new kit's bars and charge are written again whatever they held for the last one.
     this.hp.cur = NaN;
-    this.hpTextDrawn = NaN;
     this.res.cur = NaN;
-    this.resTextDrawn = NaN;
-    this.resLabelDrawn = '';
     this.chargeDrawn = NaN;
   }
 
@@ -637,8 +881,8 @@ export class Hud {
   /**
    * The interface shown again after the hide key: every "write only when changed" record let go, so the next
    * `update` writes every value afresh from what is true now -- a bar that moved while hidden shows where it
-   * is, a cooldown that ran out shows ready, the hands show what is in them, and the quarter-second lines
-   * (the clock, the frame rate, `/loc`) are written on that first frame rather than up to a quarter second
+   * is, a cooldown that ran out shows ready, the weapon mark shows what the hands hold, and the quarter-second lines
+   * (the frame rate, `/loc`) and the clock are written on that first frame rather than up to a quarter second
    * later. Nothing is written here; the frame after does the writing, and it is one burst, not a steady cost.
    * The kit's row itself (its cells and their marks) is the kit's and was written when it was set, hidden or
    * not, so it is not rebuilt. Every value record (a number, a word) is let go; every two-state record (a row
@@ -650,22 +894,23 @@ export class Hud {
   refresh(): void {
     this.tickNow = true;
     this.nearbyText = '\u0000';
-    this.hpTextDrawn = Number.NaN;
-    this.resTextDrawn = Number.NaN;
-    this.resLabelDrawn = '';
     this.refreshBar(this.hp);
     this.refreshBar(this.res);
-    this.resShown = !this.resRow.hidden;
-    this.breathShown = !this.breathRowEl.hidden;
+    this.hpLow = hasClass(this.hp.root, 'low');
+    this.hpRipple = hasClass(this.hp.root, 'ripple');
+    this.resShown = !hasClass(this.res.root, 'gone');
+    this.breathShown = !hasClass(this.breathBar, 'off');
     this.breathCur = Number.NaN;
-    this.breathTextDrawn = Number.NaN;
-    this.breathLabelDrawn = '';
-    this.breathBandDrawn = '\u0000';
-    this.staminaOn = !hasClass(this.staminaRowEl, 'gone');
-    this.staminaShown = !hasClass(this.staminaRowEl, 'off');
+    this.breathLow = hasClass(this.breathBar, 'low');
+    this.staminaOn = !hasClass(this.staminaBar, 'gone');
+    this.staminaShown = !hasClass(this.staminaBar, 'off');
     this.staminaCur = Number.NaN;
-    this.staminaTextDrawn = Number.NaN;
     this.staminaTired = hasClass(this.staminaBar, 'warn');
+    // The weather's line, its held words and the clock: the word and the time let go, the two classes read back.
+    this.weatherText = '\u0000';
+    this.weatherShown = !hasClass(this.weatherEl, 'gone');
+    this.weatherHeld = hasClass(this.weatherEl, 'held');
+    this.clockText = '\u0000';
     for (const cell of this.slots) {
       cell.lit = hasClass(cell.root, 'active');
       cell.ready = hasClass(cell.root, 'ready');
@@ -680,25 +925,33 @@ export class Hud {
     // writes the fade's element clear whatever it last wore.
     if (this.hurtLevel > 0) this.hurtLevel = 1e-6;
     this.hurtDrawn = Number.NaN;
-    for (const hand of this.hands) {
-      hand.item = NOT_READ;
-      hand.label = '\u0000';
-      hand.glyph = '\u0000';
-    }
+    // The weapon mark: what the hands held let go, so the next frame works the mark out again; each slot's markup, its
+    // tilt and the blade's timings let go so they are written afresh; the pair and the blade's two classes read back.
+    this.mkRight = NOT_READ;
+    const m = this.markDrawn;
+    m.a = '\u0000';
+    m.b = '\u0000';
+    m.tiltA = Number.NaN;
+    m.tiltB = Number.NaN;
+    m.openR = Number.NaN;
+    m.closeR = Number.NaN;
+    m.openL = Number.NaN;
+    m.closeL = Number.NaN;
+    m.pair = hasClass(this.markEl, 'pair');
+    m.lit = hasClass(this.markEl, 'lit');
     this.promptText = '\u0000';
-    this.weatherNoteText = '\u0000';
-    this.hintText = '';
   }
 
   /**
-   * One bar let go for `refresh`: its fill and ghost written again from the next share. A ghost that was easing
-   * down when the interface went is snapped back behind its fill on that frame (`ageBar` with a moment left),
-   * rather than walked down long after the blow that moved it.
+   * One bar let go for `refresh`: its fill and ghost written again from the next share, and whether it stands read
+   * back off the element. A ghost that was easing down when the interface went is snapped back behind its fill on
+   * that frame (`ageBar` with a moment left), rather than walked down long after the blow that moved it.
    */
   private refreshBar(bar: BodyBar): void {
     bar.cur = Number.NaN;
     bar.ghostAt = Number.NaN;
     if (!bar.snap) bar.ghostFor = 1e-9;
+    bar.shown = !hasClass(bar.root, 'off');
   }
 
   /** The second the writes are counted in, closed when it is a second old. */
@@ -747,20 +1000,30 @@ export class Hud {
    * What the on-foot half drew and what it is showing, for the console: a kept object. `keys` is the
    * row of key-caps as it stands, which is how a rebind is checked from a tab nobody can see;
    * `icons` is how many glyphs the page holds, which is 0 while the sheet is still on its way.
-   * `breath` is the breath row as it reads, and an empty string while the row is down, which is the
-   * only way to see it at all from a tab nobody is looking at.
+   * The bars carry no words on the screen, so these are the only words for them: `breath` is the
+   * breath bar as drawn (its share, and `low` while it flashes), an empty string while it is down;
+   * `stamina` '' while it is not in the block, 'down' while it keeps its place unseen; `bars` every
+   * bar's share as drawn and what it wears; `block` the three switches; the three readouts as they
+   * stand ('' while a line is off); and `mark` the weapon mark in words, which carries none on the screen
+   * ('saber 22.5° lit', 'staff 45° in', 'dual X 45° lit', 'pistol', 'sword / knife'; '' before its first frame).
    */
-  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; hands: string; breath: string; stamina: string } {
+  report(): { ops: number; icons: number; keys: string; attached: boolean; crosshair: boolean; mark: string; breath: string; stamina: string; bars: string; block: string; fps: string; weather: string; clock: string } {
     const o = this.out;
     o.icons = iconCount();
     o.crosshair = this.crosshairShown();
-    o.breath = this.breathShown ? `${this.breathLabelDrawn} ${this.breathTextDrawn}` : '';
-    // The stamina row: '' while it is not in the block (the speed classes off), 'down' while it keeps its place unseen.
-    o.stamina = !this.staminaOn ? '' : this.staminaShown ? `Stamina ${this.staminaTextDrawn}${this.staminaTired ? ' tired' : ''}` : 'down';
+    const pct = (steps: number, px: number) => (steps === steps ? `${Math.round((steps / px) * 100)}%` : '?');
+    o.breath = this.breathShown ? `Breath ${pct(this.breathCur, Math.max(1, HUD_TUNE.breathPixels))}${this.breathLow ? ' low' : ''}` : '';
+    o.stamina = !this.staminaOn ? '' : this.staminaShown ? `Stamina ${pct(this.staminaCur, HUD_SIZES.staminaBarW)}${this.staminaTired ? ' tired' : ''}` : 'down';
+    const bar = (name: string, b: BodyBar) => `${name} ${pct(b.cur, HUD_TUNE.barPixels)}${b.shown ? '' : ' gone'}`;
+    o.bars = `${bar('health', this.hp)}${this.hpLow ? ' low' : ''}${this.hpRipple ? ' ripple' : ''} · ${this.resShown ? bar('force', this.res) : 'no force'} · ${o.stamina || 'no stamina'} · ${o.breath || 'no breath'}`;
+    o.block = `${this.align} ${this.look} ${this.edge}`;
+    o.fps = this.fpsShown ? this.fps.textContent ?? '' : '';
+    o.weather = this.weatherShown ? `${this.weatherText}${this.weatherHeld ? HELD_WORDS : ''}` : '';
+    o.clock = this.clockShown ? this.clockText : '';
     let keys = '';
     for (let i = 0; i < this.kitSlotCount; i++) keys += (keys ? ' ' : '') + keyLabel(this.slots[i].code);
     o.keys = keys;
-    o.hands = `${this.hands[0].label || '—'} / ${this.hands[1].label || '—'}`;
+    o.mark = this.markDrawn.a === '\u0000' ? '' : markWords(this.markOut, this.markDrawn.lit);
     return o;
   }
 
@@ -810,34 +1073,19 @@ export class Hud {
   }
 
   /**
-   * Put the keys that are bound now on the cells, and in the corner strip. Called when the bindings
-   * change — at once through `hudBindingsChanged`, and in any case at the display's own
-   * four-times-a-second tick, so a rebind reaches the cells whether or not whoever rebound said so.
-   * `always` writes the corner strip even when no cap moved, which is what a fresh input wants.
+   * Put the keys that are bound now on the cells. Called when the bindings change — at once through
+   * `hudBindingsChanged`, and in any case at the display's own four-times-a-second tick, so a rebind
+   * reaches the cells whether or not whoever rebound said so. (The corner strip that named the map's,
+   * the inventory's and the spawner's keys went with the top-right box: the keys are the Controls page's.)
    */
-  refreshKeys(always = false): void {
-    let moved = false;
+  refreshKeys(_always = false): void {
     for (const cell of this.slots) {
       const code = this.codeOf(cell.action);
       if (code === cell.code) continue;
       cell.code = code;
       cell.cap.textContent = keyLabel(code);
       this.writes++;
-      moved = true;
     }
-    if (moved || always) this.writeHint();
-  }
-
-  /** The corner strip, with the keys that are bound now. Written when a key changes and never in a steady frame. */
-  private writeHint(): void {
-    let html = '';
-    for (const h of HINT_ACTIONS) {
-      html += `${html ? ' &nbsp; ' : ''}<b>${esc(keyLabel(this.codeOf(h.action)))}</b> ${h.word}`;
-    }
-    if (html === this.hintText) return;
-    this.hintText = html;
-    this.hint.innerHTML = html;
-    this.byDesign++;
   }
 
   /**
@@ -863,24 +1111,36 @@ export class Hud {
    * space the game's own frame, which a story's place and a waypoint take there. `breath` is the player's
    * own breath if they have any to show, and nothing at all otherwise — which is what dry land hands
    * over, and what every caller written before there was breath hands over by leaving the argument off.
+   * `clock` is the world's time of day as words, which the caller keeps and makes again only when the
+   * minute turns (`App.clockWords`), so handing it over every frame makes nothing; it is written while
+   * the clock's line is up and the words have changed, which is once a minute of the world's day.
    */
   update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean, breath?: BarReadout | null): void {
     this.frames++;
+    this.frameDt = dt;
     const now = performance.now();
     const acc = (now - this.lastFps) / 1000;
     if (acc >= 0.25 || this.tickNow) {
       this.tickNow = false;
       this.lastFps = now;
-      this.fps.textContent = `${acc > 0 ? Math.round(this.frames / acc) : 0} fps`;
+      // The frame rate only while its line is up: off, it is not written at all.
+      if (this.fpsShown) {
+        this.fps.textContent = `${acc > 0 ? Math.round(this.frames / acc) : 0} fps`;
+        this.byDesign++;
+      }
       this.loc.textContent = `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`;
-      this.clock.textContent = clock;
       this.frames = 0;
-      this.byDesign += 3;
-      // A rebind nobody announced, what is in the hands, and the ghost's ease if it has been tried
-      // at the console: none of the three is work for a frame, and four times a second is not one.
+      this.byDesign++;
+      // A rebind nobody announced and the ghost's ease if it has been tried at the console: neither is work for a frame,
+      // and four times a second is not one. (What is in the hands is the weapon mark's, read each frame below, so its
+      // blade draws out with the real one and its tilt follows the stance at the press of the key.)
       this.refreshKeys();
-      this.readHands();
       this.syncGhost();
+    }
+    if (this.clockShown && clock !== this.clockText) {
+      this.clockText = clock;
+      this.clock.textContent = clock;
+      this.byDesign++;
     }
     this.roll(now);
     // The nameplate over a creature's head says what you are looking at; with one, the corner says
@@ -891,38 +1151,50 @@ export class Hud {
       this.nearby.textContent = creatureName ? `nearby: ${creatureName}` : '';
       this.writes++;
     }
-    // A bar is written only when its share has moved by a pixel of the bar's own length, and its
-    // number only when the number itself has changed.
+    // A bar is written only when its share has moved by a pixel of the bar's own length. No bar
+    // carries a word or a number any more (the interface rewrite): the bar is the reading.
     const px = HUD_TUNE.barPixels;
     // The share is held between none and all: a bar told a share outside that wrote a length the
     // browser threw away, which left the last one on the screen.
-    this.setBar(this.hp, maxHp > 0 ? hp / maxHp : 0, px);
-    const hpShown = Math.ceil(hp);
-    if (hpShown !== this.hpTextDrawn) {
-      this.hpTextDrawn = hpShown;
-      this.hpText.textContent = `Health ${hpShown}`;
+    const share = maxHp > 0 ? hp / maxHp : 0;
+    this.shareIn = share;
+    this.setBar(this.hp, px);
+    // Health's two looks low down, each a class the stylesheet eases or runs: the dark red at and under
+    // `hpLow`, the ripple under `hpRipple`. One write as each threshold is crossed, none otherwise.
+    const low = share <= HUD_SIZES.hpLow;
+    if (low !== this.hpLow) {
+      this.hpLow = low;
+      this.hp.root.classList.toggle('low', low);
       this.writes++;
     }
+    const ripple = share < HUD_SIZES.hpRipple;
+    if (ripple !== this.hpRipple) {
+      this.hpRipple = ripple;
+      this.hp.root.classList.toggle('ripple', ripple);
+      this.writes++;
+    }
+    this.ageFull(this.hp, px);
     const r = kit.resource;
     if (!!r !== this.resShown) {
+      // A kit with no Force pool: the bar out of the block, and the bars placed again without it (stamina takes
+      // Force's place against health). A change of kit, not a frame's work.
       this.resShown = !!r;
-      this.resRow.hidden = !r;
+      this.res.root.classList.toggle('gone', !r);
       this.writes++;
+      this.layoutBars();
     }
     if (r) {
-      this.setBar(this.res, r.max > 0 ? r.value / r.max : 0, px);
-      const shown = Math.round(r.value);
-      if (shown !== this.resTextDrawn || r.label !== this.resLabelDrawn) {
-        this.resTextDrawn = shown;
-        this.resLabelDrawn = r.label;
-        this.resText.textContent = `${r.label} ${shown}`;
-        this.writes++;
-      }
+      this.shareIn = r.max > 0 ? r.value / r.max : 0;
+      this.setBar(this.res, px);
+      this.ageFull(this.res, px);
     }
-    // Breath, which is a row that is not there at all on dry land and costs such a frame nothing.
+    // Breath, which is a bar that is not shown at all on dry land and costs such a frame nothing.
     this.setBreath(breath ?? null);
+    // The weapon mark: what the hands hold compared by identity and the stance by its word, and the blade by one
+    // switch, so a steady frame compares a handful of values and writes nothing.
+    this.readMark(kit.id, saberOn);
     // The ghosts' eases ending: once a frame, and nothing is written in a steady one.
-    this.ageBars(dt);
+    this.ageBars();
     // The slot row: `kit.slots` is the kit's own array and is not rebuilt here, and the row's own
     // count is used rather than the kit's, so a loadout changed without the row being rebuilt cannot
     // reach past the end of it.
@@ -984,10 +1256,11 @@ export class Hud {
   /**
    * One on-foot bar: the fill, and the ghost behind it. A fall leaves the ghost where the bar was
    * and lets the stylesheet walk it down; a rise, while no ease is running, takes the ghost with it
-   * under the fill, where it cannot be seen. Nothing is written while nothing has moved.
+   * under the fill, where it cannot be seen. Nothing is written while nothing has moved. The share is
+   * `shareIn`, set by the caller just before: a field, so no fraction is handed to the call.
    */
-  private setBar(bar: BodyBar, share: number, px: number): void {
-    const steps = Math.round(Math.max(0, Math.min(1, share)) * px);
+  private setBar(bar: BodyBar, px: number): void {
+    const steps = Math.round(Math.max(0, Math.min(1, this.shareIn)) * px);
     if (steps === bar.cur) return;
     const fell = bar.cur === bar.cur && steps < bar.cur;
     if (fell) {
@@ -1007,33 +1280,41 @@ export class Hud {
   }
 
   /**
-   * The breath row. It stands while there is breath to show and it is not full (`breathRow` in
-   * `hudMath`), and it is not on the page at all otherwise — a frame on dry land reaches the first
-   * line, finds the row down and already down, and writes nothing.
+   * Health or Force going away when full (the owner's: "disappear if full after 1.5 seconds, just like stamina"):
+   * `HUD_SIZES.fullLinger` seconds after the bar is full as drawn it takes `off`, and the moment it drops it takes it
+   * off again. One write each way and none in between; the bar keeps its place in the block, so nothing else moves.
+   */
+  private ageFull(bar: BodyBar, px: number): void {
+    if (bar.cur === px) bar.sinceFull += this.frameDt;
+    else bar.sinceFull = 0;
+    const show = bar.cur !== px || bar.sinceFull < HUD_SIZES.fullLinger;
+    if (show === bar.shown) return;
+    bar.shown = show;
+    bar.root.classList.toggle('off', !show);
+    this.writes++;
+  }
+
+  /**
+   * The breath bar. It stands while there is breath to show and it is not full (`breathRow` in `hudMath`), and it is
+   * not shown otherwise — a frame on dry land reaches the first line, finds the bar down and already down, and writes
+   * nothing. Its place in the block is kept either way (`barLayout`), so it coming up moves nothing.
    *
-   * What it costs while it is up: the row appearing is one write, then one per pixel of the bar's own
-   * length as it drains (`HUD_TUNE.breathPixels`), one per change of the number beside it, two on
-   * each of the at most two changes of band, and one as the row goes down again. Nothing is compared
-   * against the page: what was written is remembered here, as everywhere else in this file.
-   *
-   * The band is two class toggles rather than one because the resting colour is no class at all —
-   * the bar wears the interface's own accent from `.hud-bar > .fill`, which is the stylesheet's
-   * default and the one colour on the block that is neither health nor the class pool.
+   * What it costs while it is up: the bar appearing is one write, then one per pixel of the bar's own length as it
+   * drains (`HUD_TUNE.breathPixels`), one as it goes under `breathFlashBelow` and starts flashing (and one if it comes
+   * back over), and one as it goes down again. Nothing is compared against the page: what was written is remembered
+   * here, as everywhere else in this file. It is the accent's bright blue, the stylesheet's own default fill.
    */
   private setBreath(r: BarReadout | null): void {
-    const b = breathRow(r ? r.value : 0, r ? r.max : 0, this.breathOut);
+    // Read off the breath's own record (`breathOf`), never handed its two numbers: a fraction handed to a call is a number made.
+    const b = r ? breathOf(r, this.breathOut) : noBreath(this.breathOut);
     const show = !!r && b.show;
     if (show !== this.breathShown) {
       this.breathShown = show;
-      this.breathRowEl.hidden = !show;
+      this.breathBar.classList.toggle('off', !show);
       this.writes++;
       // Whatever it held when it went down is written again from scratch the next time it comes up,
-      // so a row that comes back never shows the last dive's number for a frame.
-      if (!show) {
-        this.breathCur = NaN;
-        this.breathTextDrawn = NaN;
-        this.breathLabelDrawn = '';
-      }
+      // so a bar that comes back never shows the last dive's share for a frame.
+      if (!show) this.breathCur = NaN;
     }
     if (!show || !r) return;
     const px = Math.max(1, HUD_TUNE.breathPixels);
@@ -1043,59 +1324,48 @@ export class Hud {
       this.breathFill.style.transform = `scaleX(${steps / px})`;
       this.writes++;
     }
-    if (b.band !== this.breathBandDrawn) {
-      this.breathBandDrawn = b.band;
-      this.breathBar.classList.toggle('warn', b.band === 'warn');
-      this.breathBar.classList.toggle('bad', b.band === 'bad');
-      this.writes += 2;
-    }
-    // Ceiling, not rounding, and for the health bar's own reason two centimetres below it: a thing
-    // that is still there must never read nought. Rounded, the last half-second of air says "0".
-    const shown = Math.ceil(r.value);
-    if (shown !== this.breathTextDrawn || r.label !== this.breathLabelDrawn) {
-      this.breathTextDrawn = shown;
-      this.breathLabelDrawn = r.label;
-      this.breathText.textContent = `${r.label} ${shown}`;
+    if (b.low !== this.breathLow) {
+      this.breathLow = b.low;
+      this.breathBar.classList.toggle('low', b.low);
       this.writes++;
     }
   }
 
   /**
-   * The stamina row (the speed classes: src/anim/). `pool` is the body's own pool (what is left, and whether the
+   * The stamina bar (the speed classes: src/anim/). `pool` is the body's own pool (what is left, and whether the
    * body is tired), read here so that no number is handed across the call; `max` its size; `show` the pool's own word
    * for whether its bar is up (while it is not full, and for a moment after); and `on` whether the speed classes are
    * in force for the body at all. Called by the game each frame it draws the display, before `update`; a frame with
-   * the pool full and the row down reaches the third line and writes nothing.
+   * the pool full and the bar down reaches the third line and writes nothing.
    *
-   * With the classes off the row is not in the block at all (`gone`), so the two bars above stand where they stood
-   * before the classes. With them on it keeps its place while it is down (`off` hides it and never takes it out of
-   * the block), so the bars above do not move each time a sprint begins.
+   * With the classes off the bar is not in the block at all (`gone`), and the bars are placed without it. With them on
+   * it keeps its place while it is down (`off` hides it and never takes it out of the block), so nothing moves each
+   * time a sprint begins.
    *
-   * What it costs while it is up: one write as the row comes up and one as it goes, one per pixel of the bar's own
-   * length as the pool moves (`HUD_SIZES.staminaBarW`), one per change of the number, and one each time the body
-   * becomes tired or rested (the bar wears the warning colour while tired: no run until the pool is back).
+   * What it costs while it is up: one write as the bar comes up and one as it goes, one per pixel of the bar's own
+   * length as the pool moves (`HUD_SIZES.staminaBarW`), and one each time the body becomes tired or rested (the bar
+   * wears the warning colour while tired: no run until the pool is back).
    */
   setStamina(pool: { readonly value: number; readonly tired: boolean }, max: number, show: boolean, on: boolean): void {
     if (on !== this.staminaOn) {
       this.staminaOn = on;
-      this.staminaRowEl.classList.toggle('gone', !on);
+      this.staminaBar.classList.toggle('gone', !on);
       this.writes++;
+      // The bars placed again with it or without it: a change of the speed classes, not a frame's work.
+      this.layoutBars();
     }
     if (!on) show = false;
     const value = pool.value;
     const tired = pool.tired;
     if (show !== this.staminaShown) {
       this.staminaShown = show;
-      this.staminaRowEl.classList.toggle('off', !show);
+      this.staminaBar.classList.toggle('off', !show);
       this.writes++;
-      // Written again from scratch the next time it comes up, so it never shows the last sprint's number for a frame.
-      if (!show) {
-        this.staminaCur = NaN;
-        this.staminaTextDrawn = NaN;
-      }
+      // Written again from scratch the next time it comes up, so it never shows the last sprint's share for a frame.
+      if (!show) this.staminaCur = NaN;
     }
     if (!show) return;
-    // A step of the bar is a pixel of its own length at scale 1 (`staminaBarW`): the pool moves all the time while it
+    // A step of the bar is a pixel of the long bar at scale 1 (`staminaBarW`): the pool moves all the time while it
     // shows, so it is compared no finer than can be seen.
     const px = HUD_SIZES.staminaBarW;
     const steps = Math.round(Math.max(0, Math.min(1, max > 0 ? value / max : 0)) * px);
@@ -1109,12 +1379,6 @@ export class Hud {
       this.staminaBar.classList.toggle('warn', tired);
       this.writes++;
     }
-    const shown = Math.ceil(value);
-    if (shown !== this.staminaTextDrawn) {
-      this.staminaTextDrawn = shown;
-      this.staminaText.textContent = `Stamina ${shown}`;
-      this.writes++;
-    }
   }
 
   private writeGhost(bar: BodyBar, steps: number, px: number): void {
@@ -1125,16 +1389,17 @@ export class Hud {
   }
 
   /** The two eases ending: the ghost is snapped back behind the fill, ready for the next fall. */
-  private ageBars(dt: number): void {
+  private ageBars(): void {
     // The two are stepped by name rather than through a list: a list here would be a new array on
-    // every frame the display runs, which is the one thing the frame path must never do.
-    this.ageBar(this.hp, dt);
-    this.ageBar(this.res, dt);
+    // every frame the display runs, which is the one thing the frame path must never do. The frame's
+    // seconds are `frameDt`, a field, so no fraction is handed to either call.
+    this.ageBar(this.hp);
+    this.ageBar(this.res);
   }
 
-  private ageBar(bar: BodyBar, dt: number): void {
+  private ageBar(bar: BodyBar): void {
     if (bar.ghostFor <= 0) return;
-    bar.ghostFor -= dt;
+    bar.ghostFor -= this.frameDt;
     if (bar.ghostFor > 0 || bar.snap) return;
     bar.snap = true;
     bar.ghost.classList.toggle('snap', true);
@@ -1159,44 +1424,97 @@ export class Hud {
     }
   }
 
-  /** What is in each hand: read by identity, so nothing is written while nothing has changed. */
-  private readHands(): void {
+  /**
+   * The weapon mark, once a frame. What the hands hold is compared by identity, and the kit, the bare-hands switch, the
+   * stand-in blaster's kind and the stance by their words, against what was last read: while none has changed nothing is
+   * worked out and nothing written. Then the blade: `lit` on the mark while the real blade is lit and these hands can
+   * light it (or always, with the switch off), one class the moment it changes, which starts the stylesheet's draw in or
+   * out at the blade's own timing. With no source (a test's display, before the game hands one over) the hands are
+   * empty and the kit alone decides.
+   */
+  private readMark(kitId: string, saberOn: boolean): void {
     const src = this.handSource;
-    if (!src) return;
-    for (let i = 0; i < this.hands.length; i++) {
-      const hand = this.hands[i];
-      const item = i === 0 ? src.equipped.right : src.equipped.left;
-      if (item === hand.item) continue;
-      hand.item = item;
-      if (!item) {
-        if (!hand.root.hidden) {
-          hand.root.hidden = true;
-          this.writes++;
-        }
-        hand.label = '';
-        hand.glyph = '';
-        continue;
-      }
-      if (hand.root.hidden) {
-        hand.root.hidden = false;
-        this.writes++;
-      }
-      const label = item.name || wordsOf(item.id ?? '');
-      if (label !== hand.label) {
-        hand.label = label;
-        hand.name.textContent = label;
-        this.writes++;
-      }
-      // Its own picture where the rack has one, and one of our glyphs where it has none. One write
-      // for either, and only when what is in the hand has changed.
-      const url = src.icon(item);
-      const glyph = url ? `img:${url}` : handGlyph(item.class, label);
-      if (glyph !== hand.glyph) {
-        hand.glyph = glyph;
-        hand.pic.innerHTML = url ? `<img src="${esc(url)}" alt="">` : `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#${glyph}"></use></svg>`;
-        this.writes++;
-      }
+    const right = src ? src.equipped.right : null;
+    const left = src ? src.equipped.left : null;
+    const bare = !!src && src.fists === true;
+    const gun = src && typeof src.gunClass === 'string' ? src.gunClass : '';
+    const style = src && src.saber ? src.saber.style : 'medium';
+    if (right !== this.mkRight || left !== this.mkLeft || kitId !== this.mkKit || bare !== this.mkBare || gun !== this.mkGun || style !== this.mkStyle) {
+      this.mkRight = right;
+      this.mkLeft = left;
+      this.mkKit = kitId;
+      this.mkBare = bare;
+      this.mkGun = gun;
+      this.mkStyle = style;
+      const m = this.markIn;
+      m.right = right && typeof right.class === 'string' ? right.class : right ? '?' : '';
+      m.left = left && typeof left.class === 'string' ? left.class : left ? '?' : '';
+      m.kit = kitId;
+      m.bare = bare;
+      m.gun = gun;
+      m.style = style;
+      weaponMark(m, this.markOut);
+      this.drawMark();
     }
+    const lit = !this.markFollows || (saberOn && this.markOut.lights);
+    if (lit !== this.markDrawn.lit) {
+      this.markDrawn.lit = lit;
+      this.markEl.classList.toggle('lit', lit);
+      this.writes++;
+    }
+  }
+
+  /**
+   * The mark as `weaponMark` worked it out, written: each slot's markup when what it shows changed, each slot's tilt
+   * (a custom property the stylesheet turns the saber by, easing to a new stance), the pair's class, and the blade's
+   * timings in each hand when they changed. Only on a change of what is held or of the stance: never in a steady frame.
+   */
+  private drawMark(): void {
+    const o = this.markOut;
+    const d = this.markDrawn;
+    if (o.a !== d.a) {
+      d.a = o.a;
+      this.markA.innerHTML = markSvg(o.a, false);
+      this.writes++;
+    }
+    if (o.b !== d.b) {
+      d.b = o.b;
+      this.markB.innerHTML = markSvg(o.b, true);
+      this.writes++;
+    }
+    if (o.tiltA !== d.tiltA) {
+      d.tiltA = o.tiltA;
+      setVar(this.markA, '--mk-tilt', `${o.tiltA}`);
+      this.writes++;
+    }
+    if (o.tiltB !== d.tiltB) {
+      d.tiltB = o.tiltB;
+      setVar(this.markB, '--mk-tilt', `${o.tiltB}`);
+      this.writes++;
+    }
+    const pair = o.b !== '';
+    if (pair !== d.pair) {
+      d.pair = pair;
+      this.markEl.classList.toggle('pair', pair);
+      this.writes++;
+    }
+    // The blade's own timing in each hand (the right's draws the single saber, the staff and the X's first; the left's
+    // the X's second and a pair's saber), or the default where there is none to read.
+    d.openR = this.bladeVar('--mk-open', 'right', false, d.openR);
+    d.closeR = this.bladeVar('--mk-close', 'right', true, d.closeR);
+    d.openL = this.bladeVar('--mk-open2', 'left', false, d.openL);
+    d.closeL = this.bladeVar('--mk-close2', 'left', true, d.closeL);
+  }
+
+  /** One of the blade's timings: read from the source (the default where it has none), written when it moved; what is now written. */
+  private bladeVar(name: string, hand: 'right' | 'left', closing: boolean, was: number): number {
+    const src = this.handSource;
+    const read = src && typeof src.bladeSeconds === 'function' ? src.bladeSeconds(hand, closing) : Number.NaN;
+    const s = Number.isFinite(read) && read > 0 ? read : HUD_SIZES.markBladeSeconds;
+    if (s === was) return was;
+    setVar(this.markEl, name, `${s}`);
+    this.writes++;
+    return s;
   }
 
   /**
@@ -1359,11 +1677,6 @@ export function keyLabel(code: string): string {
 const MOUSE_CAPS: Record<string, string> = { Mouse0: 'LMB', Mouse1: 'MMB', Mouse2: 'RMB', Mouse3: 'M4', Mouse4: 'M5' };
 const ARROW_CAPS: Record<string, string> = { Up: '↑', Down: '↓', Left: '←', Right: '→' };
 const NAMED_CAPS: Record<string, string> = { Space: 'Space', Equal: '=', Minus: '-', Comma: ',', Period: '.', Slash: '/', Backquote: '`', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Backslash: '\\', Tab: 'Tab', Enter: 'Enter', CapsLock: 'Caps', Escape: 'Esc', Delete: 'Del', PageUp: 'PgUp', PageDown: 'PgDn', Home: 'Home', End: 'End', Pause: 'Pause', Insert: 'Ins' };
-
-/** An id as words, for an item whose own name the game's tables never had. */
-function wordsOf(id: string): string {
-  return id.replace(/_/g, ' ').trim();
-}
 
 /** Anything that goes into markup: the five characters that would otherwise close a tag. */
 function esc(text: string): string {

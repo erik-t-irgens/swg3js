@@ -112,10 +112,11 @@ const EDITOR_WINDOW_CSS = `
 .ed-panel[hidden] { display: none; }
 .ed-swatch { width: 24px; height: 24px; flex: none; border: 1px solid var(--panel-border); border-radius: 2px; }
 /* While the minimap shows, the window docks under the display's top-left block rather than over the circle: the block's
-   top (12) and its height on the HUD scale (212, the sum hud.css states over its minimap rules and hudMath.test.ts adds
-   up again), with a gap of 8; the minimap's own layout is never touched, and a window moved or sized by hand stands where
-   it was put. (The help block stood by the same sum until it went with the hide key.) */
-#hud.minimap-on ~ .ed-panel { top: calc(20px + 212px * var(--hud-scale)); max-height: calc(100vh - 36px - 212px * var(--hud-scale)); }
+   top (12) and its height on the HUD scale (225, the sum hud.css states over its minimap rules and hudMath.test.ts adds
+   up again: the weather's line under the circle is in it since the interface rewrite), with a gap of 8; the minimap's own
+   layout is never touched, and a window moved or sized by hand stands where it was put. (The help block stood by the
+   same sum until it went with the hide key.) */
+#hud.minimap-on ~ .ed-panel { top: calc(20px + 225px * var(--hud-scale)); max-height: calc(100vh - 36px - 225px * var(--hud-scale)); }
 #ui > .ed-panel { pointer-events: auto; }
 #ui > .ed-panel.fly { pointer-events: none; opacity: 0.82; }
 .ed-panel.fly * { pointer-events: none; }

@@ -56,6 +56,23 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
     ],
   },
   {
+    title: 'The bars and the action bar',
+    knobs: [
+      { key: 'hudBlockAlign', label: 'Where they stand', kind: 'choice', choices: [{ value: 'left', label: 'Bottom left' }, { value: 'middle', label: 'Bottom middle' }, { value: 'right', label: 'Bottom right' }], hint: 'The bars, the weapon mark and the action bar together. In the middle the mark stands over the health bar; at either side the mark stands at the screen\'s edge with the bars beside it, running toward the middle, and the two sides are mirror images. With them on the left, the message line goes to the bottom right.' },
+      { key: 'hudForceLook', label: 'The Force bar', kind: 'choice', choices: [{ value: 'over', label: 'Laid over the health bar' }, { value: 'inside', label: 'Inside the health bar' }], hint: 'Laid over: against the health bar with no gap, half over its edge and drawn in front. Inside: the same rounded bar with its middle on the health bar\'s edge and the half outside it not drawn, so its ends seem to curve on over the edge. Stamina does the same to the Force bar, or sits inside the health bar on the other edge.' },
+      { key: 'hudForceEdge', label: 'On which edge', kind: 'choice', choices: [{ value: 'lower', label: 'The lower edge' }, { value: 'upper', label: 'The upper edge' }], hint: 'Which of the health bar\'s two long edges the Force bar is on. Breath, under water, stands on top of whichever bar is highest.' },
+      { key: 'hudMarkBlade', label: "The mark's blade follows the saber", kind: 'toggle', hint: "The weapon mark shows a lightsaber's stance by its tilt. On, the blade on the mark draws in and out with the real one, at the saber's own pace; off, the mark keeps its blade out whether the saber is lit or not. On to begin with." },
+    ],
+  },
+  {
+    title: 'The corner',
+    knobs: [
+      { key: 'hudFps', label: 'Frame rate', kind: 'toggle', hint: 'The frame rate alone at the top right, with no box round it. Off to begin with.' },
+      { key: 'hudWeather', label: 'Weather', kind: 'toggle', hint: 'The weather in a word or two, small, under the minimap (where the minimap would be when it is off): Clear, Rain, Dust Storm. Not in space or in a dungeon. While the weather is held from the Graphics page or the console, a quiet "held" follows the word.' },
+      { key: 'hudClock', label: 'Clock', kind: 'toggle', hint: "The world's time of day just above the minimap's coordinates, in the same size of type. Off to begin with." },
+    ],
+  },
+  {
     title: 'Flying',
     knobs: [
       { key: 'hudShipCondition', label: 'The ship\'s condition', kind: 'toggle', hint: 'Shields and armour front and back, the hull, and a small square for each part fitted, under the middle of the screen. Your own health bar is hidden while you are at the controls whatever this says.' },

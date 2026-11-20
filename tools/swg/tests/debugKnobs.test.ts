@@ -199,7 +199,9 @@ function body(text: string, signature: string): string {
   const step = body(main, 'private stepGod(flown: Vehicle | null): void');
   ok(step.includes('godRefusal(this.net.session.authority, this.net.session.isAdmin)') && step.includes('p.god = false;') && step.includes('this.godHold.hold(p.god ? flown : null);'), '14: a server that does not make this browser its admin puts god mode down by itself');
   ok(body(main, 'private setGod(on: boolean): string').includes('godRefusal('), '14: and turning it on asks the same rule');
-  ok((main.match(/this\.hud\.setWeatherNote\(this\.heldNote\(\)\)/g) ?? []).length === 3 && !main.includes('setWeatherNote(this.world.weather.heldNote())'), "14: every place the quiet line is written carries god mode's and the reach's notes");
+  // The quiet line on the screen went with the top-right box (the interface rewrite's first wave): its weather's half is
+  // the "· held" after the weather's word, and the whole line, god mode's and the reach's notes with it, is the console's.
+  ok(!main.includes('setWeatherNote(') && /held: this\.heldNote\(\),/.test(main), "14: the joined line, god mode's and the reach's notes with it, is read in `__debug.hud().held` now the corner box is gone");
   ok(DEBUG_GROUPS.some((gr) => gr.helpers.includes('god')) && DEBUG_GROUPS.some((gr) => gr.helpers.includes('reach')), '14: god and reach are filed in the debug menu');
 }
 
