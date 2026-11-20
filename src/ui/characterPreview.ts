@@ -14,6 +14,7 @@ import { PREVIEW_DOF, previewGate, previewLensOn, previewSpan, type PreviewSpan 
 import { specWrapTree } from '../world/specular.ts';
 import { EnvironmentSwap } from '../world/envmap.ts';
 import { StudioChoice, studioEnvironment } from './previewStudio.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 export class CharacterPreview {
   /** What the settings ask of every doll: App keeps it in step with Effects and Depth of field (a change shows on the next frame). */
@@ -174,6 +175,9 @@ export class CharacterPreview {
     this.dispose();
     // The clone rebinds its own skeleton, so posing the doll never moves the character in the world.
     const copy = cloneSkinned(character.group);
+    // On WebGPU a body in play is drawn baked (pass 1, wave 4, `morphBake.ts`): the doll's clone takes the live source, so its
+    // shape sliders morph here as they always did.
+    if (GPU.webgpu) GPU.rt!.morphBake.unbake(copy);
     // The clone carries the character's place and heading in the world; the doll stands at the
     // origin facing the viewer, in the character's own frame (its height scale kept).
     copy.position.set(0, 0, 0);
@@ -326,12 +330,18 @@ export class CharacterPreview {
    */
   private draw(model: THREE.Object3D): void {
     this.envSwap.on(model, this.studio.textureFor(model));
+    // On WebGPU what the studio did not take keeps the world's filtered environment, a cube target of WebGPU's (pass 1, wave 4).
+    if (GPU.webgpu) this.foreignEnv.on(model);
     try {
       this.drawWith(model);
     } finally {
+      if (GPU.webgpu) this.foreignEnv.off();
       this.envSwap.off();
     }
   }
+
+  /** WebGPU's own: the world's filtered environment held off what this context draws (`ForeignEnvironment`). */
+  private readonly foreignEnv = new ForeignEnvironment();
 
   private readonly envSwap = new EnvironmentSwap();
   /** The doll's own studio, made in this context the first time a draw has anything to give it to (none while the hatch keeps the models out). */
@@ -441,6 +451,7 @@ export class CharacterPreview {
    */
   testPicture(root: THREE.Object3D, size = 256): Uint8Array {
     const copy = cloneSkinned(root);
+    if (GPU.webgpu) GPU.rt!.morphBake.unbake(copy);
     copy.position.set(0, 0, 0);
     copy.quaternion.identity();
     copy.updateMatrixWorld(true);
@@ -467,6 +478,7 @@ export class CharacterPreview {
     const alpha = r.getClearAlpha();
     const out = new Uint8Array(size * size * 4);
     this.envSwap.on(copy, this.studio.textureFor(copy));
+    if (GPU.webgpu) this.foreignEnv.on(copy);
     try {
       r.setRenderTarget(target);
       r.setClearColor(0x000000, 0);
@@ -474,6 +486,7 @@ export class CharacterPreview {
       r.render(this.scene, camera);
       r.readRenderTargetPixels(target, 0, 0, size, size, out);
     } finally {
+      if (GPU.webgpu) this.foreignEnv.off();
       this.envSwap.off();
       r.setRenderTarget(prev);
       r.setClearColor(clear, alpha);
@@ -525,4 +538,54 @@ function meshBounds(root: THREE.Object3D): THREE.Box3 {
     box.union(local);
   });
   return box;
+}
+
+/**
+ * On WebGPU alone (pass 1, wave 4, item 5): the world's filtered environment, held off what the preview's own WebGL context
+ * draws for the length of a draw and put back after. On WebGPU the world registers on a character's materials a filtered cube
+ * made by three's WebGPU generator (a cube render target's texture), and the doll draws a clone sharing those materials in a
+ * WebGL context of its own, which tries to upload any cube it is handed and throws on one with no pictures of its own (every
+ * frame, once the creator's place has registered it). Whatever the studio swap took is left as it took it; everything else
+ * whose environment is such a cube draws with none, which is what the WebGL path's doll draws with the world's filtered
+ * picture of another context (a target never uploaded here, sampled as nothing): the same light, and nothing thrown.
+ */
+class ForeignEnvironment {
+  private readonly held: (THREE.Material & { envMap: THREE.Texture | null })[] = [];
+  private readonly maps: (THREE.Texture | null)[] = [];
+  private count = 0;
+
+  /** Materials this draw held off, for the console and the tests. */
+  last = 0;
+
+  private readonly visit = (o: THREE.Object3D): void => {
+    const mat = (o as THREE.Mesh).material;
+    if (!mat) return;
+    if (Array.isArray(mat)) for (let i = 0; i < mat.length; i++) this.take(mat[i]);
+    else this.take(mat);
+  };
+
+  private take(material: THREE.Material): void {
+    const m = material as THREE.Material & { envMap?: THREE.Texture | null };
+    const t = m.envMap as (THREE.Texture & { isCubeTexture?: boolean; isRenderTargetTexture?: boolean }) | null | undefined;
+    if (!t || t.isCubeTexture !== true || t.isRenderTargetTexture !== true) return;
+    const i = this.count++;
+    this.held[i] = m as THREE.Material & { envMap: THREE.Texture | null };
+    this.maps[i] = t;
+    m.envMap = null;
+  }
+
+  on(root: THREE.Object3D): void {
+    this.off();
+    root.traverse(this.visit);
+    this.last = this.count;
+  }
+
+  off(): void {
+    for (let i = this.count - 1; i >= 0; i--) {
+      this.held[i]!.envMap = this.maps[i];
+      this.held[i] = null as unknown as THREE.Material & { envMap: THREE.Texture | null };
+      this.maps[i] = null;
+    }
+    this.count = 0;
+  }
 }

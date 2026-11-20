@@ -2,7 +2,8 @@
 // three is the revision it was written for and every private method it reaches is there (`patchApplies`), each with a
 // switch on by default, read at load from `localStorage['swg.gpu.patch.<name>']` ('0' leaves it off) and moved live by
 // `__debug.gpu({ patches: { <name>: false } })`. What each replaces and leans on is `patchTable.ts`, which
-// `gpuPatches.test.ts` holds to three's own text.
+// `gpuPatches.test.ts` holds to three's own text. The performance step's replay and pass 1's bone pool (wave 4) carry
+// switches of their own, which their records here read through to.
 
 import * as THREE from 'three';
 import { PATCH_TABLE, patchApplies, type PatchEntry } from './patchTable.ts';
@@ -12,6 +13,9 @@ import { STENCIL_PATCH, installStencilPatch } from './patchStencilBundles.ts';
 import { WARM_PATCH, WARM_STATS, WARM_TUNE } from './patchWarm.ts';
 import { installReplayPatch } from './patchReplay.ts';
 import { DRAW_APPLIED, DRAW_COST, DRAW_STATS, setDrawSwitch } from './drawCost.ts';
+import { installBonePatch, setBonePool } from './patchBones.ts';
+import { BONES } from './bonePool.ts';
+import { GPU_KEYS } from './gpuKeys.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Name = PatchEntry['name'];
@@ -41,6 +45,31 @@ const REPLAY_PATCH = {
   },
 };
 
+/**
+ * Pass 1, wave 4's bone pool (`patchBones.ts`): its switch is the wave's own (`GPU_KEYS.boneStorage`, read at load from
+ * `swg.gpu.keys.boneStorage`), so its record here reads through to it and to the pool's own verdict.
+ */
+const BONES_PATCH = {
+  get on(): boolean {
+    return GPU_KEYS.boneStorage;
+  },
+  set on(v: boolean) {
+    setBonePool(v);
+  },
+  get applied(): boolean {
+    return BONES.applied;
+  },
+  set applied(v: boolean) {
+    BONES.applied = v;
+  },
+  get why(): string {
+    return BONES.why;
+  },
+  set why(v: string) {
+    BONES.why = v;
+  },
+};
+
 /** Each patch's own record: its switch, whether it applied and why not. */
 const STATE: Record<Name, { on: boolean; applied: boolean; why: string }> = {
   shadow: SHADOW_PATCH,
@@ -48,11 +77,14 @@ const STATE: Record<Name, { on: boolean; applied: boolean; why: string }> = {
   warm: WARM_PATCH,
   stencil: STENCIL_PATCH,
   replay: REPLAY_PATCH,
+  bones: BONES_PATCH,
 };
 
 function readSwitch(name: Name): boolean {
   // The replay patch's switch is the step's own, read already (`readDrawSwitches`).
   if (name === 'replay') return DRAW_COST.replay;
+  // The bone pool's is the wave's own, read already (`gpuKeys.ts`).
+  if (name === 'bones') return GPU_KEYS.boneStorage;
   try {
     return localStorage.getItem(`swg.gpu.patch.${name}`) !== '0';
   } catch {
@@ -79,6 +111,7 @@ export function applyPatches(renderer: Any): void {
     else if (e.name === 'stencil') installStencilPatch(renderer);
     else if (e.name === 'warm') WARM_PATCH.applied = true;
     else if (e.name === 'replay') installReplayPatch(renderer);
+    else if (e.name === 'bones') installBonePatch(renderer);
     st.why = '';
   }
 }
@@ -92,7 +125,7 @@ export function setPatch(name: Name, on: boolean): boolean {
 }
 
 export function isPatchName(n: string): n is Name {
-  return n === 'shadow' || n === 'still' || n === 'warm' || n === 'stencil' || n === 'replay';
+  return n === 'shadow' || n === 'still' || n === 'warm' || n === 'stencil' || n === 'replay' || n === 'bones';
 }
 
 /** What `__debug.gpu()` says of the patches. */
@@ -117,5 +150,6 @@ export function patchReport(): Record<string, unknown> {
   (out.warm as Record<string, unknown>).tune = { ...WARM_TUNE };
   (out.replay as Record<string, unknown>).switch = "__debug.gpu({ draw: { replay: false } }), or localStorage['swg.gpu.draw.replay'] = '0' and a reload";
   (out.replay as Record<string, unknown>).stats = { asked: DRAW_STATS.replayAsked, skipped: DRAW_STATS.replaySkipped, fullReplays: DRAW_STATS.replayFull };
+  (out.bones as Record<string, unknown>).switch = "__debug.gpu({ bones: false }) live, or localStorage['swg.gpu.keys.boneStorage'] = '0' and a reload (the pool itself: __debug.gpu().bones)";
   return out;
 }

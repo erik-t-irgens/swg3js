@@ -363,7 +363,9 @@ setEnvironment(sky, 1);
 
   const doll = text('src/ui/characterPreview.ts');
   const draw = bodyOf(doll, 'private draw(model: THREE.Object3D): void {');
-  ok(/this\.envSwap\.on\(model, this\.studio\.textureFor\(model\)\);\s*try \{\s*this\.drawWith\(model\);\s*\} finally \{\s*this\.envSwap\.off\(\);/.test(draw), "the doll draws only inside its swap, handing it the studio its choice makes, and puts the world's back in a finally");
+  // Pass 1, wave 4: on WebGPU the world's WebGPU-filtered cube is held off inside the swap as well (a guard each side, the
+  // WebGL path's lines as they were round it).
+  ok(/this\.envSwap\.on\(model, this\.studio\.textureFor\(model\)\);\s*(?:\/\/[^\n]*\s*)?if \(GPU\.webgpu\) this\.foreignEnv\.on\(model\);\s*try \{\s*this\.drawWith\(model\);\s*\} finally \{\s*if \(GPU\.webgpu\) this\.foreignEnv\.off\(\);\s*this\.envSwap\.off\(\);/.test(draw), "the doll draws only inside its swap, handing it the studio its choice makes, and puts the world's back in a finally (on WebGPU the world's own cube held off inside it and put back first)");
   ok(/private readonly studio = new StudioChoice\(\(\) => studioEnvironment\(this\.renderer\)\);/.test(doll), "and that choice makes the studio in the doll's own context, at the hatch's word (its default)");
   const drawWith = bodyOf(doll, 'private drawWith(model: THREE.Object3D): void {');
   const calls = (s: string) => (s.match(/this\.renderer\.render\(|dof\.render\(|dof\.warm\(/g) ?? []).length;

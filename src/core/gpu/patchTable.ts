@@ -19,6 +19,9 @@
 // And a fifth, the performance step's own (`drawCost.ts`, its switch `swg.gpu.draw.replay` rather than a patch switch):
 //   replay  a bundle's replay asks three whether a render object needs refreshing only where the answer could be other than
 //           "nothing", once its last full replay found none in need and nothing it depends on has moved since.
+// And a sixth, pass 1's wave 4 (`patchBones.ts`, its switch `GPU_KEYS.boneStorage`):
+//   bones   a skinned body skinned from the bone pool (`bonePool.ts`), keyed "pooled" where three keys its bone count, and
+//           refreshed in full only where something of its own moved.
 
 /** One method of three's: its class, its name, and the build file its class ships in. */
 export interface ThreeMethod {
@@ -32,7 +35,7 @@ export interface ThreeMethod {
 
 export interface PatchEntry {
   /** The patch's name: the console's word for it and the key of its switch. */
-  name: 'shadow' | 'still' | 'warm' | 'stencil' | 'replay';
+  name: 'shadow' | 'still' | 'warm' | 'stencil' | 'replay' | 'bones';
   /** The file under `src/core/gpu/` that holds it. */
   file: string;
   /** What it does, in a line, for the console. */
@@ -57,6 +60,8 @@ export const PATCH_REVISIONS: Readonly<Record<PatchEntry['name'], string>> = {
   warm: '188dev',
   stencil: '188dev',
   replay: '188dev',
+  // Pass 1, wave 4: read against the development commit 577fb27 alone.
+  bones: '188dev',
 };
 
 export const PATCH_TABLE: readonly PatchEntry[] = [
@@ -129,6 +134,41 @@ export const PATCH_TABLE: readonly PatchEntry[] = [
       { cls: 'NodeMaterialObserver', method: 'equals', file: 'three.tsl.js' },
     ],
   },
+  {
+    name: 'bones',
+    file: 'patchBones.ts',
+    does: "a skinned body skinned from the bone pool (bonePool.ts: one storage buffer of every body's bones, body space, written once a frame): its render object keyed 'pooled' where three keys its bone count, its graph's position set up by three's own and then the pool's skinning, and refreshed in full only where something of its own moved",
+    replaces: [
+      // Each wrapped on the live node manager or library and called whole.
+      { cls: 'NodeManager', method: 'getForRenderCacheKey', file: 'three.webgpu.js' },
+      { cls: 'NodeManager', method: '_createNodeBuilderState', file: 'three.webgpu.js' },
+      { cls: 'NodeManager', method: 'needsRefresh', file: 'three.webgpu.js' },
+      { cls: 'NodeLibrary', method: 'fromMaterial', file: 'three.webgpu.js' },
+      // Given, as an own method, to each node material built for a pooled body; three's own is run first.
+      { cls: 'NodeMaterial', method: 'setupPosition', file: 'three.tsl.js' },
+    ],
+    relies: [
+      // The key: three's own, worked out with the skeleton read as "pooled" (its bone count is the one place it reads one).
+      { cls: 'RenderObject', method: 'getMaterialCacheKey', file: 'three.webgpu.js' },
+      { cls: 'RenderObject', method: 'getCacheKey', file: 'three.webgpu.js' },
+      { cls: 'NodeManager', method: 'getForRender', file: 'three.webgpu.js' },
+      // Asks the key again as a render object's last user lets its graph go: handed the one the graph was filed under.
+      { cls: 'NodeManager', method: 'delete', file: 'three.webgpu.js' },
+      // Makes a render object again where its key moved (the scene's environment), its old one let go through the delete.
+      { cls: 'RenderObjects', method: 'get', file: 'three.webgpu.js' },
+      // Every material a node builder builds is handed over by the library (a node material as itself).
+      { cls: 'NodeBuilder', method: 'prebuild', file: 'three.webgpu.js' },
+      // The position set up in the vertex stage, and three's own skinning there (what the pooled one leaves out).
+      { cls: 'NodeMaterial', method: 'setupVertex', file: 'three.tsl.js' },
+      // The observer's animated rule, and the refresh it decides.
+      { cls: 'NodeMaterialObserver', method: 'constructor', file: 'three.tsl.js' },
+      { cls: 'NodeMaterialObserver', method: 'needsRefresh', file: 'three.tsl.js' },
+      { cls: 'Renderer', method: '_renderObjectDirect', file: 'three.webgpu.js' },
+      // A storage buffer is uploaded only as its version moves (the pool writes the card's copy itself).
+      { cls: 'Bindings', method: '_update', file: 'three.webgpu.js' },
+      { cls: 'WebGPUAttributeUtils', method: 'createAttribute', file: 'three.webgpu.js' },
+    ],
+  },
 ];
 
 /** The private fields and methods each patch reaches on a live renderer, checked before it is applied (`patchApplies`). */
@@ -138,6 +178,7 @@ export const PATCH_NEEDS: Readonly<Record<PatchEntry['name'], readonly string[]>
   warm: ['_createObjectPipeline', '_objects.get', '_geometries.updateForRender', '_nodes.updateForRender', '_bindings.updateForRender', '_pipelines.getForRender', 'backend.createRenderPipeline'],
   stencil: ['backend.beginBundle', 'backend.finishBundle', 'backend.addBundle', 'backend.finishRender', 'backend.get', '_renderTransparents'],
   replay: ['_renderBundle', '_bundleNeedsUpdate', '_bundles.get', 'backend.get', '_nodes.needsRefresh', 'getRenderTarget', 'getOutputRenderTarget', 'getCanvasTarget', 'getMRT'],
+  bones: ['_nodes.getForRenderCacheKey', '_nodes._createNodeBuilderState', '_nodes.needsRefresh', 'library.fromMaterial', 'backend.get', 'backend.device.queue.writeBuffer'],
 };
 
 /**

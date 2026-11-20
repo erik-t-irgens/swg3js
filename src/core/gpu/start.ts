@@ -22,7 +22,7 @@ import { makeSun } from './sun.ts';
 import { GPU_LOOK, tuneGpuLook } from './gpuLook.ts';
 import { wrapConsole } from './consoleWords.ts';
 import { applyPatches, isPatchName, patchReport, setPatch } from './patches.ts';
-import { installWarm, WARM_PATCH, WARM_STATS, WARM_TUNE } from './patchWarm.ts';
+import { installWarm, WARM_NOW, WARM_PATCH, WARM_STATS, WARM_TUNE } from './patchWarm.ts';
 import { BUNDLE_TUNE, TierBundles } from './bundles.ts';
 import { installUsageHint, setUsageHint, USAGE_HINT } from './usageHint.ts';
 import { installLooks, LOOK_PARTS, LOOKS_AT_LOAD, looksReport, setLooks } from './looks.ts';
@@ -47,6 +47,11 @@ import { registerPerfSwitch } from '../perf.ts';
 import { installLedger, landingReport, ledgerFrame } from './pipeLedger.ts';
 import { keyCensus } from './keyCensus.ts';
 import { passTimer } from './gpuTimer.ts';
+import { MORPH_BAKE, morphBakeReport, setMorphBake } from './morphBake.ts';
+import { GPU_KEYS } from './gpuKeys.ts';
+import { bodyStandIns, bodyStandInsReport } from './bodyStandIns.ts';
+import { boneFrame, bonePoolReport } from './bonePool.ts';
+import { setBonePool } from './patchBones.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -224,6 +229,16 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         groundSelfTest: () => groundSelfTestGpu(renderer),
       });
     },
+    // Pass 1, wave 4: the morph bake (`morphBake.ts`), and the person warm's stand-ins made off real bodies (`bodyStandIns.ts`).
+    morphBake: MORPH_BAKE,
+    bodyStandIns,
+    // Pass 1, wave 4: the bone pool (`bonePool.ts`, written by the patch `patchBones.ts`), once a frame after the scene's walk.
+    bones: {
+      frame(scene: THREE.Scene, walk: boolean) {
+        if (walk && scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();
+        boneFrame();
+      },
+    },
     renderer: renderer as THREE.WebGLRenderer,
     environment,
     standIns,
@@ -234,6 +249,18 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     compiled: () => warm.compiled(),
     compileMark: () => warm.mark(),
     compiledSince: (mark: number) => warm.since(mark),
+    compileNow(fn: () => void) {
+      const t0 = performance.now();
+      WARM_NOW.on = true;
+      try {
+        fn();
+      } finally {
+        WARM_NOW.on = false;
+        const ms = performance.now() - t0;
+        WARM_NOW.ms += ms;
+        if (ms > WARM_NOW.longestMs) WARM_NOW.longestMs = ms;
+      }
+    },
     tune(o: Record<string, unknown>) {
       const out: Record<string, unknown> = {};
       if (typeof o.bundles === 'boolean') {
@@ -270,6 +297,23 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         out.draw = said;
       }
       if (typeof o.dynamicHint === 'boolean') out.dynamicHint = setUsageHint((o.scene as THREE.Object3D | undefined) ?? null, o.dynamicHint);
+      // Pass 1, wave 4: the morph bake live (`GPU_KEYS.morphBake`): off, every baked body is handed its source back and three
+      // builds its morphed pipelines at its next draw (the measure's); on, each is baked again.
+      if (typeof o.bake === 'boolean') {
+        const moved = setMorphBake(o.bake, (o.scene as THREE.Object3D | undefined) ?? null);
+        out.bake = { on: GPU_KEYS.morphBake, moved };
+      }
+      // And the person warm's stand-ins off real bodies (`GPU_KEYS.realStandIns`), from the next warm on.
+      if (typeof o.standIns === 'boolean') {
+        GPU_KEYS.realStandIns = o.standIns;
+        out.standIns = bodyStandInsReport();
+      }
+      // The bone pool live (`GPU_KEYS.boneStorage`): every skinned body's render object keyed the other way is made again at its
+      // next draw (its pipelines there are the measure's).
+      if (typeof o.bones === 'boolean') {
+        const remade = setBonePool(o.bones);
+        out.bones = { on: GPU_KEYS.boneStorage, renderObjectsRemade: remade };
+      }
       // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
       if (o.carries === true) out.carries = carriesReport(renderer, (o.scene as THREE.Object3D | undefined) ?? null);
       return out;
@@ -356,7 +400,13 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
           by: WARM_PATCH.on && WARM_PATCH.applied ? "the warm patch: every pass's items and every sun cascade's casters listed by three's walk and built ahead" : "three's own compileAsync (the warm patch is off or did not apply): no shadow pass warmed",
           pending: warm.pending(),
           pipelinesMade: { byDrawInPlay: WARM_STATS.drawMadeInPlay, byDrawBehindScreen: WARM_STATS.drawMadeBehind, aheadInPlay: WARM_STATS.asyncInPlay, aheadBehindScreen: WARM_STATS.asyncBehind, lastByDrawInPlay: [...WARM_STATS.lastInPlay], forSelfTests: WARM_STATS.selfTestMade },
+          // Wave 4's fixer: compiles built there and then (a jump's world swap, `World.gpuMadeNow`), and their items.
+          builtAtOnce: { calls: WARM_NOW.calls, items: WARM_NOW.items, ms: Math.round(WARM_NOW.ms), longestMs: Math.round(WARM_NOW.longestMs * 10) / 10 },
         },
+        // Pass 1, wave 4: the morph bake, and the person warm's stand-ins off real bodies.
+        bake: morphBakeReport(),
+        bodyStandIns: bodyStandInsReport(),
+        bones: bonePoolReport(),
         patches: patchReport(),
         // The performance step: the frame's draws issued for less of the main thread, each behind its switch.
         draw: drawCostReport(),

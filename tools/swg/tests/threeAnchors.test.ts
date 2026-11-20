@@ -491,6 +491,43 @@ const INJECTED: { what: string; lib: 'physical' | 'depth'; shader: Shader; loops
   ok(['_init(o: Any): void {', 'updateBefore(frame: Any): boolean | undefined {', 'super.updateBefore(frame)', 'sn.updateShadow = (frame: Any): unknown => {', "export const HELD_CSM_REVISION = '188dev';"].every((s) => held.includes(s)), 'heldCsm.ts overrides _init and updateBefore, calls three\'s own fit, wraps each updateShadow, and names the revision it was read against');
 }
 
+// ---------------------------------------------------------------- 6c. the bone pool (pass 1, wave 4)
+
+{
+  // `src/core/gpu/patchBones.ts` (the sixth private patch, "bones") wraps three's node manager and node library on the live
+  // renderer and gives each node material built for a pooled body a `setupPosition` of its own; every method it wraps or
+  // leans on is hashed in `gpuPatches.test.ts`. What each is relied on for, said in its own words, out of the build files the
+  // game loads, so a moved hash says what to read again.
+  const tsl = three('build/three.tsl.js').replace(/\r\n?/g, '\n');
+  const gpu = three('build/three.webgpu.js').replace(/\r\n?/g, '\n');
+  const method = (text: string, cls: string, name: string): string => {
+    const at = text.search(new RegExp(`^class ${cls}\\b`, 'm'));
+    if (at < 0) return '';
+    const c = text.slice(at, text.indexOf('\n}\n', at) + 2);
+    const m = c.search(new RegExp(`^\\t${name}\\(`, 'm'));
+    return m < 0 ? '' : c.slice(m, c.indexOf('\n\t}\n', m) + 3);
+  };
+  const setup = method(tsl, 'NodeMaterial', 'setupPosition');
+  ok(/if \( object\.isSkinnedMesh === true \) \{\s*skinning\( object \);\s*\}/.test(setup) && setup.indexOf('morphReference( object )') < setup.indexOf('skinning( object )') && setup.indexOf('skinning( object )') < setup.indexOf('this.displacementMap'), "three's setupPosition skins a body only where it reads isSkinnedMesh true, after its morph and before its displacement (the pool's runs three's own with the flag down, then skins)");
+  ok(/this\.hasAnimation = builder\.object\.isSkinnedMesh === true;/.test(method(tsl, 'NodeMaterialObserver', 'constructor')) && /if \( this\.hasNode \|\| this\.hasAnimation \|\|/.test(method(tsl, 'NodeMaterialObserver', 'needsRefresh')), "three's observer calls a skinned body animated and refreshes it in full at every draw (the rule a pooled graph's observer is told is not its)");
+  ok(/const bufferCountSnippet = bufferCount > 0 && type === 'buffer' \? ', ' \+ bufferCount : '';/.test(gpu), "a storage buffer's length is written into no program (the pool's size keys nothing)");
+  ok(/if \( material\.isNodeMaterial \) return material;/.test(method(gpu, 'NodeLibrary', 'fromMaterial')) && /let nodeMaterial = renderer\.library\.fromMaterial\( material \);/.test(method(gpu, 'NodeBuilder', 'prebuild')), "every material a node builder builds is handed over by the library, a node material (three's shadow material as the override) as itself");
+  const forRender = method(gpu, 'NodeManager', 'getForRender');
+  ok(/const cacheKey = this\.getForRenderCacheKey\( renderObject \);\s*nodeBuilderState = nodeBuilderCache\.get\( cacheKey \);/.test(forRender) && /nodeBuilder\.build\(\);/.test(forRender) && forRender.indexOf('getForRenderCacheKey') < forRender.indexOf('nodeBuilder.build();'), "a render object's graph is cached by the key the node manager takes, worked out just before its build (the pool's key and its build go together)");
+  ok(/\tgetForRenderCacheKey\( renderObject \) \{\s*return renderObject\.initialCacheKey;\s*\}/.test(method(gpu, 'NodeManager', 'getForRenderCacheKey')), "and that key is the render object's own (`initialCacheKey`, fixed when it is made), the pool's being three's own worked out with the skeleton read as pooled once, at the object's first ask, and kept");
+  // Wave 4's fixer: three's delete asks the key again as a graph's last user goes, and three lets a render object go and makes
+  // it again exactly when its key has moved (the scene's environment), so a key worked out afresh at the delete named another
+  // graph: the pool keeps the one it gave at the build.
+  const del = method(gpu, 'NodeManager', 'delete');
+  ok(/nodeBuilderState\.usedTimes --;\s*if \( nodeBuilderState\.usedTimes === 0 \) \{\s*this\.nodeBuilderCache\.delete\( this\.getForRenderCacheKey\( object \) \);/.test(del), "three's delete takes a graph out of its cache by the key the node manager names for the render object as its last user goes (the pool's kept key)");
+  ok(/if \( renderObject\.initialCacheKey !== renderObject\.getCacheKey\(\) \) \{\s*renderObject\.dispose\(\);/.test(method(gpu, 'RenderObjects', 'get')) && /this\.nodes\.delete\( renderObject \);/.test(gpu), 'and lets a render object go (its graph through that delete) when its key has moved since it was made');
+  ok(/const kept = pooledRecord\(ro\);\s*if \(kept !== undefined\) \{\s*BUILDING\.pooled = true;\s*return kept\.key;/.test(read('src/core/gpu/patchBones.ts')) && /markPooledRO\(ro, k\);/.test(read('src/core/gpu/patchBones.ts')), "patchBones.ts hands a pooled render object the key it gave at its first ask, at every later ask");
+  const direct = method(gpu, 'Renderer', '_renderObjectDirect');
+  ok(/const refreshType = this\._nodes\.needsRefresh\( renderObject \);/.test(direct) && /this\._bindings\.updateForRender\( renderObject \);/.test(direct), "every draw asks the node manager's refresh question, and a full refresh writes the object's own values (the pool's slot among them)");
+  const pool = read('src/core/gpu/patchBones.ts');
+  ok(['N.getForRenderCacheKey = (ro: Any): Any => {', 'lib.fromMaterial = (m: Any): Any => {', 'N._createNodeBuilderState = (nodeBuilder: Any): Any => {', 'N.needsRefresh = function (this: Any, ro: Any): number {', 'nm.setupPosition = pooledSetupPosition;'].every((s) => pool.includes(s)) && !/NodeMaterial\.prototype\.setupPosition\s*=/.test(pool), "patchBones.ts wraps the node manager and the library on the live renderer and gives a material its own setupPosition, never three's prototype");
+}
+
 // ---------------------------------------------------------------- 7. reversed depth, left to three
 
 {

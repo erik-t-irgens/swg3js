@@ -593,6 +593,99 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const callers = all.flatMap((file) => readFileSync(file, 'utf8').split(/\r?\n/).filter((x) => /\.(drawnOne|undrawnDirty)\(/.test(x) && !/^\s*(\/\/|\*)/.test(x)).map((x) => `${rel(file)}: ${x.trim()}`));
     ok(callers.length === 2 && callers.every((c) => c.startsWith('src/core/gpu/heldCsm.ts:')), `the holds' two methods for WebGPU are called from heldCsm.ts alone: ${callers.join('; ')}`);
   }
+  // Pass 1, wave 4, item 1: the morph bake (`src/core/gpu/morphBake.ts`), reached through the runtime alone. Each site adds a
+  // WebGPU line with no WebGL branch, there exactly once (the preview's twice, once in each clone), the line 499c5d5 had
+  // there right after it, so nothing of the WebGL path moved round it.
+  {
+    const wave4: [string, string, string][] = [
+      ['src/world/world.ts', 'if (GPU.webgpu) GPU.rt!.morphBake.adopt(mesh);', 'const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];'],
+      ['src/world/portalRender.ts', 'if (GPU.webgpu) GPU.rt!.morphBake.frame();', "// On WebGPU each region tier's render bundle is shown this frame while the view or the sun's shadow reach meets it."],
+      ['src/main.ts', 'if (GPU.webgpu) GPU.rt!.morphBake.play(true);', 'this.input.captured = false;'],
+      ['src/main.ts', 'if (GPU.webgpu) GPU.rt!.morphBake.play(false);', '// Whatever was built on the world being left is forgotten outright, not merely taken down: the'],
+      // Item 3: the person warm's stand-ins made off real bodies on WebGPU; the WebGL lines of `personStandIns` after it as they were.
+      ['src/world/world.ts', 'if (GPU.webgpu) return this.gpuPersonStandIns();', 'const list = signatureStandIns();'],
+    ];
+    for (const [f, gpu, gl] of wave4) {
+      const l = lines(f);
+      const at = l.flatMap((x, i) => (x === gpu ? [i] : []));
+      ok(at.length === 1, `${f}: the WebGPU line is there once: ${gpu}`);
+      ok(l[at[0] + 1] === gl, `${f}: the line 499c5d5 had there follows the WebGPU line: ${gl}`);
+    }
+    const w = lines('src/world/world.ts');
+    const adopt = w.indexOf('if (GPU.webgpu) GPU.rt!.morphBake.adopt(mesh);');
+    ok(adopt > 0 && w[adopt - 2] === 'if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !mesh.material) return;', 'world.ts: the bake is asked inside the adoption, after its drawables test, as 499c5d5 had that test');
+    const m = lines('src/main.ts');
+    const left = m.indexOf('if (GPU.webgpu) GPU.rt!.morphBake.play(false);');
+    ok(left > 0 && m[left - 2] === 'this.inWorld = false;', "main.ts: play ends for the bake straight after the world's own flag");
+    const p = lines('src/ui/characterPreview.ts');
+    const unbake = p.flatMap((x, i) => (x === 'if (GPU.webgpu) GPU.rt!.morphBake.unbake(copy);' ? [i] : []));
+    ok(unbake.length === 2 && p[unbake[0] - 3] === 'const copy = cloneSkinned(character.group);' && p[unbake[0] + 1] === "// The clone carries the character's place and heading in the world; the doll stands at the" && p[unbake[1] - 1] === 'const copy = cloneSkinned(root);' && p[unbake[1] + 1] === 'copy.position.set(0, 0, 0);', "characterPreview.ts: each clone hands its meshes their live sources on WebGPU alone, the lines 499c5d5 had round it as they were");
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes("import { MORPH_BAKE, morphBakeReport, setMorphBake } from './morphBake.ts';") && startText.includes('morphBake: MORPH_BAKE,'), 'start.ts: the runtime hands the game the bake');
+    for (const g4 of ['morphBake.ts', 'gpuKeys.ts', 'bodyStandIns.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g4)), `wave 4's ${g4} is under src/core/gpu/`);
+    // The WebGL stand-ins' own lines stand after the WebGPU line as they were, and WebGPU's half is called from that guard alone.
+    const ps = w.indexOf('if (GPU.webgpu) return this.gpuPersonStandIns();');
+    ok(ps > 0 && w[ps - 1] === 'private personStandIns(): THREE.Mesh[] {' && w[ps + 2] === 'if (!this.personStandInsMarked) {' && w[ps + 3] === 'for (const s of list) markActor(s);' && w[ps + 4] === 'this.personStandInsMarked = true;', "world.ts: personStandIns's WebGL lines stand after the WebGPU line as 499c5d5 had them");
+    ok(w.filter((x) => x.includes('this.gpuPersonStandIns(')).length === 1, 'world.ts: the stand-ins off real bodies are asked from the WebGPU guard alone');
+    // Item 2: the bone pool written once a frame in `walkOnce`, after the scene's walk (and, with the walk left to each pass,
+    // walking first itself): two WebGPU lines, each a guard with no WebGL branch, the WebGL lines of 499c5d5 round them as
+    // they were, so with the switch at WebGL the walk is the old one to the line.
+    const pr = lines('src/world/portalRender.ts');
+    const head = pr.indexOf('private walkOnce(scene: THREE.Scene): void {');
+    const want = [
+      'private walkOnce(scene: THREE.Scene): void {',
+      "// On WebGPU every body's bones go into the bone pool once a frame, after this walk and before any pass (pass 1, wave 4).",
+      'if (GPU.webgpu && !this.matrixOnce) GPU.rt!.bones.frame(scene, true);',
+      'if (!this.matrixOnce) return;',
+      'perf.begin(SEC.sceneWalk);',
+      'if (scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();',
+      'perf.end(SEC.sceneWalk);',
+      'scene.matrixWorldAutoUpdate = false;',
+      'if (GPU.webgpu) GPU.rt!.bones.frame(scene, false);',
+      '}',
+    ];
+    ok(head > 0 && want.every((x, i) => pr[head + i] === x), "portalRender.ts: walkOnce is 499c5d5's walk with the bone pool's two WebGPU lines, one before its early return and one after its walk");
+    ok(pr.filter((x) => x.includes('.bones.frame(')).length === 2, 'portalRender.ts: the bone pool is written from walkOnce alone');
+    const all: string[] = [];
+    const walkAll = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walkAll(p);
+        else if (CODE.test(n) && !n.endsWith('.d.ts')) all.push(p);
+      }
+    };
+    walkAll(SRC);
+    const callers = all.flatMap((file) => readFileSync(file, 'utf8').split(/\r?\n/).filter((x) => /\.bones\.frame\(/.test(x) && !/^\s*(\/\/|\*)/.test(x)).map((x) => `${rel(file)}: ${x.trim()}`));
+    ok(callers.length === 2 && callers.every((c) => c.startsWith('src/world/portalRender.ts:')), `the bone pool's frame is called from portalRender.ts alone: ${callers.join('; ')}`);
+    for (const g4 of ['bonePool.ts', 'patchBones.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g4)), `wave 4's ${g4} is under src/core/gpu/`);
+    // Item 5: the doll's draw and its test picture hold the world's WebGPU environment off on WebGPU alone, each a guard with
+    // no WebGL branch after the studio's own line and before 499c5d5's put-back, which stands as it was.
+    const cp = lines('src/ui/characterPreview.ts');
+    const onAt = cp.flatMap((x, i) => (x === 'if (GPU.webgpu) this.foreignEnv.on(model);' || x === 'if (GPU.webgpu) this.foreignEnv.on(copy);' ? [i] : []));
+    const offAt = cp.flatMap((x, i) => (x === 'if (GPU.webgpu) this.foreignEnv.off();' ? [i] : []));
+    ok(onAt.length === 2 && cp[onAt[0] - 2] === 'this.envSwap.on(model, this.studio.textureFor(model));' && cp[onAt[0] + 1] === 'try {' && cp[onAt[1] - 1] === 'this.envSwap.on(copy, this.studio.textureFor(copy));' && cp[onAt[1] + 1] === 'try {', "characterPreview.ts: the environment is held off on WebGPU alone, after the studio's swap and before the draw, in the draw and in the test picture");
+    ok(offAt.length === 2 && offAt.every((i) => cp[i - 1] === '} finally {' && cp[i + 1] === 'this.envSwap.off();'), "characterPreview.ts: and put back on WebGPU alone in each finally, the studio's put-back after it as 499c5d5 had it");
+    ok(cp.filter((x) => x.includes('this.foreignEnv.')).length === 4, 'characterPreview.ts: the hold is reached from those four guards alone');
+    // Wave 4's fixer, the jump's older stutters: on WebGPU the scene keeps its one fog (the WebGL branch the line 499c5d5 had),
+    // and what a world swap hangs (whatever the swap made, the sky and its reflection capture, the planets) is built as it is
+    // hung, each a guard with no WebGL branch before the line 499c5d5 had there.
+    const fog = w.indexOf('if (GPU.webgpu && this.scene.fog instanceof THREE.FogExp2) {');
+    ok(fog > 0 && w[fog + 1] === 'this.scene.fog.color.set(planet.fog.color);' && w[fog + 2] === 'this.scene.fog.density = planet.fog.density * FOG_SCALE;' && w[fog + 3] === '} else this.scene.fog = new THREE.FogExp2(planet.fog.color, planet.fog.density * FOG_SCALE);', "world.ts: the fog is kept on WebGPU alone, its WebGL branch 499c5d5's own line");
+    const hung: [string, string][] = [
+      ['if (GPU.webgpu) this.gpuSkyReady(sky);', 'this.sky.visible = false;'],
+      ['if (GPU.webgpu) this.gpuMadeNow([group]);', '// A star behind a planet must not flare through it: the body itself writes no depth, and its'],
+      ['if (GPU.webgpu) this.gpuMadeNow([this.scene], had);', 'if (v.disposed) return;'],
+    ];
+    for (const [gpu, gl] of hung) {
+      const at = w.flatMap((x, i) => (x === gpu ? [i] : []));
+      ok(at.length === 1 && w[at[0] + 1] === gl, `world.ts: the WebGPU line is there once, the line 499c5d5 had after it: ${gpu}`);
+    }
+    const had = w.indexOf('const had = GPU.webgpu ? this.gpuDrawablesNow() : null;');
+    ok(had > 0 && w[had + 1] === 'try {' && w[had + 2] === 'this.load(planet, packId);', "world.ts: what stood before a swap is taken on WebGPU alone (nothing on WebGL), right before 499c5d5's load");
+    const calls = w.filter((x) => /this\.gpu(MadeNow|SkyReady|DrawablesNow)\(/.test(x) && !/^(\/\/|\*)/.test(x));
+    ok(calls.length === 5 && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);'), `world.ts: the swap's builds are reached from WebGPU guards alone (and the sky's from within its own): ${calls.join('; ')}`);
+    ok(w.filter((x) => x.includes('this.envHeld')).length === 3 && w.indexOf('if (this.envHeld) return;') > w.indexOf('private refreshEnvironmentGpu(dt: number): void {'), "world.ts: the held capture is read in WebGPU's refresh alone");
+  }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');
   ok(main.filter((x) => x === "if (GPU.asked === 'webgpu') await startGpu();").length === 1, 'main.ts: the boot starts WebGPU only when asked for it');

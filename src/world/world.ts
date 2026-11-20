@@ -2217,7 +2217,12 @@ export class World {
 
     this.dayFog.set(planet.fog.color);
     this.nightFog.set(planet.fog.color).multiplyScalar(0.08).lerp(new THREE.Color(0x0a0f1c), 0.5);
-    this.scene.fog = new THREE.FogExp2(planet.fog.color, planet.fog.density * FOG_SCALE);
+    // On WebGPU the scene keeps its one fog, its colour and density set (pass 1, wave 4's fixer): three keys every render
+    // object on the fog object's own node, so a fresh fog at a jump's world swap made the tunnel, the hull and its crew again.
+    if (GPU.webgpu && this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.set(planet.fog.color);
+      this.scene.fog.density = planet.fog.density * FOG_SCALE;
+    } else this.scene.fog = new THREE.FogExp2(planet.fog.color, planet.fog.density * FOG_SCALE);
     this.sunColor.set(s.sunColor);
     this.hemi.color.set(planet.light.ambientSky);
     this.hemi.groundColor.set(planet.light.ambientGround);
@@ -3497,6 +3502,8 @@ export class World {
     for (const b of standing) this.spaceWorldBodies.push(b);
     this.scene.add(group);
     markActor(group);
+    // On WebGPU the planets are built as they are hung, before a frame meets them (a jump's swap has no screen over them).
+    if (GPU.webgpu) this.gpuMadeNow([group]);
     // A star behind a planet must not flare through it: the body itself writes no depth, and its
     // stand-in stands far beyond the sky the flare's occlusion measures, so the flare cannot see it.
     this.swgSky?.setSpaceOccluders(discs);
@@ -3641,6 +3648,8 @@ export class World {
     this.scene.add(sky.group, sky.cloudGroup);
     markActor(sky.group);
     markActor(sky.cloudGroup);
+    // On WebGPU the sky and its reflection capture are built as it is hung, before a frame meets them (`gpuSkyReady`).
+    if (GPU.webgpu) this.gpuSkyReady(sky);
     this.sky.visible = false;
     this.day.swg = true;
     this.day.fixed = sky.spaceLightDir;
@@ -3889,6 +3898,8 @@ export class World {
       return;
     }
     this.envWant = null;
+    // A sky just hung waits for its dome's capture pipeline (`gpuSkyReady`), its timer left where it stood.
+    if (this.envHeld) return;
     this.envTimer += dt;
     if (this.envTimer < 4) return;
     this.envTimer = 0;
@@ -7641,6 +7652,8 @@ export class World {
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!(mesh.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !mesh.material) return;
+      // WebGPU's morph bake (pass 1, wave 4), before anything reads or compiles the body.
+      if (GPU.webgpu) GPU.rt!.morphBake.adopt(mesh);
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       let isNew = false;
       for (const m of mats) {
@@ -8290,6 +8303,69 @@ export class World {
     }
     // These objects' own compiles alone: what else is being built meanwhile (a tier streaming in elsewhere) is not waited for.
     await rt.compiledSince(mark);
+  }
+
+  /**
+   * On WebGPU alone (pass 1, wave 4's fixer): drawables made with no loading screen between them and the next frame (a
+   * jump's world swap inside its closed tunnel: the new system's sky, then its planets) built for every pass that draws them
+   * there and then (`compileNow`), each pipeline asked for asynchronously, so the frame that first meets one finds it asked
+   * for and skips it until it lands (the tunnel hides it) rather than building it on that frame. `had`: drawables that stood
+   * before, left out. Answers how many it listed.
+   */
+  gpuMadeNow(roots: readonly THREE.Object3D[], had: WeakSet<THREE.Object3D> | null = null): number {
+    const r = this.renderer;
+    const camera = this.camera;
+    if (!GPU.webgpu || !r || !camera) return 0;
+    const fresh: THREE.Object3D[] = [];
+    for (const root of roots) {
+      root.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!(m.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) || !m.material || had?.has(o)) return;
+        fresh.push(o);
+      });
+    }
+    if (!fresh.length) return 0;
+    for (const o of fresh) this.adoptMaterials(o);
+    GPU.rt!.compileNow(() => this.compileFor(r, camera, fresh, this.compileTarget(), false));
+    return fresh.length;
+  }
+
+  /** On WebGPU alone: a new sky's reflection capture held until its dome's pipeline for the kept cube has landed (`gpuSkyReady`). */
+  private envHeld = false;
+
+  /**
+   * On WebGPU alone (pass 1, wave 4's fixer): a sky just hung (a jump's world swap hangs one inside its closed tunnel, with
+   * no screen over it) built before a frame meets it: its drawables for every pass (`gpuMadeNow`), and its dome for the
+   * reflection's kept cube, the capture held until that pipeline has landed (`envHeld`), so the capture neither builds it on
+   * its frame nor runs without it, which would leave every reflection without the sky for a capture's four seconds. The
+   * world's first sky, with no reflection yet, is captured as soon as it lands.
+   */
+  private gpuSkyReady(sky: SwgSky): void {
+    this.gpuMadeNow([sky.group, sky.cloudGroup]);
+    const r = this.renderer;
+    const rt = GPU.rt!;
+    if (!r || !rt.environment.capturing) return;
+    const dome = (this.dome ??= rt.environment.makeDome());
+    const face = dome.camera.children[0] as THREE.Camera | undefined;
+    if (!face) return;
+    const mark = rt.compileMark();
+    rt.compileNow(() => this.withTarget(r, dome.cube, () => r.compile(sky.domeScene, face, sky.domeScene)));
+    this.envHeld = true;
+    void rt.compiledSince(mark).then(() => {
+      this.envHeld = false;
+      if (this.swgSky !== sky || this.envTexture) return;
+      this.envTimer = 99;
+      this.refreshEnvironment(0);
+    });
+  }
+
+  /** Every drawable standing in the scene now (`gpuMadeNow`'s `had`), on WebGPU alone. */
+  private gpuDrawablesNow(): WeakSet<THREE.Object3D> {
+    const had = new WeakSet<THREE.Object3D>();
+    this.scene.traverse((o) => {
+      if ((o as THREE.Mesh).material) had.add(o);
+    });
+    return had;
   }
 
   /**
@@ -8951,6 +9027,7 @@ export class World {
    * as any person's material is, which after the first time is a set lookup a material. Never in the scene.
    */
   private personStandIns(): THREE.Mesh[] {
+    if (GPU.webgpu) return this.gpuPersonStandIns();
     const list = signatureStandIns();
     if (!this.personStandInsMarked) {
       for (const s of list) markActor(s);
@@ -8958,6 +9035,36 @@ export class World {
     }
     for (const s of list) this.adoptMaterials(s);
     return list;
+  }
+
+  /** The stand-ins made off real bodies that have been marked as actors (`gpuPersonStandIns`). */
+  private readonly gpuStandInsMarked = new WeakSet<THREE.Object3D>();
+
+  /**
+   * On WebGPU alone (pass 1, wave 4, item 3, `gpu/bodyStandIns.ts`): the person warm's stand-ins made off real bodies, every
+   * way of drawing one this world's scene holds learnt first (the player's figure at the first screen, the crowd at the
+   * arrival's sweep), each marked as an actor once (both passes) and adopted as a body's material is; with the switch off,
+   * `personKeys.ts`'s own, marked and adopted as they always were.
+   */
+  private gpuPersonStandIns(): THREE.Mesh[] {
+    const real = GPU.rt!.bodyStandIns(this.scene);
+    if (!real) {
+      const list = signatureStandIns();
+      if (!this.personStandInsMarked) {
+        for (const s of list) markActor(s);
+        this.personStandInsMarked = true;
+      }
+      for (const s of list) this.adoptMaterials(s);
+      return list;
+    }
+    for (const s of real) {
+      if (!this.gpuStandInsMarked.has(s)) {
+        markActor(s);
+        this.gpuStandInsMarked.add(s);
+      }
+      this.adoptMaterials(s);
+    }
+    return real;
   }
 
   /**
@@ -10808,11 +10915,14 @@ export class World {
     const condition = v.combat ? v.combat.shares() : null;
     const i = this.vehicles.indexOf(v);
     if (i >= 0) this.vehicles.splice(i, 1);
+    // On WebGPU what the swap makes is built before the next frame meets it (pass 1, wave 4's fixer: `gpuMadeNow`).
+    const had = GPU.webgpu ? this.gpuDrawablesNow() : null;
     try {
       this.load(planet, packId);
     } finally {
       if (!v.disposed && !this.vehicles.includes(v)) this.vehicles.push(v);
     }
+    if (GPU.webgpu) this.gpuMadeNow([this.scene], had);
     if (v.disposed) return;
     v.space = !!planet.space;
     if (joinsTheFight(v)) {

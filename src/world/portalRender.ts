@@ -953,11 +953,14 @@ export class PortalRenderer {
    * the frame. With `matrixOnce` off nothing is done here and every pass walks as it always did.
    */
   private walkOnce(scene: THREE.Scene): void {
+    // On WebGPU every body's bones go into the bone pool once a frame, after this walk and before any pass (pass 1, wave 4).
+    if (GPU.webgpu && !this.matrixOnce) GPU.rt!.bones.frame(scene, true);
     if (!this.matrixOnce) return;
     perf.begin(SEC.sceneWalk);
     if (scene.matrixWorldAutoUpdate) scene.updateMatrixWorld();
     perf.end(SEC.sceneWalk);
     scene.matrixWorldAutoUpdate = false;
+    if (GPU.webgpu) GPU.rt!.bones.frame(scene, false);
   }
 
   /**
@@ -995,6 +998,8 @@ export class PortalRenderer {
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
+      // On WebGPU a look whose shape sliders moved in play is baked again in place before anything draws it (pass 1, wave 4).
+      if (GPU.webgpu) GPU.rt!.morphBake.frame();
       // On WebGPU each region tier's render bundle is shown this frame while the view or the sun's shadow reach meets it.
       if (GPU.webgpu) GPU.rt!.bundles.frame(camera);
       // The frame an exit comes into view the shadows are drawn here, before the world pass, so nothing pops.

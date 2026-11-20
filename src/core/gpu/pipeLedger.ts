@@ -15,6 +15,8 @@
 // pipeline: the frame's one call (`ledgerFrame`) compares the travel's flag and stores two values, reading the clock only as
 // an arrival begins or its screen goes; the warm-up's queue is read thirty seconds into each arrival on a timer of its own.
 
+import { isPooledRO } from './bonePool.ts';
+
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /** Records kept: about seven arrivals' worth at Mos Eisley (about 650 each). */
@@ -41,7 +43,7 @@ export type Where = (typeof WHERE)[number];
  * context's state, whether it receives shadows, and the environment's key: lights, shadows, environment and fog).
  */
 export interface KeyFields {
-  /** The bone count three writes into a skinned body's program (its bone matrix array's length); 0 for none. */
+  /** The bone count three writes into a skinned body's program (its bone matrix array's length); 0 for none; -1 for a body skinned from the bone pool (pass 1, wave 4), keyed "pooled". */
   bones: number;
   /** The morph targets: count and a hash of the morph attributes' ids (three keys a program on each morph attribute's id, and writes the morph texture's width into it). '' for none. */
   morph: string;
@@ -249,7 +251,8 @@ export function keyFieldsOf(ro: Any): KeyFields {
     custom = -1;
   }
   return {
-    bones: object.skeleton?.bones?.length ?? 0,
+    // A body skinned from the bone pool (pass 1, wave 4) is keyed "pooled" where three keys its bone count: -1.
+    bones: isPooledRO(ro) ? -1 : (object.skeleton?.bones?.length ?? 0),
     morph,
     attrs,
     inst,

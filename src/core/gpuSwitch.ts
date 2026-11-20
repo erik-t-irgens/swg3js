@@ -134,8 +134,46 @@ export interface GpuChain {
   report(): Record<string, unknown>;
 }
 
+/**
+ * The morph bake on WebGPU (`src/core/gpu/morphBake.ts`, pass 1, wave 4): in play each look's shape sliders worked into one
+ * copy of its positions and normals, shared by its clones, so a drawn body carries no morph targets. The world and the
+ * previews call these on WebGPU alone.
+ */
+export interface GpuMorphBake {
+  /** A drawable the world adopts (`World.adoptMaterials`): baked where it carries morph targets, in play. */
+  adopt(object: THREE.Object3D): void;
+  /** Once a frame before the passes: a look whose sliders moved baked again in place. */
+  frame(): void;
+  /** A preview's clone handed its sources, so the preview's own context morphs it live. */
+  unbake(root: THREE.Object3D): void;
+  /** Play begins (before the arrival's sweep) or ends (the select screen, the creator): nothing is baked out of play. */
+  play(on: boolean): void;
+}
+
+/**
+ * The bone pool on WebGPU (`src/core/gpu/bonePool.ts`, `patchBones.ts`, pass 1, wave 4): every body's bones in one storage
+ * buffer, written once a frame. The portal renderer calls it on WebGPU alone.
+ */
+export interface GpuBones {
+  /**
+   * Once a frame, after the scene's one walk of its matrices and before any pass (`PortalRenderer.walkOnce`): every skeleton a
+   * draw met last frame written, one write to the card. `walk` true where the frame's walk was left to each pass
+   * (`matrixOnce` off): the scene is walked here first, so the bones read are this frame's.
+   */
+  frame(scene: THREE.Scene, walk: boolean): void;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
+  /** The morph bake (pass 1, wave 4). */
+  readonly morphBake: GpuMorphBake;
+  /** The bone pool (pass 1, wave 4). */
+  readonly bones: GpuBones;
+  /**
+   * The person warm's stand-ins made off real bodies (pass 1, wave 4, `gpu/bodyStandIns.ts`): every way of drawing a body met
+   * so far, `scene` learnt from first; null with the switch off, when the warm takes `personKeys.ts`'s own.
+   */
+  bodyStandIns(scene: THREE.Object3D | null): THREE.Mesh[] | null;
   /** The region tiers' bundles (item 7). */
   readonly bundles: GpuBundles;
   /** The effects chain (step 6). */
@@ -148,6 +186,12 @@ export interface GpuRuntime {
   compileMark(): number;
   /** Answers once every compile made after `mark` is built and its pipelines have landed. */
   compiledSince(mark: number): Promise<void>;
+  /**
+   * `fn` run with the warm-up building each compile's items there and then, in this task, each pipeline still asked for
+   * asynchronously (pass 1, wave 4's fixer: a jump's world swap, `World.gpuMadeNow`), so the next frame skips what has not
+   * landed rather than building it.
+   */
+  compileNow(fn: () => void): void;
   /** The console's switches (`__debug.gpu({ bundles, patches, warm })`): answers what they came to. */
   tune(o: Record<string, unknown>): Record<string, unknown>;
   /**

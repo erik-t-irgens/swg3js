@@ -65,6 +65,25 @@ const RECORDED: Record<string, string> = {
   'three.webgpu.js Renderer._bundleNeedsUpdate': '68e9d067ae2566be',
   'three.tsl.js NodeMaterialObserver.hasDynamicInstancing': '9b708c29c023642f',
   'three.tsl.js NodeMaterialObserver.equals': '7b4b90afcd33a2fa',
+  // Pass 1, wave 4's bone pool (`patchBones.ts`), read against the development commit 577fb27: what it wraps (the graph key,
+  // the library's hand-over, the observer's state, the refresh question) and what it stands on (the key it works out with the
+  // skeleton read as "pooled", the build that hands every material over, the vertex stage's position set up by three's own
+  // `setupPosition`, the observer's animated rule, the draw's refresh, and a storage buffer uploaded only as its version moves).
+  'three.webgpu.js NodeManager.getForRenderCacheKey': '7147e319478ca38d',
+  'three.webgpu.js NodeLibrary.fromMaterial': '2ffeb5face0a6a93',
+  'three.tsl.js NodeMaterial.setupPosition': '6b0c3a4539982001',
+  'three.webgpu.js RenderObject.getMaterialCacheKey': 'ba9b9f741e397b92',
+  'three.webgpu.js RenderObject.getCacheKey': 'b61f91d0efba8df0',
+  'three.webgpu.js NodeManager.getForRender': '87cab0e192e90a96',
+  // Wave 4's fixer: the delete that asks the key again as a graph's last user goes, and the remaking of a render object whose
+  // key moved that leads to it (the pool's key is kept from its first ask, as three keeps `initialCacheKey`).
+  'three.webgpu.js NodeManager.delete': '19cf10ae36fada6f',
+  'three.webgpu.js RenderObjects.get': 'aa838def04618731',
+  'three.webgpu.js NodeBuilder.prebuild': 'e9597d6fc12296c2',
+  'three.tsl.js NodeMaterial.setupVertex': 'edc2d040f741dc67',
+  'three.tsl.js NodeMaterialObserver.constructor': '8e0fee0773980edd',
+  'three.webgpu.js Bindings._update': '8bca54d8bbdca6dc',
+  'three.webgpu.js WebGPUAttributeUtils.createAttribute': 'cf5554b0e599468c',
 };
 
 const files = new Map<string, string[]>();

@@ -34,10 +34,19 @@
 
 import * as THREE from 'three';
 import { withTargetDepth } from './warmDepth.ts';
+import { pooledFor, pooledWith } from './bonePool.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 export const WARM_PATCH = { on: true, applied: false, why: '' as string };
+
+/**
+ * While on, a compile's items are built there and then, in the caller's task, each pipeline still asked for asynchronously
+ * (pass 1, wave 4's fixer, `World.gpuMadeNow`): what a jump's world swap makes inside the closed tunnel is built before the
+ * next frame meets it, so that frame finds each pipeline asked for and skips what has not landed (the tunnel hides it),
+ * where on the warm-up's own clock the frame came first and built it.
+ */
+export const WARM_NOW = { on: false, calls: 0, items: 0, ms: 0, longestMs: 0 };
 
 /**
  * The warm-up's own numbers (ours): the main thread's slice a turn behind a screen and in play (a node graph built
@@ -207,6 +216,8 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
   const idleWaiters: (() => void)[] = [];
   /** What this burst has built already, by what decides its program: built once however many objects share it. */
   const seen = new Set<string>();
+  /** The render id each build takes (below nought: three's own are its render calls' counts, never negative). */
+  let buildRenderId = 0;
 
   const keyOf = (it: Item): string => {
     // The scene and its lights are in it: one object warmed for the world's pass and a room's in one burst is two
@@ -226,7 +237,10 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     // mesh's winding (`getRenderCacheKey`'s `frontFaceCW`, read off its world matrix as the walk listed it).
     const own = object.isBatchedMesh ? `b${object._matricesTexture?.uuid ?? ''}` : !object.isInstancedMesh && object.count > 1 ? `c${object.uuid}` : '';
     const cw = object.isMesh && object.matrixWorld.determinantAffine() < 0 ? 'cw' : '';
-    const more = `${object.receiveShadow ? 'r' : ''}${cw}${object.skeleton ? `k${object.skeleton.bones.length}` : ''}${own}`;
+    // A body skinned from the bone pool (pass 1, wave 4) is keyed "pooled" by three, whatever its bones (`patchBones.ts`), its
+    // material as this item builds it (a shadow item's position node and displacement map are its tweaks).
+    const pooled = object.skeleton && (it.tweak ? pooledWith(object, it.tweak[3], it.tweak[9]) : pooledFor(object, material));
+    const more = `${object.receiveShadow ? 'r' : ''}${cw}${object.skeleton ? (pooled ? 'kpool' : `k${object.skeleton.bones.length}`) : ''}${own}`;
     const tw = it.tweak ? `${it.tweak[0]}|${it.tweak[1]}|${it.tweak[2] ? 1 : 0}|${it.tweak[6] ? 1 : 0}|${it.tweak[7]?.id ?? '-'}|${it.tweak[9]?.id ?? '-'}` : '';
     return `${it.ctx?.id}:${scene?.id ?? '-'}:${lightsNode?.id ?? '-'}:${material.id}:${it.src?.id ?? '-'}:${it.side}:${passId ?? ''}:${kind}:${morph}:${attrs}:${more}:${tw}`;
   };
@@ -300,6 +314,16 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     // And the scene says which material is the override for as long as the object is built: three keeps a material's
     // program key by its version unless it is the scene's override, whose key it works out each time.
     if (it.tweak && it.scene) it.scene.overrideMaterial = material;
+    // A render id of the build's own (pass 1, wave 4, item 4). Three keeps a render object's environment key (the lights,
+    // the shadows, the environment, the fog: `NodeManager.getCacheKey`) one a scene and lights per render id, and at its
+    // development commit a render puts the id back to what it was before it as it ends, so between frames the id stands
+    // at nought for good: every build of the warm-up's read the key worked out the first time that scene and lights were
+    // ever keyed between frames, took the graph cached under it (built for the scene as it stood then: no environment, an
+    // old fog), and built that graph's pipeline, while the draw keyed the scene as it stands and built its own. Three's
+    // own precompile takes a fresh id the same way (`renderId ++`, put back after).
+    const nodeFrame = r._nodes.nodeFrame ?? null;
+    const renderId = nodeFrame !== null ? nodeFrame.renderId : 0;
+    if (nodeFrame !== null) nodeFrame.renderId = --buildRenderId;
     try {
       const ro = r._objects.get(object, material, scene, camera, lightsNode, it.ctx, clip, passId);
       ro.drawRange = object.geometry.drawRange;
@@ -311,6 +335,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       r._bindings.updateForRender(ro);
       r._pipelines.getForRender(ro, promises);
     } finally {
+      if (nodeFrame !== null) nodeFrame.renderId = renderId;
       r._renderTarget = target;
       material.side = side;
       if (before) TWEAKS.forEach((k, i) => put(k, before[i]));
@@ -516,14 +541,17 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       WARM_STATS.listMs += performance.now() - t0;
     }
     if (!items.length) return Promise.resolve();
+    const now = WARM_NOW.on;
     const p = new Promise<void>((resolve) => {
       const job: Job = { left: items.length, seq: 0, resolve };
-      for (const it of items) {
-        it.job = job;
-        queue.push(it);
-      }
+      for (const it of items) it.job = job;
+      if (now) {
+        WARM_NOW.calls++;
+        WARM_NOW.items += items.length;
+        for (const it of items) handle(it);
+      } else for (const it of items) queue.push(it);
     });
-    void run();
+    if (!now) void run();
     return answer(p);
   };
 

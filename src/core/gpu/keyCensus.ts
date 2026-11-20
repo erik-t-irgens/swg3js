@@ -148,7 +148,8 @@ export function separate(a: Pipe, b: Pipe): { fields: string[]; detail: string[]
       for (const [k, name] of PROGRAM_FIELDS) {
         if (fa[k] === fb[k]) continue;
         fields.push(name);
-        detail.push(k === 'bones' || k === 'recv' || k === 'inst' ? `${name} ${String(fa[k]) || '-'} vs ${String(fb[k]) || '-'}` : name);
+        const said = (v: unknown): string => (k === 'bones' && v === -1 ? 'pooled' : String(v) || '-');
+        detail.push(k === 'bones' || k === 'recv' || k === 'inst' ? `${name} ${said(fa[k])} vs ${said(fb[k])}` : name);
         named++;
       }
       for (const p of propsDiffer(fa.props, fb.props)) {
@@ -288,6 +289,8 @@ export function censusOf(pipes: Pipe[], compute: number, o: CensusOptions = {}):
     count(byPass, r ? r.pass : 'unrecorded');
     count(byAsked, r ? WHERE[r.where] : 'unrecorded');
     if (r?.fields && r.fields.bones > 0) count(bones, String(r.fields.bones));
+    // A body skinned from the bone pool (pass 1, wave 4) is keyed "pooled", whatever its bones.
+    else if (r?.fields && r.fields.bones < 0) count(bones, 'pooled');
     if (r?.fields?.morph) {
       morphed++;
       morphs.add(r.fields.morph);

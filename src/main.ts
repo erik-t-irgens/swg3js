@@ -3574,16 +3574,20 @@ class App {
        * the field of its key that separates it from its nearest sibling; `{ landing: true }` (or `{ landing: { all: true } }`)
        * the landing log, each pipeline asked and landed since the page's start, by arrival, and what was pending 30 s into
        * each; `{ perf: { gpu: true } }` names the card's sections. All three are WebGPU's: on WebGL the helper answers that
-       * WebGPU is not in use and does nothing.
+       * WebGPU is not in use and does nothing. Pass 1, wave 4: `{ bake: false }` hands every body baked in play its live morph
+       * targets back (`true` bakes them again; `localStorage['swg.gpu.keys.morphBake'] = '0'` leaves the bake off at load);
+       * `{ standIns: false }` gives the person warm `personKeys.ts`'s one-bone stand-ins again in place of those made off real bodies;
+       * `{ bones: false }` draws every body with three's own skinning again in place of the bone pool (`true` the pool again;
+       * `localStorage['swg.gpu.keys.boneStorage'] = '0'` leaves the pool off at load).
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean } }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean }; bake?: boolean; standIns?: boolean; bones?: boolean }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         // The frame report on WebGPU (the performance step): a promise of the main thread's sections, the calls a frame and the card's time.
         if (o?.perf) return rt.perf(o.perf === true ? {} : o.perf).then((r) => ({ ...r, view: { pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } }));
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.bake !== undefined || o.standIns !== undefined || o.bones !== undefined || o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene }) : undefined;
         // Pass 1, wave 1: the key census and the landing log, the WebGPU runtime's own.
         if (o?.keys) return { ...rt.keys(o.keys === true ? {} : o.keys), view: { planet: this.world.planet?.id, pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } };
         if (o?.landing) return rt.landing(o.landing === true ? {} : o.landing);
@@ -13774,6 +13778,8 @@ class App {
     this.player.god = false;
     this.godHold.letGo();
     this.inWorld = false;
+    // On WebGPU play ends: every body baked is handed its live morphs back, so the select screen and the creator morph live.
+    if (GPU.webgpu) GPU.rt!.morphBake.play(false);
     // Whatever was built on the world being left is forgotten outright, not merely taken down: the
     // next character may be a different player entirely, and the server tells a browser what is
     // built where when it says hello. The ones this machine keeps itself are in its storage, and are read
@@ -18771,6 +18777,9 @@ class App {
     // The NPC pilots' taunts name the character played.
     this.world.ships.playerName = c.name;
     this.traveling = true;
+    // On WebGPU play begins before the arrival's sweep adopts the scene: from here each body's shape sliders are worked into
+    // a copy of its own (pass 1, wave 4, `morphBake.ts`); out of play (the creator, the select screen) they morph live.
+    if (GPU.webgpu) GPU.rt!.morphBake.play(true);
     this.input.captured = false;
     const planet = PLANETS.find((p) => p.id === c.planet) ?? PLANETS[0];
     this.loadingScreen.show(planet, planet.name, `${c.name} is on the way`);

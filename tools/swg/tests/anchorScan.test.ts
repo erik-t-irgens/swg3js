@@ -47,7 +47,12 @@ const PASS1_FILES: string[] = [];
 const WAVE1 = ['src/core/gpu/pipeLedger.ts', 'src/core/gpu/keyCensus.ts', 'src/core/gpu/gpuTimer.ts'];
 
 /** Lines let through, each with its reason: `file` and a piece of the line's code as scanned. */
-const ALLOW: { file: string; has: string; why: string }[] = [];
+const ALLOW: { file: string; has: string; why: string }[] = [
+  // Pass 1, wave 4: the bone pool's one write a frame. What it sends is body space, the rule itself: each matrix the body
+  // root's world matrix inverted times the bone's world matrix times its inverse bind matrix, worked in doubles before it is
+  // a float (`bonePool.ts`, `writeSlot`, held by `bonePool.test.ts` to be small 4,000 m from the middle).
+  { file: 'src/core/gpu/patchBones.ts', has: 'queue.writeBuffer(buffer, at * 4, mirror, at, count)', why: "the bone pool's matrices are body space (root inverse times bone world times inverse bind, in doubles): no place measured from the world's middle reaches the card" },
+];
 
 // ---------------------------------------------------------------- reading the code
 
