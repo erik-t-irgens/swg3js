@@ -4,9 +4,10 @@
 // CPU wraps to their period.
 //
 // This test reads every GPU file added from pass 1 on -- the files `PASS1_FILES` names, and every file under
-// `src/core/gpu/` that the base of pass 1 (`64a6438`, its list recorded below) does not have -- with comments and the words
-// inside strings blanked (each blanked character kept as a space, so every place in the code is the file's own), and fails
-// where:
+// `src/core/gpu/` that the base of pass 1 (`64a6438`, its list recorded below) does not have -- and what pass 1 added to a
+// file the base had (`PASS1_PARTS`, each part by its first and last lines, the rest of that file blanked), with comments and
+// the words inside strings blanked (each blanked character kept as a space, so every place in the code is the file's own),
+// and fails where:
 //   1. a line places with three's world-space nodes: `positionWorld`, `modelWorldMatrix`, `modelPosition`, `cameraPosition`,
 //      `cameraWorldMatrix`, `objectPosition`, `objectWorldMatrix` (a new node never places with `positionWorld`);
 //   2. the card is handed a place measured from the world's middle. A world place is a world matrix or a read of one
@@ -21,6 +22,8 @@
 //      from one or filled from one (by index, by `set`, by `toArray`), a buffer attribute set from one (`setXYZ` and its
 //      kin), an instance matrix set from one, or any buffer written to the card (`writeBuffer`), which must say why it is
 //      not such a place;
+//   3. a last-frame copy of a uniform is made (`previousUniform`, pass 1, wave 5's motion): it holds whatever that uniform is
+//      filled with, in a file the scan may not read, so each copy must say what it holds;
 // unless the line the reach starts on is in `ALLOW` with its reason. Each rule is held to catch planted code in each of its
 // forms, and to let through the forms that keep to the rule; the wave's own new files are its first subjects.
 //
@@ -43,6 +46,16 @@ const BASE_GPU = new Set(['bundles.ts', 'carries.ts', 'consoleWords.ts', 'drawCo
 /** GPU files of pass 1 on outside `src/core/gpu/`, or inside it under a base name (a later pass adds its own here). */
 const PASS1_FILES: string[] = [];
 
+/**
+ * What pass 1 added to a file the base already had, scanned as its own files are: each from the line holding `from` to the line
+ * before the one holding `to` (both read off the file's own text, each there once), everything else in the file blanked.
+ */
+const PASS1_PARTS: { file: string; from: string; to: string }[] = [
+  // Wave 5 (its fixer, from the review): the far rings' hand-in of last frame's place to the motion output.
+  { file: 'src/core/gpu/gpuGround.ts', from: "/** A uniform's last-frame copy where its value is a vector (`motion.ts`), else the node it already has. */", to: "// The bake's lattices and the morph (`HORIZON_RING_FUNCTIONS`), each as nodes over float operands." },
+  { file: 'src/core/gpu/gpuGround.ts', from: "// Pass 1, wave 5: the ring's place last frame, for the motion output (`motion.ts`): the same vertex worked over last frame's", to: '// The vertex (`HORIZON_RING_VERTEX`): an instance is a node' },
+];
+
 /** Wave 1's own new files: the rule's first subjects, held to be scanned. */
 const WAVE1 = ['src/core/gpu/pipeLedger.ts', 'src/core/gpu/keyCensus.ts', 'src/core/gpu/gpuTimer.ts'];
 
@@ -52,6 +65,8 @@ const ALLOW: { file: string; has: string; why: string }[] = [
   // root's world matrix inverted times the bone's world matrix times its inverse bind matrix, worked in doubles before it is
   // a float (`bonePool.ts`, `writeSlot`, held by `bonePool.test.ts` to be small 4,000 m from the middle).
   { file: 'src/core/gpu/patchBones.ts', has: 'queue.writeBuffer(buffer, at * 4, mirror, at, count)', why: "the bone pool's matrices are body space (root inverse times bone world times inverse bind, in doubles): no place measured from the world's middle reaches the card" },
+  // Pass 1, wave 5's fixer: the far rings' last-frame copies (`ringPrevious`, and the ground's frame beside them).
+  { file: 'src/core/gpu/gpuGround.ts', has: 'previousUniform(src as { value: Any })', why: "the far rings' last-frame copies of the vectors their vertex already places by, from before pass 1 (the eye and the square written as world places by horizonField.ts, the ground's frame by terrainTextures.ts): the ring is still placed so, and the motion is the difference of two vertices worked by the same arithmetic over this frame's and last frame's copies, read within 0.003 px 8 and 14.9 km out (wave 5's prover); the ring placed from its anchor is the later precision work's" },
 ];
 
 // ---------------------------------------------------------------- reading the code
@@ -256,6 +271,7 @@ const R_F32 = 'a 32-bit array filled from a world place';
 const R_ATTRIBUTE = 'a buffer attribute set from a world place';
 const R_INSTANCE = 'an instance placed from a world matrix';
 const R_BUFFER = 'a buffer written to the card';
+const R_COPY = "a last-frame copy of a uniform (it holds what that uniform holds, filled where the scan does not read)";
 
 /** Every reach of a world place to the card in `text` not allowed, as `file:line: rule: code`, once a line and rule. */
 function scan(file: string, text: string): string[] {
@@ -347,7 +363,30 @@ function scan(file: string, text: string): string[] {
   });
   // Any buffer written to the card.
   each(/\bwriteBuffer\s*\(/g, (m) => fault(m.index!, R_BUFFER));
+  // A last-frame copy of a uniform (`motion.ts`'s `previousUniform`), its definition aside: whatever the copied uniform is filled
+  // with is filled in another file, so each copy says what it holds.
+  each(/\bpreviousUniform\s*\(/g, (m) => {
+    if (!/\bfunction\s+$/.test(code.slice(Math.max(0, m.index! - 12), m.index!))) fault(m.index!, R_COPY);
+  });
   return faults;
+}
+
+/** A file's text with everything outside its parts blanked to spaces (line ends kept), so only the parts are scanned. */
+function partsOf(text: string, parts: { from: string; to: string }[]): { text: string; found: boolean } {
+  const keep = new Uint8Array(text.length);
+  let found = true;
+  for (const p of parts) {
+    const a = text.indexOf(p.from);
+    const b = a < 0 ? -1 : text.indexOf(p.to, a);
+    if (a < 0 || b < 0 || text.indexOf(p.from, a + 1) >= 0) {
+      found = false;
+      continue;
+    }
+    keep.fill(1, text.lastIndexOf('\n', a) + 1, text.lastIndexOf('\n', b) + 1);
+  }
+  let out = '';
+  for (let k = 0; k < text.length; k++) out += keep[k] || text[k] === '\n' || text[k] === '\r' ? text[k] : ' ';
+  return { text: out, found };
 }
 
 // ---------------------------------------------------------------- the rules catch what they are for
@@ -387,6 +426,7 @@ function scan(file: string, text: string): string[] {
     ['const tmp = new Vector3();\nfunction put(o) {\n  tmp.copy(o.position);\n  uAt.value.copy(tmp);\n}', R_VALUE],
     ['class K {\n  private at = new Vector3();\n  read(o) {\n    this.at.copy(o.position);\n  }\n  write() {\n    this.uAt.value.copy(this.at);\n  }\n}', R_VALUE],
     ['device.queue.writeBuffer(buf, 0, data);', R_BUFFER],
+    ['const eyeLast = previousUniform(u.uHorizonEye);', R_COPY],
   ];
   for (const [code, rule] of planted) {
     const got = scan('planted.ts', code);
@@ -413,6 +453,8 @@ function scan(file: string, text: string): string[] {
     // A short name filled from a place in one function is not taken for a place in another, and a function is no place.
     'function a(o) {\n  const p = o.position;\n  return p.x;\n}\nfunction b() {\n  const p = 1;\n  uScale.value = p;\n}',
     'const near = (o) => o.position.x < 10;\nuNear.value = near;',
+    // The copy's own definition is no copy.
+    'export function previousUniform(src: { value: Any }): Any {\n  return uniform(kept(src)).setGroup(renderGroup);\n}',
   ];
   for (const code of fine) ok(scan('fine.ts', code).length === 0, `code within the rule is let through: ${code.replace(/\n\s*/g, ' ')} (${scan('fine.ts', code).join('; ')})`);
   ok(codeLines('a /* x\n y */ b\nc').length === 3 && blank("x = 'abc'; // d").length === "x = 'abc'; // d".length, "blanking keeps the file's line numbers and every offset in it");
@@ -421,6 +463,12 @@ function scan(file: string, text: string): string[] {
   const allowed = scan('allowed.ts', 'uSun.value.copy(sun.position);\nuMoon.value.copy(moon.position);');
   ALLOW.pop();
   ok(allowed.length === 1 && allowed[0].startsWith('allowed.ts:2:'), `an allowed line is let through and the next is not (${allowed.join('; ')})`);
+  // A part of a base file is scanned, and the rest of that file is not; its line numbers are the file's own.
+  const base = 'uOld.value.copy(camera.position);\n// pass 1 from here\nuNew.value.copy(camera.position);\n// pass 1 to here\nuOld2.value.copy(camera.position);';
+  const part = partsOf(base, [{ from: '// pass 1 from here', to: '// pass 1 to here' }]);
+  const inPart = scan('base.ts', part.text);
+  ok(part.found && inPart.length === 1 && inPart[0].startsWith('base.ts:3:'), `a base file's part is scanned and the rest is not (${inPart.join('; ')})`);
+  ok(!partsOf(base, [{ from: '// not there', to: '// pass 1 to here' }]).found, "a part whose first line is not in the file is said so");
 }
 
 // ---------------------------------------------------------------- the subjects: pass 1's GPU files
@@ -432,7 +480,20 @@ const subjects = [...new Set([...PASS1_FILES, ...added])].sort();
 for (const f of WAVE1) ok(subjects.includes(f), `wave 1's ${f} is a subject of the scan`);
 for (const f of PASS1_FILES) ok(existsSync(join(ROOT, f)), `${f} named in PASS1_FILES is there`);
 const faults = subjects.flatMap((f) => scan(f, readFileSync(join(ROOT, f), 'utf8')));
-ok(faults.length === 0, `no GPU file of pass 1 on places a thing from the world's middle in a 32-bit value on the card:\n  ${faults.join('\n  ')}`);
-for (const a of ALLOW) ok(subjects.includes(a.file) && a.why.length > 20, `the allowed line in ${a.file} is in a subject and says why`);
+// And what pass 1 added to the base's own files, part by part.
+const partFiles = [...new Set(PASS1_PARTS.map((p) => p.file))];
+for (const f of partFiles) {
+  const got = partsOf(readFileSync(join(ROOT, f), 'utf8'), PASS1_PARTS.filter((p) => p.file === f));
+  ok(got.found, `${f}: every part pass 1 added is found by its first and last lines`);
+  faults.push(...scan(f, got.text));
+}
+ok(faults.length === 0, `no GPU file of pass 1 on, nor what pass 1 added to the base's, places a thing from the world's middle in a 32-bit value on the card:\n  ${faults.join('\n  ')}`);
+for (const a of ALLOW) ok((subjects.includes(a.file) || partFiles.includes(a.file)) && a.why.length > 20, `the allowed line in ${a.file} is in a subject and says why`);
+// Each allowed line is still there to be allowed (a line moved away leaves no reason standing for nothing).
+for (const a of ALLOW) {
+  const t = readFileSync(join(ROOT, a.file), 'utf8');
+  const scanned = partFiles.includes(a.file) && !subjects.includes(a.file) ? partsOf(t, PASS1_PARTS.filter((p) => p.file === a.file)).text : t;
+  ok(blank(scanned).includes(a.has), `the allowed line in ${a.file} (${a.has}) is in what is scanned`);
+}
 
-console.log(`anchorScan: ${checks} checks passed (${subjects.length} files scanned: ${subjects.join(', ')})`);
+console.log(`anchorScan: ${checks} checks passed (${subjects.length} files scanned: ${subjects.join(', ')}; and ${PASS1_PARTS.length} parts of ${partFiles.join(', ')})`);

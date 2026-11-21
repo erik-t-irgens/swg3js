@@ -1882,6 +1882,8 @@ class App {
   private fxQueued = false;
   private fxBusy = false;
   private fxAgain = false;
+  /** On WebGPU the motion output was moved live (pass 1, wave 5): the next reconcile makes the chain again whatever Effects says. */
+  private fxRemake = false;
   /** The ship last flown, spawned again on arriving in space (or back from it). */
   private lastShipDef: VehicleDef | null = null;
   /** The way between a planet and its space, offered on E: up near the top of the sky, down anywhere in space. */
@@ -3580,14 +3582,16 @@ class App {
        * `{ bones: false }` draws every body with three's own skinning again in place of the bone pool (`true` the pool again;
        * `localStorage['swg.gpu.keys.boneStorage'] = '0'` leaves the pool off at load).
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean }; bake?: boolean; standIns?: boolean; bones?: boolean }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean }; bake?: boolean; standIns?: boolean; bones?: boolean; motion?: boolean; view?: 'motion' | 'off'; pixels?: number }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         // The frame report on WebGPU (the performance step): a promise of the main thread's sections, the calls a frame and the card's time.
         if (o?.perf) return rt.perf(o.perf === true ? {} : o.perf).then((r) => ({ ...r, view: { pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } }));
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.bake !== undefined || o.standIns !== undefined || o.bones !== undefined || o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.bake !== undefined || o.standIns !== undefined || o.bones !== undefined || o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        // Pass 1, wave 5: the motion output moved live makes the effects chain again, its scene target with the output or without.
+        if (tuned?.remakeEffects === true) this.remakeEffectsGpu();
         // Pass 1, wave 1: the key census and the landing log, the WebGPU runtime's own.
         if (o?.keys) return { ...rt.keys(o.keys === true ? {} : o.keys), view: { planet: this.world.planet?.id, pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } };
         if (o?.landing) return rt.landing(o.landing === true ? {} : o.landing);
@@ -24909,6 +24913,16 @@ class App {
     return fx;
   }
 
+  /**
+   * On WebGPU the motion output was moved live (pass 1, wave 5, `__debug.gpu({ motion })`): a chain's scene target carries it
+   * or not as the chain is made, so the chain is made again, behind the notice and warmed as an Effects switch is.
+   */
+  private remakeEffectsGpu(): void {
+    if (!GPU.webgpu) return;
+    this.fxRemake = true;
+    this.queueEffects();
+  }
+
   /** A setting in the effects registry moved: take all of them in one go on the next microtask. */
   private queueEffects(): void {
     if (this.fxQueued) return;
@@ -24943,9 +24957,13 @@ class App {
         const S = this.settings;
         this.postfx?.configure(S);
         this.syncPreviewEffects();
-        if (S.effects === !!this.postfx) continue;
+        // On WebGPU a chain with Effects on is made again where the motion output moved live (pass 1, wave 5).
+        const remake = GPU.webgpu && this.fxRemake && S.effects && !!this.postfx;
+        this.fxRemake = false;
+        if (S.effects === !!this.postfx && !remake) continue;
         if (!this.inWorld) {
           // Nothing is being drawn: arriving compiles for whichever path is in force then.
+          if (remake) this.postfx?.dispose();
           if (S.effects) this.postfx = this.makePostFX();
           else {
             this.postfx?.dispose();

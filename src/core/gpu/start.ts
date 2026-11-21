@@ -52,6 +52,7 @@ import { GPU_KEYS } from './gpuKeys.ts';
 import { bodyStandIns, bodyStandInsReport } from './bodyStandIns.ts';
 import { boneFrame, bonePoolReport } from './bonePool.ts';
 import { setBonePool } from './patchBones.ts';
+import { GPU_MOTION, MOTION, MOTION_VIEW, laidMotion, motionCensus, motionFrame, motionReport } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -239,6 +240,16 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         boneFrame();
       },
     },
+    // Pass 1, wave 5: the motion output (`motion.ts`, drawn by the patch `patchMotion.ts`), the camera's change once a frame.
+    motion: {
+      frame(camera: THREE.Camera) {
+        motionFrame(camera);
+      },
+      // The wave's fixer: a mesh the game lays on the CPU each frame (a rope's strip) hands in each vertex's change.
+      laid(mesh: THREE.Mesh, positions: Float32Array) {
+        laidMotion(mesh, positions);
+      },
+    },
     renderer: renderer as THREE.WebGLRenderer,
     environment,
     standIns,
@@ -314,6 +325,20 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         const remade = setBonePool(o.bones);
         out.bones = { on: GPU_KEYS.boneStorage, renderObjectsRemade: remade };
       }
+      // Pass 1, wave 5: the motion output live (`GPU_MOTION.on`): the next chain made takes it, and the game makes one now
+      // (`remakeEffects`), its scene target with the output or without it; only where the patch applied.
+      if (typeof o.motion === 'boolean') {
+        const was = GPU_MOTION.on;
+        GPU_MOTION.on = o.motion;
+        out.motion = { on: GPU_MOTION.on, applied: MOTION.applied, ...(MOTION.why ? { why: MOTION.why } : {}) };
+        if (was !== GPU_MOTION.on && MOTION.applied) out.remakeEffects = true;
+      }
+      // And its view: the buffer drawn in place of the picture ('motion'), or the picture again ('off').
+      if (o.view === 'motion' || o.view === 'off') {
+        MOTION_VIEW.on = o.view === 'motion';
+        if (typeof o.pixels === 'number' && Number.isFinite(o.pixels) && o.pixels > 0) MOTION_VIEW.pixels = o.pixels;
+        out.view = { ...MOTION_VIEW, reads: "red rightward and green upward about mid grey, full at `pixels` pixels a frame; half bright unmarked, full bright where marked reactive", drawing: MOTION_VIEW.on && !(GPU_MOTION.on && MOTION.applied) ? 'nothing: the scene target carries no motion output (the switch off, or the patch not applied)' : MOTION_VIEW.on ? 'the motion buffer in place of the picture, where Effects are on' : 'the picture' };
+      }
       // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
       if (o.carries === true) out.carries = carriesReport(renderer, (o.scene as THREE.Object3D | undefined) ?? null);
       return out;
@@ -342,7 +367,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       return gpuFramePerf(renderer, { ended: () => frame.ended, cascadeNodes: () => ((sunNow?.node as Any)?._shadowNodes ?? []) as Any[], switches: drawSwitchesNow, timer }, o);
     },
     keys(o) {
-      return keyCensus(renderer, o);
+      // Pass 1, wave 5: the pipelines made for a draw into a motion target, the see-through ones named.
+      return { ...keyCensus(renderer, o), motion: motionCensus() };
     },
     landing(o) {
       return landingReport(o);
@@ -407,6 +433,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         bake: morphBakeReport(),
         bodyStandIns: bodyStandInsReport(),
         bones: bonePoolReport(),
+        // Pass 1, wave 5: the motion output.
+        motion: motionReport(),
         patches: patchReport(),
         // The performance step: the frame's draws issued for less of the main thread, each behind its switch.
         draw: drawCostReport(),

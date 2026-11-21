@@ -14,6 +14,7 @@
 // Neither casts a shadow (a third of a texel would cast a crawling dotted line, and a depth program would
 // be one more to warm), and both stay opaque and depth-writing, out of the movers the motion blur draws.
 import * as THREE from 'three';
+import { GPU } from '../core/gpuSwitch.ts';
 import { GRAPPLE_TUNE, setGrappleLook } from './grapple.ts';
 import { len3, ribbonWidth, sagOf } from './grappleMath.ts';
 
@@ -77,6 +78,8 @@ export class RopeRibbon {
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = true;
     this.mesh.visible = false;
+    // On WebGPU the motion output is handed each vertex's change since the last frame (pass 1, wave 5): it is laid here, in place.
+    if (GPU.webgpu) GPU.rt!.motion.laid(this.mesh, this.pos);
   }
 
   /** Nothing drawn. */

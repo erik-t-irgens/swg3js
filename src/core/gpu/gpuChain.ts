@@ -343,6 +343,29 @@ export function gradeGraph(u: GradeUniforms): ChainGraph {
 
 // ---------------------------------------------------------------- the output's copy (three's `OutputPass` reads `tDiffuse`)
 
+// ---------------------------------------------------------------- the motion buffer's view (pass 1, wave 5: `motion.ts`)
+
+/**
+ * The motion buffer drawn in place of the picture for looking at (`__debug.gpu({ view: 'motion' })`): each pixel's motion in
+ * pixels a frame (the buffer's normalised device coordinates times half the target's size) as red rightward and green upward
+ * about mid grey, full at `pixels`, its brightness the reactive mark (half bright unmarked, full bright marked). Its values
+ * are the display's own: carried through no tone mapping (`swgRawOut`).
+ */
+export function motionViewGraph(u: { tMotion: { value: THREE.Texture | null }; size: THREE.Vector2; pixels: { pixels: number } }): ChainGraph {
+  const m = chainMaterial('fx.gpu.motionView');
+  const input = tex(u.tMotion);
+  const size = uniform(u.size).setGroup(renderGroup);
+  const pixels = uniform(u.pixels.pixels).setGroup(renderGroup).onRenderUpdate(() => u.pixels.pixels);
+  m.fragmentNode = Fn(() => {
+    const s = vec4(input.sample(uv())).toVar('swgMotionS');
+    const n = clamp(s.xy.mul(size).mul(0.5).div(max(pixels, 1e-3)), -1, 1);
+    const lit = float(0.5).add(clamp(s.w, 0, 1).mul(0.5));
+    return vec4(vec3(n.x.mul(0.5).add(0.5), n.y.mul(0.5).add(0.5), 0.5).mul(lit), 1);
+  })();
+  (m as Any).swgRawOut = true;
+  return graph(m, 1, { uniforms: { size, pixels }, textures: { tMotion: input } });
+}
+
 /** The picture copied as it is into three's frame-buffer target, whose own output pass tone-maps and encodes it. */
 export function outputGraph(u: { tDiffuse: { value: THREE.Texture | null } }): ChainGraph {
   const m = chainMaterial('fx.gpu.output');

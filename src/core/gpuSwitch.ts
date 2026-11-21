@@ -115,6 +115,11 @@ export interface GpuChain {
   readonly atLoad: boolean;
   /** The scene target's depth and stencil, its type read off three's WebGPU renderer as the WebGL path reads its own. */
   sceneDepth(width: number, height: number): THREE.DepthTexture;
+  /**
+   * The scene target itself (pass 1, wave 5): the WebGL path's own, and with the motion on (`gpu/motion.ts`) a second
+   * half-float output every draw into it writes its motion into.
+   */
+  sceneTarget(width: number, height: number, depth: THREE.DepthTexture): THREE.WebGLRenderTarget;
   /** A new chain's spine (`PostFX`'s constructor): the sanitize, the bloom and the output, in the registry's places. */
   spine(fx: PostFX, width: number, height: number, settings: FxSettings): void;
   /** Every ported effect beyond the spine (`installEffects`): the colour grade. */
@@ -163,12 +168,29 @@ export interface GpuBones {
   frame(scene: THREE.Scene, walk: boolean): void;
 }
 
+/**
+ * The motion output on WebGPU (`src/core/gpu/motion.ts`, pass 1, wave 5): every draw into the scene target writes its motion
+ * since the last frame. The portal renderer calls it on WebGPU alone.
+ */
+export interface GpuMotion {
+  /** Once a game frame before any pass draws (`PortalRenderer.render`): the camera's change since the last frame, in doubles. */
+  frame(camera: THREE.Camera): void;
+  /**
+   * A mesh whose vertices the game lays on the CPU each frame in its own space (a rope's strip), registered as it is made, before
+   * its first draw: `positions` is its position attribute's array. Its geometry is given each vertex's change since the last
+   * frame, worked once a frame; on WebGL nothing calls it.
+   */
+  laid(mesh: THREE.Mesh, positions: Float32Array): void;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** The morph bake (pass 1, wave 4). */
   readonly morphBake: GpuMorphBake;
   /** The bone pool (pass 1, wave 4). */
   readonly bones: GpuBones;
+  /** The motion output (pass 1, wave 5). */
+  readonly motion: GpuMotion;
   /**
    * The person warm's stand-ins made off real bodies (pass 1, wave 4, `gpu/bodyStandIns.ts`): every way of drawing a body met
    * so far, `scene` learnt from first; null with the switch off, when the warm takes `personKeys.ts`'s own.

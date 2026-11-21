@@ -308,6 +308,11 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     // The target the walk listed it under (step 6's fixer), as three's own precompile puts it back for each item.
     const target = r._renderTarget;
     r._renderTarget = it.rt;
+    // And the renderer's multi-output node the walk listed it under (pass 1, wave 5: the motion output's on a scene target that
+    // carries it, none elsewhere), which a build reads off the renderer itself: built under whatever node the warm-up's clock
+    // found standing, a scene item between frames was built with no motion output and filed under the context that has one.
+    const mrtKept = r.getMRT?.() ?? null;
+    r.setMRT?.(it.ctx?.mrt ?? null);
     r._currentSourceMaterial = it.src ?? null;
     // Node builds take their shared bind groups from the current render context (three 0.187's precompile does the same).
     r._currentRenderContext = it.ctx;
@@ -336,6 +341,7 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       r._pipelines.getForRender(ro, promises);
     } finally {
       if (nodeFrame !== null) nodeFrame.renderId = renderId;
+      r.setMRT?.(mrtKept);
       r._renderTarget = target;
       material.side = side;
       if (before) TWEAKS.forEach((k, i) => put(k, before[i]));

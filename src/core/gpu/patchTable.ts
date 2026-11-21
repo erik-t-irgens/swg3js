@@ -22,6 +22,9 @@
 // And a sixth, pass 1's wave 4 (`patchBones.ts`, its switch `GPU_KEYS.boneStorage`):
 //   bones   a skinned body skinned from the bone pool (`bonePool.ts`), keyed "pooled" where three keys its bone count, and
 //           refreshed in full only where something of its own moved.
+// And a seventh, pass 1's wave 5 (`patchMotion.ts`, its switch `GPU_MOTION.on`):
+//   motion  the renderer's multi-output node following the target set (the motion output's node on a scene target that carries
+//           it, none on any other), and a see-through material's motion output blended to keep what is behind it.
 
 /** One method of three's: its class, its name, and the build file its class ships in. */
 export interface ThreeMethod {
@@ -35,7 +38,7 @@ export interface ThreeMethod {
 
 export interface PatchEntry {
   /** The patch's name: the console's word for it and the key of its switch. */
-  name: 'shadow' | 'still' | 'warm' | 'stencil' | 'replay' | 'bones';
+  name: 'shadow' | 'still' | 'warm' | 'stencil' | 'replay' | 'bones' | 'motion';
   /** The file under `src/core/gpu/` that holds it. */
   file: string;
   /** What it does, in a line, for the console. */
@@ -62,6 +65,8 @@ export const PATCH_REVISIONS: Readonly<Record<PatchEntry['name'], string>> = {
   replay: '188dev',
   // Pass 1, wave 4: read against the development commit 577fb27 alone.
   bones: '188dev',
+  // Pass 1, wave 5: read against the development commit 577fb27 alone.
+  motion: '188dev',
 };
 
 export const PATCH_TABLE: readonly PatchEntry[] = [
@@ -169,6 +174,40 @@ export const PATCH_TABLE: readonly PatchEntry[] = [
       { cls: 'WebGPUAttributeUtils', method: 'createAttribute', file: 'three.webgpu.js' },
     ],
   },
+  {
+    name: 'motion',
+    file: 'patchMotion.ts',
+    does: "with the effects on, every draw into the scene target writes its motion (motion.ts): the renderer's multi-output node follows the target set (ours on a scene target carrying the motion output, none on any other), and a see-through material's motion output keeps what is behind it (its colour blended nought and one) and takes the larger reactive (its alpha's max)",
+    replaces: [
+      // Each wrapped on the live renderer or its backend's pipeline maker and called whole.
+      { cls: 'Renderer', method: 'setRenderTarget', file: 'three.webgpu.js' },
+      { cls: 'WebGPUPipelineUtils', method: 'createRenderPipeline', file: 'three.webgpu.js' },
+    ],
+    relies: [
+      // The renderer's node, set and read; and the render context keyed on its id (a build reads the renderer's node itself).
+      { cls: 'Renderer', method: 'setMRT', file: 'three.webgpu.js' },
+      { cls: 'Renderer', method: 'getMRT', file: 'three.webgpu.js' },
+      { cls: 'RenderContexts', method: 'get', file: 'three.webgpu.js' },
+      // The colour's node merged with the renderer's round a material's colour, and not round a fragment of its own.
+      { cls: 'NodeMaterial', method: 'setup', file: 'three.tsl.js' },
+      { cls: 'NodeMaterial', method: 'setupOutput', file: 'three.tsl.js' },
+      // Each target's output by its texture's name; the merge keeps the renderer's node's outputs.
+      { cls: 'MRTNode', method: 'setup', file: 'three.tsl.js' },
+      { cls: 'MRTNode', method: 'merge', file: 'three.tsl.js' },
+      // The pipeline's key: the material's blending and transparency, the targets' formats, never the node or its blends.
+      { cls: 'WebGPUBackend', method: 'getRenderCacheKey', file: 'three.webgpu.js' },
+      { cls: 'Pipelines', method: '_getRenderCacheKey', file: 'three.webgpu.js' },
+      // An output's clear colour read off the context's node as a pass begins and as it clears.
+      { cls: 'WebGPUBackend', method: 'beginRender', file: 'three.webgpu.js' },
+      { cls: 'WebGPUBackend', method: 'clear', file: 'three.webgpu.js' },
+      // The renderer's node is no node of a material's: the observer's refresh rule is unmoved by it.
+      { cls: 'NodeMaterialObserver', method: 'containsNode', file: 'three.tsl.js' },
+      // A shadow map is drawn with the renderer's node taken off and put back.
+      { cls: 'ShadowNode', method: 'updateShadow', file: 'three.tsl.js' },
+      // An object uniform written only at a full refresh, the refresh decided at every draw.
+      { cls: 'Renderer', method: '_renderObjectDirect', file: 'three.webgpu.js' },
+    ],
+  },
 ];
 
 /** The private fields and methods each patch reaches on a live renderer, checked before it is applied (`patchApplies`). */
@@ -179,6 +218,7 @@ export const PATCH_NEEDS: Readonly<Record<PatchEntry['name'], readonly string[]>
   stencil: ['backend.beginBundle', 'backend.finishBundle', 'backend.addBundle', 'backend.finishRender', 'backend.get', '_renderTransparents'],
   replay: ['_renderBundle', '_bundleNeedsUpdate', '_bundles.get', 'backend.get', '_nodes.needsRefresh', 'getRenderTarget', 'getOutputRenderTarget', 'getCanvasTarget', 'getMRT'],
   bones: ['_nodes.getForRenderCacheKey', '_nodes._createNodeBuilderState', '_nodes.needsRefresh', 'library.fromMaterial', 'backend.get', 'backend.device.queue.writeBuffer'],
+  motion: ['setRenderTarget', 'getRenderTarget', 'setMRT', 'getMRT', 'backend.pipelineUtils.createRenderPipeline'],
 };
 
 /**

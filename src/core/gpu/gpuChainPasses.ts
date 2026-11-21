@@ -34,9 +34,10 @@ import type { FxFrameContext } from '../fx/context.ts';
 import { FX_KNOBS, type FxPassId, type FxSettings } from '../fxRegistry.ts';
 import type { FxInstallDeps } from '../fx/install.ts';
 import type { GpuChain } from '../gpuSwitch.ts';
-import { BLUR_DIRECTIONS, bloomGraphs, gradeGraph, outputGraph, sanitizeGraph, type BloomGraphs, type ChainGraph } from './gpuChain.ts';
+import { BLUR_DIRECTIONS, bloomGraphs, gradeGraph, motionViewGraph, outputGraph, sanitizeGraph, type BloomGraphs, type ChainGraph } from './gpuChain.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { GpuDebugViewPass, GpuLinearDepthHalf, GpuNormalsHalf, GpuSsaoPass, gpuSsaoHost } from './gpuSsaoPass.ts';
+import { markMotionTarget, motionTextureOf, motionWanted, MOTION_VIEW } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -301,6 +302,9 @@ export class GpuColorGradePass extends ColorGradePass {
 
 export class GpuOutputPass extends OutputFxPass {
   private readonly g: ChainGraph;
+  /** Pass 1, wave 5: the motion buffer drawn in place of the picture (`__debug.gpu({ view: 'motion' })`), and what it reads. */
+  private readonly mvU = { tMotion: { value: null as THREE.Texture | null }, size: new THREE.Vector2(1, 1), pixels: MOTION_VIEW };
+  private readonly mv: ChainGraph;
 
   constructor() {
     super();
@@ -308,6 +312,7 @@ export class GpuOutputPass extends OutputFxPass {
     // The one chain graph WebGL tone-maps (its OutputPass): under the inline output (item 5) it is drawn straight onto the
     // canvas and takes the ACES fit and the sRGB curve in its own output; without it three's output pass does, after it.
     this.g.material.toneMapped = true;
+    this.mv = motionViewGraph(this.mvU);
   }
 
   /** Three's `OutputPass.render` writes its picture and the exposure into its uniforms: the picture here, three's output pass reading the renderer's exposure itself. */
@@ -315,16 +320,25 @@ export class GpuOutputPass extends OutputFxPass {
     const u = (this.inner as unknown as { uniforms: Record<string, { value: unknown }> }).uniforms;
     u.tDiffuse.value = input.texture;
     u.toneMappingExposure.value = ctx.renderer.toneMappingExposure;
+    // The motion buffer in place of the picture, where it is asked for and this chain's scene target carries it.
+    const motion = MOTION_VIEW.on ? motionTextureOf(ctx.sceneColor) : null;
+    if (motion !== null) {
+      this.mvU.tMotion.value = motion;
+      if (this.mvU.size.x !== ctx.width || this.mvU.size.y !== ctx.height) this.mvU.size.set(ctx.width, ctx.height);
+      draw(ctx.renderer, this.mv, output);
+      return true;
+    }
     draw(ctx.renderer, this.g, output);
     return true;
   }
 
   /**
    * The chain's last pass on WebGPU but while the console's debug view replaces the picture (the occlusion's views, step 6
-   * item 4): built for the canvas, and for a chain buffer, which it is copied into under the view.
+   * item 4): built for the canvas, and for a chain buffer, which it is copied into under the view. The motion view with it.
    */
   materials(): FxWarmItem[] {
-    return [warmItem(this.g, CHAIN_PORTED.has('debugView') ? 'both' : 'screen')];
+    const where = CHAIN_PORTED.has('debugView') ? 'both' : 'screen';
+    return [warmItem(this.g, where), warmItem(this.mv, where)];
   }
 
   /** WebGL's three's output pass settles its defines on a first draw; three's WebGPU output pass is its own. */
@@ -332,6 +346,7 @@ export class GpuOutputPass extends OutputFxPass {
 
   dispose(): void {
     this.g.material.dispose();
+    this.mv.material.dispose();
     super.dispose();
   }
 }
@@ -375,6 +390,14 @@ export function chainRuntime(renderer: Any): GpuChain {
       // The WebGL path's own choice, read off three's WebGPU renderer: a float depth under reversed depth (depth32float with
       // the stencil the portals need), else 24 bits and the stencil.
       return new THREE.DepthTexture(width, height, renderer.reversedDepthBuffer === true ? THREE.FloatType : THREE.UnsignedInt248Type);
+    },
+    sceneTarget(width: number, height: number, depth: THREE.DepthTexture): THREE.WebGLRenderTarget {
+      // The WebGL path's own target, and with the motion on (pass 1, wave 5: `motion.ts`) a second half-float output beside its
+      // colour, which every draw into it writes (motion in red and green, the reactive mark in alpha): 8 bytes a pixel more.
+      const motion = motionWanted();
+      const t = new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth, ...(motion ? { count: 2 } : {}) });
+      if (motion) markMotionTarget(t);
+      return t;
     },
     spine(fx: PostFX, width: number, height: number, settings: FxSettings): void {
       // The two depth products the occlusion asks for (item 4), and the debug view its views draw through.

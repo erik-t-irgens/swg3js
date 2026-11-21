@@ -212,6 +212,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     // world pass told to the holds' own lights there; the WebGL branch of each the line(s) it had.
     ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSun) this.gpuSun.arm(now);', 'else {'],
     ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSun) hold.drawn(hold.lights, drew, whole);', 'else hold.drawn(this.csm?.lights ?? NO_CASCADE_LIGHTS, drew, whole);'],
+    // Pass 1, wave 5: the effects chain's scene target is the WebGPU side's there (with the motion's output beside its colour);
+    // the WebGL branch the line it had.
+    ['src/core/postfx.ts', 'if (GPU.webgpu) this.sceneTarget = GPU.rt!.chain.sceneTarget(w, h, depth);', 'else this.sceneTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth });'],
   ];
   for (const [f, gpu, gl] of pairs) {
     const l = lines(f);
@@ -385,9 +388,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(startText.includes("import { carriesReport, STAYS } from './carries.ts';") && startText.includes('stays: { ...STAYS },'), 'start.ts: the report says what stays and the tune checks what the copies carry');
     const l = lines('src/main.ts');
     const back = l.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
-    // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries, and the performance step
-    // its draw switches after that.
-    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined || o.draw) ? rt.tune({ ...o, scene: this.scene })'));
+    // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries, the performance step
+    // its draw switches after that, and pass 1's wave 5 the motion output's switch and its view after those.
+    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined) ? rt.tune({ ...o, scene: this.scene })'));
     ok(back > 0 && ask > back && ask - back < 6, "main.ts: gpu() asks for the carries' check only after its WebGL return");
     const warm = readFileSync(join(SRC, 'core', 'gpu', 'patchWarm.ts'), 'utf8');
     ok(warm.includes("if (o.name === 'flora stand-in' && o.receiveShadow !== true) {"), 'patchWarm.ts: the flora stand-ins are told to receive as the batches do, inside the warm patch');
@@ -501,7 +504,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const gl = m.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
     const rtAt = m.indexOf('const rt = GPU.rt!;', gl);
     const perfAt = m.findIndex((x) => x.startsWith('if (o?.perf) return rt.perf('));
-    const tunedAt = m.findIndex((x) => x.startsWith('const tuned = o && (') && x.includes('|| o.draw)'));
+    // Pass 1, wave 5's motion switch and view join the same line after the draw switches.
+    const tunedAt = m.findIndex((x) => x.startsWith('const tuned = o && (') && x.includes('|| o.draw || o.motion !== undefined || o.view !== undefined)'));
     ok(gl > 0 && rtAt === gl + 1 && perfAt > rtAt && perfAt - rtAt < 4 && tunedAt > perfAt && tunedAt - perfAt < 4, "main.ts: gpu({ perf }) and gpu({ draw }) are read only after the helper's WebGL answer has returned, through the WebGPU runtime");
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
     ok(startText.includes('readDrawSwitches();') && startText.includes('installShadowCull(renderer);') && startText.includes('registerDrawPerfSwitches(registerPerfSwitch);') && startText.includes('draw: drawCostReport(),'), 'start.ts: the WebGPU runtime reads, installs, registers and reports the draw switches');
@@ -543,7 +547,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const ends = m.filter((x) => x.includes('GPU.rt!.endFrame('));
     ok(ends.length === 1 && ends[0] === 'if (GPU.webgpu) GPU.rt!.endFrame(this.traveling || !this.inWorld, this.traveling);', `main.ts: the frame's end hands the runtime the travel's flag on its WebGPU line alone (${ends.join(' | ')})`);
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
-    ok(startText.includes('installLedger(renderer, ') && startText.includes('const timer = passTimer(renderer, adapter.vendor);') && startText.includes('ledgerFrame(loading, traveling);') && startText.includes('return keyCensus(renderer, o);') && startText.includes('return landingReport(o);'), 'start.ts: the WebGPU runtime installs the ledger, makes the clock, calls the frame and answers the two words');
+    // Pass 1, wave 5: the census answers the motion output's own count beside three's keys.
+    ok(startText.includes('installLedger(renderer, ') && startText.includes('const timer = passTimer(renderer, adapter.vendor);') && startText.includes('ledgerFrame(loading, traveling);') && startText.includes('return { ...keyCensus(renderer, o), motion: motionCensus() };') && startText.includes('return landingReport(o);'), 'start.ts: the WebGPU runtime installs the ledger, makes the clock, calls the frame and answers the two words');
     const perfText = readFileSync(join(SRC, 'core', 'gpu', 'framePerf.ts'), 'utf8');
     ok(!/\btrackTimestamp\b|timestampQueryPool|resolveTimestampsAsync/.test(perfText.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')),"framePerf.ts: the card's clock is read through the adapter alone (gpuTimer.ts), the file three r188's GPUTimer changes");
     const all: string[] = [];
@@ -685,6 +690,37 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const calls = w.filter((x) => /this\.gpu(MadeNow|SkyReady|DrawablesNow)\(/.test(x) && !/^(\/\/|\*)/.test(x));
     ok(calls.length === 5 && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);'), `world.ts: the swap's builds are reached from WebGPU guards alone (and the sky's from within its own): ${calls.join('; ')}`);
     ok(w.filter((x) => x.includes('this.envHeld')).length === 3 && w.indexOf('if (this.envHeld) return;') > w.indexOf('private refreshEnvironmentGpu(dt: number): void {'), "world.ts: the held capture is read in WebGPU's refresh alone");
+  }
+  // Pass 1, wave 5: the motion output (`src/core/gpu/motion.ts`, `patchMotion.ts`), reached through the runtime alone. The
+  // camera's change is worked once a frame by one WebGPU line in the portal renderer, with no WebGL branch, the line 2b6e3a1 had
+  // there right after it; the effects switch's remake asked on WebGPU alone, its WebGL behaviour the line it had.
+  {
+    for (const g5 of ['motion.ts', 'patchMotion.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g5)), `wave 5's ${g5} is under src/core/gpu/`);
+    const pr = lines('src/world/portalRender.ts');
+    const at = pr.flatMap((x, i) => (x === 'if (GPU.webgpu) GPU.rt!.motion.frame(camera);' ? [i] : []));
+    ok(at.length === 1 && pr[at[0] + 1] === '// On WebGPU a look whose shape sliders moved in play is baked again in place before anything draws it (pass 1, wave 4).' && pr[at[0] - 2] === 'frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);', 'portalRender.ts: the motion frame is one WebGPU line between the lines 2b6e3a1 had round it');
+    ok(pr.filter((x) => x.includes('.motion.frame(')).length === 1, 'portalRender.ts: the motion frame is worked from the frame alone');
+    const m = lines('src/main.ts');
+    const remake = m.indexOf('const remake = GPU.webgpu && this.fxRemake && S.effects && !!this.postfx;');
+    ok(remake > 0 && m[remake + 1] === 'this.fxRemake = false;' && m[remake + 2] === 'if (S.effects === !!this.postfx && !remake) continue;', 'main.ts: the remake is false on WebGL, where the reconcile goes on as it did');
+    ok(m.filter((x) => x.includes('this.fxRemake = true')).length === 1 && m.indexOf('if (!GPU.webgpu) return;', m.indexOf('private remakeEffectsGpu(): void {')) === m.indexOf('private remakeEffectsGpu(): void {') + 1, 'main.ts: the remake is asked on WebGPU alone');
+    const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
+    ok(startText.includes('motionFrame(camera);') && startText.includes('motion: motionReport(),'), 'start.ts: the runtime works the frame and reports the output');
+    const patchesText = readFileSync(join(SRC, 'core', 'gpu', 'patches.ts'), 'utf8');
+    ok(patchesText.includes("else if (e.name === 'motion') installMotionPatch(renderer);"), 'patches.ts: the motion patch is installed with the others, only where it applies');
+    // The wave's fixer: each rope's strip laid on the CPU is registered as it is made by one WebGPU line with no WebGL branch,
+    // the lines 2b6e3a1 had round it, and its file takes the switch alone (never the runtime's module).
+    const laid = 'if (GPU.webgpu) GPU.rt!.motion.laid(this.mesh, this.pos);';
+    for (const [f, before, after] of [
+      ['src/player/grappleDraw.ts', 'this.mesh.visible = false;', '}'],
+      ['src/player/ropeChainDraw.ts', 'this.handOff = 0;', '}'],
+    ] as const) {
+      const l = lines(f);
+      const at = l.flatMap((x, i) => (x === laid ? [i] : []));
+      ok(at.length === 1 && l[at[0] - 2] === before && l[at[0] - 1].startsWith('// On WebGPU the motion output is handed each vertex') && l[at[0] + 1] === after, `${f}: the strip is registered as laid by one WebGPU line, between the lines 2b6e3a1 had round it`);
+      ok(l.filter((x) => x.includes('.motion.laid(')).length === 1 && l.includes("import { GPU } from '../core/gpuSwitch.ts';"), `${f}: registered there alone, its file taking the switch`);
+    }
+    ok(startText.includes('laidMotion(mesh, positions);'), "start.ts: the runtime's laid is the motion output's own");
   }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');

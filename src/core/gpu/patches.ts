@@ -16,6 +16,8 @@ import { DRAW_APPLIED, DRAW_COST, DRAW_STATS, setDrawSwitch } from './drawCost.t
 import { installBonePatch, setBonePool } from './patchBones.ts';
 import { BONES } from './bonePool.ts';
 import { GPU_KEYS } from './gpuKeys.ts';
+import { installMotionPatch } from './patchMotion.ts';
+import { GPU_MOTION, MOTION } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Name = PatchEntry['name'];
@@ -70,6 +72,31 @@ const BONES_PATCH = {
   },
 };
 
+/**
+ * Pass 1, wave 5's motion output (`patchMotion.ts`): its switch is the wave's own (`GPU_MOTION.on`, read at load from
+ * `swg.gpu.motion`, read where a chain's scene target is made), so its record here reads through to it and to its verdict.
+ */
+const MOTION_PATCH = {
+  get on(): boolean {
+    return GPU_MOTION.on;
+  },
+  set on(v: boolean) {
+    GPU_MOTION.on = v;
+  },
+  get applied(): boolean {
+    return MOTION.applied;
+  },
+  set applied(v: boolean) {
+    MOTION.applied = v;
+  },
+  get why(): string {
+    return MOTION.why;
+  },
+  set why(v: string) {
+    MOTION.why = v;
+  },
+};
+
 /** Each patch's own record: its switch, whether it applied and why not. */
 const STATE: Record<Name, { on: boolean; applied: boolean; why: string }> = {
   shadow: SHADOW_PATCH,
@@ -78,6 +105,7 @@ const STATE: Record<Name, { on: boolean; applied: boolean; why: string }> = {
   stencil: STENCIL_PATCH,
   replay: REPLAY_PATCH,
   bones: BONES_PATCH,
+  motion: MOTION_PATCH,
 };
 
 function readSwitch(name: Name): boolean {
@@ -85,6 +113,8 @@ function readSwitch(name: Name): boolean {
   if (name === 'replay') return DRAW_COST.replay;
   // The bone pool's is the wave's own, read already (`gpuKeys.ts`).
   if (name === 'bones') return GPU_KEYS.boneStorage;
+  // The motion output's is wave 5's own, read already (`motion.ts`).
+  if (name === 'motion') return GPU_MOTION.on;
   try {
     return localStorage.getItem(`swg.gpu.patch.${name}`) !== '0';
   } catch {
@@ -112,6 +142,7 @@ export function applyPatches(renderer: Any): void {
     else if (e.name === 'warm') WARM_PATCH.applied = true;
     else if (e.name === 'replay') installReplayPatch(renderer);
     else if (e.name === 'bones') installBonePatch(renderer);
+    else if (e.name === 'motion') installMotionPatch(renderer);
     st.why = '';
   }
 }
@@ -125,7 +156,7 @@ export function setPatch(name: Name, on: boolean): boolean {
 }
 
 export function isPatchName(n: string): n is Name {
-  return n === 'shadow' || n === 'still' || n === 'warm' || n === 'stencil' || n === 'replay' || n === 'bones';
+  return n === 'shadow' || n === 'still' || n === 'warm' || n === 'stencil' || n === 'replay' || n === 'bones' || n === 'motion';
 }
 
 /** What `__debug.gpu()` says of the patches. */
@@ -151,5 +182,6 @@ export function patchReport(): Record<string, unknown> {
   (out.replay as Record<string, unknown>).switch = "__debug.gpu({ draw: { replay: false } }), or localStorage['swg.gpu.draw.replay'] = '0' and a reload";
   (out.replay as Record<string, unknown>).stats = { asked: DRAW_STATS.replayAsked, skipped: DRAW_STATS.replaySkipped, fullReplays: DRAW_STATS.replayFull };
   (out.bones as Record<string, unknown>).switch = "__debug.gpu({ bones: false }) live, or localStorage['swg.gpu.keys.boneStorage'] = '0' and a reload (the pool itself: __debug.gpu().bones)";
+  (out.motion as Record<string, unknown>).switch = "__debug.gpu({ motion: false }) live (the effects chain made again), or localStorage['swg.gpu.motion'] = '0' and a reload (the output itself: __debug.gpu().motion)";
   return out;
 }

@@ -19,6 +19,7 @@ import { groundFamiliesNode, groundTilesNode, ringNode } from './gpuGround.ts';
 import { bladeNode, lavaNode, marksNode, particlesNode, tunnelNode } from './gpuPrograms.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { HeldLightingModel } from './gpuLightHold.ts';
+import { markMotion, withMotionOutput } from './motion.ts';
 
 /**
  * A program of step 5's left out at load (`localStorage['swg.gpu.<part>'] = '0'`): step 3's way, nothing drawn. Every vertex
@@ -29,7 +30,8 @@ function drawsNothing(name: string): THREE.Material {
   m.name = `gpu: ${name} left out at load`;
   m.vertexNode = vec4(2, 2, 2, 1);
   m.fragmentNode = vec4(0, 0, 0, 0);
-  return m;
+  // Pass 1, wave 5: a fragment of its own writes every output of a scene target that carries the motion (`motion.ts`).
+  return withMotionOutput(m);
 }
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -55,7 +57,8 @@ export function makeStandIns(): GpuStandIns {
       const up = dial(() => GPU_LOOK.skyZenithAt);
       const elev = normalize(positionLocal).y;
       m.colorNode = mix(colour(horizon), colour(zenith), smoothstep(float(0), up, elev));
-      return m;
+      // Pass 1, wave 5: its motion is the camera's turn alone (`motion.ts`).
+      return markMotion(m, 'sky');
     },
     lava(c) {
       // Step 5: the client's lava itself (`gpuPrograms.ts`), unless its part was left out at load.

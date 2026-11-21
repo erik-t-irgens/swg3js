@@ -18,6 +18,7 @@
 import * as THREE from 'three';
 import { NodeMaterial } from 'three/webgpu';
 import { float, vec4 } from 'three/tsl';
+import { adoptMotion } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -66,6 +67,8 @@ export function installFallback(renderer: Any): FallbackStats {
     if (!s) {
       s = make() as THREE.Material;
       made.set(m, s);
+      // Pass 1, wave 5: the stand-in's motion marks (the sky's turn, a place handed in) read off the original three builds on.
+      adoptMotion(m, s);
       const n = s.name || nameOf(m);
       stats.standIns.set(n, (stats.standIns.get(n) ?? 0) + 1);
     }

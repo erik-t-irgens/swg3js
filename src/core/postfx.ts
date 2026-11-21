@@ -171,7 +171,9 @@ export class PostFX {
     if (GPU.webgpu) depth = GPU.rt!.chain.sceneDepth(w, h);
     else depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);
     depth.format = THREE.DepthStencilFormat;
-    this.sceneTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth });
+    // On WebGPU (the GPU port's pass 1, wave 5) the target is the WebGPU side's: this one, with the motion's output beside its colour.
+    if (GPU.webgpu) this.sceneTarget = GPU.rt!.chain.sceneTarget(w, h, depth);
+    else this.sceneTarget = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth });
     this.sceneTarget.texture.name = 'fx.scene';
     this.bufferA = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, samples: 0 });
     this.bufferA.texture.name = 'fx.a';

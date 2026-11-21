@@ -34,6 +34,7 @@ import { NodeMaterial, NodeUpdateType, Texture3DNode, TextureNode } from 'three/
 import * as TSL from 'three/tsl';
 import { asShownFB } from './gpuGround.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
+import { withMotionOutput } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -241,6 +242,8 @@ function program(name: string, fog: boolean): Any {
   m.lights = false;
   m.fog = fog;
   everyDraw(m);
+  // Pass 1, wave 5: a fragment of its own writes every output of a scene target that carries the motion (`motion.ts`).
+  withMotionOutput(m);
   return m;
 }
 

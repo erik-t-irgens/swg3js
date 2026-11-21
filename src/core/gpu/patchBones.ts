@@ -32,6 +32,7 @@ import { Fn, add, attribute, mat3, normalLocal, positionLocal, positionPrevious,
 import { NodeMaterial, StorageBufferAttribute } from 'three/webgpu';
 import { BONES, BONE_IO, isPooledRO, markPooledRO, mirror, pooledFor, pooledRecord, releaseAll, slotBase, slotPrev, touch, unbindInto } from './bonePool.ts';
 import { GPU_KEYS } from './gpuKeys.ts';
+import { markBonesPrevious, motionBuild } from './motion.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -76,7 +77,8 @@ const poolSkinning: (object: Any) => Any = (Fn as Any)(([_object]: Any[], builde
   // Three's own per-object reference to the drawn mesh's `bindMatrix` (no object named: the one drawn).
   const bind = (reference as Any)('bindMatrix', 'mat4');
   const blendAt = (first: Any): Any => add(n.pool.element(first.add(joint.x)).mul(weight.x), n.pool.element(first.add(joint.y)).mul(weight.y), n.pool.element(first.add(joint.z)).mul(weight.z), n.pool.element(first.add(joint.w)).mul(weight.w));
-  if (builder.needsPreviousData()) {
+  // Pass 1, wave 5: the motion output (`motion.ts`) asks for last frame's place too, where it is built.
+  if (builder.needsPreviousData() || motionBuild(builder)) {
     const before = n.unbind.mul(blendAt(n.prev)).mul(bind);
     positionPrevious.assign(before.mul(positionPrevious).xyz);
   }
@@ -106,6 +108,10 @@ function pooledSetupPosition(this: Any, builder: Any): Any {
   }
   poolSkinning(object);
   pooledBuilders.add(builder);
+  // Pass 1, wave 5: the motion output reads last frame's skinned place, which the skinning hands in where it is built. Told
+  // here, as the material is set up: three builds a graph's fragment stage before its vertex stage, so a word left by the
+  // skinning's own body (run as the vertex stage is built) came after the motion output had chosen.
+  if (motionBuild(builder)) markBonesPrevious(builder);
   return out;
 }
 

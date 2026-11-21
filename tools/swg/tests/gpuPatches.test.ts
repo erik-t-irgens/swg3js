@@ -84,6 +84,27 @@ const RECORDED: Record<string, string> = {
   'three.tsl.js NodeMaterialObserver.constructor': '8e0fee0773980edd',
   'three.webgpu.js Bindings._update': '8bca54d8bbdca6dc',
   'three.webgpu.js WebGPUAttributeUtils.createAttribute': 'cf5554b0e599468c',
+  // Pass 1, wave 5's motion output (`patchMotion.ts`), read against the development commit 577fb27: what it wraps (the target
+  // set, which the renderer's multi-output node follows; the pipeline maker, which reads each output's blend off the context's
+  // node) and what it stands on (the node set and read, the render context keyed on its id, a material's colour merged with
+  // it and a fragment of its own not, each target's output by its texture's name, the pipeline's key carrying the material's
+  // blending and transparency and never the node, an output's clear colour, the observer's refresh rule, the shadow map drawn
+  // with the node taken off, and an object uniform written only at a full refresh).
+  'three.webgpu.js Renderer.setRenderTarget': '2980238c59690ed8',
+  'three.webgpu.js WebGPUPipelineUtils.createRenderPipeline': 'b9abd2e9cd4ebc78',
+  'three.webgpu.js Renderer.setMRT': '18f51ab3974c04e1',
+  'three.webgpu.js Renderer.getMRT': '9dc79c67a44c989b',
+  'three.webgpu.js RenderContexts.get': 'b051adc7e813e0b6',
+  'three.tsl.js NodeMaterial.setup': 'b5913782438586fc',
+  'three.tsl.js NodeMaterial.setupOutput': '5062b7bb21ec13c8',
+  'three.tsl.js MRTNode.setup': '0958b8e2fa0d3588',
+  'three.tsl.js MRTNode.merge': '7df52828f40928ab',
+  'three.webgpu.js WebGPUBackend.getRenderCacheKey': '97b8b42b2a3f542b',
+  'three.webgpu.js Pipelines._getRenderCacheKey': 'c5850a7ca002a561',
+  'three.webgpu.js WebGPUBackend.beginRender': '9bd6a0cffddb7a5f',
+  'three.webgpu.js WebGPUBackend.clear': '85337798cf1cf924',
+  'three.tsl.js NodeMaterialObserver.containsNode': '965633bf8555f1bb',
+  'three.tsl.js ShadowNode.updateShadow': 'b3f7a0d581580332',
 };
 
 const files = new Map<string, string[]>();

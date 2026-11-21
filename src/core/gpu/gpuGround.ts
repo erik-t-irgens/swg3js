@@ -46,6 +46,7 @@ import { ALBEDO_SCALE } from '../../world/horizon/horizonDecode.ts';
 import { acesInverseNode, toLinearNode } from './gpuCard.ts';
 import { diffuseBackNode } from './gpuSpec.ts';
 import { HeldLightingModel } from './gpuLightHold.ts';
+import { motionPrevious, previousUniform } from './motion.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 import { GPU_LOOKS } from './looks.ts';
 import { drawsInline } from './inlineOutput.ts';
@@ -703,6 +704,30 @@ export function ringNodes(u: RingUniforms): RingNodes {
   };
 }
 
+/** A uniform's last-frame copy where its value is a vector (`motion.ts`), else the node it already has. */
+function previousOr(src: { value: unknown }, now: Any): Any {
+  const v = src.value as { clone?: unknown; copy?: unknown } | null;
+  return v && typeof v.clone === 'function' && typeof v.copy === 'function' ? previousUniform(src as { value: Any }) : now;
+}
+
+/** The rings' nodes with every vector the vertex reads that a frame moves taken at last frame (pass 1, wave 5's motion). */
+export function ringPrevious(r: RingNodes, u: RingUniforms): RingNodes {
+  return {
+    ...r,
+    eye: previousOr(u.uHorizonEye, r.eye),
+    square: previousOr(u.uHorizonSquare, r.square),
+    morph: previousOr(u.uHorizonMorph, r.morph),
+    drop: previousOr(u.uHorizonDrop, r.drop),
+    grid: previousOr(u.uHorizonGrid, r.grid),
+    fine: previousOr(u.uHorizonFine, r.fine),
+    coarse: previousOr(u.uHorizonCoarse, r.coarse),
+    shapeWin: previousOr(u.uHorizonShapeWin, r.shapeWin),
+    shapeAt: previousOr(u.uHorizonShapeAt, r.shapeAt),
+    win: previousOr(u.uHorizonWin, r.win),
+    winC: previousOr(u.uHorizonWinC, r.winC),
+  };
+}
+
 // The bake's lattices and the morph (`HORIZON_RING_FUNCTIONS`), each as nodes over float operands.
 
 export function ringDistLevelN(d: Any, lod0: Any, morph: Any): Any {
@@ -948,6 +973,10 @@ export function ringNode(u: RingUniforms, ground: GroundTileUniforms, opts: { tr
     level: V.level(),
     uv: V.uv(),
   };
+  // Pass 1, wave 5: the ring's place last frame, for the motion output (`motion.ts`): the same vertex worked over last frame's
+  // eye, square, morph, drop, lattices, shape window and ground frame (each a copy rolled once a frame), its pictures as they
+  // stand. Built only where the motion output is.
+  motionPrevious(m, () => ringVertexN(ringPrevious(r, u), previousOr(ground.uGroundFrame, g.frame), attribute('aRing', 'vec4'), positionGeometry).pos);
   // The vertex (`HORIZON_RING_VERTEX`): an instance is a node's corner, its level and, for a skirt, its side.
   m.positionNode = Fn(() => {
     const o = ringVertexN(r, g.frame, attribute('aRing', 'vec4'), positionGeometry);

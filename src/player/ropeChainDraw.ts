@@ -17,6 +17,7 @@
 import * as THREE from 'three';
 import { CLIMB_TUNE } from '../anim/climbTune.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 import { GRAPPLE_TUNE } from './grapple.ts';
 import { GRAPPLE_MATERIAL } from './grappleDraw.ts';
 import { CURVE_MOST, type RopeCurve } from './ropeCurve.ts';
@@ -156,6 +157,8 @@ export class ChainRibbon {
     this.mesh.visible = false;
     this.widest = 0;
     this.handOff = 0;
+    // On WebGPU the motion output is handed each vertex's change since the last frame (pass 1, wave 5): it is laid here, in place.
+    if (GPU.webgpu) GPU.rt!.motion.laid(this.mesh, this.pos);
   }
 
   /** How far the strip's rings at the hands stood from the hands as drawn at the last lay, metres (`drawChained`'s; the console's). */

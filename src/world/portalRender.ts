@@ -998,6 +998,8 @@ export class PortalRenderer {
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projView, THREE.WebGLCoordinateSystem, camera.reversedDepth);
+      // On WebGPU the camera's change since the last frame is worked once, before anything draws its motion (pass 1, wave 5).
+      if (GPU.webgpu) GPU.rt!.motion.frame(camera);
       // On WebGPU a look whose shape sliders moved in play is baked again in place before anything draws it (pass 1, wave 4).
       if (GPU.webgpu) GPU.rt!.morphBake.frame();
       // On WebGPU each region tier's render bundle is shown this frame while the view or the sun's shadow reach meets it.
