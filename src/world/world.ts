@@ -1373,6 +1373,9 @@ export class World {
     LEDGER_WORLD.cellOf = this.livingCell;
     LEDGER_WORLD.now = () => this.simTime;
     this.bolts = new Bolts(scene);
+    // On WebGPU the warm-up's bolts, gone at the next update, and a colour's first shot are adopted and built as they are
+    // fired (pass 1, wave 7's fixer).
+    if (GPU.webgpu) this.bolts.onMade = (meshes) => void this.gpuMadeNow(meshes);
     this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);
     this.weaponFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/weapons/`);
     this.bolts.weaponVisuals = this.weaponFx;
@@ -2105,6 +2108,8 @@ export class World {
     this.turrets = new TurretManager(this.physics, this.terrain);
     this.scene.add(this.turrets.group);
     this.sceneAdds.watch(this.turrets.group);
+    // On WebGPU a turret (the console's, stood in play with no screen over it) is built as it is hung (pass 1, wave 7's fixer).
+    if (GPU.webgpu) this.turrets.onPlaced = (group) => void this.gpuMadeNow([group]);
     this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);
     this.npcs.attach(this.npcDeps);
     // The catalogue's mobiles. The asset cache outlives the planet; the catalogue is a getter,

@@ -81,10 +81,11 @@ export function jitterBegin(camera: THREE.PerspectiveCamera, width: number, heig
   KEPT_P.copy(camera.projectionMatrix);
   KEPT_PI.copy(camera.projectionMatrixInverse);
   keptCamera = camera;
-  // `setViewOffset`'s own effect, written into its record and worked out by the camera's own `updateProjectionMatrix`: a fraction
-  // handed to a call the compiler does not build in is a number made (half of a dozen node processes boxed the two offsets as
-  // `setViewOffset`'s arguments, 31 bytes a frame), and three makes the record with whole numbers in its offsets, which boxes every
-  // fraction written into them after; so the record is made here, its offsets begun as fractions, in three's own fields and order.
+  // `setViewOffset`'s own effect, written into its record and worked out as three's `updateProjectionMatrix` works it
+  // (`nudgedProjection`): a fraction handed to a call the compiler does not build in is a number made (half of a dozen node
+  // processes boxed the two offsets as `setViewOffset`'s arguments, 31 bytes a frame, and the frustum's four sides as three's
+  // `makePerspective`'s, 64), and three makes the record with whole numbers in its offsets, which boxes every fraction written
+  // into them after; so the record is made here, its offsets begun as fractions, in three's own fields and order.
   if (camera.view === null) camera.view = { enabled: true, fullWidth: 1, fullHeight: 1, offsetX: 0.25, offsetY: 0.25, width: 1, height: 1 };
   const v = camera.view;
   // A view offset of +x pixels moves the window right, so the picture moves left: the pixel whose centre is at m + 0.5 shows what
@@ -96,7 +97,7 @@ export function jitterBegin(camera: THREE.PerspectiveCamera, width: number, heig
   v.offsetY = JITTER_OFFSETS[i * 2 + 1];
   v.width = width;
   v.height = height;
-  camera.updateProjectionMatrix();
+  nudgedProjection(camera, v);
   JITTER.on = true;
   JITTER.x = JITTER_OFFSETS[i * 2];
   JITTER.y = JITTER_OFFSETS[i * 2 + 1];
@@ -108,14 +109,74 @@ export function jitterBegin(camera: THREE.PerspectiveCamera, width: number, heig
 export function jitterEnd(): void {
   if (!JITTER.on || keptCamera === null) return;
   const camera = keptCamera;
-  // `clearViewOffset` turns the view off and works the projection out again; the kept one is copied over it, so a field the
-  // game set without asking for a new projection (none does today) cannot reach the frame early.
-  camera.clearViewOffset();
+  // The view turned off, as `clearViewOffset` turns it off, and the kept projection copied back rather than worked out again
+  // (`clearViewOffset` would work it out only for the copy to replace it), so a field the game set without asking for a new
+  // projection (none does today) cannot reach the frame early.
+  if (camera.view !== null) camera.view.enabled = false;
   camera.projectionMatrix.copy(KEPT_P);
   camera.projectionMatrixInverse.copy(KEPT_PI);
   keptCamera = null;
   JITTER.on = false;
   JITTER.index = (JITTER.index + 1) % JITTER_LENGTH;
+}
+
+/**
+ * The camera's projection and its inverse for its view record (on), worked as three's `PerspectiveCamera.updateProjectionMatrix`
+ * and `Matrix4.makePerspective` work them (three.js, MIT, `LICENSES/three-MIT.txt`), each sum in three's own order, so the
+ * result is three's to the bit. Three's call hands the frustum's four sides to `makePerspective` as arguments, and in about
+ * half of a dozen node processes those four fractions were boxed there, 64 B a frame, by whether the call was built in (the
+ * GPU port's pass 1, wave 7's fixer); here they stay locals. `threeAnchors.test.ts` holds both of three's methods to the text
+ * this was read from, and `gpuTaa.test.ts` holds the result to three's own call.
+ */
+function nudgedProjection(camera: THREE.PerspectiveCamera, view: NonNullable<THREE.PerspectiveCamera['view']>): void {
+  const near = camera.near;
+  const far = camera.far;
+  let top = (near * Math.tan(THREE.MathUtils.DEG2RAD * 0.5 * camera.fov)) / camera.zoom;
+  let height = 2 * top;
+  let width = camera.aspect * height;
+  let left = -0.5 * width;
+  left += (view.offsetX * width) / view.fullWidth;
+  top -= (view.offsetY * height) / view.fullHeight;
+  width *= view.width / view.fullWidth;
+  height *= view.height / view.fullHeight;
+  const skew = camera.filmOffset;
+  if (skew !== 0) left += (near * skew) / camera.getFilmWidth();
+  const right = left + width;
+  const bottom = top - height;
+  const x = (2 * near) / (right - left);
+  const y = (2 * near) / (top - bottom);
+  const a = (right + left) / (right - left);
+  const b = (top + bottom) / (top - bottom);
+  let c: number;
+  let d: number;
+  if (camera.reversedDepth) {
+    c = near / (far - near);
+    d = (far * near) / (far - near);
+  } else if (camera.coordinateSystem === THREE.WebGLCoordinateSystem) {
+    c = -(far + near) / (far - near);
+    d = (-2 * far * near) / (far - near);
+  } else if (camera.coordinateSystem === THREE.WebGPUCoordinateSystem) {
+    c = -far / (far - near);
+    d = (-far * near) / (far - near);
+  } else throw new Error(`the jitter's projection: a camera of an unknown coordinate system (${camera.coordinateSystem})`);
+  const te = camera.projectionMatrix.elements;
+  te[0] = x;
+  te[4] = 0;
+  te[8] = a;
+  te[12] = 0;
+  te[1] = 0;
+  te[5] = y;
+  te[9] = b;
+  te[13] = 0;
+  te[2] = 0;
+  te[6] = 0;
+  te[10] = c;
+  te[14] = d;
+  te[3] = 0;
+  te[7] = 0;
+  te[11] = -1;
+  te[15] = 0;
+  camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
 }
 
 /** The camera's projection as the game set it: the kept one while the camera is nudged (`motion.ts`'s frame reads it). */

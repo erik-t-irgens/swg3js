@@ -191,6 +191,13 @@ export class TurretManager {
     dark: new THREE.MeshStandardMaterial({ color: 0x24272c, roughness: 0.8, metalness: 0.1, flatShading: true }),
   };
 
+  /**
+   * Told each turret as it stands (`place`): the world builds it there and then on WebGPU (`World.gpuMadeNow`, the GPU port's
+   * pass 1, wave 7's fixer), since a turret stands in play with no loading screen over it and its materials are in no warm
+   * list, so its first frame built its pipelines by a draw. Unset on WebGL.
+   */
+  onPlaced: ((group: THREE.Object3D) => void) | null = null;
+
   constructor(private readonly physics: Physics, private readonly terrain: Terrain) {}
 
   /** Stand a turret on the ground at (x, z), facing `facing`. */
@@ -201,6 +208,7 @@ export class TurretManager {
     this.byCollider.set(t.collider.handle, t);
     this.group.add(t.group);
     markActor(t.group);
+    this.onPlaced?.(t.group);
     return t;
   }
 

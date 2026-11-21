@@ -21,7 +21,7 @@
 import * as THREE from 'three';
 import type { ModelLevel, Primitive } from './assetPack.ts';
 import { keepUploadRange, type UploadRange } from './uploadRange.ts';
-import { LOD_LEVEL_TUNE, levelCasts, levelOf, packLevels, type LodLevelTune } from './lodLevels.ts';
+import { LOD_LEVEL_TUNE, chainMade, chainNears, levelCasts, levelOf, packLevels, type LodLevelTune } from './lodLevels.ts';
 
 /** One level's draw: a mesh a piece, one instance store they all read, and the copies at it now. */
 interface LevelDraw {
@@ -131,6 +131,14 @@ export class LevelGroup {
   /** Per copy, its level now (the level count for "drawn at nothing"). */
   readonly level: Int8Array;
   private readonly nears: Float32Array;
+  /**
+   * The model's chain, kept for its made levels (`lods`, the converter's): their switches are the chain's times
+   * `LOD_LEVEL_TUNE.madeBias`, worked out again by the first sweep after it moves (`madeSeen`). A chain of the client's
+   * own never reads the bias.
+   */
+  private readonly chain: readonly ModelLevel[];
+  private readonly made: boolean;
+  private madeSeen: number;
   private readonly beyond: number;
   readonly draws: LevelDraw[];
   private readonly start: Int32Array;
@@ -193,7 +201,10 @@ export class LevelGroup {
     this.hidden = new Uint8Array(n);
     const L = levels.length;
     this.nears = new Float32Array(L);
-    for (let k = 0; k < L; k++) this.nears[k] = levels[k].near;
+    this.chain = levels;
+    this.made = chainMade(levels);
+    this.madeSeen = tune.madeBias;
+    chainNears(levels, this.made ? tune.madeBias : 1, this.nears);
     const far = levels[L - 1].far;
     this.beyond = far > 0 && far < 1e8 ? far : Number.POSITIVE_INFINITY;
     this.start = new Int32Array(L + 2);
@@ -248,7 +259,7 @@ export class LevelGroup {
     for (let k = 0; k < L; k++) {
       const attr = new THREE.InstancedBufferAttribute(new Float32Array(n * 16), 16);
       attr.setUsage(THREE.DynamicDrawUsage);
-      const draw: LevelDraw = { near: levels[k].near, meshes: [], base: [], attr, count: 0, members: new Int32Array(n).fill(-1), range: { start: 0, count: 0 } };
+      const draw: LevelDraw = { near: this.nears[k], meshes: [], base: [], attr, count: 0, members: new Int32Array(n).fill(-1), range: { start: 0, count: 0 } };
       for (const prim of levels[k].primitives) {
         const mesh = make(prim, n, k);
         mesh.instanceMatrix = attr;
@@ -306,7 +317,15 @@ export class LevelGroup {
     const h = tune.hysteresis;
     const beyond = tune.hideBeyond ? this.beyond : Number.POSITIVE_INFINITY;
     // The shadow rule's inputs: the scale, where the second cascade ends, and the rule's own reach (a tune moved).
-    const shadowMoved = scale !== this.scale || cascadeFar !== this.cascadeFar || tune.shadowLevelMax !== this.shadowReach;
+    let shadowMoved = scale !== this.scale || cascadeFar !== this.cascadeFar || tune.shadowLevelMax !== this.shadowReach;
+    // A made chain's switches by the made levels' own bias, once it moves: every copy is picked again.
+    if (this.made && tune.madeBias !== this.madeSeen) {
+      this.madeSeen = tune.madeBias;
+      chainNears(this.chain, tune.madeBias, this.nears);
+      for (let k = 0; k < L; k++) this.draws[k].near = this.nears[k];
+      this.settled = -1;
+      shadowMoved = true;
+    }
     this.scale = scale;
     this.cascadeFar = cascadeFar;
     this.shadowReach = tune.shadowLevelMax;

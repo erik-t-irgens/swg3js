@@ -27,9 +27,9 @@
 // region happens to be rebuilt, so shadows switched on or a shadow distance moved never leave a batch casting
 // by the old answer.
 import * as THREE from 'three';
-import type { LoadedModel, Primitive } from './assetPack.ts';
+import type { LoadedModel, ModelLevel, Primitive } from './assetPack.ts';
 import { keepUploadRange, type UploadRange } from './uploadRange.ts';
-import { LOD_LEVEL_DEFAULTS, LOD_LEVEL_TUNE, levelCasts, levelOf, type LodLevelTune } from './lodLevels.ts';
+import { LOD_LEVEL_DEFAULTS, LOD_LEVEL_TUNE, chainMade, chainNears, levelCasts, levelOf, type LodLevelTune } from './lodLevels.ts';
 import { fitInstanceSphere } from './levelGroup.ts';
 import { CHUNK_SIZE } from './terrain.ts';
 import { castsShadow } from './surfaces.ts';
@@ -72,6 +72,8 @@ interface ModelLevels {
   prims: readonly (readonly Primitive[])[];
   /** Level 0's switch distance to the next, for the shadow rule; per level. */
   nearOf: Float32Array;
+  /** The model's chain when the converter's `lods` made it (`LOD_LEVEL_TUNE.madeBias` moves its switches), else null. */
+  made: readonly ModelLevel[] | null;
 }
 
 interface ChunkRec {
@@ -152,6 +154,9 @@ export class FloraField {
   private readonly dirtyList: (Region | null)[] = [];
   private dirtyCount = 0;
   private readonly levelsOf = new Map<LoadedModel, ModelLevels>();
+  /** The made chains among them, in a kept list a sweep walks by index when the made levels' bias moves (`madeSeen`). */
+  private readonly madeChains: ModelLevels[] = [];
+  private madeSeen = LOD_LEVEL_DEFAULTS.madeBias;
   /** Whether the batches are what is drawn (the switch); the chunks' own meshes are the other way. */
   shown = true;
   readonly stats: FloraFieldStats = { chunks: 0, regions: 0, batches: 0, meshes: 0, drawing: 0, byLevel: [0, 0, 0, 0], hidden: 0, rebuilds: 0, dirty: 0, sweeps: 0 };
@@ -200,14 +205,16 @@ export class FloraField {
     const nears = new Float32Array(count);
     const nearOf = new Float32Array(count);
     const prims: (readonly Primitive[])[] = [];
+    const made = levels && chainMade(levels) ? levels : null;
+    if (levels) chainNears(levels, made ? this.madeSeen : 1, nears);
     for (let k = 0; k < count; k++) {
-      nears[k] = levels ? levels[k].near : 0;
       nearOf[k] = nears[k];
       prims.push(k === 0 ? m.primitives : (levels as NonNullable<typeof levels>)[k].primitives);
     }
     const beyond = levels ? levels[count - 1].far : Number.POSITIVE_INFINITY;
-    lv = { count, nears, beyond: beyond > 0 && beyond < 1e8 ? beyond : Number.POSITIVE_INFINITY, prims, nearOf };
+    lv = { count, nears, beyond: beyond > 0 && beyond < 1e8 ? beyond : Number.POSITIVE_INFINITY, prims, nearOf, made };
     this.levelsOf.set(m, lv);
+    if (made) this.madeChains.push(lv);
     return lv;
   }
 
@@ -272,7 +279,19 @@ export class FloraField {
   sweep(ex: number, ey: number, ez: number, scale: number): void {
     const tune = this.tune;
     const h = tune.hysteresis;
-    if (scale !== this.scale || tune.shadowLevelMax !== this.shadowReach) {
+    // The made chains' switches by the made levels' own bias, once it moves (every planting is picked below anyway).
+    let madeMoved = false;
+    if (tune.madeBias !== this.madeSeen) {
+      this.madeSeen = tune.madeBias;
+      const mc = this.madeChains;
+      for (let i = 0; i < mc.length; i++) {
+        const lv = mc[i];
+        chainNears(lv.made as readonly ModelLevel[], tune.madeBias, lv.nears);
+        for (let k = 0; k < lv.count; k++) lv.nearOf[k] = lv.nears[k];
+      }
+      madeMoved = mc.length > 0;
+    }
+    if (madeMoved || scale !== this.scale || tune.shadowLevelMax !== this.shadowReach) {
       this.scale = scale;
       this.shadowReach = tune.shadowLevelMax;
       // Every batch's shadow by the new scale or the rule's new reach, rebuilt or not.
@@ -596,6 +615,7 @@ export class FloraField {
     this.dirtyList.length = 0;
     this.dirtyCount = 0;
     this.levelsOf.clear();
+    this.madeChains.length = 0;
   }
 }
 

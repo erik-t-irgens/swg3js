@@ -101,6 +101,12 @@
 //                                                                  effects name), into doors.json beside each pack's manifest, and the door
 //                                                                  models once into <out-dir>/doors (doors.mjs). It converts no building, so it
 //                                                                  runs after snapshot and gallery and takes seconds
+//   node tools/swg/cli.mjs lods <out-dir> [--only=<pack>,...] [--dry-run]
+//                                                                  lower levels of detail for every placed model and plant the client gave
+//                                                                  none, made by meshoptimizer at about a half, a quarter and an eighth of the
+//                                                                  triangles and written as the client's own levels are (madelods.mjs). It reads
+//                                                                  no archive, so it takes no <swg-dir>; it writes the packs' models and
+//                                                                  manifests in place, so stop the dev server first. A second run changes nothing
 //   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=47] [--skip-existing]
 //                                                                  bake a world's outdoor walkability grid (nav.json, nav.bin) from the pack
 //                                                                  it already has: the terrain, the placements and the models' own triangles.
@@ -221,6 +227,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs';
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
+import { madeLodsAsk } from './madelods.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
 import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, gridCopies, gridEditsOf, walkThroughTemplates, writeNavGrid } from './navgrid.mjs';
@@ -3085,6 +3092,8 @@ function packStatus(dir) {
   /** The worlds whose radial flora (grass and the far tree cards) has no pictures, or pictures from another terrain, each with why. */
   const wantRadial = [];
   const wantHorizon = [];
+  /** The packs whose models with no levels of their own have none made, or have changed since (`lods`, madelods.mjs), each with why. */
+  const wantMadeLods = [];
   // A folder with some worlds converted asks for a missing one alone (a world added to the list since, Hoth among
   // them), since `snapshot all` would convert every world again; a folder with none asks for them all in one run.
   const anyPacked = GAME_PLANETS.some((p) => existsSync(join(dir, p, 'manifest.json')));
@@ -3335,6 +3344,10 @@ function packStatus(dir) {
     if (travel && rowsLost(travel.rows, layoutIds, TRAVEL_OWN_MODELS)) wantTravel = true;
     if (travel && layout && ngePortsUnstood(layout.objects, travel.rows, ngePortBuildings, travel.nge === 'none')) wantTravel = true;
     if (fittings && rowsLost(fittings.rows, layoutIds)) wantFittings = true;
+    // The levels made for the models the client gave none (`lods`, madelods.mjs), by the pack's own stamp: an `if` of its
+    // own, gathered into one run over every pack below.
+    const madeLodsWhy = placed ? madeLodsAsk(packDir, manifest, planet) : null;
+    if (madeLodsWhy) wantMadeLods.push(madeLodsWhy);
   }
   // The copies of yours (the race drawer's fourth wave): each one's own walk grid, baked from its source's pack under its own
   // key (`gridCopies`), asked for while it has none or one its source's layout or its own edit files have moved past. A
@@ -3711,6 +3724,11 @@ function packStatus(dir) {
   // stands by its template: an `if` of its own.
   const galleryInteriors = gallery && existsSync(join(dir, 'gallery', 'gallery.json')) ? interiorsStale(join(dir, 'gallery'), dir) : null;
   if (galleryInteriors) need(`interiors <swg-dir> ${dir} --retail-only`, `the gallery's buildings' furniture is not written, or was written before what it reads (${galleryInteriors}): a building of the gallery put down by the world editor stands empty`);
+  // The levels made for the models the client gave none (`lods`): the gallery's beside every world's, one run for all of
+  // them, which reads no archive and so takes no <swg-dir>.
+  const galleryMadeLods = gallery ? madeLodsAsk(join(dir, 'gallery'), gallery, 'the gallery') : null;
+  if (galleryMadeLods) wantMadeLods.push(galleryMadeLods);
+  if (wantMadeLods.length) need(`lods ${dir}`, wantMadeLods.length === 1 ? wantMadeLods[0] : `${wantMadeLods.length} packs' models with no levels of their own have none made, or have changed since (${wantMadeLods.slice(0, 2).join('; ')}${wantMadeLods.length > 2 ? '; ...' : ''})`);
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
   else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's models were ${MATERIAL_WHY}`);
   else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
@@ -9770,6 +9788,53 @@ switch (cmd) {
     if (out.missingPacks.length) console.log(`scenes: not converted yet, so left out: ${out.missingPacks.join(', ')}`);
     for (const f of out.failed.slice(0, 10)) console.log(`scenes: ${f.key} failed — ${f.why}`);
     if (out.failed.length > 10) console.log(`scenes: and ${out.failed.length - 10} more`);
+    break;
+  }
+  case 'lods': {
+    // <out-dir> [--only=<pack>,...] [--dry-run]: lower levels of detail for every placed model and plant the client gave
+    // none (`tools/swg/madelods.mjs`), in every pack the snapshot or the gallery stamped with the client's own levels. It
+    // opens no archive -- the models are the pack's -- so it takes no <swg-dir> and nothing about `--retail-only` applies
+    // (it is taken and said, since a script may hand it to every command). It writes each model it gives levels to beside
+    // itself and renames it over its name, and each pack's manifest last, with the stamp `status` asks by.
+    if (!pos[1]) usage();
+    const { MADE_LOD, MADE_LOD_FORMAT, loadSimplifier, madeLodsForPack, madeLodsPack } = await import('./madelods.mjs');
+    await loadSimplifier();
+    const root = pos[1];
+    const dry = flags.has('--dry-run');
+    const only = options.only ? new Set(String(options.only).split(',').map((s) => s.trim()).filter(Boolean)) : null;
+    if (flags.has('--retail-only')) console.log('lods: reads no archive, so --retail-only changes nothing');
+    console.log(`lods: levels at ${MADE_LOD.ratios.map((r) => `1/${Math.round(1 / r)}`).join(', ')} of the triangles, each kept while its error is under ${MADE_LOD.maxError} of the model's size and it has at most ${MADE_LOD.keepShare} of the level before's triangles; models under ${MADE_LOD.minTris} triangles get none; switches where the error is ${MADE_LOD.pixels} pixel of ${MADE_LOD.rows} rows at ${MADE_LOD.fovDeg} degrees (format ${MADE_LOD_FORMAT})${dry ? '; a dry run, nothing written' : ''}`);
+    const total = { packs: 0, made: 0, levels: 0, none: 0, refused: 0, own: 0, already: 0, restored: 0, before: 0, after: 0, why: {} };
+    for (const pack of readdirSync(root).sort()) {
+      if (only && !only.has(pack)) continue;
+      const packDir = join(root, pack);
+      const mf = join(packDir, 'manifest.json');
+      if (!existsSync(mf)) continue;
+      let manifest;
+      try {
+        manifest = JSON.parse(readFileSync(mf, 'utf8'));
+      } catch {
+        console.log(`  ${pack}: its manifest cannot be read; left alone`);
+        continue;
+      }
+      if (!madeLodsPack(manifest)) continue;
+      let c;
+      try {
+        c = madeLodsForPack(packDir, { dryRun: dry });
+      } catch (err) {
+        console.log(`  ${pack}: failed (${err.message})${err.code === 'EPERM' || err.code === 'EBUSY' ? ': a file is held open; stop the dev server and run it again' : ''}`);
+        process.exitCode = 1;
+        continue;
+      }
+      total.packs++;
+      for (const k of ['made', 'levels', 'none', 'refused', 'own', 'already', 'restored']) total[k] += c[k];
+      total.before += c.trisBefore;
+      total.after += c.trisAfter;
+      for (const [k, v] of Object.entries(c.why)) total.why[k] = (total.why[k] ?? 0) + v;
+      const whys = Object.entries(c.why).map(([k, v]) => `${v} ${k}`).join(', ');
+      console.log(`  ${pack}: ${c.made} models given ${c.levels} levels${c.already ? `, ${c.already} already` : ''}${c.restored ? `, ${c.restored} made again` : ''}, ${c.own} with the client's own, ${c.none + c.refused} given none${whys ? ` (${whys})` : ''}; ${c.trisBefore} triangles of those looked at come to ${c.trisAfter} at their lowest; ${(c.ms / 1000).toFixed(1)}s`);
+    }
+    console.log(`lods: ${total.packs} packs, ${total.made} models given ${total.levels} levels${total.already ? `, ${total.already} already had theirs` : ''}, ${total.own} with the client's own, ${total.none + total.refused} given none; ${total.before} triangles looked at come to ${total.after} at their lowest${dry ? ' (a dry run: nothing written)' : ''}`);
     break;
   }
   case 'navgrid': {

@@ -363,6 +363,7 @@ export const LATE_EXEMPT = {
   horizon: "reads only the pack's own terrain file, by its SHA-1",
   'clips-save': 'reads no archive; follows the player pack',
   'clips-apply': 'reads no archive; follows the parts rig',
+  lods: "reads no archive; asked again by the models it looked at (each pack's madeLods key)",
 };
 
 /**

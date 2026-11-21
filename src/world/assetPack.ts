@@ -123,6 +123,10 @@ export interface PackLevel {
   far: number;
   tris: number;
   prims: number;
+  /** A level the converter's `lods` made for a model the client gave none (`tools/swg/madelods.mjs`), never one of the client's. */
+  made?: boolean;
+  /** A made level's error, metres: how far the simplifier moved the surface. */
+  error?: number;
 }
 
 /**
@@ -136,6 +140,8 @@ export interface ModelLevel {
   /** The client's level number. */
   level: number;
   primitives: Primitive[];
+  /** A level the converter's `lods` made (its row's `made`): its switch is moved by `LOD_LEVEL_TUNE.madeBias` (`chainNears`). */
+  made?: boolean;
 }
 
 export interface PackManifest {
@@ -318,7 +324,9 @@ function modelLevels(def: PackModelDef, scenes: THREE.Group[], primitives: Primi
     const row = lods[kept[j]];
     const next = kept[j + 1];
     const far = next !== undefined ? lods[next].near : row.far;
-    out.push({ near: j === 0 ? 0 : row.near, far, level: row.level, primitives: j === 0 ? primitives.filter((p) => p.cell <= 0) : (prims.get(row.level) ?? []) });
+    const level: ModelLevel = { near: j === 0 ? 0 : row.near, far, level: row.level, primitives: j === 0 ? primitives.filter((p) => p.cell <= 0) : (prims.get(row.level) ?? []) };
+    if (j > 0 && row.made === true) level.made = true;
+    out.push(level);
   }
   return out;
 }

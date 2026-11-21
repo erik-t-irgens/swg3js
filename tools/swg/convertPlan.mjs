@@ -210,6 +210,11 @@ export const STEP_FACTS = {
   // The deeds a player buys a building with. It checks each deed's building against the models the
   // gallery carries, so it waits for the gallery; it writes one file at the top of the folder.
   deeds: { order: 39, lock: 'deeds', needs: ['gallery'], seconds: 20, bytes: 0.4 * GB, measured: '111 deeds: 2.0 s, 288 MB' },
+  // The levels made for the models the client gave none (madelods.mjs). It reads every world's manifest and the models
+  // with no levels of their own, which the snapshot and the flora write and travel and the fittings append to, and the
+  // gallery's, and writes those models and every such manifest in place; it opens no archive and mounts nothing, so it
+  // holds every pack and the gallery and stands after all five.
+  lods: { order: 39.5, lock: 'pack', locks: ['gallery'], needs: ['snapshot', 'flora', 'gallery', 'travel', 'fittings'], seconds: 10, bytes: 0.45 * GB, measured: 'forty-three packs, 957 models looked at, 82 given 94 levels: 2.0 s, 314 MB' },
 
   // The last two read the finished packs and open no archive at all, so they mount nothing -- which
   // is why both are quick and hold so little for what they get through. Neither carries a planet on

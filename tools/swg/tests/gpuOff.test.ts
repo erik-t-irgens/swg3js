@@ -692,6 +692,10 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
       ['if (GPU.webgpu) this.gpuSkyReady(sky);', 'this.sky.visible = false;'],
       ['if (GPU.webgpu) this.gpuMadeNow([group]);', '// A star behind a planet must not flare through it: the body itself writes no depth, and its'],
       ['if (GPU.webgpu) this.gpuMadeNow([this.scene], had);', 'if (v.disposed) return;'],
+      // Pass 1, wave 7's fixer: a turret stood in play and the warm-up's bolts, each built as it is hung, the hook set on WebGPU
+      // alone and the line 8980954 had after it standing as it was.
+      ['if (GPU.webgpu) this.turrets.onPlaced = (group) => void this.gpuMadeNow([group]);', 'this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);'],
+      ['if (GPU.webgpu) this.bolts.onMade = (meshes) => void this.gpuMadeNow(meshes);', 'this.shipFx = new ParticleEffects(scene, `${import.meta.env.BASE_URL}assets-private/ships/`);'],
     ];
     for (const [gpu, gl] of hung) {
       const at = w.flatMap((x, i) => (x === gpu ? [i] : []));
@@ -700,7 +704,14 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const had = w.indexOf('const had = GPU.webgpu ? this.gpuDrawablesNow() : null;');
     ok(had > 0 && w[had + 1] === 'try {' && w[had + 2] === 'this.load(planet, packId);', "world.ts: what stood before a swap is taken on WebGPU alone (nothing on WebGL), right before 499c5d5's load");
     const calls = w.filter((x) => /this\.gpu(MadeNow|SkyReady|DrawablesNow)\(/.test(x) && !/^(\/\/|\*)/.test(x));
-    ok(calls.length === 5 && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);'), `world.ts: the swap's builds are reached from WebGPU guards alone (and the sky's from within its own): ${calls.join('; ')}`);
+    ok(calls.length === 7 && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);'), `world.ts: the swap's builds, a turret's and the warm-up bolts' are reached from WebGPU guards alone (and the sky's from within its own): ${calls.join('; ')}`);
+    // The two hooks are the turret manager's and the bolts' own, unset unless the world sets them, each called only where set.
+    const tu = lines('src/combat/turrets.ts');
+    const bo = lines('src/combat/bolts.ts');
+    ok(tu.includes('onPlaced: ((group: THREE.Object3D) => void) | null = null;') && tu.filter((x) => x.includes('onPlaced')).length === 2 && tu.includes('this.onPlaced?.(t.group);'), "turrets.ts: the placed hook begins unset and is called, where set, once a turret stands");
+    ok(bo.includes('onMade: ((meshes: THREE.Object3D[]) => void) | null = null;') && bo.includes('const madeHere = this.onMade !== null && !this.materials.has(color);') && bo.includes('if (madeHere) this.onMade!([mesh]);') && bo.includes('const made = this.onMade ? [] as THREE.Object3D[] : null;') && bo.includes('if (made && made.length) this.onMade!(made);') && bo.filter((x) => x.includes('onMade') && !/^(\/\/|\*|\/\*\*)/.test(x)).length === 5, "bolts.ts: the made hook begins unset and is told the warm-up's bolts and a colour's first shot only where set");
+    // And the rest of a shot is 8980954's: with the hook unset (WebGL) `madeHere` is false and the warm-up collects nothing.
+    ok(bo.includes('const [coreMat, glowMat] = this.materialsFor(color);') && bo.includes('this.scene.add(mesh);') && bo.includes('markActor(mesh);'), "bolts.ts: a shot's materials and its hanging are 8980954's lines");
     ok(w.filter((x) => x.includes('this.envHeld')).length === 3 && w.indexOf('if (this.envHeld) return;') > w.indexOf('private refreshEnvironmentGpu(dt: number): void {'), "world.ts: the held capture is read in WebGPU's refresh alone");
   }
   // Pass 1, wave 5: the motion output (`src/core/gpu/motion.ts`, `patchMotion.ts`), reached through the runtime alone. The

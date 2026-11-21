@@ -2,8 +2,9 @@
 // WGSL and draws nothing, so the pictures are a browser's (the wave's prover); here:
 //  1. the jitter: sixteen Halton(2, 3) offsets about a pixel's centre; `jitterBegin` nudges the camera by `setViewOffset` so a
 //     pixel's centre shows what the camera unnudged shows at the centre plus the offset (the upscaled resolve's assumption, in
-//     WebGPU's rows from the top), and `jitterEnd` puts the projection back to the bit; a frame that threw is put back at the next
-//     begin; the motion frame reads the projection unnudged;
+//     WebGPU's rows from the top), its projection and inverse three's own `updateProjectionMatrix`'s to the bit (worked out by
+//     hand, with WebGL's and WebGPU's coordinates and reversed depth), and `jitterEnd` puts the projection back to the bit; a
+//     frame that threw is put back at the next begin; the motion frame reads the projection unnudged;
 //  2. the motion buffer's blue: the surface's view distance now less last frame's, read off a perspective clip's w (the source);
 //  3. the resolves' graphs build over the pass's own records, every number they read by reference, five pictures each, carried
 //     through no output of three's, and every picture read by `load` or by a sample at level 0 (no derivative in a branch);
@@ -176,9 +177,10 @@ if (process.argv.includes('--alloc')) {
   ok(radicalInverse(1, 2) === 0.5 && radicalInverse(2, 2) === 0.25 && radicalInverse(3, 3) === 1 / 9, 'the radical inverse');
 
   resetJitterForTests();
-  for (const reversed of [false, true]) {
+  for (const [reversed, system] of [[false, THREE.WebGLCoordinateSystem], [true, THREE.WebGLCoordinateSystem], [false, THREE.WebGPUCoordinateSystem]] as const) {
     const cam = new THREE.PerspectiveCamera(70, 1600 / 900, 0.05, 9000);
     (cam as Any)._reversedDepth = reversed;
+    cam.coordinateSystem = system;
     cam.updateProjectionMatrix();
     cam.position.set(1200, 30, -800);
     cam.rotation.set(0.1, 0.7, 0);
@@ -205,6 +207,13 @@ if (process.argv.includes('--alloc')) {
       const pyB = (0.5 - (b.y / b.w) * 0.5) * H;
       ok(Math.abs(pxB - (pxA - jx)) < 1e-6 && Math.abs(pyB - (pyA - jy)) < 1e-6, `frame ${f}${reversed ? ', reversed depth' : ''}: the nudged camera shows the point the offset up and left (${(pxB - pxA).toFixed(6)}, ${(pyB - pyA).toFixed(6)} against ${(-jx).toFixed(6)}, ${(-jy).toFixed(6)})`);
       ok(Math.abs(b.z / b.w - a.z / a.w) < 1e-9 && Math.abs(b.w - a.w) < 1e-9, `frame ${f}: its depth is unmoved`);
+      // The nudge is worked out by hand (`nudgedProjection`, so nothing is boxed): three's own `setViewOffset` and
+      // `updateProjectionMatrix` on a twin camera give the very same projection and inverse, to the bit.
+      const twin = new THREE.PerspectiveCamera(cam.fov, cam.aspect, cam.near, cam.far);
+      (twin as Any)._reversedDepth = reversed;
+      twin.coordinateSystem = system;
+      twin.setViewOffset(W, H, jx, jy, W, H);
+      ok(cam.projectionMatrix.equals(twin.projectionMatrix) && cam.projectionMatrixInverse.equals(twin.projectionMatrixInverse), `frame ${f}${reversed ? ', reversed depth' : ''}${system === THREE.WebGPUCoordinateSystem ? ', WebGPU coordinates' : ''}: the nudged projection and its inverse are three's own updateProjectionMatrix's, to the bit`);
       // The motion frame inside the nudge reads the game's projection.
       resetMotionForTests();
       motionFrame(cam);

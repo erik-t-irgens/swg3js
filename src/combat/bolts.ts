@@ -339,9 +339,22 @@ export class Bolts {
    */
   onBlocked: ((bolt: Bolt, at: THREE.Vector3, out: THREE.Vector3) => boolean) | null = null;
 
+  /**
+   * Told the warm-up's bolts as they are fired (`warmUp`), which stand only until the next update, and the first bolt of a
+   * colour whose two materials were made by its own shot: the world adopts and builds them there and then on WebGPU
+   * (`World.gpuMadeNow`, the GPU port's pass 1, wave 7's fixer). There nothing else lists the warm-up's bolts before they go,
+   * and a colour first fired in play was drawn on its first frame before the quarter-second scan adopted it, which on WebGPU
+   * keys it apart from the adopted materials (the portal renderer's stencil state is in three's key there), so its core's and
+   * glow's pipelines were built by that draw. Unset on WebGL.
+   */
+  onMade: ((meshes: THREE.Object3D[]) => void) | null = null;
+  /** Whether the last `fire` made its colour's materials (`onMade`). */
+  private madeLast = false;
+
   /** Fire a bolt from `from` along `dir` (unit length). */
   fire(from: THREE.Vector3, dir: THREE.Vector3, o: BoltOptions): Bolt {
     const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0, scar = 'bolt', kind = null } = o;
+    const madeHere = this.onMade !== null && !this.materials.has(color);
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -374,6 +387,8 @@ export class Bolts {
     mesh.scale.set(size, size, (0.6 + size * 0.4) * stretch);
     this.scene.add(mesh);
     markActor(mesh);
+    this.madeLast = madeHere;
+    if (madeHere) this.onMade!([mesh]);
     // Which gun this is, for everything it will be heard doing: the caller's own set, or, for a
     // ship's bolt fired by something that does not carry one, the set of the projectile it draws,
     // and failing both the plain blaster, so a bolt is never silent leaving and loud landing.
@@ -400,12 +415,16 @@ export class Bolts {
 
   /** A bolt of each colour far below the world, gone on the next update, so the first real shot finds its shaders compiled. */
   warmUp(colors: number[] = [0xff4a2a, 0x3af06a]): void {
+    const made = this.onMade ? [] as THREE.Object3D[] : null;
     for (const color of colors) {
       // Not really a shot: the set that names nothing, so the warm-up is heard no more than it is seen.
       const b = this.fire(new THREE.Vector3(0, -900, 0), new THREE.Vector3(0, -1, 0), { owner: 'enemy', color, speed: 0, sound: SILENT_GUN, scar: null });
       b.age = BLASTER.life;
       this.fired.enemy--;
+      // Every arrival's warm-up told, but a bolt whose colour this very shot made was told by `fire` already.
+      if (made && !this.madeLast) made.push(b.mesh);
     }
+    if (made && made.length) this.onMade!(made);
   }
 
   /**

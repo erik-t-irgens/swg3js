@@ -18,7 +18,7 @@ import { gzipSync } from 'node:zlib';
 import { checkJka, checkOut, checkSwg, formatBytes, isInside, roomFor, FULL_CONVERSION_BYTES } from '../checks.mjs';
 import { labelOf, nextStep, planSteps, readStatus, setAside } from '../plan.mjs';
 import { mimeOf, parseRange, resolveUnder } from '../serve.mjs';
-import { blobHash, distFiles, refusal, releaseFiles, unreachedImports, ustarName, writeTar } from '../pack.mjs';
+import { bareImports, blobHash, CONVERTER_PACKAGES, distFiles, packageProblems, refusal, releaseFiles, unreachedImports, ustarName, writeTar } from '../pack.mjs';
 import { STEP_FACTS } from '../../swg/convertPlan.mjs';
 import { splitCommand, statusJson } from '../../swg/statusplan.mjs';
 import { isRetailByName } from '../../swg/manifest.mjs';
@@ -269,7 +269,7 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   // Every step that opens an archive is retail-only. A couple of commands open none at all -- they
   // are built out of packs that are already converted -- and asking those for `--retail-only` would
   // be asking them about something they never look at.
-  const ARCHIVE_FREE = new Set(['navgrid', 'scenes', 'clouds']);
+  const ARCHIVE_FREE = new Set(['navgrid', 'scenes', 'clouds', 'lods']);
   const fromArchives = real.steps.filter((s) => !ARCHIVE_FREE.has(s.command));
   ok(fromArchives.every((s) => s.args.includes('--retail-only')), `every step that reads an archive is retail-only (${fromArchives.length} of ${real.steps.length})`);
   ok(real.steps.filter((s) => ARCHIVE_FREE.has(s.command)).every((s) => !s.args.includes('--retail-only')), 'and the ones that read none do not pretend to care');
@@ -503,6 +503,48 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   }
   const missing = unreachedImports([{ path: 'tools/a.mjs', from: join(lib, 'tools', 'a.mjs') }, { path: 'tools/b.mjs', from: join(lib, 'tools', 'b.mjs') }], lib);
   ok(missing.length === 2 && missing[0].startsWith('src/c.ts') && missing[1].startsWith('tools/d.json'), `a named file left out of the list is found, and a name with no file is not (${missing.join('; ')})`);
+
+  // The converter's one dependency outside Node (the GPU port's pass 1, wave 7: meshoptimizer's simplifier, which
+  // `lods` imports by its package's name, tools/swg/madelods.mjs). The relative-import check above never sees a
+  // package's name, so a release that left it out would install and then fail at the first `lods` a player's
+  // conversion asks for: the release carries the package's own manifest, licence and the file the name reaches, from
+  // node_modules at the version package.json pins, and every package name any module of it imports is held to that.
+  const pinned = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies ?? {};
+  ok(pinned.meshoptimizer === '1.1.1' && CONVERTER_PACKAGES.some((p) => p.name === 'meshoptimizer'), `package.json pins meshoptimizer exactly (${pinned.meshoptimizer}) and the release names it`);
+  const depFiles = CONVERTER_PACKAGES.flatMap((p) => p.files.map((f) => `node_modules/${p.name}/${f}`));
+  ok(depFiles.length >= 3 && depFiles.every((f) => packedPaths.has(f)), `the release carries ${depFiles.join(', ')}`);
+  ok(!packed.some((f) => f.path.startsWith('node_modules/') && !depFiles.includes(f.path)), 'and nothing else of node_modules');
+  ok(packed.some((f) => f.path === 'tools/swg/madelods.mjs') && bareImports(packed).length === 0, 'every package name a module of the release imports resolves to a file it carries (madelods.mjs among them)');
+  // The scan's own forms, each planted.
+  const bare = join(scratch, 'bare');
+  mkdirSync(join(bare, 'tools'), { recursive: true });
+  writeFileSync(join(bare, 'tools', 'a.mjs'), "import x from 'leftpad';\nimport type { T } from 'typesonly';\nimport 'sidefx';\nconst m = await import('meshoptimizer/simplifier');\nimport { readFileSync } from 'node:fs';\nimport y from './b.mjs';");
+  const carried = (paths) => paths.map((p) => ({ path: p, from: join(root, ...p.split('/')) }));
+  const found = bareImports([{ path: 'tools/a.mjs', from: join(bare, 'tools', 'a.mjs') }, ...carried(depFiles)]);
+  ok(found.length === 2 && found.some((m) => m.startsWith('leftpad')) && found.some((m) => m.startsWith('sidefx')), `a package the release does not carry is found by its static and its side-effect import, and a type-only import, Node's own and a relative one are not (${found.join('; ')})`);
+  const unfound = bareImports([{ path: 'tools/a.mjs', from: join(bare, 'tools', 'a.mjs') }, ...carried(depFiles.filter((f) => !f.endsWith('meshopt_simplifier.js')))]);
+  ok(unfound.some((m) => m.startsWith('meshoptimizer/simplifier') && m.includes('meshopt_simplifier.js is not carried')), 'and a dynamic import of a carried package whose file is left out is found too');
+  // A pin the release cannot keep: not named, a range, or another version installed.
+  const fakeRoot = join(scratch, 'pins');
+  mkdirSync(join(fakeRoot, 'node_modules', 'meshoptimizer'), { recursive: true });
+  writeFileSync(join(fakeRoot, 'node_modules', 'meshoptimizer', 'package.json'), JSON.stringify({ name: 'meshoptimizer', version: '1.1.0' }));
+  const pinWith = (deps) => {
+    writeFileSync(join(fakeRoot, 'package.json'), JSON.stringify({ dependencies: deps }));
+    return packageProblems(fakeRoot).join('; ');
+  };
+  ok(/does not name/.test(pinWith({})) && /pinned exactly/.test(pinWith({ meshoptimizer: '^1.1.1' })) && /at 1\.1\.0.*pins 1\.1\.1/.test(pinWith({ meshoptimizer: '1.1.1' })), 'a dependency package.json does not name, names as a range, or that npm installed at another version stops the pack');
+  ok(packageProblems(root).length === 0, "and the checkout's own is clean");
+  // The carried files alone are enough: a release's layout with nothing of node_modules but them, and a converter
+  // module importing the simplifier by its name and running it over a square of two triangles.
+  const rel = join(scratch, 'release layout');
+  for (const f of depFiles) {
+    mkdirSync(dirname(join(rel, ...f.split('/'))), { recursive: true });
+    writeFileSync(join(rel, ...f.split('/')), readFileSync(join(root, ...f.split('/'))));
+  }
+  mkdirSync(join(rel, 'tools', 'swg'), { recursive: true });
+  writeFileSync(join(rel, 'tools', 'swg', 'probe.mjs'), "import { MeshoptSimplifier as S } from 'meshoptimizer/simplifier';\nawait S.ready;\nconst [ix] = S.simplify(new Uint32Array([0, 1, 2, 0, 2, 3]), new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]), 3, 3, 0.01);\nconsole.log(`ok ${S.supported} ${ix.length}`);\n");
+  const ran = spawnSync(process.execPath, [join(rel, 'tools', 'swg', 'probe.mjs')], { cwd: rel, encoding: 'utf8' });
+  ok(ran.status === 0 && /^ok true \d+/.test(ran.stdout.trim()), `in a release's layout holding only the carried files, the converter imports the simplifier by its name and runs it (${(ran.stdout || ran.stderr).trim().slice(0, 200)})`);
 }
 
 // ---------------------------------------------------------------------------------------------

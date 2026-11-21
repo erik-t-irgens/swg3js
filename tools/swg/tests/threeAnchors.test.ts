@@ -25,6 +25,8 @@
 //  6b. what the held cascades on WebGPU lean on (`src/core/gpu/heldCsm.ts`, pass 1, wave 3): every method of three's
 //     `CSMShadowNode`, its cascades' shadow nodes, the node frame and the light shadow it overrides or calls, each held to
 //     a hash of its text at the development commit, and what each is relied on for said in its own words;
+//  6d. the methods of three's the edge smoothing's jitter works out by hand (`src/core/gpu/taa/taaJitter.ts`, pass 1, wave 7):
+//     the camera's view record, its projection and the perspective matrix, each held to a hash of its text;
 //  7. what three does under reversed depth that the game leaves to it: the polygon offset's units turned with
 //     the factor, the opaque and transparent sorts turned by the depth it negates, the always test kept;
 //  8. every function of three's chunks that any shader text of the game's calls (every string under `src/`), each
@@ -526,6 +528,49 @@ const INJECTED: { what: string; lib: 'physical' | 'depth'; shader: Shader; loops
   ok(/const refreshType = this\._nodes\.needsRefresh\( renderObject \);/.test(direct) && /this\._bindings\.updateForRender\( renderObject \);/.test(direct), "every draw asks the node manager's refresh question, and a full refresh writes the object's own values (the pool's slot among them)");
   const pool = read('src/core/gpu/patchBones.ts');
   ok(['N.getForRenderCacheKey = (ro: Any): Any => {', 'lib.fromMaterial = (m: Any): Any => {', 'N._createNodeBuilderState = (nodeBuilder: Any): Any => {', 'N.needsRefresh = function (this: Any, ro: Any): number {', 'nm.setupPosition = pooledSetupPosition;'].every((s) => pool.includes(s)) && !/NodeMaterial\.prototype\.setupPosition\s*=/.test(pool), "patchBones.ts wraps the node manager and the library on the live renderer and gives a material its own setupPosition, never three's prototype");
+}
+
+// ---------------------------------------------------------------- 6d. the jitter's projection (pass 1, wave 7)
+
+{
+  // `src/core/gpu/taa/taaJitter.ts` writes the view record three's `setViewOffset` makes, in its fields, and works the nudged
+  // camera's projection and inverse out by hand as three's `PerspectiveCamera.updateProjectionMatrix` and
+  // `Matrix4.makePerspective` work them (`nudgedProjection`), since three's call boxed the frustum's four sides as arguments
+  // (the wave's fixer). Each of the three methods is held to a hash of its text at the development commit, read as 6c reads a
+  // method (its class's block in the build file the game loads, line endings folded to LF). A hash that moves fails here,
+  // naming the method: read `nudgedProjection` against it again before recording the new one (`gpuTaa.test.ts` holds the
+  // result to three's own call to the bit, over both coordinate systems and reversed depth).
+  const core = three('build/three.core.js').replace(/\r\n?/g, '\n');
+  const method = (cls: string, name: string): string => {
+    const at = core.search(new RegExp(`^class ${cls}\\b`, 'm'));
+    if (at < 0) return '';
+    const c = core.slice(at, core.indexOf('\n}\n', at) + 2);
+    const m = c.search(new RegExp(`^\\t${name}\\(`, 'm'));
+    return m < 0 ? '' : c.slice(m, c.indexOf('\n\t}\n', m) + 3);
+  };
+  const JITTER_RECORDED: Record<string, string> = {
+    // The fields and order of the record the jitter writes in place.
+    'PerspectiveCamera.setViewOffset': 'c29f36b7c2e3b932',
+    // The four sides from the field of view, zoom, aspect, the view's offsets and sizes and the film offset.
+    'PerspectiveCamera.updateProjectionMatrix': '052870c1648900da',
+    // The matrix from the four sides, near and far, by coordinate system and reversed depth.
+    'Matrix4.makePerspective': '6aed0b2e7d63828a',
+  };
+  const print = process.argv.includes('--print-jitter');
+  const moved: string[] = [];
+  const texts: Record<string, string> = {};
+  for (const k of Object.keys(JITTER_RECORDED)) {
+    const [cls, name] = k.split('.');
+    const t = method(cls, name);
+    const h = t === '' ? 'missing' : createHash('sha256').update(t).digest('hex').slice(0, 16);
+    texts[k] = t;
+    if (print) console.log(`    '${k}': '${h}',`);
+    if (h !== JITTER_RECORDED[k]) moved.push(`${k} (${h}, recorded ${JITTER_RECORDED[k]})`);
+  }
+  ok(moved.length === 0 || print, `every method of three's the jitter's hand-worked projection follows is the text it was read against (${Object.keys(JITTER_RECORDED).length} of them${moved.length ? `; moved: ${moved.join('; ')}` : ''})`);
+  ok(/this\.projectionMatrix\.makePerspective\( left, left \+ width, top, top - height, near, this\.far, this\.coordinateSystem, this\.reversedDepth \);\s*this\.projectionMatrixInverse\.copy\( this\.projectionMatrix \)\.invert\(\);/.test(texts['PerspectiveCamera.updateProjectionMatrix']), "three's updateProjectionMatrix hands makePerspective the four sides it works out, then inverts a copy (the two steps nudgedProjection writes out)");
+  const jit = read('src/core/gpu/taa/taaJitter.ts');
+  ok(jit.includes('nudgedProjection(camera, v);') && !/camera\.updateProjectionMatrix\(\)|camera\.clearViewOffset\(\)|\.setViewOffset\(/.test(jit.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')), "taaJitter.ts works the nudge out itself and calls none of three's projection methods in a frame");
 }
 
 // ---------------------------------------------------------------- 7. reversed depth, left to three

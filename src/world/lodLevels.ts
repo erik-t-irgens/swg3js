@@ -38,9 +38,17 @@ export interface LodLevelTune {
   regionsPerFrame: number;
   /** Draw nothing of a copy past its chain's last far, which is inferred to be the client's own draw limit. */
   hideBeyond: boolean;
+  /**
+   * The switch distances of the levels the converter's `lods` made (a manifest row marked `made`: a model the client
+   * gave no levels of its own) are multiplied by this, on top of `bias`: over 1 keeps each made level out farther. Its
+   * start is 1, where each made level switches in where its own error comes to a pixel of a 1440-row screen at the
+   * game's 60 degrees (`switchNear` in `tools/swg/madelods.mjs`), which is a rule of thumb and the owner's to move
+   * (`src/world/lodDials.ts`). The client's own levels never read it.
+   */
+  madeBias: number;
 }
 
-export const LOD_LEVEL_DEFAULTS: Readonly<LodLevelTune> = Object.freeze({ on: true, bias: 1, hysteresis: 0.1, sweepMetres: 8, sweepSeconds: 0.25, shadowLevelMax: 0, regionsPerFrame: 2, hideBeyond: false });
+export const LOD_LEVEL_DEFAULTS: Readonly<LodLevelTune> = Object.freeze({ on: true, bias: 1, hysteresis: 0.1, sweepMetres: 8, sweepSeconds: 0.25, shadowLevelMax: 0, regionsPerFrame: 2, hideBeyond: false, madeBias: 1 });
 
 export const LOD_LEVEL_TUNE: LodLevelTune = { ...LOD_LEVEL_DEFAULTS };
 
@@ -75,6 +83,26 @@ export function levelOf(d: number, nears: ArrayLike<number>, count: number, scal
     if (d >= lo && d < hi) return prev;
   }
   return raw;
+}
+
+/**
+ * A chain's switch distances as the pick reads them, written into `out` (as long as the chain): each level's own, and a
+ * level the converter's `lods` made (`made`) its own times `madeBias` (`LOD_LEVEL_TUNE.madeBias`; one that is not a
+ * number over nought reads as 1). A chain is all the client's or all made, so the distances rise as they did. Nothing
+ * allocated.
+ */
+export function chainNears(levels: ArrayLike<{ readonly near: number; readonly made?: boolean }>, madeBias: number, out: Float32Array): void {
+  const b = madeBias > 0 && Number.isFinite(madeBias) ? madeBias : 1;
+  for (let k = 0; k < levels.length; k++) {
+    const l = levels[k];
+    out[k] = l.made === true ? l.near * b : l.near;
+  }
+}
+
+/** Whether any level of a chain is one the converter's `lods` made. */
+export function chainMade(levels: ArrayLike<{ readonly made?: boolean }>): boolean {
+  for (let k = 0; k < levels.length; k++) if (levels[k].made === true) return true;
+  return false;
 }
 
 /**

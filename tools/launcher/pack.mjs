@@ -80,6 +80,15 @@ const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 
  * of ours only, tools/swg/oursEntries.mjs), which `wardrobe`, `customization`, `mobiles` and `props` read.
  */
 const CONVERTER_DATA = ['tools/swg/README.md', 'tools/swg/manifests/retail.json', 'tools/swg/manifests/final-names.json', 'tools/swg/manifests/ours-entries.json', 'tools/swg/regions/regions.json'];
+/**
+ * The converter's dependencies outside Node, carried from `node_modules` as npm installed them and only at the version
+ * `package.json` pins: meshoptimizer's simplifier (MIT, `LICENSES/meshoptimizer-MIT.txt`), which `lods` imports by its
+ * package's own name (`meshoptimizer/simplifier`, tools/swg/madelods.mjs). Each carries its `package.json` (whose
+ * `exports` is how Node finds the file by that name), its licence and the files the names it is imported by reach, and
+ * nothing else of the package; `bareImports` holds every name the release's modules import to this list, since the
+ * relative-import check never sees a package's name.
+ */
+export const CONVERTER_PACKAGES = [{ name: 'meshoptimizer', files: ['package.json', 'LICENSE.md', 'meshopt_simplifier.js'], imports: ['meshoptimizer/simplifier'] }];
 
 /** Where the pack's own build of the game goes: the only dist folder a release is ever packed from. */
 export const PACK_DIST = join(ROOT, 'launcher-build', 'dist');
@@ -208,10 +217,10 @@ export function releaseFiles({ root = ROOT, dist, git = null, untracked = false 
   // A path outside the build goes in only when git knows it: tracked, or (a local pack asked with
   // --with-untracked, never CI's) untracked and not ignored.
   const known = (rel) => tracked.has(rel) || extra.has(rel);
-  const add = (rel, from = join(root, ...rel.split('/')), { built = false } = {}) => {
+  const add = (rel, from = join(root, ...rel.split('/')), { built = false, dep = false } = {}) => {
     const why = refusal(rel);
     if (why) problems.push(`${rel} ${why}`);
-    else if (!built && !known(rel)) problems.push(`${rel} is not a file git knows (commit it${untracked ? '' : ', or pack with --with-untracked to try it here'})`);
+    else if (!built && !dep && !known(rel)) problems.push(`${rel} is not a file git knows (commit it${untracked ? '' : ', or pack with --with-untracked to try it here'})`);
     else if (!existsSync(from)) problems.push(`${rel} is missing`);
     else files.push({ path: rel, from });
   };
@@ -227,14 +236,87 @@ export function releaseFiles({ root = ROOT, dist, git = null, untracked = false 
   for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/(core3ref|ngeref)\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel) || STORY_SOURCE.some((re) => re.test(rel)) || PROGRESS_SOURCE.some((re) => re.test(rel))) add(rel);
   for (const rel of CONVERTER_DATA) add(rel);
   for (const rel of SOURCE_FILES) add(rel);
+  // The converter's dependencies outside Node, from node_modules, each only at the version package.json pins.
+  problems.push(...packageProblems(root));
+  for (const pkg of CONVERTER_PACKAGES) for (const f of pkg.files) add(`node_modules/${pkg.name}/${f}`, join(root, 'node_modules', pkg.name, f), { dep: true });
   // The launcher proper, and the root files.
   for (const rel of LAUNCHER_FILES) add(rel);
   add('package.json');
   add('README.md');
   if (problems.length) throw new Error(`the release cannot be packed:\n  ${problems.join('\n  ')}`);
-  const missing = unreachedImports(files, root);
+  const missing = [...unreachedImports(files, root), ...bareImports(files)];
   if (missing.length) throw new Error(`the release leaves out files its own code names:\n  ${missing.join('\n  ')}`);
   return files;
+}
+
+/**
+ * What stands between `CONVERTER_PACKAGES` and a release: a package `package.json` does not name among its dependencies,
+ * or one npm has not installed at the version it pins exactly (a range is refused too, since the release carries one
+ * version and must carry the one every player's converter was tested with).
+ */
+export function packageProblems(root = ROOT, packages = CONVERTER_PACKAGES) {
+  const problems = [];
+  let pkg = null;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  } catch {
+    return [`${join(root, 'package.json')} cannot be read, so the converter's dependencies cannot be checked`];
+  }
+  for (const p of packages) {
+    const pin = pkg.dependencies?.[p.name];
+    let have = null;
+    try {
+      have = JSON.parse(readFileSync(join(root, 'node_modules', p.name, 'package.json'), 'utf8')).version;
+    } catch {
+      have = null;
+    }
+    if (typeof pin !== 'string') problems.push(`the converter needs ${p.name}, which package.json does not name among its dependencies`);
+    else if (!/^\d+\.\d+\.\d+$/.test(pin)) problems.push(`package.json names ${p.name} as ${pin}: the release carries one version, so it is pinned exactly`);
+    else if (have !== pin) problems.push(`node_modules/${p.name} is ${have ? `at ${have}` : 'not installed'}, and package.json pins ${pin} (run npm ci)`);
+  }
+  return problems;
+}
+
+/**
+ * Every package name a module of the release imports (a static import or export, a side-effect import, a dynamic
+ * import of a written name; never a type-only import, which Node's type stripping erases) that is not Node's own and
+ * not reached through `CONVERTER_PACKAGES`: a name no entry lists, or one whose package's `exports` maps it to a file
+ * the release does not carry.
+ */
+export function bareImports(files, packages = CONVERTER_PACKAGES) {
+  const have = new Set(files.map((f) => f.path));
+  const missing = new Set();
+  const named = [/(?:^|[\s;}])(?:import|export)\s+(?!type\s)[^'"`;]*?\bfrom\s*['"]([^'"`\s]+)['"]/g, /(?:^|[\s;}])import\s*['"]([^'"`\s]+)['"]/g, /\bimport\(\s*['"]([^'"`\s]+)['"]\s*\)/g];
+  for (const f of files) {
+    if (!/\.(mjs|cjs|js|ts)$/.test(f.path) || f.path.startsWith('dist/') || f.path.startsWith('node_modules/')) continue;
+    const text = readFileSync(f.from, 'utf8');
+    for (const re of named) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const spec = m[1];
+        if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue;
+        const pkg = packages.find((p) => p.imports.includes(spec));
+        if (!pkg) {
+          missing.add(`${spec} (imported by ${f.path}, a package the release does not carry)`);
+          continue;
+        }
+        const manifest = files.find((x) => x.path === `node_modules/${pkg.name}/package.json`);
+        let target = null;
+        try {
+          const json = JSON.parse(readFileSync(manifest.from, 'utf8'));
+          const sub = spec === pkg.name ? '.' : `./${spec.slice(pkg.name.length + 1)}`;
+          const e = json.exports?.[sub];
+          target = typeof e === 'string' ? e : (e?.default ?? e?.import ?? null);
+        } catch {
+          target = null;
+        }
+        const rel = target ? `node_modules/${pkg.name}/${target.replace(/^\.\//, '')}` : null;
+        if (!rel || !have.has(rel)) missing.add(`${spec} (imported by ${f.path}: ${rel ?? 'no file its package names for it'} is not carried)`);
+      }
+    }
+  }
+  return [...missing].sort();
 }
 
 /**

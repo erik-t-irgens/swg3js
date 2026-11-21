@@ -60,6 +60,7 @@ const WORDS = {
   scenes: 'The character screens’ places',
   clouds: 'Clouds',
   loading: 'Loading pictures',
+  lods: 'Simpler models for far away',
 };
 
 /** The page's words for a step. */
