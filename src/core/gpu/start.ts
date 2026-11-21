@@ -57,7 +57,6 @@ import { jitterBegin, jitterEnd, JITTER } from './taa/taaJitter.ts';
 import { TAA_DIALS, TAA_TUNE, tuneTaa } from './taa/taaTune.ts';
 import { GpuTaaPass, taaPassNow } from './taa/taaPass.ts';
 import { SCENE_SIZE, sceneSizeNow } from './taa/taaSize.ts';
-import { MESHLET, meshletConsole, meshletReport, startMeshletTrial } from './meshletTrial.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -228,9 +227,6 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   let worldScene: THREE.Scene | null = null;
   installLedger(renderer, { queued: () => warm.pendingItems(), inFlight: () => warm.inFlightNow(), queuedNames: (out) => warm.queuedNames(out) }, { native: () => !(WARM_PATCH.on && WARM_PATCH.applied), world: () => worldScene });
   const timer = passTimer(renderer, adapter.vendor);
-  // Pass 1, wave 7: the meshlet trial, only where `?meshlet` asked for it (`meshletTrial.ts`: three's addon is imported then
-  // and only then, and its pipeline becomes the drawing pipeline once loaded; without it nothing of the trial runs).
-  if (MESHLET.asked) void startMeshletTrial(renderer, { shadowCull: installShadowCull, register: registerPerfSwitch });
   // Reflections (step 4): the black stand-in made here, at start, behind the first loading screen, with the dome's generator.
   const environment = makeGpuEnvironment(renderer);
   // The effects chain (step 6): the ported passes, put on the WebGL path's own runner by its constructor and its install.
@@ -246,8 +242,6 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       // The occlusion's console (step 6, item 4): the WebGL helper as it stands, its probe of the centre a WebGPU readback
       // the answer waits for, and what the pass drew of the water.
       const ssao0 = debug.ssao as ((o?: unknown) => unknown) | undefined;
-      // Pass 1, wave 7: the meshlet trial's console (`meshletTrial.ts`; one line saying how to ask for it when not asked).
-      debug.meshlet = (o?: unknown) => meshletConsole(o, worldScene, renderer);
       wrapConsole(debug, () => ({ draws: frame.draws, triangles: frame.triangles, pipelinesHeld: pipelinesNow(), pipelinesMadeInPlay: frame.madeInPlay, drawsSteppedOver: frame.skipped, timestamps: !timer.able ? 'not granted on this device' : timer.on ? "on (three's GPUTimer, round each pass)" : "off: on while __debug.gpu({ perf: { gpu: true } }) times the card" }), {
         ...(ssao0
           ? {
@@ -510,8 +504,6 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         // Pass 1, wave 6: the canvas's samples (the Effects-off picture's smoothing, and what the chain's last draw goes onto).
         canvas: { multisampled: canvasMsaa, samples: canvasMsaa ? 4 : 1, switch: "localStorage['swg.gpu.canvasMsaa'] = '0' and a reload makes the canvas with one sample, to measure what the 4x canvas costs the chain's last draw (the Effects-off picture is then stepped)" },
         patches: patchReport(),
-        // Pass 1, wave 7: the meshlet trial (`?meshlet`).
-        meshlet: meshletReport(),
         // The performance step: the frame's draws issued for less of the main thread, each behind its switch.
         draw: drawCostReport(),
         bundles: bundles.report(),
