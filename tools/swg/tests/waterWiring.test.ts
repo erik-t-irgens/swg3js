@@ -98,4 +98,25 @@ const main = read('src/main.ts');
   ok(/const es = host\.edits\.beginStroke\(label\);\s*const no = await host\.edits\.strokeWrite\(es, changes\);\s*const said = host\.edits\.endStroke\(es\);/.test(tool), 'every change one write and one undo (the editing\'s own stroke)');
 }
 
+{
+  // Every water body hung straight in the scene is adopted as it is hung (the GPU port's pass 1, wave 8's fixer). Left to the
+  // queued scan, a draw behind the screen in between built a lake's program without the cascades, a program no frame shows
+  // (2 more WebGL programs at Mos Eisley in 4 of 7 sessions once the wave's cuts moved the load's timing). Where the game
+  // makes a body ready itself in play (`compileReady`, which adopts first), only the screen's path adopts here.
+  const lakes = method(world, '  private applySwgWater(swg: SwgTerrain): void {');
+  ok(/this\.scene\.add\(mesh\);\n(\s*\/\/[^\n]*\n)*\s*this\.adoptNow\(mesh\);/.test(lakes), 'a client lake is adopted on the line after its add, before any frame can draw it');
+  const basin = method(world, '  private basinWaterBody(');
+  ok(/this\.scene\.add\(mesh\);\n(\s*\/\/[^\n]*\n)*\s*this\.adoptNow\(mesh\);/.test(basin), "a basin's water is adopted on the line after its add");
+  const sea = method(world, '  private createGlobalWater(');
+  ok(/this\.scene\.add\(this\.water\);\n(\s*\/\/[^\n]*\n)*\s*this\.adoptNow\(this\.water\);/.test(sea) && /this\.scene\.add\(this\.waterFar\);\n\s*this\.adoptNow\(this\.waterFar\);/.test(sea), 'both sea meshes are adopted on the line after their adds');
+  const ours = method(world, '  private addLakeBody(table: SwgWaterTable): void {');
+  ok(/if \(!live\) \{\n\s*this\.adoptNow\(mesh\);\n\s*return;\n\s*\}[\s\S]*void this\.compileReady\(\[mesh\]/.test(ours), 'a lake of ours is adopted at once behind a screen, and made ready by compileReady (which adopts first) in play');
+  const rivers = method(world, '  private addRiverBodies(t: RiverTable): void {');
+  ok(/if \(!live\) \{\n\s*for \(const p of parts\) this\.adoptNow\(p\.mesh\);\n\s*return;\n\s*\}[\s\S]*void this\.compileReady\(meshes,/.test(rivers), "a river's bodies are adopted at once behind a screen, and made ready by compileReady in play");
+  const ready = method(world, '  async compileReady(objects: THREE.Object3D[], label?: string, opts?: { roomsLater?: RoomJob }): Promise<void> {');
+  ok(/if \(!r \|\| !camera\) return;\n(\s*\/\/[^\n]*\n)*\s*for \(const o of objects\) this\.adoptMaterials\(o\);/.test(ready), "compileReady adopts before its first await, so a body it makes ready in play is adopted before any frame");
+  const now = method(world, '  adoptNow(root: THREE.Object3D): void {');
+  ok(/const fresh = this\.adoptMaterials\(root\);\s*if \(fresh\.length\) this\.compileObjects\(fresh\);/.test(now), "adoptNow is the scan's own adoption and queue, made at once: nothing asked for differs");
+}
+
 console.log(`waterWiring: ${checks} checks passed`);

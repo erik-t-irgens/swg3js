@@ -21,7 +21,7 @@ import { GUNS, gunTypeFor } from '../../combat/guns';
 import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
 import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
-import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
+import { loadsBehindScreen, MOBILE_CACHE, MobileAssets, wakeLoads, type ModelAsset, type PackAsset } from './assets';
 import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, forcedArmsRefusal, SABER_SWINGS, type OwnArms } from './arms';
 import { withMood } from './moodIdle.ts';
 import { applyDifficultyTo } from '../difficulty.ts';
@@ -1807,7 +1807,7 @@ export class MobileManager {
    * have found since the session began, every walking body's stuck count summed, and what the perched
    * bodies have come to on this planet.
    */
-  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; perch?: Partial<PerchTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number } & FightKnob): Record<string, unknown> {
+  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; perch?: Partial<PerchTune>; budget?: number; concurrency?: number; screenConcurrency?: number; failFor?: number; cap?: number; animRange?: number } & FightKnob): Record<string, unknown> {
     if (t) {
       this.tuneFight(t);
       if (t.step) tuneStep(t.step);
@@ -1821,6 +1821,9 @@ export class MobileManager {
       if (t.gait) Object.assign(GAIT_LIMITS, t.gait);
       if (t.budget !== undefined) MOBILE_CACHE.budget = t.budget;
       if (t.concurrency !== undefined) MOBILE_CACHE.concurrency = Math.max(1, Math.floor(t.concurrency));
+      // Behind a loading screen (pass 1, wave 8, cut 4); a number raised lets the waiting loads go at once.
+      if (t.screenConcurrency !== undefined) MOBILE_CACHE.screenConcurrency = Math.max(1, Math.floor(t.screenConcurrency));
+      if (t.concurrency !== undefined || t.screenConcurrency !== undefined) wakeLoads();
       if (t.failFor !== undefined) MOBILE_CACHE.failFor = t.failFor;
       if (t.cap !== undefined) this.cap = t.cap;
       if (t.animRange !== undefined) this.animRange = t.animRange;
@@ -1834,7 +1837,7 @@ export class MobileManager {
       gait: { ...GAIT_LIMITS },
       step: { ...STEP_TUNE, found: { ...STEP_STATS }, stuck },
       perch: { ...PERCH_TUNE, counts: { ...this.perchCounts } },
-      cache: { ...MOBILE_CACHE },
+      cache: { ...MOBILE_CACHE, behindScreen: loadsBehindScreen() },
       cap: this.cap,
       animRange: this.animRange,
       fight: this.fightReport(),

@@ -117,8 +117,24 @@ export const HORIZON_TUNE = {
    */
   mipsEvery: 250,
   liveMs: 2,
+  /**
+   * The GPU port's pass 1, wave 8, cut 2: an arrival begins the bake (its fetch, its sections, heights, normals and pyramid)
+   * as soon as the pack's list is in, rather than once the ground's pictures are, which only its colours need
+   * (`HorizonField.begin`); false begins it as before. Read at an arrival; every array is the one-word decode's
+   * (`horizonEarly.test.ts`, and in the browser on Tatooine, Naboo and a world made in the browser). On since the wave's
+   * proof: with the threads, Tatooine's wait for the bake went from 2.9 s to 1.4 s.
+   */
+  early: true,
+  /**
+   * Cut 2: how many threads compose the bake's fine albedo, the decode worker and helpers of its own module (1 to 4 [ours]:
+   * Tatooine's colours were 2.15 s of a 3.3 s decode on one), every byte the one thread's; 1 is one thread, as before. Held
+   * under the machine's cores less one (`albedoThreadsHeld`). Read as a bake's worker is made; 4 since the wave's proof.
+   */
+  albedoThreads: 4,
 };
 export type HorizonTune = typeof HORIZON_TUNE;
+/** The most threads the bake's albedo is composed over (cut 2: the decode worker and three helpers) [ours]. */
+export const ALBEDO_THREADS_MOST = 4;
 
 export const HORIZON_VIEWS = ['shaded', 'lod', 'albedo', 'normals', 'edge', 'detail', 'window'] as const;
 

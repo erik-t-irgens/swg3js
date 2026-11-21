@@ -54,6 +54,16 @@ export const LOADING_TUNE = {
 
 export type LoadingTune = typeof LOADING_TUNE;
 
+/**
+ * What the WebGPU boot sets `LOADING_TUNE.drawEveryMs` to (the GPU port's pass 1, wave 8, cut 3), before anything is drawn;
+ * WebGL keeps its 100. On WebGPU a draw behind an opaque screen builds no pipeline of its own (the warm-up builds them off
+ * the frame) and still cost about 6 of the 12 s the game's frame took behind a first arrival's screen, so the hidden world is
+ * drawn once a second there: every frame is still drawn from the moment the screen begins to go (`opaqueAt`), so the sweep,
+ * the reveal and everything after it are as they were. 100 is the old cadence; `__debug.loading({ tune: { drawEveryMs } })`
+ * moves it live on either renderer.
+ */
+export const GPU_DRAW_EVERY_MS = 1000;
+
 /** The ranges a number of `LOADING_TUNE` is held to when moved; the switches take a boolean. */
 const RANGES: Partial<Record<keyof LoadingTune, [number, number]>> = {
   sliceMs: [0, 500],

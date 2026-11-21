@@ -380,6 +380,18 @@ function privateAssets(): Plugin {
   };
 }
 
+/**
+ * Kept out of the dev server's file watcher (the GPU port's pass 1, wave 8, cut 1): the converted content and the owner's
+ * imports. Both are read from the disk at every ask by their own handlers (`privateAssets`, `privateImports`), and nothing
+ * reads a watch event of theirs (reloading is off, `hmr` below). Watched, they cost the dev server dearly on a drive that
+ * records when each file was last read: Windows rewrites a file's last-read time when it is read after about an hour away,
+ * every watching Vite takes that for a change and works through such files one at a time (about 0.14 s of CPU each), and
+ * serving stalls while it does (600 such files came through a watching server at 1.2 MB/s and through one that does not
+ * watch at 181 MB/s; a first arrival after an hour away took 44 s against 29). Matched as Vite's own ignores are (a folder's
+ * `/**` takes the folder itself too). `SWG3JS_WATCH_ASSETS=1` watches them again, for one server.
+ */
+const UNWATCHED = process.env.SWG3JS_WATCH_ASSETS === '1' ? [] : ['**/assets-private/**', '**/imports-private/**'];
+
 export default defineConfig({
   base: './',
   plugins: [privateAssets(), privateStory(), privateImports(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
@@ -390,6 +402,7 @@ export default defineConfig({
   // or `.env` no longer restarts the server, so a game being played on the dev server is not pulled out from under him
   // while work goes on in the checkout. The watcher still runs, so the next reload by hand loads the code as it stands, and
   // the socket stays up, so the placements', tracks' and story's words (`server.ws.send`) still reach the page.
-  // SWG3JS_DEV_RELOAD=1 puts Vite's own reloading and restarting back.
-  server: { host: true, port: Number(process.env.PORT) || undefined, hmr: process.env.SWG3JS_DEV_RELOAD === '1' ? undefined : false },
+  // SWG3JS_DEV_RELOAD=1 puts Vite's own reloading and restarting back. The converted content and the imports are kept out
+  // of the watcher (`UNWATCHED` above); SWG3JS_WATCH_ASSETS=1 watches them again.
+  server: { host: true, port: Number(process.env.PORT) || undefined, hmr: process.env.SWG3JS_DEV_RELOAD === '1' ? undefined : false, watch: { ignored: UNWATCHED } },
 });

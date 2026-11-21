@@ -46,6 +46,11 @@ export class LoadingScreen {
    * from (`LoadingLog`, `__debug.loading()`). Nothing by default.
    */
   onChange: ((kind: 'on' | 'what' | 'off', text: string, now: number) => void) | null = null;
+  /**
+   * Told true as the screen comes up and false the moment it begins to go (before the reveal's glide), which is when the
+   * world counts as in play again: the people's loads at once follow it (`screenLoads`, pass 1, wave 8, cut 4).
+   */
+  onCover: ((covering: boolean) => void) | null = null;
 
   constructor(parent: HTMLElement, private readonly baseUrl: string) {
     this.root = document.createElement('div');
@@ -102,6 +107,7 @@ export class LoadingScreen {
     }
     this.visible = true;
     this.hiding = false;
+    this.onCover?.(true);
     this.target = 0;
     this.shown = 0;
     this.title.textContent = title.toUpperCase();
@@ -167,6 +173,7 @@ export class LoadingScreen {
   async hide(opts: { quick?: boolean } = {}): Promise<void> {
     this.target = 1;
     this.hiding = true;
+    this.onCover?.(false);
     if (!opts.quick) {
       // Let the reveal reach the edge before the screen goes, so the picture is seen whole for a moment.
       const t0 = performance.now();

@@ -34,7 +34,42 @@ import { roomJob, type RoomJob } from '../roomDefer.ts';
  * referenced); 3.1% of the 180 the town filled is 5.7 MB, rounded up to the next five, 10 MB, so the same town stands the
  * same people.
  */
-export const MOBILE_CACHE = { budget: 190e6, concurrency: 2, failFor: 30_000 };
+export const MOBILE_CACHE = { budget: 190e6, concurrency: 2, failFor: 30_000, screenConcurrency: 6 };
+
+/**
+ * `MOBILE_CACHE.screenConcurrency` (the GPU port's pass 1, wave 8, cut 4): the loads at once while a loading screen covers
+ * the world, from the moment it comes up to the moment it begins to go (`screenLoads`), on either renderer; play keeps
+ * `concurrency`. Behind a screen a load's unpacking stutters nothing anybody sees, and the people a town stands there came
+ * in about 0.9 s the sooner six at a time than two. The budget for bodies is checked at every spawn as before, so more at
+ * once never stands more than it allows. 2 is the old way, for comparing (`__debug.mobileTune({ screenConcurrency: 2 })`).
+ */
+let behindScreen = false;
+
+/** How many loads may be under way now: `screenConcurrency` behind a loading screen, `concurrency` in play. */
+function loadSlots(): number {
+  return behindScreen ? MOBILE_CACHE.screenConcurrency : MOBILE_CACHE.concurrency;
+}
+
+/**
+ * The game says a loading screen came up (true) or has begun to go (false): the slots follow at once. Coming up, every
+ * cache's waiting loads take the slots that opened; going, no load starts until those under way are fewer than
+ * `concurrency` (a load is never stopped part way).
+ */
+export function screenLoads(up: boolean): void {
+  if (behindScreen === up) return;
+  behindScreen = up;
+  if (up) wakeLoads();
+}
+
+/** Every cache's waiting loads into whatever slots are free now (a screen up, a number raised live). */
+export function wakeLoads(): void {
+  for (const c of caches.values()) c.wake();
+}
+
+/** Whether a loading screen covers the world as far as the loads know: for the console and the tests. */
+export function loadsBehindScreen(): boolean {
+  return behindScreen;
+}
 
 /** GPU bytes a model takes, over its bytes on disk, until it has been loaded and measured (PNG to RGBA with mips). */
 const DISK_TO_GPU = 3.5;
@@ -224,9 +259,26 @@ export class MobileAssets {
     return new Error(message);
   }
 
-  /** One of `concurrency` loading slots; a load waits for a free one. */
+  /** Let as many waiting loads go as there are free slots now; each looks at the slots again before it starts. */
+  wake(): void {
+    for (let free = loadSlots() - this.active; free > 0 && this.waiting.length; free--) this.waiting.shift()?.();
+  }
+
+  /** How many loads are under way now (holding a slot), for the console and the tests. */
+  get underWay(): number {
+    return this.active;
+  }
+
+  /** One of the loading slots (`loadSlots`: `concurrency`, or `screenConcurrency` behind a screen); a load waits for a free one. */
   private async slot<T>(fn: () => Promise<T>): Promise<T> {
-    while (this.active >= MOBILE_CACHE.concurrency) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    // A load let go that finds the slots still full (a screen went meanwhile) waits again at the head of the line, so the
+    // loads still start in the order they were asked.
+    for (let again = false; this.active >= loadSlots(); again = true) {
+      await new Promise<void>((resolve) => {
+        if (again) this.waiting.unshift(resolve);
+        else this.waiting.push(resolve);
+      });
+    }
     this.active++;
     try {
       return await fn();

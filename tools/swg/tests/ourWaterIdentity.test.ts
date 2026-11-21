@@ -111,7 +111,14 @@ if (OldTerrain) {
   if (!old) note(`git cannot hand ${W4}'s world.ts over: applySwgWater is not compared`);
   else {
     const before = methodOf(old);
+    // The one line the GPU port's pass 1, wave 8's fixer added: each lake adopted as it is hung, straight after its add (a draw
+    // behind the screen before the scan's adoption built a program without the cascades). It moves when a program is asked
+    // for, never which: held here in its place, then taken out with its comment for the comparison below.
+    const adopt =
+      "      this.scene.add(mesh);\n      // Adopted as it is hung, never left to the scan (the GPU port's pass 1, wave 8's fixer): a draw behind the screen\n      // between the add and the scan's adoption built this lake's program without the cascades, one no frame shows.\n      this.adoptNow(mesh);\n";
+    ok(methodOf(now).includes(adopt), 'World.applySwgWater adopts each lake straight after its add, before any frame can draw it');
     const after = methodOf(now)
+      .replace(adopt, '      this.scene.add(mesh);\n')
       .replace('    this.ourLakeBodies.clear();\n', '')
       .replace(
         "      // Lakes are triangulated outlines with no interior vertices, so they ripple but do not swell. A lake of ours\n      // (Map-maker II's fifth wave) wears its look of its own over its shader's; every client table's look is today's.\n      const look = w.ours ? lookOver(bodies.lookFor(w.shader || null, planet), w.ours.look) : bodies.lookFor(w.shader || null, planet);\n      const body = bodies.add(mesh, false, look, 'lake');\n",

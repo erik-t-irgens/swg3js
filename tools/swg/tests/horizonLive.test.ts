@@ -151,6 +151,10 @@ class FakeWorker {
   terminate(): void {}
 }
 (globalThis as unknown as { Worker: unknown }).Worker = FakeWorker;
+// The field's decode on one thread, the one stand-in worker this suite models: with the bake's albedo shared out (the GPU
+// port's pass 1, wave 8, cut 2) the field makes helper workers of their own, and `horizonEarly.test.ts` holds that decode,
+// and the window and overlay answers after it, to the one thread's bytes.
+HORIZON_TUNE.albedoThreads = 1;
 async function pump(): Promise<void> {
   await new Promise((r) => setImmediate(r));
   for (let round = 0; round < 100 && (toWorker.length || toField.length); round++) {

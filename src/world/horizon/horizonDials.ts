@@ -5,7 +5,7 @@
 // Pure: the tune table and the dials' shapes, nothing of the page.
 import type { DialGroup, DialSet, NumberDial, ChoiceDial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
-import { HORIZON_TUNE, HORIZON_VIEWS, shapeReachMost } from './horizonMath.ts';
+import { ALBEDO_THREADS_MOST, HORIZON_TUNE, HORIZON_VIEWS, shapeReachMost } from './horizonMath.ts';
 import { SHAPE_CHOICE, SHAPE_SIDES } from './shapeWindow.ts';
 import { GROUND_DETAIL_TUNE, groundTileUniforms, tuneGroundDetail, writeGroundDetail } from '../terrainTextures.ts';
 import { CARD_FIELD_TUNE, tuneCardField } from './cardField.ts';
@@ -75,6 +75,8 @@ export function tuneHorizon(o: Record<string, unknown>): string[] {
       // The program divides by the fade: never under one sample.
       else if (k === 'shapeFade') t[k] = Math.max(1, v);
       else if (k === 'shapePad') t[k] = Math.max(0, v);
+      // Cut 2 (pass 1, wave 8): whole threads, one to four (the decode worker and up to three helpers).
+      else if (k === 'albedoThreads') t[k] = Math.min(ALBEDO_THREADS_MOST, Math.max(1, Math.round(v)));
       // W5: nought is the slider's reach at any height, or the far sea following every move; a step of under a metre none.
       else if (k === 'heightReach' || k === 'seaStep') t[k] = Math.max(0, v);
       else if (k === 'farStep') t[k] = Math.max(1, v);

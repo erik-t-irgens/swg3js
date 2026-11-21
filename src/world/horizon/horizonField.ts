@@ -16,7 +16,7 @@ import type { HeightEdits } from '../../swg/terrain/heightEdits.ts';
 import { DETAIL_TILE, STRIP_TILES, clipRect, freshRects, layerMeans, normalsRect, poleTiles, pyramidRelay, windowPlace, windowTiles, wrapPieces, type DecodedBake, type IndexRect, type RgbaRegion, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { HORIZON_BIN, HORIZON_JSON, readHorizonHeader, type HorizonHeader } from './horizonFile.ts';
 import { PlainColours, plainAlbedoRect, type MadeGroundSpec, type PlainGround } from './horizonDem.ts';
-import { HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
+import { ALBEDO_THREADS_MOST, HORIZON_TUNE, HORIZON_VIEWS, HoleGrid, LEAF, PATCH, RingSelector, bakeHeightAt, cameraFrustum, newReachRules, newRingSurface, reachRules, ringLevelOf, ringSurfaceAt, type MinMaxPyramid, type ReachRules, type RingAsk, type RingSurface } from './horizonMath.ts';
 import { HORIZON_TILE, HeightOverlay, REGEN_STEP, overridesOf, regenPlan, samplesIn, type RawRect, type SampleRect } from './horizonOverlay.ts';
 import { PAINT_TILE, paintTileOf } from '../../swg/terrain/groundPaint.ts';
 import { makeRingUniforms, patchGeometry, ringMaterial, ringMesh, ringMipOffset, skirtGeometry, widenWindowTex, type RingUniforms } from './horizonRings.ts';
@@ -287,6 +287,18 @@ export type FieldState = { state: 'none'; why: string } | { state: 'refused'; wh
  */
 export const DECODE_WAIT_MS = 60000;
 
+/**
+ * The most threads the bake's albedo may take on this machine (cut 2): its cores less one, the main thread's, and never
+ * under one, so a machine of few cores never runs more composing threads than it has beside the page. Every count gives
+ * the same bytes.
+ */
+export function albedoThreadsHeld(cores: number = typeof navigator !== 'undefined' && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : ALBEDO_THREADS_MOST + 1): number {
+  return Math.max(1, Math.floor(cores) - 1);
+}
+
+/** Why a ground with no tile arrays draws the far tiles (the albedo reads them). */
+const NO_TILE_ARRAYS = "the ground's tile arrays are not loaded (swg.ground.tiles '0', or terrain shaders older than version 4): the albedo reads them";
+
 /** The shape window's blocks put on the card a frame at most (4 KB each), and past how many due the whole block goes at once [ours]. */
 export const SHAPE_UPLOADS_PER_FRAME = 24;
 export const SHAPE_WHOLE_PAST = 96;
@@ -495,28 +507,16 @@ export class HorizonField {
    * handed to the session's uniforms. Answers whether the rings can be drawn.
    */
   async load(fetch: FieldFetch, ground: FieldGround | null, session: RingSession, renderer: THREE.WebGLRenderer | null, eye: { x: number; z: number }, stores: OverlayStores | null = null): Promise<boolean> {
+    // Begun early (cut 2): the bake is in its worker already, so the tables are handed over and the colours waited for.
+    if (this.begun) return this.loadBegun(ground, session, renderer, eye, stores);
     const t0 = performance.now();
     if (!ground) {
-      this.state = { state: 'refused', why: "the ground's tile arrays are not loaded (swg.ground.tiles '0', or terrain shaders older than version 4): the albedo reads them" };
+      this.state = { state: 'refused', why: NO_TILE_ARRAYS };
       return false;
     }
-    const json = await fetch.json(HORIZON_JSON);
-    if (this.disposed) return false;
-    if (!json) {
-      this.state = { state: 'none', why: `no bake on disk (npm run swg -- horizon assets-private --only=${this.world})` };
-      return false;
-    }
-    const bin = await fetch.bytes(HORIZON_BIN);
-    if (this.disposed) return false;
-    if (!bin) {
-      this.state = { state: 'none', why: `the bake's ${HORIZON_BIN} is missing (npm run swg -- horizon assets-private --only=${this.world})` };
-      return false;
-    }
-    const read = readHorizonHeader(json, { generator: GENERATOR_REVISION, centre: this.centre, binLength: bin.length }, this.world);
-    if ('refused' in read) {
-      this.state = { state: 'refused', why: read.refused };
-      return false;
-    }
+    const got = await this.fetchBake(fetch);
+    if (!got) return false;
+    const { read, bin } = got;
     this.header = read.header;
     this.fetchMs = performance.now() - t0;
     const tm = performance.now();
@@ -525,10 +525,118 @@ export class HorizonField {
     this.mainMs = performance.now() - tm;
     const td = performance.now();
     this.ground = ground;
-    const d = await this.decode((w) => w.postMessage({ type: 'decode', id: 1, header: read.header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, [bin.buffer as ArrayBuffer]));
+    const d = await this.decode((w, ports) => w.postMessage({ type: 'decode', id: 1, header: read.header, bin: bin.buffer, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach), ...(ports.length ? { ports } : {}) }, [bin.buffer as ArrayBuffer, ...ports]), HORIZON_TUNE.albedoThreads);
     this.decodeWallMs = performance.now() - td;
     if (!d || this.disposed) return false;
     return this.stand(read.header, d, session, renderer, stores);
+  }
+
+  /** The bake's two files fetched and its header held to this build; null with the state saying why (or let go meanwhile). */
+  private async fetchBake(fetch: FieldFetch): Promise<{ read: { header: HorizonHeader }; bin: Uint8Array } | null> {
+    const json = await fetch.json(HORIZON_JSON);
+    if (this.disposed) return null;
+    if (!json) {
+      this.state = { state: 'none', why: `no bake on disk (npm run swg -- horizon assets-private --only=${this.world})` };
+      return null;
+    }
+    const bin = await fetch.bytes(HORIZON_BIN);
+    if (this.disposed) return null;
+    if (!bin) {
+      this.state = { state: 'none', why: `the bake's ${HORIZON_BIN} is missing (npm run swg -- horizon assets-private --only=${this.world})` };
+      return null;
+    }
+    const read = readHorizonHeader(json, { generator: GENERATOR_REVISION, centre: this.centre, binLength: bin.length }, this.world);
+    if ('refused' in read) {
+      this.state = { state: 'refused', why: read.refused };
+      return null;
+    }
+    return { read, bin };
+  }
+
+  // ---------------------------------------------------------------- the bake begun early (the GPU port's pass 1, wave 8, cut 2)
+
+  /** The bake begun before the ground's pictures are in (`begin`): its header once it is in its worker, or null (none, refused, gone). */
+  private begun: Promise<HorizonHeader | null> | null = null;
+  /** That decode's answer, which comes once `compose` is posted. */
+  private composed: Promise<DecodedBake | null> | null = null;
+  /** The decode's bound, begun early: armed at the compose, so the wait for the pack's other loads is never counted against it. */
+  private armDecodeWait: (() => void) | null = null;
+  /** The helpers composing the albedo's other slices (`HORIZON_TUNE.albedoThreads`), let go once the decode has answered. */
+  private readonly helpers: Worker[] = [];
+  /** For the console: whether this field was begun early, and its begin's own wall (the fetch to the bake handed over), ms. */
+  earlyBegun = false;
+  beganMs = 0;
+  /** For the console: the threads the albedo was composed over (the decode worker and the helpers made). */
+  albedoThreads = 1;
+
+  /**
+   * The bake fetched, held to this build and handed to its worker as soon as the pack's list is in (`HORIZON_TUNE.early`):
+   * the worker inflates it and makes its heights, normals and pyramid while the terrain, the flora and the ground's pictures
+   * load, and `load` then hands it the tile tables and waits for the colours and the window alone. A refusal or a failure
+   * is the state's, as `load`'s is; the decode's bound runs from the compose.
+   */
+  begin(fetch: FieldFetch): void {
+    if (this.begun || this.disposed) return;
+    this.earlyBegun = true;
+    this.begun = (async () => {
+      const t0 = performance.now();
+      const got = await this.fetchBake(fetch);
+      // Let go, or refused by the load, while it fetched: no worker is made.
+      if (!got || this.disposed || this.beginStopped) return null;
+      const { read, bin } = got;
+      this.fetchMs = performance.now() - t0;
+      this.composed = this.decode((w, ports) => w.postMessage({ type: 'begin', id: 1, header: read.header, bin: bin.buffer, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, ...(ports.length ? { ports } : {}) }, [bin.buffer as ArrayBuffer, ...ports]), HORIZON_TUNE.albedoThreads, false);
+      this.beganMs = performance.now() - t0;
+      return read.header;
+    })();
+  }
+
+  /** `load` for a bake begun early: the tables made and handed to the worker, the colours and the window waited for. */
+  private async loadBegun(ground: FieldGround | null, session: RingSession, renderer: THREE.WebGLRenderer | null, eye: { x: number; z: number }, stores: OverlayStores | null): Promise<boolean> {
+    if (!ground) {
+      this.state = { state: 'refused', why: NO_TILE_ARRAYS };
+      this.stopDecode();
+      return false;
+    }
+    const header = await this.begun;
+    if (!header || this.disposed) return false;
+    const w = this.worker;
+    // The worker failed while it began: its state says why.
+    if (!w) return false;
+    this.header = header;
+    const tm = performance.now();
+    const tables = tileTablesOf(ground);
+    this.means = tables.means;
+    this.mainMs = performance.now() - tm;
+    const td = performance.now();
+    this.ground = ground;
+    w.postMessage({ type: 'compose', id: 1, tables, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) });
+    this.armDecodeWait?.();
+    const d = await this.composed;
+    // The answer held by nothing of the field's past the stand (its arrays are let go once on the card, as the one word's are).
+    this.composed = null;
+    this.decodeWallMs = performance.now() - td;
+    if (!d || this.disposed) return false;
+    return this.stand(header, d, session, renderer, stores);
+  }
+
+  /** A begin refused by the load before its fetch was in (`stopDecode`): it makes no worker. */
+  private beginStopped = false;
+
+  /** A decode no longer wanted (begun early, then refused): answered with nothing, its worker and helpers let go. */
+  private stopDecode(): void {
+    this.beginStopped = true;
+    this.abortDecode?.();
+    this.abortDecode = null;
+    this.worker?.terminate();
+    this.worker = null;
+    this.letHelpersGo();
+  }
+
+  /** The albedo's helpers let go (the decode answered, failed or was let go). */
+  private letHelpersGo(): void {
+    for (const h of this.helpers) h.terminate();
+    this.helpers.length = 0;
   }
 
   /** Whether this field's ground names no family (`horizonDem.ts`' plain world): its albedo is the palette's and it has no composition window. */
@@ -555,7 +663,8 @@ export class HorizonField {
     session.ground.uGroundFrame.value.x = 0;
     session.ground.uGroundFrame.value.y = 0;
     const td = performance.now();
-    const d = await this.decode((w) => w.postMessage({ type: 'make', id: 1, spec, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach) }, spec.source ? [spec.source.raw] : []));
+    // Its albedo shared over helpers only where it is composed from tables (a plain world's is its palette's).
+    const d = await this.decode((w, ports) => w.postMessage({ type: 'make', id: 1, spec, tables, centre: this.centre, shift: { x: this.shift.x, z: this.shift.z }, eye: { rx: this.centre.x - eye.x, rz: eye.z + this.centre.z }, S: windowTiles(HORIZON_TUNE.detailReach), ...(ports.length ? { ports } : {}) }, [...(spec.source ? [spec.source.raw] : []), ...ports]), tables ? HORIZON_TUNE.albedoThreads : 1);
     this.decodeWallMs = performance.now() - td;
     if (!d || !d.header || this.disposed) return false;
     this.header = d.header;
@@ -1161,7 +1270,7 @@ export class HorizonField {
    * nothing within `decodeWaitMs`), so the far tiles are drawn and nothing waits for good. Once decoded the worker stays
    * for the detail window, and what goes wrong with it after is a note: the rings stand as they stood.
    */
-  private decode(post: (w: Worker) => void): Promise<DecodedBake | null> {
+  private decode(post: (w: Worker, ports: MessagePort[]) => void, threads = 1, timed = true): Promise<DecodedBake | null> {
     return new Promise((resolve) => {
       if (this.disposed) {
         resolve(null);
@@ -1188,16 +1297,45 @@ export class HorizonField {
         this.state = { state: 'refused', why };
         w.terminate();
         if (this.worker === w) this.worker = null;
+        this.letHelpersGo();
         resolve(null);
       };
-      timer = setTimeout(() => fail(`the decode worker said nothing in ${Math.round(this.decodeWaitMs / 1000)} s`), this.decodeWaitMs);
+      const arm = () => {
+        if (!answered && timer === null) timer = setTimeout(() => fail(`the decode worker said nothing in ${Math.round(this.decodeWaitMs / 1000)} s`), this.decodeWaitMs);
+      };
+      // Begun early (cut 2), the bound is armed when the colours are asked for (`loadBegun`), never while the pack loads.
+      if (timed) arm();
+      this.armDecodeWait = timed ? null : arm;
       // Let go while it decodes: answered now (nothing), so whatever awaits the load is not held by a worker gone.
       this.abortDecode = () => {
         if (answered) return;
         answered = true;
         if (timer !== null) clearTimeout(timer);
+        this.letHelpersGo();
         resolve(null);
       };
+      // Cut 2's threads: helper workers of the same module, each handed a port the decode worker shares the albedo's rows
+      // over; one that fails is said to the decode worker, which makes its slice itself. Fewer made, fewer slices.
+      const ports: MessagePort[] = [];
+      const most = Math.min(ALBEDO_THREADS_MOST, Math.max(1, Math.round(threads)), albedoThreadsHeld());
+      for (let slot = 1; slot < most; slot++) {
+        let h: Worker;
+        try {
+          h = new Worker(new URL('./horizonDecodeWorker.ts', import.meta.url), { type: 'module' });
+        } catch {
+          break;
+        }
+        const ch = new MessageChannel();
+        h.onerror = (e: ErrorEvent) => {
+          e.preventDefault?.();
+          if (!answered) w.postMessage({ type: 'helperLost', id: 0, slot });
+          h.terminate();
+        };
+        h.postMessage({ type: 'helper', id: 0, port: ch.port2 }, [ch.port2]);
+        this.helpers.push(h);
+        ports.push(ch.port1);
+      }
+      this.albedoThreads = ports.length + 1;
       w.onerror = (e: ErrorEvent) => {
         e.preventDefault?.();
         if (answered) {
@@ -1215,6 +1353,7 @@ export class HorizonField {
         if (m.type === 'decoded' && !answered) {
           answered = true;
           if (timer !== null) clearTimeout(timer);
+          this.letHelpersGo();
           resolve(m.d!);
         } else if ((m.type === 'window' || m.type === 'strip' || m.type === 'retune') && m.id === this.windowAsked) {
           this.windowAsked = 0;
@@ -1244,7 +1383,7 @@ export class HorizonField {
           } else fail(`the bake did not decode (${m.message})`);
         }
       };
-      post(w);
+      post(w, ports);
     });
   }
 
@@ -1816,6 +1955,7 @@ export class HorizonField {
     this.abortDecode = null;
     this.worker?.terminate();
     this.worker = null;
+    this.letHelpersGo();
     if (s) {
       // The stand-ins put back (made once a session), so no freed texture stays bound.
       const fresh = (standIns ??= makeRingUniforms());

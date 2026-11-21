@@ -340,7 +340,7 @@ import { FIGURE_SPHERE, followDepth, measureLocalSphere, type FxMoverList, type 
 import { MOTION_TUNING, MOVER_LIMITS, tuneMotion, type FollowView, type MotionChanges } from './core/fx/velocityMath.ts';
 import type { MotionBlurPass } from './core/fx/motionBlur';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
-import { MobileAssets } from './world/mobiles/assets';
+import { MobileAssets, screenLoads } from './world/mobiles/assets';
 import { LOOK_SHARE } from './world/mobiles/lookShare.ts';
 import type { Mobile } from './world/mobiles/mobile';
 import { vehiclePlumes } from './vehicles/enginePlumes';
@@ -568,7 +568,7 @@ import { ROOM_DEFER, ROOM_DEFER_STATS } from './world/roomDefer.ts';
 import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
-import { centreAgrees, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
+import { centreAgrees, GPU_DRAW_EVERY_MS, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
 import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, fetchPublicBytes, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
 // The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
 // null on the dev server, which asks for every such file and answers it from the disk as the editors need.
@@ -11521,6 +11521,8 @@ class App {
     this.death.querySelector('.respawn')!.addEventListener('click', () => this.respawn());
     this.ui.appendChild(this.death);
     this.loadingScreen = new LoadingScreen(this.ui, import.meta.env.BASE_URL);
+    // The people's loads take `MOBILE_CACHE.screenConcurrency` slots while a screen covers the world (pass 1, wave 8, cut 4).
+    this.loadingScreen.onCover = screenLoads;
     // The last trip's screens kept for `__debug.loading()`: each going up and away, its words, and the programs built
     // behind it off the watch's own loading count (sampled here, so a hidden tab drawing no frames counts too).
     this.loadingScreen.onChange = (kind, text, now) => {
@@ -37139,6 +37141,8 @@ async function startGpu(): Promise<void> {
     }
     GPU.rt = await m.startWebGPU(document.getElementById('game') as HTMLCanvasElement, { reversedDepth: REVERSED_DEPTH, timestamps });
     GPU.webgpu = true;
+    // The hidden world behind an opaque screen drawn at WebGPU's own cadence (pass 1, wave 8, cut 3); WebGL keeps its own.
+    LOADING_TUNE.drawEveryMs = GPU_DRAW_EVERY_MS;
   } catch (err) {
     GPU.rt = null;
     GPU.refused = String((err as Error)?.message ?? err);

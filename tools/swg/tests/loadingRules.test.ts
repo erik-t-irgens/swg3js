@@ -6,7 +6,7 @@
 // built after a screen for the bodies it had up, the tune's guard, and the record of the last trip's screens.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { centreAgrees, courseCounts, LOADING_TUNE, LoadingLog, loadBounded, opaqueAt, placeFromPois, poisCentreOf, programsForUp, raceCurtainNeed, SCREEN_FADE_MS, sweepYield, tuneLoading } from '../../../src/world/loadingTune.ts';
+import { centreAgrees, courseCounts, GPU_DRAW_EVERY_MS, LOADING_TUNE, LoadingLog, loadBounded, opaqueAt, placeFromPois, poisCentreOf, programsForUp, raceCurtainNeed, SCREEN_FADE_MS, sweepYield, tuneLoading } from '../../../src/world/loadingTune.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -24,6 +24,8 @@ const ok = (cond: boolean, what: string): void => {
   ok(sweepYield(0, 10, true, 10), 'and the slice spent, it waits a frame however little was built');
   ok(sweepYield(0, 0, true, 0), 'a slice of nought is the old frame per batch, for comparing');
   ok(LOADING_TUNE.sliceMs === 10 && LOADING_TUNE.standWaitMs === 8000 && LOADING_TUNE.drawEveryMs === 100 && LOADING_TUNE.courseNear === 64, 'the numbers the design starts from');
+  // The GPU port's pass 1, wave 8, cut 3: WebGPU's boot sets its own cadence over WebGL's 100 (loadingWiring holds where).
+  ok(GPU_DRAW_EVERY_MS === 1000 && GPU_DRAW_EVERY_MS <= 5000, "WebGPU draws the hidden world once a second behind an opaque screen, inside the knob's range");
 }
 
 // --- the race start's need test ------------------------------------------------------------------------------------

@@ -178,6 +178,10 @@ function method(text: string, signature: string): string {
   const tick = main.indexOf('this.world.programs.tick(performance.now());', draw);
   ok(draw > 0 && tick > draw && tick - draw < 800, 'the frame loop ticks the queue again after drawFrame');
   ok(/const screenHides = LOADING_TUNE\.screenDraws && this\.loadingScreen\.opaque;\s*if \(!screenHides \|\| tFrame - this\.screenDrawnAt >= LOADING_TUNE\.drawEveryMs\)/.test(main), 'and draws the world at most every drawEveryMs only while the screen is fully opaque');
+  // The GPU port's pass 1, wave 8, cut 3: the cadence is WebGPU's own there, set once in the boot's WebGPU branch alone,
+  // after the renderer stood and before anything is drawn; nowhere else is the number written outside the console's knob.
+  const startGpu = main.slice(main.indexOf('async function startGpu(): Promise<void> {'), main.indexOf('async function boot(): Promise<void> {'));
+  ok(/GPU\.webgpu = true;\s*\/\/[^\n]*\n\s*LOADING_TUNE\.drawEveryMs = GPU_DRAW_EVERY_MS;\s*\} catch \(err\) \{/.test(startGpu) && (main.match(/LOADING_TUNE\.drawEveryMs = /g) ?? []).length === 1, "WebGPU's boot alone sets its own cadence (GPU_DRAW_EVERY_MS), once, as the renderer stands; WebGL keeps drawEveryMs's 100");
   const one = method(world, '  private compileOne(');
   // Since the performance pass's second wave a rooms pass compiles against its own scene and leaves nothing set up; the
   // put-back is the old way's alone (`renderStates` 'shared').

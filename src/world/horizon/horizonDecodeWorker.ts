@@ -3,7 +3,14 @@
 // or by the strips the eye's move brought into it), and for the overlays the field lays over the bake (W2: the poles and
 // colour cells the live generator made again), whose albedo is composed again here over their cells and the coarse
 // texels those reach. A ground knob's move hands it new tables (`retune`): the albedo composed again whole.
-import { coarseAlbedoRegion, coarseReach, composeAlbedo, composeAlbedoRegion, composeBake, composeCoarseAlbedo, decodeBake, inflate, TileComposer, tintRect, wholeWindow, windowRect, type ColourOverride, type IndexRect, type PoleOverride, type TileTables, type WindowPlace } from './horizonDecode.ts';
+//
+// The GPU port's pass 1, wave 8, cut 2: with `HORIZON_TUNE.early` the bake comes in two words, `begin` as soon as the pack's
+// list is in (the sections, heights, normals and pyramid, `beginBake`) and `compose` once the ground's pictures are
+// (`finishBake`); with `HORIZON_TUNE.albedoThreads` past one the field makes helper workers of this same module, each handed
+// a port (`helper`), and the fine albedo's rows are shared out over them, this worker composing the first slice and
+// stitching the rest in (`composeAlbedoRows`, `stitchAlbedo`), every byte the one-thread walk's. With neither, every word
+// is answered exactly as before.
+import { albedoSlices, beginBake, coarseAlbedoRegion, coarseReach, composeAlbedo, composeAlbedoRegion, composeAlbedoRows, composeBake, composeCoarseAlbedo, decodeBake, finishBake, inflate, shapeBake, stitchAlbedo, TileComposer, tintRect, wholeWindow, windowRect, type AlbedoSlice, type BegunBake, type ColourOverride, type DecodedBake, type IndexRect, type PoleOverride, type TileTables, type WindowPlace } from './horizonDecode.ts';
 import { MadeGround, makeBake, plainAlbedos, type MadeGroundSpec } from './horizonDem.ts';
 import { sectionOf, type HorizonHeader } from './horizonFile.ts';
 
@@ -22,9 +29,21 @@ let kept: Kept | null = null;
 /** A world with no converted terrain's ground (h6b, `horizonDem.ts`), kept for the shape window's poles (`poles`). */
 let madeGround: MadeGround | null = null;
 
+/** Cut 2: the bake begun (`begin`) and not yet composed: its first half, or null where it failed (its own error answered that). */
+let begun: Promise<BegunBake | null> | null = null;
+/** Cut 2: the helpers' ports handed over with the bake, in slice order from the second; the slices a helper lost are made here. */
+let helperPorts: MessagePort[] = [];
+const helperLost = new Map<number, () => void>();
+/** The slots the field said were lost, kept for the bake under way: a helper can be lost before its slice is asked. */
+const lostSlots = new Set<number>();
+
 type Message =
-  | { type: 'decode'; id: number; header: HorizonHeader; bin: ArrayBuffer; tables: TileTables; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number }
-  | { type: 'make'; id: number; spec: MadeGroundSpec; tables: TileTables | null; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number }
+  | { type: 'decode'; id: number; header: HorizonHeader; bin: ArrayBuffer; tables: TileTables; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number; ports?: MessagePort[] }
+  | { type: 'make'; id: number; spec: MadeGroundSpec; tables: TileTables | null; centre: { x: number; z: number }; shift: { x: number; z: number }; eye: { rx: number; rz: number }; S: number; ports?: MessagePort[] }
+  | { type: 'begin'; id: number; header: HorizonHeader; bin: ArrayBuffer; centre: { x: number; z: number }; shift: { x: number; z: number }; ports?: MessagePort[] }
+  | { type: 'compose'; id: number; tables: TileTables; eye: { rx: number; rz: number }; S: number }
+  | { type: 'helper'; id: number; port: MessagePort }
+  | { type: 'helperLost'; id: number; slot: number }
   | { type: 'poles'; id: number; startX: number; startZ: number; n: number; step: number }
   | { type: 'window'; id: number; place: WindowPlace }
   | { type: 'strip'; id: number; place: WindowPlace; tiles: IndexRect[]; cells: IndexRect[] }
@@ -33,9 +52,136 @@ type Message =
 
 const post = (m: unknown, buffers: ArrayBuffer[]) => (self as unknown as Worker).postMessage(m, buffers);
 
+/** Every array a decoded bake hands the field, to move rather than copy. */
+function bakeBuffers(d: DecodedBake): ArrayBuffer[] {
+  const buffers: ArrayBuffer[] = [d.fine.buffer, d.coarse.buffer, d.fineNormal.buffer, d.albedo.buffer, d.coarseAlbedo.buffer, d.window.buffer, d.tint.buffer] as ArrayBuffer[];
+  for (const a of [...d.pyramid.lo, ...d.pyramid.hi]) buffers.push(a.buffer as ArrayBuffer);
+  return buffers;
+}
+
+/** A slice's arrays, to move rather than copy. */
+function sliceBuffers(s: AlbedoSlice): ArrayBuffer[] {
+  return [s.rgba.buffer, s.sigLo.buffer, s.sigHi.buffer, s.cell.buffer, s.slot.buffer, s.at.buffer, s.vals.buffer] as ArrayBuffer[];
+}
+
+/**
+ * The fine albedo composed over this worker and its helpers: the rows cut into one slice a thread, the first composed
+ * here while the helpers compose theirs (each handed the tables, the families and its own rows of colour over its port),
+ * then stitched in row order. A helper that answers an error, or that the field says was lost, has its slice made here.
+ */
+async function sharedAlbedo(t: TileTables, header: HorizonHeader, fam: Uint8Array, colour: Uint8Array, ports: MessagePort[]): Promise<{ rgba: Uint8Array; memo: number; ms: number }> {
+  const t0 = performance.now();
+  const nx = header.colour.nx;
+  const bounds = albedoSlices(header.colour.nz, ports.length + 1);
+  const here = (k: number) => composeAlbedoRows(t, header, fam, colour, bounds[k], bounds[k + 1], 0);
+  const asks = ports.map(
+    (p, i) =>
+      new Promise<AlbedoSlice>((resolve) => {
+        const k = i + 1;
+        let done = false;
+        const own = () => {
+          if (done) return;
+          done = true;
+          helperLost.delete(k);
+          p.onmessage = null;
+          p.close();
+          resolve(here(k));
+        };
+        if (lostSlots.has(k)) {
+          // Lost before its slice was asked: made here, its port let go.
+          own();
+          return;
+        }
+        helperLost.set(k, own);
+        p.onmessage = (e: MessageEvent) => {
+          const r = e.data as AlbedoSlice & { error?: string };
+          if (r.error || done) return own();
+          done = true;
+          helperLost.delete(k);
+          p.onmessage = null;
+          p.close();
+          resolve(r);
+        };
+        const rows = colour.slice(bounds[k] * nx * 3, bounds[k + 1] * nx * 3);
+        p.postMessage({ tables: t, header, fam, colour: rows, j0: bounds[k], j1: bounds[k + 1] }, [rows.buffer]);
+      }),
+  );
+  const first = here(0);
+  const rest = await Promise.all(asks);
+  const a = stitchAlbedo(header, [first, ...rest]);
+  return { rgba: a.rgba, memo: a.memo, ms: performance.now() - t0 };
+}
+
+/** A begun bake finished, its albedo shared out where helpers were handed over, and kept for the window's asks as a decode keeps it. */
+async function finishShared(b: BegunBake, t: TileTables, eye: { rx: number; rz: number }, S: number, ports: MessagePort[]): Promise<DecodedBake> {
+  const fine = ports.length ? await sharedAlbedo(t, b.header, b.s.families, b.s.colour, ports) : null;
+  const d = finishBake(b, t, eye, S, fine);
+  kept = { header: b.header, families: b.s.families, colour: b.s.colour, coarseFamilies: b.s.coarseFamilies, coarseColour: b.s.coarseColour, tables: t, poles: [], cells: [] };
+  return d;
+}
+
 self.onmessage = async (e: MessageEvent) => {
   const m = e.data as Message;
   try {
+    if (m.type === 'helper') {
+      // A helper (cut 2): one slice of the fine albedo's rows composed for the decode worker over the port it was handed.
+      const port = m.port;
+      port.onmessage = (ev: MessageEvent) => {
+        const r = ev.data as { tables: TileTables; header: HorizonHeader; fam: Uint8Array; colour: Uint8Array; j0: number; j1: number };
+        try {
+          const s = composeAlbedoRows(r.tables, r.header, r.fam, r.colour, r.j0, r.j1, r.j0);
+          port.postMessage(s, sliceBuffers(s));
+        } catch (err) {
+          port.postMessage({ error: String((err as Error)?.message ?? err) });
+        }
+      };
+      return;
+    }
+    if (m.type === 'helperLost') {
+      lostSlots.add(m.slot);
+      helperLost.get(m.slot)?.();
+      return;
+    }
+    // A bake's first word: no slot of the last bake's is lost for it.
+    if (m.type === 'begin' || m.type === 'decode' || m.type === 'make') lostSlots.clear();
+    if (m.type === 'begin') {
+      helperPorts = m.ports ?? [];
+      const p = beginBake(m.header, new Uint8Array(m.bin), m.centre, m.shift);
+      // The compose reads null where the begin failed: its error is answered here, once.
+      begun = p.catch(() => null);
+      await p;
+      return;
+    }
+    if (m.type === 'compose') {
+      if (!begun) throw new Error('nothing begun to compose');
+      const b = await begun;
+      begun = null;
+      if (!b) return;
+      const ports = helperPorts;
+      helperPorts = [];
+      const d = await finishShared(b, m.tables, m.eye, m.S, ports);
+      post({ type: 'decoded', id: m.id, d }, bakeBuffers(d));
+      return;
+    }
+    if (m.type === 'decode' && m.ports?.length) {
+      // The decode in one word with its albedo shared out (the threads without the early start).
+      const b = await beginBake(m.header, new Uint8Array(m.bin), m.centre, m.shift);
+      const d = await finishShared(b, m.tables, m.eye, m.S, m.ports);
+      post({ type: 'decoded', id: m.id, d }, bakeBuffers(d));
+      return;
+    }
+    if (m.type === 'make' && m.ports?.length && m.tables) {
+      // A world with no converted terrain (h6b), its albedo shared out: the make's own heights, then the same steps.
+      const t0 = performance.now();
+      const g = new MadeGround(m.spec);
+      const b = makeBake(g);
+      const ms = { inflate: 0, heights: performance.now() - t0, normals: 0, albedo: 0, pyramid: 0, detail: 0, memo: 0 };
+      const d = await finishShared(shapeBake(b.header, b.fine, b.coarse, b, m.centre, m.shift, ms), m.tables, m.eye, m.S, m.ports);
+      d.header = b.header;
+      madeGround = g;
+      post({ type: 'decoded', id: m.id, d }, bakeBuffers(d));
+      return;
+    }
     if (m.type === 'decode') {
       const bin = new Uint8Array(m.bin);
       const d = await decodeBake(m.header, bin, m.tables, m.centre, m.shift, m.eye, m.S);

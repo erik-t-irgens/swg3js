@@ -65,7 +65,7 @@ import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_DETAIL_TUNE, GROUND_FIRST_CHILD_ONLY, GROUND_NORMAL, GROUND_RELIEF_WANTED, GROUND_TILES_WANTED, GROUND_TRI_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, tuneGroundDetail, writeGroundDraw, type GroundSelfTest, type ShadersFile } from './terrainTextures.ts';
-import { GROUND_DRAW_TUNE, NO_SHIFT, groundChunkAt, groundChunkOrigin, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
+import { GROUND_DRAW_TUNE, NO_SHIFT, groundChunkAt, groundChunkOrigin, groundShift, tilesFit, worldRowSwitches, type CornerName, type DrawSwitchesKept, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { PICTURES_NOT_LOADED, appendLending, arrivalAsks, baseFamilyId, familyOfKey, groundPacksOf, lendInto, lentAnswer, lentPackDir, lentPacksOf, lentPicturesOf, loadLentTable, notGroundPack, planLending, shadersTiled, undrawnLent, type LendPlan, type LentFetch, type LentTable } from './lentGround.ts';
 import { AssetPack, lowerLevels, normalYOf, type Layout, type LoadedModel, type PackModelDef } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
@@ -836,6 +836,8 @@ export class World {
    */
   private horizonSession: RingSession | null = null;
   horizonField: HorizonField | null = null;
+  /** The bake begun as the pack's list came in (the GPU port's pass 1, wave 8, cut 2), until `loadHorizon` takes it. */
+  private horizonEarly: HorizonField | null = null;
   readonly horizonHole = new HoleGrid();
   /**
    * The tile ground's air variant (the volumetrics' second wave, `airGround.ts`): the session's too, never disposed, made
@@ -2340,6 +2342,10 @@ export class World {
       this.packProgress = 1;
       return null;
     }
+    // The far ground's bake begun as soon as the pack's list is in (the GPU port's pass 1, wave 8, cut 2, `HORIZON_TUNE.early`):
+    // fetched, inflated and its heights, normals and pyramid made in its worker while everything below loads, for
+    // `loadHorizon` to take once the ground's pictures are in. Off, the bake is begun there, after the tile arrays, as before.
+    if (HORIZON_TUNE.early) this.beginHorizon(pack);
     // What this world takes away (Map-maker II's twelfth wave), in before anything stands: the streamer's constructor files
     // nothing it hides (`fileByState`), the `.lay` loop below drops what a hide asks, the wildlife's laying and the people's
     // adopt read it, and the placed sounds are put down once with no way back the frame `this.pack` is first seen, so the
@@ -2561,6 +2567,8 @@ export class World {
         }
       }
     }
+    // A bake begun early that `loadHorizon` did not take (no terrain came, the terrain failed, the switch moved) let go (cut 2).
+    this.dropEarlyHorizon();
 
     // A pack with a sky but no terrain (the gallery, a space zone) still gets its sky, and a space zone its planets.
     if (!layout?.terrain) {
@@ -3247,6 +3255,8 @@ export class World {
     this.water.frustumCulled = false;
     this.waterNear = this.waterBodies.add(this.water, true, look, 'seaNear');
     this.scene.add(this.water);
+    // Both sea meshes adopted as they are hung, as a lake is (`applySwgWater`): a draw before the scan's adoption keys them without the cascades.
+    this.adoptNow(this.water);
     this.waterFar = new THREE.Mesh(new THREE.RingGeometry(WATER_NEAR * 0.48, 9000, 96, 1).rotateX(-Math.PI / 2));
     this.waterFar.name = 'water:sea-far';
     this.waterFar.position.y = level - 0.05;
@@ -3255,6 +3265,7 @@ export class World {
     this.farSea = new FarSea(this.waterFar.geometry);
     this.waterFarBody = this.waterBodies.add(this.waterFar, false, look, 'seaFar');
     this.scene.add(this.waterFar);
+    this.adoptNow(this.waterFar);
     this.waterMaterials.push(this.waterNear.lit, this.waterFarBody.lit);
   }
 
@@ -3968,6 +3979,8 @@ export class World {
     const lit = body.lit;
     this.waterMaterials.push(lit);
     this.scene.add(mesh);
+    // Adopted as it is hung, as a client lake is (`applySwgWater`): a draw before the scan's adoption keys it without the cascades.
+    this.adoptNow(mesh);
     const pos = geometry.getAttribute('position');
     const footprint = pos ? basinFootprint(pos.array, geometry.index?.array ?? null, matrix.elements) : null;
     if (footprint) {
@@ -6262,6 +6275,9 @@ export class World {
       if (w.shader) shaders.add(w.shader);
       this.localWater.push(mesh);
       this.scene.add(mesh);
+      // Adopted as it is hung, never left to the scan (the GPU port's pass 1, wave 8's fixer): a draw behind the screen
+      // between the add and the scan's adoption built this lake's program without the cascades, one no frame shows.
+      this.adoptNow(mesh);
       if (w.ours) this.ourLakeBodies.set(w.ours.id, { mesh, body, table: w });
     }
     bodies.lavaTables = lava;
@@ -12666,12 +12682,14 @@ export class World {
    * world with no bake, or a bake refused, draws its far tiles as today and `horizon()` says why.
    */
   async loadHorizon(packId: string, eye: THREE.Vector3): Promise<void> {
+    // The bake begun as this arrival's pack came in (cut 2), kept from the drop below where it is this world's very bake.
+    const early = this.takeEarlyHorizon(packId);
     this.dropHorizon();
     // A ground world with no pack of its own has its rings made in the browser (h6b); every other is a bake's, or none.
     if (this.planet.pack === false && !this.planet.space && !this.planet.instances && !this.terrain.swg) return this.loadMadeHorizon(packId, eye);
     if (this.planet.space || this.planet.instances || !this.terrain.swg) return;
     const swg = this.terrain.swg;
-    const field = new HorizonField(packId, { x: swg.centerX, z: swg.centerZ }, swg.groundShift);
+    const field = early ?? new HorizonField(packId, { x: swg.centerX, z: swg.centerZ }, swg.groundShift);
     this.horizonField = field;
     const gt = this.groundTextures;
     const tiles = gt?.tiles ?? null;
@@ -12942,10 +12960,46 @@ export class World {
     this.dropCardField();
     this.horizonField?.dispose(s);
     this.horizonField = null;
+    // And a bake begun early that nothing took (cut 2): its worker and what it holds.
+    this.dropEarlyHorizon();
     if (s && s.patch.parent) s.patch.parent.remove(s.patch, s.skirt);
     // (The first unload runs before the first world has a terrain.)
     if (this.terrain?.swg) this.terrain.swg.horizon = null;
     this.releaseRingCards();
+  }
+
+  /**
+   * The far ground's bake begun for the arrival under way as its pack's list came in (the GPU port's pass 1, wave 8, cut
+   * 2), on a world whose bake `loadHorizon` would read: a pack whose layout names a terrain, the switch off `'tiles'`, not
+   * a space zone or a world of copies, the tile program on. Its centre and shift are the layout's, which the terrain made
+   * from it takes (`SwgTerrain`'s own `groundShift`), and `takeEarlyHorizon` holds them to the terrain's before taking it.
+   */
+  private beginHorizon(pack: AssetPack): void {
+    this.dropEarlyHorizon();
+    const layout = pack.layout;
+    if (HORIZON_TUNE.ground === 'tiles' || !layout?.terrain || this.planet.space || this.planet.instances || !GROUND_TILES_WANTED) return;
+    const c = layout.center;
+    const packId = this.packId;
+    const field = new HorizonField(packId, { x: c.x, z: c.z }, groundShift(c.x, c.z));
+    field.begin({ json: (f) => packJson(packId, f, undefined, { probe: false }), bytes: (f) => packBytes(packId, f, undefined, { probe: false }) });
+    this.horizonEarly = field;
+  }
+
+  /** The bake begun early, taken by `loadHorizon` where it is this world's (its pack, centre and shift the terrain's); else let go. */
+  private takeEarlyHorizon(packId: string): HorizonField | null {
+    const e = this.horizonEarly;
+    this.horizonEarly = null;
+    if (!e) return null;
+    const swg = this.terrain?.swg;
+    if (swg && !this.planet.space && !this.planet.instances && e.world === packId && e.centre.x === swg.centerX && e.centre.z === swg.centerZ && e.shift.x === swg.groundShift.x && e.shift.z === swg.groundShift.z) return e;
+    e.dispose(null);
+    return null;
+  }
+
+  /** A bake begun early and never taken let go (`dropHorizon`, and the arrival's own end of its ground). */
+  private dropEarlyHorizon(): void {
+    this.horizonEarly?.dispose(null);
+    this.horizonEarly = null;
   }
 
   /** The far tiles whose far grid and tree cards stand while the rings do (W2: within `farGridRadius` tiles), by key. */
@@ -13304,7 +13358,9 @@ export class World {
       // The third wave: the near ground's own look out to the ground detail distance, from the composition window round the eye.
       detail: f ? { on: HORIZON_TUNE.detail, reach: HORIZON_TUNE.detailReach, fade: Math.round(HORIZON_TUNE.detailReach * HORIZON_TUNE.detailFadeShare), window: { ...f.place, metres: f.place.S * 4 }, work: { ...f.windowWork } } : null,
       decodeMs: f?.decodeMs ?? null,
-      loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs) } : null,
+      // Cut 2 (pass 1, wave 8): whether the bake was begun as the pack came in (its begin's wall, the fetch to the hand-over),
+      // and the threads its albedo was composed over; `decodeWall` is then from the colours' ask, the begin's work behind it.
+      loadMs: f ? { fetch: Math.round(f.fetchMs), decodeWall: Math.round(f.decodeWallMs), mainThread: Math.round(f.mainMs), arrivalJoinWait: Math.round(f.joinWaitMs), early: f.earlyBegun, beganWall: Math.round(f.beganMs), albedoThreads: f.albedoThreads } : null,
       reach: r ? { slider: r.reach, eyeOver: Math.round(r.eyeOver), grown: Math.round(r.grown), inForce: Math.round(r.inForce), fogReach: Number.isFinite(r.fogReach) ? Math.round(r.fogReach) : null, fogDensity: (this.scene.fog as THREE.FogExp2 | null)?.density ?? null, lod0: Math.round(r.lod0), levels: r.levels, skyRadius: r.skyRadius, far: r.far } : null,
       // W5: what every reader of the reach holds this frame (today's numbers while the rings are not drawn): the camera's far
       // plane and the jump's kept one, the sky's radius, the god rays' and the flare's sky, and the far sea's outer edge.
@@ -16290,7 +16346,12 @@ export class World {
     // Its current variant where the volumetrics master is on: made now and worn only once a warm has built it (in play it
     // waits in `liquidUnbuilt`; behind a screen the sweep after builds it).
     if (this.air && VOL_TUNE.on) this.makeLiquidVariants();
-    if (!live) return;
+    // Behind a screen it is drawn at once, so it is adopted as it is hung, as a client lake is (`applySwgWater`); in play
+    // `compileReady` below adopts it before any frame.
+    if (!live) {
+      this.adoptNow(mesh);
+      return;
+    }
     const gen = this.generation;
     void this.compileReady([mesh], `water: the lake ${row.id}`).then(() => {
       if (this.generation === gen && this.ourLakeBodies.get(row.id)?.mesh === mesh) mesh.visible = true;
@@ -16674,7 +16735,13 @@ export class World {
     this.riverWork.added += parts.length;
     // Their current variants where the volumetrics master is on: worn only once a warm has built them (`liquidUnbuilt`).
     if (this.air && VOL_TUNE.on) this.makeLiquidVariants();
-    if (!live || !parts.length) return;
+    // Behind a screen they are drawn at once, so they are adopted as they are hung, as a client lake is (`applySwgWater`);
+    // in play `compileReady` below adopts them before any frame.
+    if (!live) {
+      for (const p of parts) this.adoptNow(p.mesh);
+      return;
+    }
+    if (!parts.length) return;
     const gen = this.generation;
     const meshes = parts.map((p) => p.mesh);
     void this.compileReady(meshes, `water: the river ${t.name}`).then(() => {

@@ -35,6 +35,15 @@ export interface SurfaceContext {
   trackByKey: Map<string, string>;
 }
 
+/**
+ * The loader's switch (the GPU port's pass 1, wave 8, cut 5). `directPictures`: a picture a model file carries is handed to
+ * the browser's decoder straight from the file's own bytes (`DirectPicturesPlugin`), with the very options three's own
+ * loader decodes it with, where three makes an object URL of each picture and fetches that back (1.1 s of `createObjectURL`
+ * and 0.4 s of the fetch on a first arrival at Mos Eisley, on a main thread 99% busy while the buildings come in). The
+ * pixels are the same to the bit on both renderers; false is three's own way, for comparing, read at each picture asked for.
+ */
+export const SURFACE_TUNE = { directPictures: true };
+
 /** Frame textures uploaded per step while a flip-book first shows, so its first swap uploads nothing. */
 const UPLOADS_PER_STEP = 4;
 /** The longest step the clock takes: a stall or a hidden tab resumes, it does not race. */
@@ -167,12 +176,15 @@ export class AnimatedSurfaces {
   private readonly onDispose = (e: { target: unknown }): void => this.forget(e.target as THREE.Material);
 
   /**
-   * Register the loader plugin, and the skinned meshes' own (`skinnedLoad.ts`: Float32 joints and the morph ladder, at
-   * load); returns the loader so a field can be `surfaces.withPlugin(new GLTFLoader())`.
+   * Register the loader plugin, the pictures' straight decode (`DirectPicturesPlugin`, `SURFACE_TUNE.directPictures`) and
+   * the skinned meshes' own (`skinnedLoad.ts`: Float32 joints and the morph ladder, at load); returns the loader so a field
+   * can be `surfaces.withPlugin(new GLTFLoader())`.
    */
   withPlugin(loader: GLTFLoader): GLTFLoader {
     loader.register((parser) => new SwgSurfacesPlugin(parser, this));
     loader.register(skinnedPlugin);
+    // Last: three asks its own picture plugins (WebP, AVIF, Basis) first whatever the order, and ours only answer for a picture.
+    loader.register((parser) => new DirectPicturesPlugin(parser));
     return loader;
   }
 
@@ -652,6 +664,66 @@ function referencedTextures(json: { materials?: unknown[] }): Set<number> {
     add(def.occlusionTexture);
   }
   return out;
+}
+
+/** What `DirectPicturesPlugin` reads of a file's own index of its pictures. */
+interface PictureJson {
+  images?: ({ bufferView?: unknown; uri?: unknown; mimeType?: string } | undefined)[];
+}
+
+/** The parser's loader of pictures, as three makes it in a browser that has `createImageBitmap` (`ImageBitmapLoader`). */
+type PictureLoader = { isImageBitmapLoader?: boolean; options?: ImageBitmapOptions };
+
+/**
+ * The pictures of a model file decoded straight from its bytes (the GPU port's pass 1, wave 8, cut 5; `SURFACE_TUNE`). Three
+ * hands a picture held in the file's own buffer to its `ImageBitmapLoader` through an object URL: a `Blob` of the bytes,
+ * `URL.createObjectURL`, a `fetch` of that address back into a blob, `createImageBitmap` of it, the address revoked. Here the
+ * bytes go to `createImageBitmap` in a `Blob` of the picture's own type at once, with the options three's loader hands it
+ * (its own `options`, `premultiplyAlpha: 'none'` as three sets it, and `colorSpaceConversion: 'none'` laid over them), and
+ * the bitmap becomes a texture exactly as the parser makes one of a bitmap (`new Texture(bitmap)`, `needsUpdate`). The rest
+ * is three's own: the plugin answers no texture itself but stands in front of this parser's own `loadImageSource`, handing it,
+ * where it would hand the parser's bitmap loader, a decoder that goes through the branch three keeps for a loader that parses
+ * a picture's bytes itself (its KTX2 branch, `isKTX2Loader` with the bytes of the buffer view). So whoever picks the texture
+ * -- three's own `loadTexture`, or a plugin registered after this one that calls `loadTextureImage` with the parser's loader,
+ * the imports folders' one picture per distinct image (`sharedImages.ts`) among them -- gets the straight decode, and the
+ * picture's cache, its clones, its extras and type, which way up it is (`flipY` false), its name, its sampler's filters and
+ * wrapping and the parser's associations all stay three's. `directPictures.test.ts` holds those lines of three's by hash and
+ * drives three's own loader both ways, with and without the shared pictures. A picture held by address (`uri`), a loader
+ * that is not the parser's bitmap loader (no `createImageBitmap`: a node test, an old Safari; an extension's own loader) or
+ * the switch off leave the picture to three's own way.
+ */
+class DirectPicturesPlugin implements GLTFLoaderPlugin {
+  readonly name = 'SWG_direct_pictures';
+
+  constructor(parser: GLTFParser) {
+    const own = parser.loadImageSource;
+    if (typeof own !== 'function') return;
+    // This parser's own, never three's prototype: every other loader's parser is left as three made it.
+    parser.loadImageSource = function (this: GLTFParser, sourceIndex: number, loader: THREE.Loader): Promise<THREE.Texture> {
+      return own.call(this, sourceIndex, directDecoder(parser, sourceIndex, loader) ?? loader);
+    };
+  }
+}
+
+/** The straight decoder for one picture of a parser's file, or null where the picture is three's to load its own way. */
+function directDecoder(parser: GLTFParser, sourceIndex: number, loader: THREE.Loader): THREE.Loader | null {
+  if (!SURFACE_TUNE.directPictures) return null;
+  const own = loader as unknown as PictureLoader;
+  if (loader !== (parser.textureLoader as unknown) || own.isImageBitmapLoader !== true || typeof createImageBitmap !== 'function') return null;
+  const image = (parser.json as PictureJson).images?.[sourceIndex];
+  if (!image || !isIndex(image.bufferView) || image.uri !== undefined) return null;
+  const mimeType = typeof image.mimeType === 'string' ? image.mimeType : '';
+  const decoder = {
+    isKTX2Loader: true,
+    parse(bytes: ArrayBuffer, onLoad: (texture: THREE.Texture) => void, onError: (err: unknown) => void): void {
+      createImageBitmap(new Blob([bytes], { type: mimeType }), Object.assign({}, own.options, { colorSpaceConversion: 'none' as const })).then((bitmap) => {
+        const texture = new THREE.Texture(bitmap as unknown as HTMLImageElement);
+        texture.needsUpdate = true;
+        onLoad(texture);
+      }, onError);
+    },
+  };
+  return decoder as unknown as THREE.Loader;
 }
 
 /**

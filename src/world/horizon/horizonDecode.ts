@@ -1191,3 +1191,253 @@ export function composeBake(header: HorizonHeader, fine: Float32Array, coarse: F
   ms.detail = clock() - t0;
   return { fine, coarse, fineNormal, albedo, coarseAlbedo, pyramid, window: w.window, tint: w.tint, place, ms };
 }
+
+// ---------------------------------------------------------------- the bake begun early and its colours on several threads
+// (the GPU port's pass 1, wave 8, cut 2: `HORIZON_TUNE.early`, `HORIZON_TUNE.albedoThreads`). `decodeBake` and `composeBake`
+// above are the one-thread path, untouched; these are the same steps cut where the ground's pictures are first needed, and
+// the albedo's rows shared out, every byte the one-thread walk's (`horizonEarly.test.ts`).
+
+/** The sections the colours are composed from (a bake's inflated, or a made world's own). */
+export type ColourSections = Pick<Record<HorizonSectionName, Uint8Array>, 'families' | 'colour' | 'coarseFamilies' | 'coarseColour'>;
+
+/** What a bake comes to before the ground's pictures are in: its heights, normals and pyramid, and the sections the colours want. */
+export interface BegunBake {
+  header: HorizonHeader;
+  fine: Float32Array;
+  coarse: Float32Array;
+  fineNormal: Uint8Array;
+  pyramid: MinMaxPyramid;
+  s: ColourSections;
+  ms: DecodedBake['ms'];
+}
+
+/** The decode's first half (`decodeBake`'s inflate and heights, `composeBake`'s normals and pyramid): nothing of the ground's pictures. */
+export async function beginBake(header: HorizonHeader, bin: Uint8Array, centre: { x: number; z: number }, shift: { x: number; z: number }): Promise<BegunBake> {
+  const clock = () => performance.now();
+  let t0 = clock();
+  const s = await inflateSections(header, bin);
+  const ms = { inflate: clock() - t0, heights: 0, normals: 0, albedo: 0, pyramid: 0, detail: 0, memo: 0 };
+  t0 = clock();
+  const fine = decodeHeights(s.heights, header.fine.nx, header.fine.nz, header.fine.lo, header.fine.q);
+  const coarse = decodeHeights(s.coarseHeights, header.coarse.nx, header.coarse.nz, header.coarse.lo, header.coarse.q);
+  ms.heights = clock() - t0;
+  return shapeBake(header, fine, coarse, s, centre, shift, ms);
+}
+
+/** The normals and the pyramid from the heights (a bake's decoded, a made world's made), as `composeBake` works them. */
+export function shapeBake(header: HorizonHeader, fine: Float32Array, coarse: Float32Array, s: ColourSections, centre: { x: number; z: number }, shift: { x: number; z: number }, ms: DecodedBake['ms']): BegunBake {
+  const clock = () => performance.now();
+  let t0 = clock();
+  const fineNormal = normalsOf(fine, header.fine);
+  ms.normals = clock() - t0;
+  t0 = clock();
+  const pyramid = pyramidOf(header, fine, coarse, centre, shift);
+  ms.pyramid = clock() - t0;
+  return { header, fine, coarse, fineNormal, pyramid, s: { families: s.families, colour: s.colour, coarseFamilies: s.coarseFamilies, coarseColour: s.coarseColour }, ms };
+}
+
+/**
+ * The decode's second half (`composeBake` from the albedo on): the fine albedo handed in (composed on several threads,
+ * `stitchAlbedo`) or composed here on one, the coarse albedo, and the composition window round the eye.
+ */
+export function finishBake(b: BegunBake, t: TileTables | null, eye: { rx: number; rz: number }, S: number, fine: { rgba: Uint8Array; ms: number; memo: number } | null, plain: { albedo: Uint8Array; coarseAlbedo: Uint8Array } | null = null): DecodedBake {
+  const clock = () => performance.now();
+  const { header, s, ms } = b;
+  let albedo: Uint8Array;
+  let coarseAlbedo: Uint8Array;
+  let t0: number;
+  if (t) {
+    const a = fine ?? composeAlbedo(t, header, s.families, s.colour);
+    ms.albedo = a.ms;
+    ms.memo = a.memo;
+    albedo = a.rgba;
+    t0 = clock();
+    coarseAlbedo = composeCoarseAlbedo(t, header, a.rgba, s.coarseFamilies, s.coarseColour);
+    ms.albedo += clock() - t0;
+  } else {
+    albedo = plain!.albedo;
+    coarseAlbedo = plain!.coarseAlbedo;
+  }
+  t0 = clock();
+  const place = windowPlace(eye.rx, eye.rz, S, header.colour);
+  const w = t ? wholeWindow(t, header, s.families, s.colour, [], [], place) : { window: new Uint16Array(place.S * place.S * 4), tint: new Uint8Array(place.T * place.T * 4) };
+  ms.detail = clock() - t0;
+  return { fine: b.fine, coarse: b.coarse, fineNormal: b.fineNormal, albedo, coarseAlbedo, pyramid: b.pyramid, window: w.window, tint: w.tint, place, ms };
+}
+
+/**
+ * The colour lattice's rows cut into `n` slices as even as whole rows allow, in order: `n + 1` bounds from 0 to `nz`
+ * (a slice may be empty where there are fewer rows than slices).
+ */
+export function albedoSlices(nz: number, n: number): number[] {
+  const out: number[] = [];
+  for (let k = 0; k <= n; k++) out.push(Math.floor((nz * k) / n));
+  return out;
+}
+
+/**
+ * One slice of the fine albedo's rows (`j0` to `j1`), composed exactly as `composeAlbedo` composes those rows, with what
+ * `stitchAlbedo` needs to give back the one-thread walk's bytes: the tile memo keeps a colour as a 32-bit float, so in the
+ * one-thread walk a signature's first tile carries its colour as worked (a double) and every later one the memo's float.
+ * A slice's own memo starts empty, so the first tile of each signature in the slice carries the double even where the walk
+ * would have met that signature in an earlier slice; each such first meeting (`misses`) is kept with its cell's tiles and
+ * tint, and the stitch puts that cell together again with the memo's float where an earlier slice met the signature.
+ * `colour` holds the lattice's rows from `colourRow0` on (the whole lattice at nought).
+ */
+export interface AlbedoSlice {
+  j0: number;
+  j1: number;
+  /** Rows j0 to j1 of the fine albedo, RGBA. */
+  rgba: Uint8Array;
+  /** Each signature this slice's memo first met: its two keys, the cell (lattice index), the tile's place in the cell's summing order, and where its cell's record starts in `vals`. */
+  sigLo: Int32Array;
+  sigHi: Int32Array;
+  cell: Int32Array;
+  slot: Int32Array;
+  at: Int32Array;
+  /** A record a cell holding a first meeting: its tiles' colours (per by per, three each, in summing order), then its tint's three. */
+  vals: Float64Array;
+  ms: number;
+}
+
+export function composeAlbedoRows(t: TileTables, header: HorizonHeader, fam: Uint8Array, colour: Uint8Array, j0: number, j1: number, colourRow0 = 0): AlbedoSlice {
+  const t0 = performance.now();
+  const c = header.colour;
+  const comp = new TileComposer(t, fam, header.ground);
+  const tile = [0, 0, 0];
+  const tint = [0, 0, 0];
+  const per = c.step / DETAIL_TILE;
+  const k = 1 / (per * per);
+  const P = c.nx * per + 1;
+  const xs = c.x0 - c.step / 2;
+  const zs = c.z0 - c.step / 2;
+  let sF = new Int32Array(P);
+  let sC = new Int32Array(P);
+  let nF = new Int32Array(P);
+  let nC = new Int32Array(P);
+  const acc = new Float64Array(c.nx * 3);
+  const out = new Uint8Array(c.nx * Math.max(0, j1 - j0) * 4);
+  // A cell row's tiles' colours by (q, a), kept for the cells a first meeting falls in; and which cells those are.
+  const row = new Float64Array(per * (P - 1) * 3);
+  const rowMiss = new Uint8Array(c.nx);
+  const sigLo: number[] = [];
+  const sigHi: number[] = [];
+  const cell: number[] = [];
+  const slot: number[] = [];
+  const at: number[] = [];
+  const vals: number[] = [];
+  let lastRgb = -1;
+  if (j1 > j0) comp.poleRow(xs, j0 === 0 ? zs : zs + j0 * per * DETAIL_TILE, P, sF, sC);
+  for (let j = j0; j < j1; j++) {
+    acc.fill(0);
+    const first = cell.length;
+    let missed = false;
+    for (let q = 0; q < per; q++) {
+      const b = j * per + q;
+      comp.poleRow(xs, zs + (b + 1) * DETAIL_TILE, P, nF, nC);
+      for (let a = 0; a < P - 1; a++) {
+        const memoBefore = comp.memoSize;
+        comp.colourOf(comp.layersFrom(sF, sC, nF, nC, a), tile);
+        const ci = (a / per) | 0;
+        const o = ci * 3;
+        acc[o] += tile[0];
+        acc[o + 1] += tile[1];
+        acc[o + 2] += tile[2];
+        const r = (q * (P - 1) + a) * 3;
+        row[r] = tile[0];
+        row[r + 1] = tile[1];
+        row[r + 2] = tile[2];
+        if (comp.memoSize !== memoBefore) {
+          // The memo's key for the layers and codes standing (`colourOf`'s own two integers).
+          const L = comp.layers;
+          const C = comp.codes;
+          sigLo.push(L[0] | (L[1] << 8) | (L[2] << 16) | (L[3] << 24));
+          sigHi.push(C[0] + 32 * (C[1] + 32 * C[2]) + 1);
+          cell.push(j * c.nx + ci);
+          slot.push(q * per + (a - ci * per));
+          at.push(-1);
+          rowMiss[ci] = 1;
+          missed = true;
+        }
+      }
+      const f = sF;
+      sF = nF;
+      nF = f;
+      const ch = sC;
+      sC = nC;
+      nC = ch;
+    }
+    for (let i = 0; i < c.nx; i++) {
+      const o = ((j - colourRow0) * c.nx + i) * 3;
+      const rgb = (colour[o] << 16) | (colour[o + 1] << 8) | colour[o + 2];
+      if (rgb !== lastRgb) {
+        cellTint(t, colour[o], colour[o + 1], colour[o + 2], tint);
+        lastRgb = rgb;
+      }
+      const d = ((j - j0) * c.nx + i) * 4;
+      out[d] = enc(acc[i * 3] * k * tint[0]);
+      out[d + 1] = enc(acc[i * 3 + 1] * k * tint[1]);
+      out[d + 2] = enc(acc[i * 3 + 2] * k * tint[2]);
+      out[d + 3] = 0;
+      if (missed && rowMiss[i]) {
+        const v = vals.length;
+        for (let q = 0; q < per; q++) for (let s = 0; s < per; s++) for (let ch = 0; ch < 3; ch++) vals.push(row[(q * (P - 1) + i * per + s) * 3 + ch]);
+        vals.push(tint[0], tint[1], tint[2]);
+        for (let m = first; m < cell.length; m++) if (cell[m] === j * c.nx + i) at[m] = v;
+        rowMiss[i] = 0;
+      }
+    }
+  }
+  return { j0, j1, rgba: out, sigLo: Int32Array.from(sigLo), sigHi: Int32Array.from(sigHi), cell: Int32Array.from(cell), slot: Int32Array.from(slot), at: Int32Array.from(at), vals: Float64Array.from(vals), ms: performance.now() - t0 };
+}
+
+/**
+ * The fine albedo put together from its slices (in row order, covering every row), byte for byte `composeAlbedo`'s: each
+ * slice's rows laid in, then every cell where a slice first met a signature an earlier slice had met summed again with
+ * that tile's colour as the memo keeps it (`Math.fround`, the 32-bit float), in the cell's own order, times its tint.
+ * `memo` is the signatures met over all of them, which is the one-thread walk's memo size.
+ */
+export function stitchAlbedo(header: HorizonHeader, slices: readonly AlbedoSlice[], out = new Uint8Array(header.colour.nx * header.colour.nz * 4)): { rgba: Uint8Array; memo: number; ms: number; again: number } {
+  const t0 = performance.now();
+  let summed = 0;
+  const c = header.colour;
+  const per = c.step / DETAIL_TILE;
+  const k = 1 / (per * per);
+  const tiles = per * per;
+  const seen = new Set<number>();
+  const held = new Uint8Array(tiles);
+  for (const sl of slices) {
+    out.set(sl.rgba, sl.j0 * c.nx * 4);
+    // The cells to sum again, each once, every tile of it whose signature an earlier slice met taken at the memo's float.
+    const again = new Map<number, number[]>();
+    for (let m = 0; m < sl.cell.length; m++) {
+      const key = sl.sigHi[m] * 4294967296 + (sl.sigLo[m] >>> 0);
+      if (!seen.has(key)) continue;
+      let slots = again.get(sl.cell[m]);
+      if (!slots) again.set(sl.cell[m], (slots = [sl.at[m]]));
+      slots.push(sl.slot[m]);
+    }
+    for (let m = 0; m < sl.cell.length; m++) seen.add(sl.sigHi[m] * 4294967296 + (sl.sigLo[m] >>> 0));
+    for (const [ci, slots] of again) {
+      held.fill(0);
+      for (let q = 1; q < slots.length; q++) held[slots[q]] = 1;
+      const v = slots[0];
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let s = 0; s < tiles; s++) {
+        const x = v + s * 3;
+        r += held[s] ? Math.fround(sl.vals[x]) : sl.vals[x];
+        g += held[s] ? Math.fround(sl.vals[x + 1]) : sl.vals[x + 1];
+        b += held[s] ? Math.fround(sl.vals[x + 2]) : sl.vals[x + 2];
+      }
+      const tv = v + tiles * 3;
+      const d = ci * 4;
+      out[d] = enc(r * k * sl.vals[tv]);
+      out[d + 1] = enc(g * k * sl.vals[tv + 1]);
+      out[d + 2] = enc(b * k * sl.vals[tv + 2]);
+      summed++;
+    }
+  }
+  return { rgba: out, memo: seen.size, ms: performance.now() - t0, again: summed };
+}

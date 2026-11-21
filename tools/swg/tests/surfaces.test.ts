@@ -348,7 +348,9 @@ const anim8 = (map = [0, 1, 2, 3, 4, 5, 6, 7]): SwgSurface => ({ anim: { mode: '
   const returned = s.withPlugin(loader as never);
   ok(returned === (loader as unknown) && typeof register === 'function', 'withPlugin registers and hands the loader back');
   // The skinned meshes' own plugin goes on beside it (the performance pass's second wave, skinnedLoad.test.ts).
-  ok(registered.length === 2 && (registered[1] as unknown as () => { name: string })().name === 'SWG_skinned_load', 'and registers the skinned meshes\' load plugin after its own');
+  ok(registered.length === 3 && (registered[1] as unknown as () => { name: string })().name === 'SWG_skinned_load', 'and registers the skinned meshes\' load plugin after its own');
+  // And the pictures' straight decode after both (the GPU port's pass 1, wave 8, cut 5; directPictures.test.ts drives it).
+  ok((registered[2] as unknown as (p: unknown) => { name: string })({}).name === 'SWG_direct_pictures', 'and the pictures\' straight decode last');
   const { list } = texturesOf(8);
   const json = {
     materials: [
