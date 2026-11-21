@@ -23,8 +23,8 @@ const ok = (cond: unknown, msg: string): void => {
   console.log(`ok   ${msg}`);
 };
 
-/** What the stand-in renderer was asked to build: the object, the material and the target bound at the build. */
-const built: { object: THREE.Object3D; material: THREE.Material; rt: unknown }[] = [];
+/** What the stand-in renderer was asked to build: the object, the material, the target bound and its context's targets at the build. */
+const built: { object: THREE.Object3D; material: THREE.Material; rt: unknown; tex: unknown }[] = [];
 /** Pipeline promises held open, to keep the warm-up's queue busy while a second call lists. */
 const held: (() => void)[] = [];
 let holdPipelines = false;
@@ -47,7 +47,7 @@ const r: Any = {
   _bindings: { updateForRender() {} },
   _pipelines: {
     getForRender: (ro: Any, promises: Promise<unknown>[]) => {
-      built.push({ object: ro.object, material: ro.material, rt: r._renderTarget });
+      built.push({ object: ro.object, material: ro.material, rt: r._renderTarget, tex: ro.context.textures });
       promises.push(holdPipelines ? new Promise<void>((res) => held.push(res)) : Promise.resolve());
     },
   },
@@ -100,6 +100,36 @@ const breath = (): Promise<void> => new Promise((res) => setTimeout(res, 0));
   ok(!!canvasBuild && canvasBuild.rt === null, `the canvas item is built under the canvas it was listed under, not the target the renderer held when the queue reached it (${canvasBuild?.rt === B ? 'B' : String(canvasBuild?.rt)})`);
   ok(r._renderTarget === B, 'and the renderer is handed back the target it held');
   r._renderTarget = null;
+}
+
+// ---------------------------------------------------------------- 1b. built with its context's targets as listed
+// (pass 1, wave 6's prover) Three gives every target of one attachment state one render context and sets its `textures` at
+// each render's start, and a pipeline is made for every output's format read off them: the smoothing's two histories (a red
+// and a red-green second output) share one, so the upscaled resolve, listed under its own history and built later on the
+// warm-up's clock after a frame had drawn the full history into that context, was built for the wrong second output.
+{
+  const filler = new THREE.MeshBasicMaterial();
+  const upMat = new THREE.MeshBasicMaterial();
+  const c = ctx as Any;
+  const fullTex = [{ name: 'full.color' }, { name: 'full.aux r16float' }];
+  const upTex = [{ name: 'up.color' }, { name: 'up.aux rg16float' }];
+  built.length = 0;
+  holdPipelines = true;
+  c.textures = fullTex;
+  const first = warm.compile(new THREE.Mesh(tri(), filler), camera, null);
+  // Listed while the context holds the upscaled history's targets (three's compile sets them before it walks): it waits.
+  c.textures = upTex;
+  const second = warm.compile(new THREE.Mesh(tri(), upMat), camera, null);
+  // A frame then draws the full history into the same context before the queue reaches the item.
+  c.textures = fullTex;
+  holdPipelines = false;
+  while (held.length) held.shift()!();
+  for (let i = 0; i < 20 && built.length < 2; i++) await breath();
+  await Promise.all([first, second]);
+  const upBuild = built.find((b) => b.material === upMat);
+  ok(!!upBuild && upBuild.tex === upTex, `the item is built with its context's targets as they stood at the listing, not those a later frame left in it (${upBuild?.tex === fullTex ? 'the full history' : String(upBuild?.tex)})`);
+  ok(c.textures === fullTex, 'and the context is handed back the targets it held');
+  delete c.textures;
 }
 
 // ---------------------------------------------------------------- 2. what three keys apart is never taken for one

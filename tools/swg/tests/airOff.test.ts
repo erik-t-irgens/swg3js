@@ -127,7 +127,11 @@ const store = new Map<string, string>();
   ok(agree, `for every pass of the old chain, over ${combos} combinations of its switches, an override and the master, the registry's rule answers what the old passWanted answered (on a chain holding nothing it yields to)`);
   const air = newDefs.find((d) => d.id === 'airVolume')!;
   const newPasses = newDefs.filter((d) => !oldDefs.some((o2) => o2.id === d.id)).map((d) => d.id);
-  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 2 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes, and each requires the master');
+  // The GPU port's pass 1, wave 6 added WebGPU's edge smoothing (`taa`), which WebGL never registers: the third new pass, under no
+  // master of the volumetrics' and on with the chain alone.
+  const taaDef = newDefs.find((d) => d.id === 'taa');
+  ok(!!taaDef && !taaDef.requires?.length && taaDef.toggles.length === 1 && taaDef.toggles[0] === 'effects' && !taaDef.typical, "the GPU port's edge smoothing is new too, requiring no master, on with the chain, not typical");
+  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 3 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing)');
   // W7b's `yieldsTo` (the design's §4.1 item 6c): the September row alone names it, it names the clouds alone, and the
   // decision over every combination of the September switch, the clouds' switch, the master and the effects -- with the
   // registry's own answer for whether the clouds are wanted, so nothing is stood in -- is the old chain's wherever the

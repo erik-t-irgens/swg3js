@@ -58,6 +58,11 @@ export interface FxSettings {
   colorGrade: boolean;
   colorGradeStrength: number;
   fxaa: boolean;
+  /**
+   * The edge smoothing over frames, WebGPU's alone (the GPU port's pass 1, wave 6): 0 off, 1 full (the scene at the canvas's size),
+   * 2 upscaled (the scene drawn at a share of it and filled out over frames). WebGL never reads it.
+   */
+  smoothing: number;
   filmGrain: boolean;
   filmGrainStrength: number;
   vignette: boolean;
@@ -107,6 +112,7 @@ export type FxPassId =
   | 'airVolume'
   | 'godRays'
   | 'underwater'
+  | 'taa'
   | 'depthOfField'
   | 'motionBlur'
   | 'underwaterSpecks'
@@ -239,6 +245,8 @@ export const FX_DEFAULTS: FxSettings = {
   colorGrade: true,
   colorGradeStrength: 1,
   fxaa: true,
+  // Full: the design's High tier, which new players start on (the owner's answer to question 3).
+  smoothing: 1,
   filmGrain: false,
   filmGrainStrength: 0.3,
   vignette: true,
@@ -310,6 +318,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'colorGrade', pass: 'colorGrade', label: 'Colour grade', kind: 'toggle', requires: ['effects'], hint: 'A look for each planet over the light of its own sky at this hour: Tatooine’s sun warmer and richer, Mustafar hot, Dathomir bleak and cold, nights moonlit. Rooms and ship interiors take a third of it.' },
   { key: 'colorGradeStrength', pass: 'colorGrade', label: 'Colour grade strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'colorGrade'], hint: '0.5 a hint, 1 as designed.' },
   { key: 'fxaa', pass: 'fxaa', label: 'Edge smoothing', kind: 'toggle', requires: ['effects'], hint: 'Smooths the stepped edges at the end of the chain. The effects path cannot multisample, so this is what stands in for it.' },
+  // WebGPU's (the GPU port's pass 1, wave 6): its row is hidden on WebGL, where the edges are FXAA's above.
+  { key: 'smoothing', pass: 'taa', label: 'Smoothing', kind: 'select', options: [{ value: 0, label: 'Off' }, { value: 1, label: 'Full' }, { value: 2, label: 'Upscaled' }], requires: ['effects'], hint: 'Edges smoothed over frames: each frame is drawn from a camera nudged by a fraction of a pixel and gathered into the last, so fences, wires and fronds stand still and smooth. Full draws the scene at the screen\'s own size; Upscaled draws it at about 70% and fills the screen out over frames, which is faster and a little softer. Off shows each frame as it is drawn.' },
   { key: 'filmGrain', pass: 'grainVignette', label: 'Film grain', kind: 'toggle', requires: ['effects'], hint: 'A fine grain that changes 24 times a second, strongest in the mid-tones; blacks and whites stay clean.' },
   { key: 'filmGrainStrength', pass: 'grainVignette', label: 'Film grain strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'filmGrain'], hint: '0.2 fine, 0.5 film, 1 coarse.' },
   { key: 'vignette', pass: 'grainVignette', label: 'Vignette', kind: 'toggle', requires: ['effects'], hint: 'The picture’s corners a little darker, as through a lens; a touch more while aiming.' },
@@ -353,6 +363,9 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'airVolume', stage: 'scene', toggles: ['airVolume'], requires: ['volumetrics'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.4, cpuBudgetMs: 0.05, typical: false, canBeLast: false, live: true, why: 'The dust the moving air carries (src/world/volumetrics/), marched through the band of air over the ground near you and integrated past it, lit by the very sun and ambient the scene is lit by, darkened by the dust between it and the sun and by the sun\'s own cascades, and composited as the scene times what it lets through plus what it scatters. After the clouds, so the nearer layer is composited last over the farther; before the god rays, the depth of field, the motion blur, the bloom and the grade, so the dust is rayed, defocused, smeared, spilled and graded with the picture. It marches at a share of the screen through an upsample of its own size, and refuses with a reason indoors, in space, under water, at an amount of nought and while nothing is airborne. Not typical: the typical frame has 0.07 ms left, and its cost is a line of the frame report of its own.' },
   { id: 'godRays', stage: 'scene', toggles: ['godRays'], required: false, needs: ['linearDepthHalf'], budgetMs: 0.25, typical: true, canBeLast: false, live: true, why: 'Scattered sunlight. Before depth of field, since rays are far light that should soften with the far background they overlay, and before the blur and the bloom so they smear and spill like the sun.' },
   { id: 'underwater', stage: 'scene', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.12, typical: false, canBeLast: false, live: true, why: 'What the water between the eye and each pixel does to it, and the shimmer of the light bending through the ripples overhead. After the god rays, so scattered sunlight is graded by the water it comes through like anything else; before the lens, so the aperture and the shutter soften and smear what the water has already done. It reads the full-resolution scene depth itself and asks for no product, and it draws on no frame the camera is dry.' },
+  // WebGPU's edge smoothing (the GPU port's pass 1, wave 6: `src/core/gpu/taa/`); WebGL never registers it, so its chain and its typical frame are as they were.
+  // On with the chain: its mode, Off among them, is the Smoothing row's (`FxSettings.smoothing`, a choice, never a switch), which the pass reads.
+  { id: 'taa', stage: 'scene', toggles: ['effects'], required: false, needs: [], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'The edges smoothed over frames, each drawn from a camera nudged by a fraction of a pixel: last of the surfaces and the air, so every one of them is smoothed and what it reads (the depth, the motion buffer) is the scene as drawn; before the lens, so the aperture, the shutter and the bloom work on a steady picture and a bloomed highlight does not shimmer. The upscaled smoothing fills the canvas from a smaller scene here, so every pass before it runs at the scene’s size and every pass after at the canvas’s. Not typical: WebGPU’s alone.' },
   { id: 'depthOfField', stage: 'lens', toggles: ['depthOfField'], required: false, needs: ['linearDepthHalf', 'dofGlow'], budgetMs: 0.35, typical: false, canBeLast: false, live: true, why: 'The aperture needs colour and depth aligned, so it comes before motion blur; before bloom so a defocused highlight blooms as a disc.' },
   { id: 'motionBlur', stage: 'lens', toggles: ['motionBlur'], required: false, needs: ['velocity'], budgetMs: 0.25, cpuBudgetMs: 0.2, typical: true, canBeLast: false, live: true, why: 'The shutter after the aperture, and before bloom: bloom first would smear the halo around a near engine glow by the depth of the ground behind it.' },
   { id: 'underwaterSpecks', stage: 'lens', toggles: ['underwater'], required: false, needs: [], budgetMs: 0.06, typical: false, canBeLast: false, live: true, why: 'The specks drifting in the water, added to the picture rather than seen through it, so they are drawn rather than sampled: the pass puts its own points straight into the buffer and tests the scene depth in its own fragment program. After the underwater look, whose grading reads the scene depth and would take the *background\'s* transmittance off every speck, leaving open water with almost none; after the aperture and the shutter, which would soften and smear each one by the depth and the movement of whatever lies behind it, and in open water, where the depth is the far plane, would turn every speck into a disc the moment the player aimed. Before bloom and the grade, so they spill and are graded with the picture. It asks for no product and draws on no frame the camera is not really under a surface.' },

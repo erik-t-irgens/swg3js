@@ -44,7 +44,10 @@ const ok = (cond: unknown, msg: string): void => {
 const BASE_GPU = new Set(['bundles.ts', 'carries.ts', 'consoleWords.ts', 'drawCost.ts', 'fallback.ts', 'framePerf.ts', 'gpuCard.ts', 'gpuCardSelfTest.ts', 'gpuChain.ts', 'gpuChainPasses.ts', 'gpuDetail.ts', 'gpuEnv.ts', 'gpuGround.ts', 'gpuGroundSelfTest.ts', 'gpuLook.ts', 'gpuPrograms.ts', 'gpuSpec.ts', 'gpuSpecSelfTest.ts', 'gpuSsao.ts', 'gpuSsaoPass.ts', 'inlineOutput.ts', 'looks.ts', 'patchReplay.ts', 'patchShadow.ts', 'patchStencilBundles.ts', 'patchStill.ts', 'patchTable.ts', 'patchWarm.ts', 'patches.ts', 'shadowCull.ts', 'standIns.ts', 'start.ts', 'stillMark.ts', 'sun.ts', 'usageHint.ts', 'warmDepth.ts']);
 
 /** GPU files of pass 1 on outside `src/core/gpu/`, or inside it under a base name (a later pass adds its own here). */
-const PASS1_FILES: string[] = [];
+const PASS1_FILES: string[] = [
+  // Wave 6: the effects chain's walk on WebGPU in two sizes (`PostFX`'s WebGPU branch calls it).
+  'src/core/fx/chainWalkGpu.ts',
+];
 
 /**
  * What pass 1 added to a file the base already had, scanned as its own files are: each from the line holding `from` to the line
@@ -473,7 +476,9 @@ function partsOf(text: string, parts: { from: string; to: string }[]): { text: s
 
 // ---------------------------------------------------------------- the subjects: pass 1's GPU files
 const gpuDir = join(ROOT, 'src', 'core', 'gpu');
-const added = readdirSync(gpuDir)
+// Every file under it, its folders' too (wave 6's `taa/`): the base had none in a folder, so each such file is pass 1's or later.
+const added = (readdirSync(gpuDir, { recursive: true }) as string[])
+  .map((f) => f.replace(/\\/g, '/'))
   .filter((f) => /\.tsx?$/.test(f) && !BASE_GPU.has(f))
   .map((f) => `src/core/gpu/${f}`);
 const subjects = [...new Set([...PASS1_FILES, ...added])].sort();

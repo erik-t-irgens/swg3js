@@ -120,6 +120,16 @@ interface Item {
    * pipeline no draw used.
    */
   rt: Any;
+  /**
+   * The render context's own targets as the walk listed it (pass 1, wave 6's prover): three gives every target of one
+   * attachment state one render context (`RenderContexts.get` keys a target by its count and its first texture's format,
+   * type, depth and stencil alone) and sets its `textures` at each render's start, while a pipeline is made for every output's
+   * format read off them. So the two smoothing histories (a red and a red-green second output) share one context, and the
+   * upscaled resolve built later on the warm-up's clock read the full history's textures, the last drawn: a pipeline no draw
+   * used, and the first Upscaled draw built its own. Put back for the build, as the target is.
+   */
+  tex: Any;
+  depthTex: Any;
   job: Job | null;
 }
 
@@ -316,6 +326,13 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
     r._currentSourceMaterial = it.src ?? null;
     // Node builds take their shared bind groups from the current render context (three 0.187's precompile does the same).
     r._currentRenderContext = it.ctx;
+    // And that context's targets as they stood at the listing (shared by every target of one attachment state: `Item.tex`).
+    const ctxTex = it.ctx ? it.ctx.textures : null;
+    const ctxDepth = it.ctx ? it.ctx.depthTexture : null;
+    if (it.ctx) {
+      it.ctx.textures = it.tex;
+      it.ctx.depthTexture = it.depthTex;
+    }
     // And the scene says which material is the override for as long as the object is built: three keeps a material's
     // program key by its version unless it is the scene's override, whose key it works out each time.
     if (it.tweak && it.scene) it.scene.overrideMaterial = material;
@@ -346,6 +363,10 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       material.side = side;
       if (before) TWEAKS.forEach((k, i) => put(k, before[i]));
       r._currentSourceMaterial = source;
+      if (it.ctx) {
+        it.ctx.textures = ctxTex;
+        it.ctx.depthTexture = ctxDepth;
+      }
       r._currentRenderContext = ctx;
       if (it.tweak && it.scene) it.scene.overrideMaterial = sceneOverride;
     }
@@ -408,7 +429,8 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
       // The shadow pass draws casters alone (three's own render object function for it).
       if (shadow && a[0]?.castShadow !== true) return;
       builtFor.add(a[0]);
-      out.push({ a, ctx: this._currentRenderContext, tweak: override ? TWEAKS.map((k) => a[1][k]) : null, side: a[1].side, src: this._currentSourceMaterial, scene: sceneRef, rt: this._renderTarget ?? null, job: null });
+      const c = this._currentRenderContext;
+      out.push({ a, ctx: c, tweak: override ? TWEAKS.map((k) => a[1][k]) : null, side: a[1].side, src: this._currentSourceMaterial, scene: sceneRef, rt: this._renderTarget ?? null, tex: c ? c.textures : null, depthTex: c ? c.depthTexture : null, job: null });
     };
     if (override && sceneRef) {
       sceneRef.overrideMaterial = override;

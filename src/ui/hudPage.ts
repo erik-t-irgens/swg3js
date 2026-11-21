@@ -26,6 +26,11 @@ export interface Knob {
   presetOf?: (s: Settings) => string;
   /** The words shown for a name `presetOf` answers that is none of the sets. */
   otherLabel?: string;
+  /**
+   * A preset drawn as a slider of its sets, in order, its readout the set's words or `otherLabel` (the quality tiers,
+   * `qualityTiers.ts`), handed to the game whole (`Menu.onTier`); a plain preset is a list.
+   */
+  slider?: boolean;
   min?: number;
   max?: number;
   step?: number;

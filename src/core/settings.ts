@@ -12,6 +12,12 @@ export interface Settings extends FxSettings {
   fov: number;
   /** Rendering resolution over the screen's, 0.5 to 2. */
   renderScale: number;
+  /**
+   * The upscaled edge smoothing's share of the screen's width and height (WebGPU's alone, the GPU port's pass 1, wave 6): the
+   * quality tiers' lever (Low 0.6, Medium 0.7, `src/ui/qualityTiers.ts`), handed to the smoothing's `share` dial at load and
+   * whenever it moves; the dial moves the share live for the session. No row of its own; WebGL never reads it.
+   */
+  smoothingShare: number;
   shadows: boolean;
   /** Shadow map edge per cascade: 1024, 2048 or 4096. */
   shadowMapSize: number;
@@ -392,6 +398,8 @@ export const DEFAULT_SETTINGS: Settings = {
   invertY: false,
   fov: 60,
   renderScale: Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 2),
+  // The smoothing dial's own start (`TAA_TUNE.share`): the design's "about 70%", the Medium tier's.
+  smoothingShare: 0.7,
   shadows: true,
   shadowMapSize: 2048,
   shadowDistance: 320,
@@ -684,6 +692,18 @@ export function loadSettings(): Settings {
   }
   live = out;
   return out;
+}
+
+/**
+ * Whether this browser has any settings saved (the GPU port's pass 1, wave 6's fixer: with no character either, a new player, whom
+ * the quality tiers start on High on WebGPU, `isNewPlayer`). False where storage cannot be read. WebGPU's alone calls it.
+ */
+export function settingsSaved(): boolean {
+  try {
+    return localStorage.getItem(KEY) !== null;
+  } catch {
+    return false;
+  }
 }
 
 export function saveSettings(s: Settings): void {

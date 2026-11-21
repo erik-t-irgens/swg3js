@@ -4896,7 +4896,9 @@ export class World {
     const s = (Number.isFinite(ws.windMean) ? ws.windMean : 0) * AIR_TUNE.wind.scale;
     f.windX = Math.sin(ws.windHeading) * s;
     f.windZ = Math.cos(ws.windHeading) * s;
-    this.renderer?.getDrawingBufferSize(this.rainBuf);
+    // On WebGPU the scene's own height, a share of the canvas's under the upscaled edge smoothing (pass 1, wave 6).
+    if (GPU.webgpu) GPU.rt!.taa.sceneSize(this.rainBuf);
+    else this.renderer?.getDrawingBufferSize(this.rainBuf);
     f.screen = this.rainBuf.y > 1 ? this.rainBuf.y : 1080;
     // The streaks' colour: the sky's own ambient and main light at their own scales, the sun's height and the overcast.
     const L = this.swgSky?.lighting;

@@ -8,6 +8,7 @@ import { keyLabel } from './hud.ts';
 import { GAMEPLAY } from './gameplayPage.ts';
 import { FLORA } from './floraPage.ts';
 import { VOLUMETRICS } from './volPage.ts';
+import { QUALITY_KNOB, TIER_NAMES, screenScale, tierNearest, tierValues, type TierName } from './qualityTiers.ts';
 import { GraphicsLayout, graphicsMarkup, wireGraphics } from './graphicsPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
@@ -213,6 +214,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
   {
     title: 'Picture',
     knobs: [
+      // The quality tiers' slider (the GPU port's pass 1, wave 6, `qualityTiers.ts`): WebGPU's, left off the page on WebGL.
+      QUALITY_KNOB,
       { key: 'renderScale', label: 'Render scale', hint: 'Resolution over the screen\'s. Below 1 is the biggest saving there is; above 1 sharpens at a steep cost.', kind: 'range', min: 0.5, max: 2, step: 0.05, format: (v) => `${v.toFixed(2)}×` },
       { key: 'fov', label: 'Field of view', hint: 'Degrees, upright. Aiming a blaster narrows it by the same amount as before.', kind: 'range', min: 45, max: 100, step: 1, format: (v) => `${v}°` },
       { key: 'exposure', label: 'Exposure', hint: 'How bright the picture comes out of tone mapping.', kind: 'range', min: 0.5, max: 2, step: 0.05, format: (v) => v.toFixed(2) },
@@ -343,14 +346,20 @@ export class Menu {
   onDebugMenu: () => void = () => {};
   /** A setting moved: the game applies it. */
   onSetting: (key: keyof Settings, value: number | boolean | string) => void = () => {};
+  /**
+   * The quality slider moved to a tier (the GPU port's pass 1, wave 6): the game writes every setting of it into these settings,
+   * saves them and applies them behind its notice (`App.applyQualityTier`). Null with no game: the menu writes them itself.
+   */
+  onTier: ((tier: TierName) => void) | null = null;
   /** A panel's own click, played by the game's interface sounds. */
   onUiSound: (action: 'panelOpen' | 'panelClose' | 'confirm' | 'select' | 'rollover' | 'increment') => void = () => {};
   /**
    * What the game has to say about a knob beside its hint, and whether it is greyed for a reason of its own: the
    * volumetrics master turned on in play says "from the next arrival", and greys "off at load" when the module was
-   * never constructed (`localStorage['swg.vol'] = '0'`). Null for nothing.
+   * never constructed (`localStorage['swg.vol'] = '0'`). Null for nothing. `hide` leaves the row out (a row of the other renderer's:
+   * WebGPU's Smoothing on WebGL).
    */
-  knobState: (key: keyof Settings) => { note?: string; off?: string } | null = () => null;
+  knobState: (key: keyof Settings) => { note?: string; off?: string; hide?: boolean } | null = () => null;
 
   /** The emotes page's source, given by the game once a character is up. */
   emotes: EmoteSource | null = null;
@@ -631,7 +640,8 @@ export class Menu {
         find?.setSelectionRange(find.value.length, find.value.length);
       }
       body.querySelector('.reset-gfx')!.addEventListener('click', () => {
-        for (const g of GRAPHICS) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key]);
+        // The quality slider is a reading of other rows and has no setting of its own: the rows it reads are reset as rows.
+        for (const g of GRAPHICS) for (const k of g.knobs) if (!k.slider) this.setValue(k.key, DEFAULT_SETTINGS[k.key]);
         this.showPage('graphics');
       });
     }
@@ -653,7 +663,15 @@ export class Menu {
       .map((k) => {
         const v = this.settings[k.key];
         let control: string;
-        if (k.kind === 'preset') {
+        if (k.kind === 'preset' && k.slider) {
+          // A slider of the sets in order (the quality tiers): its thumb at the set the settings hold, or under Custom at the one
+          // they hold most of, its readout the set's words or Custom. Worked out from the settings each time the page is drawn.
+          const now = k.presetOf ? k.presetOf(this.settings) : '';
+          const sets = k.presets ?? [];
+          const at = sets.findIndex((p) => p.name === now);
+          const thumb = at >= 0 ? at : Math.max(0, sets.findIndex((p) => p.name === tierNearest(this.settings, screenScale())));
+          control = `<input type="range" data-tier="${k.key}" min="0" max="${Math.max(0, sets.length - 1)}" step="1" value="${thumb}" /><span class="value">${at >= 0 ? sets[at].label : (k.otherLabel ?? 'Custom')}</span>`;
+        } else if (k.kind === 'preset') {
           // Worked out from the settings each time the page is drawn; a name that is none of the sets reads as its own word.
           const now = k.presetOf ? k.presetOf(this.settings) : '';
           const sets = k.presets ?? [];
@@ -681,7 +699,9 @@ export class Menu {
         const labels = off.map((key) => this.labelOf(key));
         let hint = labels.length ? `${k.hint} (off while ${labels.join(' and ')} ${labels.length > 1 ? 'are' : 'is'} off)` : k.hint;
         // The game's own word on this knob now (the volumetrics master's "from the next arrival"), and a greying of its own.
-        const state = k.kind === 'preset' ? null : this.knobState(k.key);
+        // A slider of sets asks the game only whether its row stands (the quality tiers' on WebGL, which it does not).
+        const state = k.kind === 'preset' ? (k.slider && this.knobState(k.key)?.hide ? { hide: true } : null) : this.knobState(k.key);
+        if (state?.hide) return '';
         if (state?.note) hint = `${hint} <b>${state.note}</b>`;
         if (state?.off) hint = `${hint} (${state.off})`;
         const grey = labels.length > 0 || !!state?.off;
@@ -699,7 +719,8 @@ export class Menu {
   private wireKnobs(body: HTMLElement): void {
     const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs), ...INTERFACE.flatMap((g) => g.knobs), ...GAMEPLAY.flatMap((g) => g.knobs)];
     for (const el of body.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]')) {
-      const knob = all.find((k) => k.key === el.dataset.key)!;
+      // A row's own knob, never a preset sharing its key (the quality slider stands on the Smoothing row's key).
+      const knob = all.find((k) => k.key === el.dataset.key && k.kind !== 'preset')!;
       const on = () => {
         const value = knob.kind === 'toggle' ? (el as HTMLInputElement).checked : knob.kind === 'choice' ? el.value : Number(el.value);
         this.setValue(knob.key, value);
@@ -736,6 +757,36 @@ export class Menu {
         const again = this.root.querySelector<HTMLElement>('.menu-body');
         if (again) again.scrollTop = scroll;
       });
+    }
+    // The quality slider (the GPU port's pass 1, wave 6): the tier under the thumb handed to the game whole, which writes and
+    // applies it behind its notice, and the page drawn again so every row and the slider's reading show what now stands. A
+    // click on the thumb where it stands under Custom takes that tier too, since a range moved nowhere sends no change.
+    for (const el of body.querySelectorAll<HTMLInputElement>('input[data-tier]')) {
+      const knob = all.find((k) => k.kind === 'preset' && k.slider && k.key === el.dataset.tier);
+      if (!knob) continue;
+      const take = () => {
+        const tier = TIER_NAMES[Number(el.value)];
+        if (!tier || (knob.presetOf && knob.presetOf(this.settings) === tier)) return;
+        if (this.onTier) this.onTier(tier);
+        else {
+          for (const [key, value] of Object.entries(tierValues(tier, screenScale()))) {
+            if (value !== undefined && this.settings[key as keyof Settings] !== value) this.setValue(key as keyof Settings, value);
+          }
+        }
+        this.onUiSound('select');
+        const scroll = body.scrollTop;
+        this.showPage(this.page);
+        const again = this.root.querySelector<HTMLElement>('.menu-body');
+        if (again) again.scrollTop = scroll;
+      };
+      // Its readout follows the thumb while it is dragged; the tier is taken where it is let go.
+      el.addEventListener('input', () => {
+        const out = el.parentElement?.querySelector<HTMLElement>('.value');
+        const p = knob.presets?.[Number(el.value)];
+        if (out && p) out.textContent = p.label;
+      });
+      el.addEventListener('change', take);
+      el.addEventListener('click', take);
     }
   }
 

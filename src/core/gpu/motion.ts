@@ -5,7 +5,8 @@
 //
 // What it writes, in three's own convention (`VelocityNode`: this frame's place in normalised device coordinates less last
 // frame's, x and y, y up; three's `Reprojection.getHistoryUV` turns it into a history picture's place as `uv - v.xy * (0.5,
-// -0.5)`), unjittered, in red and green; blue spare (nought); and the reactive mark in alpha. A blend state has one rule for
+// -0.5)`), unjittered, in red and green; in blue the view distance this frame less last frame's, in metres (wave 6: the edge
+// smoothing's depth test reads it, nought for the sky); and the reactive mark in alpha. A blend state has one rule for
 // a target's colour and one for its alpha, so the reactive mark, which a see-through draw takes the larger of, is the alpha,
 // and the motion, which it keeps, is the colour.
 //
@@ -38,6 +39,7 @@ import * as THREE from 'three';
 import { BlendMode, Node } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { isStill } from './stillMark.ts';
+import { unjitteredProjection } from './taa/taaJitter.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -89,7 +91,7 @@ export const MOTION_STATS = {
 
 // ---------------------------------------------------------------- the frame: the camera's change, in doubles
 
-/** This frame's projection, unjittered (wave 6 jitters by `setViewOffset` after the frame is worked here). */
+/** This frame's projection, unjittered: the game's own while the edge smoothing nudges the camera (wave 6, `taa/taaJitter.ts`). */
 const P_NOW = new THREE.Matrix4();
 /** Last frame's projection times last frame's view times this frame's inverse view: a view-space place to last frame's clip. */
 const D_PREV = new THREE.Matrix4();
@@ -121,7 +123,7 @@ const prevBySource = new Map<object, PrevRec>();
 export function motionFrame(camera: THREE.Camera): void {
   frameNo++;
   MOTION_STATS.frames++;
-  P_NOW.copy(camera.projectionMatrix);
+  P_NOW.copy(unjitteredProjection(camera));
   V_NOW.copy(camera.matrixWorldInverse);
   C_NOW.copy(camera.matrixWorld);
   if (!haveLast) {
@@ -443,6 +445,16 @@ function ndcLess(cur: Any, prev: Any): Any {
   return select(ok, cur.xy.div(cur.w).sub(prev.xy.div(prev.w)), vec2(0, 0));
 }
 
+/**
+ * The motion output of a surface: its place in normalised device coordinates less last frame's, and in blue its view distance
+ * this frame less last frame's (a perspective clip's w is the view distance), in metres, nought where either is behind its camera
+ * (wave 6: the edge smoothing's depth test takes last frame's distance of the surface found here as this frame's less it).
+ */
+function surfaceMotion(cur: Any, prev: Any): Any {
+  const ok = cur.w.greaterThan(1e-6).and(prev.w.greaterThan(1e-6));
+  return vec4(ndcLess(cur, prev), select(ok, cur.w.sub(prev.w), float(0)), 0);
+}
+
 /** The reactive mark of a see-through material: how much of what is behind it the draw covers. */
 function reactiveOf(material: Any): Any {
   const o = vec4(output);
@@ -488,7 +500,7 @@ function motionGraph(builder: Any): Any {
   // The object's own change this frame, taken only where it was worked for this very frame.
   const on = select(n.stamp.equal(n.frame), float(1), float(0));
   const moved = mix(before, n.w.mul(vec4(before, 1)).xyz, on);
-  return vec4(ndcLess(n.pNow.mul(vec4(pv, 1)), n.dPrev.mul(vec4(moved, 1))), 0, 0);
+  return surfaceMotion(n.pNow.mul(vec4(pv, 1)), n.dPrev.mul(vec4(moved, 1)));
 }
 
 /** The motion output: a node whose graph is worked out per build, from the material and object being built. */
@@ -608,7 +620,7 @@ export function motionReport(): Record<string, unknown> {
     on: GPU_MOTION.on,
     applied: MOTION.applied,
     ...(MOTION.why ? { why: MOTION.why } : {}),
-    does: "with the effects on, every draw into the scene target writes its pixel's motion since the last frame into a second output (RGBA16F: this frame's place in normalised device coordinates less last frame's in red and green, three's convention, unjittered; the reactive mark in alpha): still things by the camera's change worked once a frame in doubles, what moved by its own change worked at its refresh, bodies by the bone pool's last half, a rope laid on the CPU by each vertex's change, the sky by the camera's turn; see-through things keep the motion behind them and mark themselves reactive",
+    does: "with the effects on, every draw into the scene target writes its pixel's motion since the last frame into a second output (RGBA16F: this frame's place in normalised device coordinates less last frame's in red and green, three's convention, unjittered; the view distance this frame less last frame's in blue, metres; the reactive mark in alpha): still things by the camera's change worked once a frame in doubles, what moved by its own change worked at its refresh, bodies by the bone pool's last half, a rope laid on the CPU by each vertex's change, the sky by the camera's turn; see-through things keep the motion behind them and mark themselves reactive",
     switch: "__debug.gpu({ motion: false }) live (the effects chain is made again, its scene target of one output), or localStorage['swg.gpu.motion'] = '0' and a reload; __debug.gpu({ view: 'motion' }) draws the buffer, 'off' the picture again",
     frames: MOTION_STATS.frames,
     targets: MOTION_STATS.targets,

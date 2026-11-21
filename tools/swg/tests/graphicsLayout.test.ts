@@ -406,7 +406,9 @@ else {
 {
   const menu = readFileSync(join(REPO, 'src/ui/menu.ts'), 'utf8').replace(/\r\n/g, '\n');
   ok(/body\.innerHTML = `<h2>Graphics<\/h2>\$\{graphicsMarkup\(GRAPHICS, \(k\) => this\.knobRows\(k\), this\.gfx\)\}<div class="menu-actions"><button class="reset-gfx">Reset graphics to defaults<\/button><\/div>`;\n      this\.wireKnobs\(body\);\n      wireGraphics\(body, this\.gfx, \{ scroller: body, sound: \(a\) => this\.onUiSound\(a\) \}\);/.test(menu), "the page is the menu's own rows laid out by `graphicsMarkup`, wired by `wireKnobs` and then by `wireGraphics`");
-  ok(/for \(const g of GRAPHICS\) for \(const k of g\.knobs\) this\.setValue\(k\.key, DEFAULT_SETTINGS\[k\.key\]\);/.test(menu), 'its reset walks the very table it draws');
+  // The GPU port's pass 1, wave 6: the quality slider is a reading of other rows with no setting of its own, so the reset steps
+  // over it (`slider`) and resets each of the rows it reads as a row.
+  ok(/for \(const g of GRAPHICS\) for \(const k of g\.knobs\) if \(!k\.slider\) this\.setValue\(k\.key, DEFAULT_SETTINGS\[k\.key\]\);/.test(menu), 'its reset walks the very table it draws, the quality slider aside');
   const css = readFileSync(join(REPO, 'src/style.css'), 'utf8');
   const rules = css.slice(css.indexOf('.gfx-bar'), css.indexOf('.gfx-finding .gfx-folds'));
   ok(rules.length > 0 && !/z-index|position\s*:/.test(rules), "the page's own rules carry no z-index and no position");

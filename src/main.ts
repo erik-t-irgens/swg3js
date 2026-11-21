@@ -432,7 +432,8 @@ import { remoteBlades } from './net/remoteBlades.ts';
 import { remoteRopes } from './net/remoteRopes.ts';
 import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
-import { HUD_BLOCK_ALIGNS, HUD_DPR_RANGE, HUD_FORCE_EDGES, HUD_FORCE_LOOKS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, HUD_SLOT_LINES, loadSettings, saveSettings, type Settings } from './core/settings';
+import { DEFAULT_SETTINGS, HUD_BLOCK_ALIGNS, HUD_DPR_RANGE, HUD_FORCE_EDGES, HUD_FORCE_LOOKS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, HUD_SLOT_LINES, loadSettings, saveSettings, settingsSaved, type Settings } from './core/settings';
+import { TIER_KEYS, TIER_LABELS, isNewPlayer, screenScale, startOnTier, tierValues, type TierName } from './ui/qualityTiers.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -1884,11 +1885,17 @@ class App {
   private fxAgain = false;
   /** On WebGPU the motion output was moved live (pass 1, wave 5): the next reconcile makes the chain again whatever Effects says. */
   private fxRemake = false;
+  /** The quality tiers' changes taken one after another behind their notice (pass 1, wave 6, `applyQualityTier`). */
+  private tierQueue: Promise<void> = Promise.resolve();
   /** The ship last flown, spawned again on arriving in space (or back from it). */
   private lastShipDef: VehicleDef | null = null;
   /** The way between a planet and its space, offered on E: up near the top of the sky, down anywhere in space. */
   private spaceGate: 'up' | 'down' | null = null;
-  private readonly settings: Settings = loadSettings();
+  // On WebGPU a new player starts on the quality tiers' High (pass 1, wave 6: the owner's answer to the design's question 3): in a
+  // browser with no settings saved and no character (`isNewPlayer`), each of its settings at the game's default takes High's for this
+  // screen and is saved (`startOnTier`; only the render scale differs, on a screen of more than 1.5 device pixels a point); a player
+  // already here keeps every setting as saved (wave 6's fixer). The WebGL branch is the line it had.
+  private readonly settings: Settings = GPU.webgpu ? startOnTier(loadSettings(), DEFAULT_SETTINGS, screenScale(), isNewPlayer(settingsSaved(), loadCharacters().length), saveSettings) : loadSettings();
   /**
    * The colour theme now on (the Colours switch, `applyTheme`; the interface rewrite's second wave, item 11): put on here,
    * straight after the settings are read and before anything of the interface is built, so the first thing drawn is in
@@ -2109,6 +2116,8 @@ class App {
     if (GPU.webgpu) World.anisotropy = Math.min(8, (this.renderer as unknown as { getMaxAnisotropy(): number }).getMaxAnisotropy());
     else World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     this.renderer.toneMappingExposure = S.exposure;
+    // On WebGPU the upscaled smoothing's share is the setting's (pass 1, wave 6: the quality tiers' lever), before any chain is sized by it.
+    if (GPU.webgpu) GPU.rt!.taa.setShare(S.smoothingShare);
 
     this.cam = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
     this.cam.sensitivity = S.sensitivity;
@@ -3582,14 +3591,14 @@ class App {
        * `{ bones: false }` draws every body with three's own skinning again in place of the bone pool (`true` the pool again;
        * `localStorage['swg.gpu.keys.boneStorage'] = '0'` leaves the pool off at load).
        */
-      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean }; bake?: boolean; standIns?: boolean; bones?: boolean; motion?: boolean; view?: 'motion' | 'off'; pixels?: number }) => {
+      gpu: (o?: { look?: Record<string, unknown>; bundles?: boolean; patches?: Record<string, boolean>; warm?: Record<string, number>; dynamicHint?: boolean; carries?: boolean; inline?: boolean; perf?: boolean | { frames?: number; gpu?: boolean; gpuFrames?: number; noCount?: boolean }; draw?: Record<string, unknown>; keys?: boolean | { list?: boolean; limit?: number }; landing?: boolean | { all?: boolean; last?: number; exact?: boolean }; bake?: boolean; standIns?: boolean; bones?: boolean; motion?: boolean; view?: 'motion' | 'off'; pixels?: number; taa?: Record<string, number> }) => {
         const how = { asked: GPU.asked, read: GPU.how, switch: "?renderer=webgpu on the address, else localStorage['swg.renderer'] ('webgpu' or 'webgl'), else WebGPU; read once at boot" };
         if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };
         const rt = GPU.rt!;
         // The frame report on WebGPU (the performance step): a promise of the main thread's sections, the calls a frame and the card's time.
         if (o?.perf) return rt.perf(o.perf === true ? {} : o.perf).then((r) => ({ ...r, view: { pos: this.player.worldPos.toArray().map((v) => Math.round(v)), cell: this.world.cellState?.cell ?? 0 } }));
         const look = o?.look ? rt.look(o.look) : undefined;
-        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.bake !== undefined || o.standIns !== undefined || o.bones !== undefined || o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined) ? rt.tune({ ...o, scene: this.scene }) : undefined;
+        const tuned = o && (o.bundles !== undefined || o.patches || o.warm || o.dynamicHint !== undefined || o.bake !== undefined || o.standIns !== undefined || o.bones !== undefined || o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined || o.taa) ? rt.tune({ ...o, scene: this.scene }) : undefined;
         // Pass 1, wave 5: the motion output moved live makes the effects chain again, its scene target with the output or without.
         if (tuned?.remakeEffects === true) this.remakeEffectsGpu();
         // Pass 1, wave 1: the key census and the landing log, the WebGPU runtime's own.
@@ -12697,7 +12706,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -13146,6 +13155,8 @@ class App {
     // The menu's own clicks, from the game's interface table.
     this.menu.onUiSound = (action) => void this.audio.ui.play(action);
     this.menu.onSetting = (key) => this.applySetting(key);
+    // The quality slider's tier, written and applied behind the Effects switch's notice (pass 1, wave 6): WebGPU's, whose row it is.
+    if (GPU.webgpu) this.menu.onTier = (tier) => this.applyQualityTier(tier);
     // The volumetrics master's word beside its knob: "from the next arrival", or greyed with the hatch.
     this.menu.knobState = (key) => this.volKnobState(key);
     // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
@@ -13879,6 +13890,11 @@ class App {
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.postfx?.setSize();
         this.world.onCameraResized();
+        break;
+      case 'smoothingShare':
+        // The upscaled smoothing's share of the screen (pass 1, wave 6: the quality tiers' lever), WebGPU's alone: the dial's own
+        // number, the chain sized again before its next scene where it draws upscaled.
+        if (GPU.webgpu) GPU.rt!.taa.setShare(S.smoothingShare);
         break;
       case 'waterRibbons':
         // The terrain's ribbons (the volumetrics' fifth wave's survey: Mustafar's lava falls), drawn or let go.
@@ -14856,7 +14872,9 @@ class App {
    * for it yet; the prints grey on a browser that cannot blend into a float target (every footprint is then today's
    * decal); and the ground's switches say so where this world's ground is not drawn the way the air's variant needs.
    */
-  private volKnobState(key: string): { note?: string; off?: string } | null {
+  private volKnobState(key: string): { note?: string; off?: string; hide?: boolean } | null {
+    // WebGPU's edge smoothing (pass 1, wave 6) has no row on WebGL, whose edges are the FXAA row's.
+    if (!GPU.webgpu && key === 'smoothing') return { hide: true };
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
     // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
     if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };
@@ -23996,7 +24014,8 @@ class App {
     retune(ROUTE_TUNE as unknown as Record<string, unknown>, o.routes);
     const vis = this.portals.vis;
     const res = vis.result;
-    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    // On WebGPU the rectangles in the scene's own pixels (pass 1, wave 6: a share of the canvas's under the upscaled smoothing).
+    const size = GPU.webgpu ? GPU.rt!.taa.sceneSize(new THREE.Vector2()) : this.renderer.getDrawingBufferSize(new THREE.Vector2());
     const round = (v: number) => Math.round(v * 10) / 10;
     const rectPx = (r: ArrayLike<number>) => {
       const x0 = Math.max(-1, r[0]);
@@ -24126,6 +24145,8 @@ class App {
       this.drawFrameRouted(cam, view);
     } finally {
       this.portals.actors.restoreFrame();
+      // On WebGPU a frame that threw while the camera was nudged puts it back here (pass 1, wave 6).
+      if (GPU.webgpu) GPU.rt!.taa.end();
     }
   }
 
@@ -24603,7 +24624,9 @@ class App {
     const wfx = this.world.weather.state.enabled ? this.world.weather.fx : null;
     ra.overcast = wfx ? wfx.overcast : 0;
     ra.dust = wfx ? wfx.dust : 0;
-    ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;
+    // On WebGPU the scene's own height, which under the upscaled smoothing is a share of the canvas's (pass 1, wave 6).
+    if (GPU.webgpu) ra.bufferHeight = GPU.rt!.taa.sceneSize(this.roomAirBuffer).y;
+    else ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;
     perf.begin(SEC.roomAir);
     this.roomAir.update(ra);
     perf.end(SEC.roomAir);
@@ -24627,6 +24650,8 @@ class App {
     this.feedClouds();
     // With the effects on, the passes draw into their target and the picture goes out through them.
     const postfx = this.postfx;
+    // On WebGPU, where the edge smoothing draws, the camera nudged by a fraction of a pixel for the scene's passes (pass 1, wave 6).
+    if (GPU.webgpu && postfx) GPU.rt!.taa.begin(cam, postfx);
     postfx?.begin();
     perf.begin(SEC.portals);
     this.portals.render(this.scene, cam, view, this.world.buildings);
@@ -24734,6 +24759,8 @@ class App {
       postfx.end(f);
       perf.passEnd(PASS.post);
     }
+    // On WebGPU the camera put back exactly as the game set it, before anything reads it again (pass 1, wave 6).
+    if (GPU.webgpu) GPU.rt!.taa.end();
     if (GPU.webgpu) this.frameCalls = GPU.rt!.frameDraws();
     else this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
@@ -24921,6 +24948,54 @@ class App {
     if (!GPU.webgpu) return;
     this.fxRemake = true;
     this.queueEffects();
+  }
+
+  /**
+   * The quality slider moved to a tier (the GPU port's pass 1, wave 6, `src/ui/qualityTiers.ts`): every setting of its row that
+   * differs is written and saved at once, so the page drawn again at once shows them, and is taken in behind the Effects switch's
+   * notice (`tierCurtain`), one tier after another. WebGPU's alone, whose row the slider is.
+   */
+  private applyQualityTier(tier: TierName): void {
+    if (!GPU.webgpu) return;
+    const values = tierValues(tier, screenScale()) as Record<string, unknown>;
+    const moved: (keyof Settings)[] = [];
+    for (const k of TIER_KEYS) {
+      if (!(k in values) || this.settings[k] === values[k]) continue;
+      (this.settings as unknown as Record<string, unknown>)[k] = values[k];
+      moved.push(k);
+    }
+    if (!moved.length) return;
+    saveSettings(this.settings);
+    this.tierQueue = this.tierQueue.then(() => this.tierCurtain(TIER_LABELS[tier], moved)).catch((err) => console.warn('quality tier', err));
+  }
+
+  /**
+   * A tier's settings applied behind the Effects switch's curtain: the notice put up and painted first, every setting moved applied
+   * as its own row applies it (the effects keys go to the chain on a microtask, which is waited out, a switch it starts with it),
+   * and then, in a world, the switch's own sweep over every material in the scene for the target drawn now, so whatever the tier
+   * stands or shows (the trees further, more people, the occlusion, another size) is made ready before the notice goes.
+   */
+  private async tierCurtain(label: string, moved: readonly (keyof Settings)[]): Promise<void> {
+    const words = `Quality: ${label}`;
+    this.notice.set(`${words}: preparing shaders`);
+    // The notice on the screen before anything starts, as the Effects switch waits (two frames, or a timer in a hidden tab).
+    await new Promise<void>((done) => {
+      const late = setTimeout(done, 100);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        clearTimeout(late);
+        done();
+      }));
+    });
+    for (const k of moved) this.applySetting(k);
+    // The effects chain's reconcile runs on the next microtask; whatever it does (a resize, a switch under way) is waited for.
+    await Promise.resolve();
+    while (this.fxQueued || this.fxBusy) await new Promise<void>((done) => setTimeout(done, 50));
+    if (this.inWorld && !this.traveling) {
+      this.notice.set(`${words}: preparing shaders`);
+      await this.world.compileAllAsync((done, total) => this.notice.set(`${words}: shaders for ${done} of ${total} objects${machineAside(compilerVerdict())}`), { target: this.postfx ? this.postfx.compileTarget : null, keepQueue: true });
+    }
+    // Down as the Effects switch takes its own down: the volumetrics' warm keeps its words where it is still going.
+    this.notice.set(this.volWarming || this.wispWarming.size > 0 ? VOL_WARM_NOTICE : null);
   }
 
   /** A setting in the effects registry moved: take all of them in one go on the next microtask. */

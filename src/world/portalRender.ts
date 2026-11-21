@@ -796,7 +796,9 @@ export class PortalRenderer {
       this.visFresh = false;
       return;
     }
-    this.renderer.getDrawingBufferSize(this.bufferSize);
+    // On WebGPU the scene's own pixels, a share of the canvas's under the upscaled edge smoothing (pass 1, wave 6).
+    if (GPU.webgpu) GPU.rt!.taa.sceneSize(this.bufferSize);
+    else this.renderer.getDrawingBufferSize(this.bufferSize);
     const inside = this.camCell.building;
     const n = inside ? 0 : this.selectNear(camera, buildings);
     this.vis.compute(camera, inside, this.camCell.cell, this.near as Building[], n, this.bufferSize.x, this.bufferSize.y);

@@ -208,6 +208,17 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ['src/world/portalRender.ts', 'if (GPU.webgpu) return [this.portalStandIn, this.resetQuad, ...this.gpuDoorwayStandIns()];', 'return [this.portalStandIn, this.resetQuad];'],
     // And the sun the occlusion reads: on WebGPU the WebGPU sun's and its cascades, the WebGL branch the line it had.
     ['src/world/world.ts', 'if (GPU.webgpu && csm && csm.lights.length && this.gpuSun && this.renderer && this.camera) this.gpuSun.fillFx(sky, csm, this.renderer, Math.min(this.camera.far, csm.maxFar) - this.camera.near);', 'else if (csm && csm.lights.length) {'],
+    // Pass 1, wave 6: the edge smoothing's sizes (the scene at the smoothing's share, every reader of its pixels by it) and the
+    // chain's walk in two sizes, each the line it had as the WebGL branch.
+    ['src/core/postfx.ts', 'if (GPU.webgpu) this.sizePassGpu(pass);', 'else pass.setSize(this.sizeV.x, this.sizeV.y, this.settings);'],
+    ['src/core/postfx.ts', 'if (GPU.webgpu) product.setSize(this.inputV.x, this.inputV.y, this.settings);', 'else product.setSize(this.sizeV.x, this.sizeV.y, this.settings);'],
+    ['src/core/postfx.ts', 'if (GPU.webgpu) this.chainGpu(ctx, last, check);', 'else {'],
+    // Wave 6's fixer: the frame's context at the scene's size on WebGPU, and configure's resizes by the scene-size rule there.
+    ['src/core/postfx.ts', 'if (GPU.webgpu) updateContext(ctx, input, this.inputV);', 'else updateContext(ctx, input, this.sizeV);'],
+    ['src/core/postfx.ts', 'if (GPU.webgpu) this.configureSizesGpu(ssao, water, cloudQuality, cloudAmount, air, clouds);', 'else {'],
+    ['src/main.ts', 'if (GPU.webgpu) ra.bufferHeight = GPU.rt!.taa.sceneSize(this.roomAirBuffer).y;', 'else ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;'],
+    ['src/world/portalRender.ts', 'if (GPU.webgpu) GPU.rt!.taa.sceneSize(this.bufferSize);', 'else this.renderer.getDrawingBufferSize(this.bufferSize);'],
+    ['src/world/world.ts', 'if (GPU.webgpu) GPU.rt!.taa.sceneSize(this.rainBuf);', 'else this.renderer?.getDrawingBufferSize(this.rainBuf);'],
     // Pass 1, wave 3: the holds decided on three's own cascades on WebGPU (armed where WebGL decides), and the frame with no
     // world pass told to the holds' own lights there; the WebGL branch of each the line(s) it had.
     ['src/world/world.ts', 'if (GPU.webgpu && this.gpuSun) this.gpuSun.arm(now);', 'else {'],
@@ -389,8 +400,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const l = lines('src/main.ts');
     const back = l.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
     // Step 6 asks for the inline output's live switch (item 5) on the same line, after the carries, the performance step
-    // its draw switches after that, and pass 1's wave 5 the motion output's switch and its view after those.
-    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined) ? rt.tune({ ...o, scene: this.scene })'));
+    // its draw switches after that, pass 1's wave 5 the motion output's switch and its view after those, and wave 6 the edge
+    // smoothing's dials last.
+    const ask = l.findIndex((x) => x.includes('o.carries === true || o.inline !== undefined || o.draw || o.motion !== undefined || o.view !== undefined || o.taa) ? rt.tune({ ...o, scene: this.scene })'));
     ok(back > 0 && ask > back && ask - back < 6, "main.ts: gpu() asks for the carries' check only after its WebGL return");
     const warm = readFileSync(join(SRC, 'core', 'gpu', 'patchWarm.ts'), 'utf8');
     ok(warm.includes("if (o.name === 'flora stand-in' && o.receiveShadow !== true) {"), 'patchWarm.ts: the flora stand-ins are told to receive as the batches do, inside the warm patch');
@@ -504,8 +516,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const gl = m.indexOf("if (!GPU.webgpu) return { renderer: 'WebGL (three WebGLRenderer)', ...how, refused: GPU.refused ?? undefined, note: GPU.refused ? 'WebGPU was asked for and could not start here' : 'WebGPU is not in use: nothing of it was loaded' };");
     const rtAt = m.indexOf('const rt = GPU.rt!;', gl);
     const perfAt = m.findIndex((x) => x.startsWith('if (o?.perf) return rt.perf('));
-    // Pass 1, wave 5's motion switch and view join the same line after the draw switches.
-    const tunedAt = m.findIndex((x) => x.startsWith('const tuned = o && (') && x.includes('|| o.draw || o.motion !== undefined || o.view !== undefined)'));
+    // Pass 1, wave 5's motion switch and view join the same line after the draw switches, and wave 6's smoothing dials after them.
+    const tunedAt = m.findIndex((x) => x.startsWith('const tuned = o && (') && x.includes('|| o.draw || o.motion !== undefined || o.view !== undefined || o.taa)'));
     ok(gl > 0 && rtAt === gl + 1 && perfAt > rtAt && perfAt - rtAt < 4 && tunedAt > perfAt && tunedAt - perfAt < 4, "main.ts: gpu({ perf }) and gpu({ draw }) are read only after the helper's WebGL answer has returned, through the WebGPU runtime");
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
     ok(startText.includes('readDrawSwitches();') && startText.includes('installShadowCull(renderer);') && startText.includes('registerDrawPerfSwitches(registerPerfSwitch);') && startText.includes('draw: drawCostReport(),'), 'start.ts: the WebGPU runtime reads, installs, registers and reports the draw switches');
@@ -721,6 +733,83 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
       ok(l.filter((x) => x.includes('.motion.laid(')).length === 1 && l.includes("import { GPU } from '../core/gpuSwitch.ts';"), `${f}: registered there alone, its file taking the switch`);
     }
     ok(startText.includes('laidMotion(mesh, positions);'), "start.ts: the runtime's laid is the motion output's own");
+  }
+  // Pass 1, wave 6: the edge smoothing (`src/core/gpu/taa/`), reached through the runtime alone. Its sizes and walk in `PostFX`
+  // are WebGPU branches before the lines cf79ca5 had; the camera's nudge is two WebGPU lines round the frame with no WebGL branch;
+  // its row is left out of the Graphics page on WebGL; and the walk's module, which the WebGL boot loads with `PostFX`, imports
+  // nothing but the registry.
+  {
+    for (const f of ['taaJitter.ts', 'taaTune.ts', 'taaGraphs.ts', 'taaPass.ts', 'taaSize.ts']) ok(existsSync(join(SRC, 'core', 'gpu', 'taa', f)), `wave 6's ${f} is under src/core/gpu/taa/`);
+    const px = lines('src/core/postfx.ts');
+    // The WebGL walk stands whole inside the else after the WebGPU line, as cf79ca5 had it.
+    const walk = px.indexOf('if (GPU.webgpu) this.chainGpu(ctx, last, check);');
+    const was = ['let read: THREE.WebGLRenderTarget = this.sceneTarget;', 'let write = this.bufferA;', 'this.lastToScreen = last >= 0 ? this.defs[last].id : null;', 'for (let i = 0; i <= last; i++) {', 'if (!this.on[i]) continue;', 'const pass = this.passes[i];', 'const toScreen = i === last;', 'pass.prepare(ctx);', 'this.timer.begin(pass.timerLabel);', 'const wrote = pass.render(ctx, read, toScreen ? null : write);', 'this.timer.end(pass.timerLabel);', 'if (check) recordError(r, this.lastCheck!, pass.timerLabel);', 'if (wrote && !toScreen) {', 'read = write;', 'write = read === this.bufferA ? this.bufferB : this.bufferA;', '}', '}', '}', 'r.setRenderTarget(null);'];
+    ok(walk > 0 && px[walk + 1] === 'else {' && was.every((x, i) => px[walk + 2 + i] === x), "postfx.ts: the WebGL walk is cf79ca5's, whole, in the else after the WebGPU line");
+    const sizes = px.indexOf('private setSizeAll(w: number, h: number): void {');
+    const sizedWas = ['this.sceneTarget.setSize(w, h);', 'this.bufferA.setSize(w, h);', 'this.bufferB.setSize(w, h);', 'for (const p of this.productList) p.setSize(w, h, this.settings);', 'for (const p of this.passes) p.setSize(w, h, this.settings);', 'this.ctx.width = w;', 'this.ctx.height = h;', '}'];
+    ok(sizes > 0 && px[sizes + 2] === 'if (GPU.webgpu) {' && px[sizes + 3] === 'this.setSizeGpu(w, h);' && px[sizes + 4] === 'return;' && px[sizes + 5] === '}' && sizedWas.every((x, i) => px[sizes + 6 + i] === x), "postfx.ts: setSizeAll is cf79ca5's after a WebGPU branch that returns");
+    ok(px.includes('if (GPU.webgpu) GPU.rt!.chain.inputSize(w, h, this.settings, this.inputV);') && px.includes('const smoothing = GPU.webgpu ? this.settings.smoothing : 0;') && px.includes('if (GPU.webgpu && this.settings.smoothing !== smoothing) this.setSize();') && px.includes('if (GPU.webgpu) this.disposeLowGpu();'), "postfx.ts: the scene's size, the mode's resize and the scene's own buffers are WebGPU's alone");
+    // Wave 6's fixer: configure's resizes stand whole in the else after the WebGPU line, as cf79ca5 had them.
+    const conf = px.indexOf('if (GPU.webgpu) this.configureSizesGpu(ssao, water, cloudQuality, cloudAmount, air, clouds);');
+    const confWas = [
+      "if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);",
+      "if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);",
+      'if (this.settings.volumetricCloudQuality !== cloudQuality || this.settings.volumetricCloudAmount !== cloudAmount) {',
+      "this.byPassId.get('volumetricClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);",
+      '}',
+      '// The volume takes its quality and strength from `setSize` too, never by reading the settings in a frame: its target',
+      '// is resized only when its share of the screen moved, and the rest are numbers it keeps.',
+      'if (',
+      'this.settings.airVolumeResolution !== air[0] ||',
+      'this.settings.airVolumeAmount !== air[1] ||',
+      'this.settings.airVolumeSteps !== air[2] ||',
+      'this.settings.airVolumeHistory !== air[3] ||',
+      'this.settings.airVolumeShadows !== air[4] ||',
+      'this.settings.volumetrics !== air[5]',
+      ') {',
+      "this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);",
+      '}',
+      '// The clouds (the seventh wave) likewise: their target resized only when their share of the screen moved.',
+      'if (',
+      'this.settings.volCloudsResolution !== clouds[0] ||',
+      'this.settings.volCloudsAmount !== clouds[1] ||',
+      'this.settings.volCloudsSteps !== clouds[2] ||',
+      'this.settings.volCloudsLight !== clouds[3] ||',
+      'this.settings.volCloudsHistory !== clouds[4] ||',
+      'this.settings.volumetrics !== clouds[5]',
+      ') {',
+      "this.byPassId.get('airClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);",
+      '}',
+      '}',
+      '}',
+    ];
+    ok(conf > 0 && px[conf + 1] === 'else {' && confWas.every((x, i) => px[conf + 2 + i] === x), "postfx.ts: configure's WebGL resizes are cf79ca5's, whole, in the else after the WebGPU line");
+    ok(px.filter((x) => x.includes('this.configureSizesGpu(')).length === 1 && px.filter((x) => x.includes('this.resizePassGpu(')).length === 5, "postfx.ts: configure's WebGPU resizes are reached from that line alone");
+    const walkText = readFileSync(join(SRC, 'core', 'fx', 'chainWalkGpu.ts'), 'utf8');
+    const walkImports = [...walkText.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]);
+    ok(walkImports.length === 1 && walkImports[0] === '../fxRegistry.ts', `chainWalkGpu.ts, which the WebGL boot loads with PostFX, imports the registry alone (${walkImports.join(', ')})`);
+    const m = lines('src/main.ts');
+    const begin = m.indexOf('if (GPU.webgpu && postfx) GPU.rt!.taa.begin(cam, postfx);');
+    ok(begin > 0 && m[begin - 2] === 'const postfx = this.postfx;' && m[begin + 1] === 'postfx?.begin();', "main.ts: the camera is nudged on WebGPU alone, between the lines cf79ca5 had, before the chain's target is set");
+    const ends = m.flatMap((x, i) => (x === 'if (GPU.webgpu) GPU.rt!.taa.end();' ? [i] : []));
+    ok(ends.length === 2 && m[ends[0] - 2] === 'this.portals.actors.restoreFrame();' && m[ends[1] - 3] === 'perf.passEnd(PASS.post);' && m[ends[1] - 2] === '}', "main.ts: put back on WebGPU alone after the chain, and in the frame's finally");
+    ok(m.filter((x) => x.includes('.taa.begin(') || x.includes('.taa.end(')).length === 3, 'main.ts: nudged and put back there alone');
+    ok(m.includes("const size = GPU.webgpu ? GPU.rt!.taa.sceneSize(new THREE.Vector2()) : this.renderer.getDrawingBufferSize(new THREE.Vector2());"), "main.ts: the console's rectangles in the scene's pixels on WebGPU, the drawing buffer's on WebGL as before");
+    ok(m.some((x) => x.includes('?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,')), "main.ts: the smoothing's dials asked on WebGPU alone");
+    ok(m.includes("if (!GPU.webgpu && key === 'smoothing') return { hide: true };"), 'main.ts: the Smoothing row is left out on WebGL');
+    ok(lines('src/ui/menu.ts').includes("if (state?.hide) return '';"), 'menu.ts: a row the game says to hide is left out');
+    // Wave 6's quality tiers (`src/ui/qualityTiers.ts`): a new player started on High, the share handed to the smoothing, the
+    // slider's tier and its curtain, each on WebGPU alone; the settings' read on WebGL the expression cf79ca5 had.
+    ok(m.includes('private readonly settings: Settings = GPU.webgpu ? startOnTier(loadSettings(), DEFAULT_SETTINGS, screenScale(), isNewPlayer(settingsSaved(), loadCharacters().length), saveSettings) : loadSettings();'), "main.ts: a new player started on High on WebGPU alone, WebGL's settings read as cf79ca5 read them");
+    // Wave 6's fixer: whether settings are saved is asked from that WebGPU branch alone.
+    ok(m.filter((x) => x.includes('settingsSaved(')).length === 1 && lines('src/core/settings.ts').includes('export function settingsSaved(): boolean {'), 'main.ts: settingsSaved is asked on WebGPU alone');
+    ok(m.filter((x) => x.includes('.taa.setShare(')).length === 2 && m.filter((x) => x === 'if (GPU.webgpu) GPU.rt!.taa.setShare(S.smoothingShare);').length === 2, 'main.ts: the share handed to the smoothing on WebGPU alone, at load and in applySetting');
+    ok(m.includes('if (GPU.webgpu) this.menu.onTier = (tier) => this.applyQualityTier(tier);') && m.filter((x) => x.includes('this.menu.onTier')).length === 1, "main.ts: the slider's tier goes to the game on WebGPU alone");
+    const tier = m.indexOf('private applyQualityTier(tier: TierName): void {');
+    ok(tier > 0 && m[tier + 1] === 'if (!GPU.webgpu) return;' && m.filter((x) => x.includes('this.applyQualityTier(')).length === 1, 'main.ts: the tier and its curtain do nothing on WebGL, and are reached from the WebGPU hook alone');
+    ok(m.filter((x) => x.includes('this.tierCurtain(')).length === 1, "main.ts: the tier's curtain is reached from applyQualityTier alone");
+    const mt = lines('src/ui/menu.ts');
+    ok(mt.includes("const state = k.kind === 'preset' ? (k.slider && this.knobState(k.key)?.hide ? { hide: true } : null) : this.knobState(k.key);"), "menu.ts: the slider stands only where the game does not hide the Smoothing row's key (left off on WebGL)");
   }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');

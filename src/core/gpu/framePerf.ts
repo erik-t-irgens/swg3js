@@ -463,7 +463,9 @@ export async function gpuFramePerf(renderer: Any, deps: FramePerfDeps, o: FrameP
       const passes = frames.map((f) => f.passes).sort((a, b) => a - b);
       out.gpu = ms.length
         ? {
-            renderMs: { n: ms.length, p50: r2(ms[ms.length >> 1], 3), p90: r2(ms[Math.floor(ms.length * 0.9)], 3) },
+            // The 95th percentile beside them (pass 1, wave 6: each quality tier's card budget is held at p95; with fewer than twenty
+            // frames timed it is the slowest).
+            renderMs: { n: ms.length, p50: r2(ms[ms.length >> 1], 3), p90: r2(ms[Math.floor(ms.length * 0.9)], 3), p95: r2(ms[Math.min(ms.length - 1, Math.floor(ms.length * 0.95))], 3) },
             sections,
             passesTimed: passes[passes.length >> 1],
             passesAFrame: counting ? { begun: r2(begun / n, 1), timed: r2(timed / n, 1), untimed: [...untimed].map(([k, v]) => `${k} ${r2(v / n, 1)}`) } : null,

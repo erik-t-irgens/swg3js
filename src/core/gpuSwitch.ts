@@ -20,6 +20,7 @@ import type { PostFX } from './postfx.ts';
 import type { FxSettings } from './fxRegistry.ts';
 import type { FxInstallDeps } from './fx/install.ts';
 import type { ShadowHold, ShadowMovers } from '../world/shadowCadence.ts';
+import type { DialSet } from '../ui/dials.ts';
 
 /** How the switch was read. */
 export type RendererChoice = 'webgl' | 'webgpu';
@@ -124,6 +125,11 @@ export interface GpuChain {
   spine(fx: PostFX, width: number, height: number, settings: FxSettings): void;
   /** Every ported effect beyond the spine (`installEffects`): the colour grade. */
   install(fx: PostFX, deps: FxInstallDeps): void;
+  /**
+   * The size the scene is drawn at for a canvas `width` by `height` (pass 1, wave 6): the canvas's, or under the upscaled
+   * smoothing its share; written into `out`. `PostFX` sizes its scene target, its products and every pass before the smoothing by it.
+   */
+  inputSize(width: number, height: number, settings: FxSettings, out: THREE.Vector2): THREE.Vector2;
   /** Whether a Graphics page row moves the picture on WebGPU: the Effects setting and each ported pass's own rows. */
   knobPorted(key: string): boolean;
   /** What a row says where its pass, or the chain, was left out at load; null where it is simply not on WebGPU yet. */
@@ -183,6 +189,29 @@ export interface GpuMotion {
   laid(mesh: THREE.Mesh, positions: Float32Array): void;
 }
 
+/**
+ * The edge smoothing on WebGPU (`src/core/gpu/taa/`, pass 1, wave 6): the camera nudged by a fraction of a pixel for the scene's
+ * passes of a frame the smoothing draws, and the scene's size for whatever reads its pixels. The game calls these on WebGPU alone.
+ */
+export interface GpuTaa {
+  /**
+   * Before the scene's passes (`main.ts`'s frame, before `PostFX.begin`): where `fx`'s smoothing draws this frame, the chain resized
+   * first if its share moved, and the camera nudged for the frame; nothing otherwise.
+   */
+  begin(camera: THREE.PerspectiveCamera, fx: PostFX): void;
+  /** After the chain (and in the frame's `finally`): the camera put back exactly as the game set it, if it was nudged. */
+  end(): void;
+  /** The scene's size in pixels as the chain draws it now (the canvas's, or its share under the upscaled smoothing), into `out`. */
+  sceneSize(out: THREE.Vector2): THREE.Vector2;
+  /** The smoothing's dials for the debug menu, under the `gpu` helper; null for any other helper. */
+  dials(helper: string): DialSet | null;
+  /**
+   * The upscaled smoothing's share of the screen set from the setting (`Settings.smoothingShare`, the quality tiers' lever): the
+   * `share` dial's own number, held to its bounds; the chain is sized again before its next scene where it draws upscaled.
+   */
+  setShare(share: number): void;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** The morph bake (pass 1, wave 4). */
@@ -191,6 +220,8 @@ export interface GpuRuntime {
   readonly bones: GpuBones;
   /** The motion output (pass 1, wave 5). */
   readonly motion: GpuMotion;
+  /** The edge smoothing (pass 1, wave 6). */
+  readonly taa: GpuTaa;
   /**
    * The person warm's stand-ins made off real bodies (pass 1, wave 4, `gpu/bodyStandIns.ts`): every way of drawing a body met
    * so far, `scene` learnt from first; null with the switch off, when the warm takes `personKeys.ts`'s own.
@@ -285,6 +316,12 @@ export interface GpuSunOptions {
   mapSize: number;
   lightMargin: number;
   splits: (amount: number, near: number, far: number, target: number[]) => void;
+  /**
+   * The cascades' maps made again at another size in play (pass 1, wave 6: the Shadow resolution row, the quality tiers): told
+   * after the maps are resized and before anything draws, so whatever bound the old maps outside three's own refresh (the region
+   * tiers' bundles) is recorded again. The runtime sets it.
+   */
+  resized?: () => void;
 }
 
 export interface GpuSun {

@@ -182,6 +182,19 @@ export class TierBundles implements GpuBundles {
     this.stats.pokes++;
   }
 
+  /**
+   * The sun's cascades made again at another size (pass 1, wave 6, `sun.ts`'s `resized`): a bundle replays the bind groups it was
+   * recorded with, so every bundle taken is recorded again at its next draw, its objects refreshed by three with the new maps.
+   */
+  relight(): void {
+    for (const rec of this.recs) {
+      if (!rec.taken) continue;
+      rec.group.needsUpdate = true;
+      rec.again++;
+      this.stats.recordedAgain++;
+    }
+  }
+
   setOn(on: boolean): void {
     BUNDLE_TUNE.on = on;
     const want = on && STENCIL_PATCH.on && STENCIL_PATCH.applied;

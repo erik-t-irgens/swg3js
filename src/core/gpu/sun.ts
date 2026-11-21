@@ -90,6 +90,23 @@ export function makeSun(renderer: Any, scene: THREE.Scene, camera: THREE.Perspec
         if (node.camera) node.updateFrustums();
       }
       const own = node.lights as { shadow: THREE.DirectionalLightShadow }[];
+      // The maps' size moved in play (pass 1, wave 6: the Shadow resolution row, the quality tiers). Three makes a cascade's map
+      // again at its next draw and destroys the old textures, and a render object keeps the bind groups it was refreshed with:
+      // three refreshes every lit one in full only where the size its observer reads moved, which is the sun light's own
+      // (`NodeMaterialObserver.getLightsData`), never a cascade's copy, so every receiver went on binding the destroyed maps (a
+      // GPU error a draw, the frame's submits refused). So the maps are made again here, before anything draws this frame, the
+      // sun's own size is moved with them for three's observer, and the bundles are told (`resized`).
+      const size = first ? first.shadow.mapSize.x : light.shadow.mapSize.x;
+      if (light.shadow.mapSize.x !== size) {
+        light.shadow.mapSize.set(size, first!.shadow.mapSize.y);
+        const nodes = (node._shadowNodes ?? []) as { shadowMap?: { setSize(w: number, h: number, d?: number): void; depth?: number } | null }[];
+        for (let i = 0; i < own.length && i < lights.length; i++) {
+          own[i].shadow.mapSize.copy(lights[i].shadow.mapSize);
+          const map = nodes[i]?.shadowMap;
+          if (map) map.setSize(own[i].shadow.mapSize.x, own[i].shadow.mapSize.y, map.depth);
+        }
+        opts.resized?.();
+      }
       for (let i = 0; i < own.length && i < lights.length; i++) {
         const from = lights[i].shadow;
         const to = own[i].shadow;

@@ -38,6 +38,9 @@ import { BLUR_DIRECTIONS, bloomGraphs, gradeGraph, motionViewGraph, outputGraph,
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { GpuDebugViewPass, GpuLinearDepthHalf, GpuNormalsHalf, GpuSsaoPass, gpuSsaoHost } from './gpuSsaoPass.ts';
 import { markMotionTarget, motionTextureOf, motionWanted, MOTION_VIEW } from './motion.ts';
+import { GpuTaaPass, taaPassNow } from './taa/taaPass.ts';
+import { SCENE_SIZE, sceneSizeFor } from './taa/taaSize.ts';
+import { JITTER } from './taa/taaJitter.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -351,6 +354,18 @@ export class GpuOutputPass extends OutputFxPass {
   }
 }
 
+/** What the chain's report says of its edges (pass 1, wave 6): the smoothing's mode and its state, or why it does not draw. */
+function taaEdges(): Record<string, unknown> {
+  const p = taaPassNow();
+  return {
+    how: "with the effects on, the edge smoothing over frames (src/core/gpu/taa/: the camera nudged by a Halton(2, 3) fraction of a pixel round the scene's passes, each pixel's history reprojected by the motion buffer, held by a linear depth test and the neighbourhood's spread, the reactive mark raising the new frame's share); with the effects off three's canvas multisampled 4x as before",
+    switch: "the Graphics page's Smoothing row (Off, Full, Upscaled); the dials __debug.gpu({ taa: { share, current, currentUp, reactive, depth, edge } }) and the debug menu's sliders when gpu is picked",
+    scene: { ...SCENE_SIZE },
+    pass: p ? p.report() : 'no chain: the Effects setting is off',
+    jitterNow: JITTER.on,
+  };
+}
+
 // ---------------------------------------------------------------- what the runtime hands the game
 
 /**
@@ -360,6 +375,8 @@ export class GpuOutputPass extends OutputFxPass {
 export const CHAIN_PASSES: ReadonlyMap<FxPassId, keyof typeof LOOKS_AT_LOAD | null> = new Map<FxPassId, keyof typeof LOOKS_AT_LOAD | null>([
   ['sanitize', null],
   ['ssao', 'ssao'],
+  // Pass 1, wave 6: the edge smoothing (`taa/`), the spine's own once the motion buffer is: no switch at load of its own.
+  ['taa', null],
   ['bloom', 'bloom'],
   ['colorGrade', 'grade'],
   ['output', null],
@@ -379,6 +396,7 @@ export const CHAIN_BINDS = {
   bloom: 'the bright pass 1, each of the ten blurs 1 (one binding however many taps: 11 to 43), the composite 5, the blend 1: each texture with its sampler',
   ssao: "as the WGSL declares them (read off `renderer.debug.getShaderAsync` at 1600 by 900, step 6's fixer), at half resolution (the default) and at full: the GTAO 6 textures at half (the half distance, the half normals, the region, the three cascades' maps) and 5 at full (the scene's depth, the region, the three cascades' maps), with 3 samplers declared beside the cascades' maps in both and never sampled (the maps are fetched and compared by hand: three 0.187 declares no comparison sampler for a node texture's compare); the blur 2 at either (the occlusion and the half distance at half, the occlusion and the depth at full), no sampler; the apply 6 textures at half (the picture, the depth, the occlusion, the half distance, the half normals, the region's green for the water) and 4 at full (the picture, the depth, the occlusion, the region), 1 sampler (the picture's); the region read 0 (a stencil test), the water's coverage 0, the probe 2 (the depth, the occlusion), the debug view 3 and 2 samplers; the products: the half distance 1 (the depth), the half normals 1 (the half distance); every graph under 16 of each",
   colorGrade: '1 texture (the chain buffer) and its sampler',
+  taa: "each resolve 5 textures (this frame's picture, the history's colour and its distance, the scene's depth, the motion buffer), the history's two with a sampler (read at level 0), the others loaded; then the colour copied into the chain buffer",
   output: "1 texture (the chain buffer) and its sampler, drawn straight onto the canvas under the inline output (the start); with it left out, three's own output pass 1 more (its frame-buffer target)",
 };
 
@@ -410,6 +428,8 @@ export function chainRuntime(renderer: Any): GpuChain {
       s.fx = fx;
       LIVE.push(fx);
       fx.registerPass(s);
+      // Pass 1, wave 6: the edge smoothing, after the occlusion and before the bloom (the registry's place), over this chain's scene target.
+      fx.registerPass(new GpuTaaPass(renderer, fx.sceneTarget, settings));
       if (CHAIN_PORTED.has('bloom')) fx.registerPass(new GpuBloomPass(width, height, settings.bloomStrength));
       fx.registerPass(new GpuOutputPass());
     },
@@ -417,6 +437,10 @@ export function chainRuntime(renderer: Any): GpuChain {
       // The occlusion reads the frame's lights from the context, as on WebGL, and the water's own twins for its coverage.
       if (CHAIN_PORTED.has('ssao')) fx.registerPass(new GpuSsaoPass(gpuSsaoHost(fx), deps.water ?? null, renderer));
       if (CHAIN_PORTED.has('colorGrade')) fx.registerPass(new GpuColorGradePass());
+    },
+    inputSize(width: number, height: number, settings: FxSettings, out: THREE.Vector2): THREE.Vector2 {
+      // The upscaled smoothing draws the scene at its share of the canvas, only where the smoothing can draw (a motion buffer).
+      return sceneSizeFor(width, height, Number(settings.smoothing), motionWanted(), out);
     },
     knobPorted(key: string): boolean {
       if (key === 'effects') return atLoad;
@@ -457,7 +481,7 @@ export function chainRuntime(renderer: Any): GpuChain {
         binds: { ...CHAIN_BINDS },
         chainsLive: LIVE.length,
         drawing: d ? { effects: true, size: d.size, lastToScreen: d.lastPassToScreen, memoryMB: d.memoryMB, passes: d.passes.map((p) => ({ id: p.id, drew: p.drewLastFrame, ...(p.why ? { why: p.why } : {}) })) } : 'no chain: the Effects setting is off, the scene straight to the canvas with three\'s tone mapping at the game\'s exposure',
-        edges: 'no edge smoothing with the effects on (FXAA is not ported; the scene target is not multisampled): the edges are stepped, where with the effects off three\'s frame-buffer target is multisampled 4x; multisampling the scene target is the cheap option for the design session',
+        edges: taaEdges(),
       };
     },
   };

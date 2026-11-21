@@ -37,6 +37,7 @@ import { BloomPass, DebugViewPass, FxaaPass, GodRaysPass, MotionBlurPass, Output
 import { FxTimer, type FxTimingReport } from './fx/timer';
 import { resolveLinks } from './programQueue.ts';
 import { GPU } from './gpuSwitch.ts';
+import { passAtSceneSize, walkChainGpu } from './fx/chainWalkGpu.ts';
 
 export type { SunInfo, FxFrameInput, FxFrameContext, FxSun } from './fx/context';
 
@@ -137,6 +138,13 @@ export class PostFX {
   private readonly sizeV = new THREE.Vector2();
   private readonly bufferA: THREE.WebGLRenderTarget;
   private readonly bufferB: THREE.WebGLRenderTarget;
+  /**
+   * On WebGPU (pass 1, wave 6): the scene's size, the canvas's or under the upscaled smoothing its share, and the two buffers the
+   * passes before the smoothing draw in at it (the canvas's two themselves where the sizes agree). Never read on WebGL.
+   */
+  private readonly inputV = new THREE.Vector2();
+  private lowA: THREE.WebGLRenderTarget | null = null;
+  private lowB: THREE.WebGLRenderTarget | null = null;
   private readonly passes: FxPass[] = [];
   private readonly defs: FxPassDef[] = [];
   private readonly byPassId = new Map<FxPassId, FxPass>();
@@ -161,6 +169,8 @@ export class PostFX {
     this.sizeV.set(Math.max(1, this.sizeV.x), Math.max(1, this.sizeV.y));
     const w = this.sizeV.x;
     const h = this.sizeV.y;
+    // On WebGPU (pass 1, wave 6) the scene's size, before anything is registered at it.
+    if (GPU.webgpu) GPU.rt!.chain.inputSize(w, h, this.settings, this.inputV);
     // The frame's own target: a stencil for the portals, a depth buffer the passes can read as a
     // texture, and half floats for light brighter than white. Not multisampled (R12); the edges
     // are smoothed at the end instead.
@@ -229,7 +239,9 @@ export class PostFX {
     this.on.length = this.passes.length;
     this.missing.length = this.passes.length;
     this.byPassId.set(pass.id, pass);
-    pass.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    // On WebGPU (pass 1, wave 6) a pass before the edge smoothing at the scene's size, the rest at the canvas's.
+    if (GPU.webgpu) this.sizePassGpu(pass);
+    else pass.setSize(this.sizeV.x, this.sizeV.y, this.settings);
   }
 
   registerProduct(product: FxProduct): void {
@@ -247,7 +259,9 @@ export class PostFX {
     this.productList.splice(at, 0, product);
     this.productDefs.splice(at, 0, def);
     this.byProductId.set(product.id, product);
-    product.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    // On WebGPU (pass 1, wave 6) every product at the scene's size, which its depth is.
+    if (GPU.webgpu) product.setSize(this.inputV.x, this.inputV.y, this.settings);
+    else product.setSize(this.sizeV.x, this.sizeV.y, this.settings);
     this.checkNoDepthSampling(product);
   }
 
@@ -299,38 +313,68 @@ export class PostFX {
     // on either of the two and not on the resolution alone.
     const cloudQuality = this.settings.volumetricCloudQuality;
     const cloudAmount = this.settings.volumetricCloudAmount;
+    // On WebGPU (pass 1, wave 6) the edge smoothing's mode, which sizes the scene.
+    const smoothing = GPU.webgpu ? this.settings.smoothing : 0;
     const s0 = this.settings;
     const air = [s0.airVolumeResolution, s0.airVolumeAmount, s0.airVolumeSteps, s0.airVolumeHistory, s0.airVolumeShadows, s0.volumetrics];
     const clouds = [s0.volCloudsResolution, s0.volCloudsAmount, s0.volCloudsSteps, s0.volCloudsLight, s0.volCloudsHistory, s0.volumetrics];
     Object.assign(this.settings, settings);
-    if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
-    if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
-    if (this.settings.volumetricCloudQuality !== cloudQuality || this.settings.volumetricCloudAmount !== cloudAmount) {
-      this.byPassId.get('volumetricClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+    if (GPU.webgpu && this.settings.smoothing !== smoothing) this.setSize();
+    // On WebGPU (pass 1, wave 6's fixer) the same resizes by the scene-size rule every sizing there keeps (`sizePassGpu`): a pass
+    // before the edge smoothing at the scene's size, so under Upscaled the occlusion's region, which shares the scene's depth, is
+    // never made the canvas's (every frame indoors was refused). The WebGL lines below are the ones cf79ca5 had.
+    if (GPU.webgpu) this.configureSizesGpu(ssao, water, cloudQuality, cloudAmount, air, clouds);
+    else {
+      if (this.settings.ssaoResolution !== ssao) this.byPassId.get('ssao')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+      if (this.settings.waterReflectionResolution !== water) this.byPassId.get('waterReflections')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+      if (this.settings.volumetricCloudQuality !== cloudQuality || this.settings.volumetricCloudAmount !== cloudAmount) {
+        this.byPassId.get('volumetricClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+      }
+      // The volume takes its quality and strength from `setSize` too, never by reading the settings in a frame: its target
+      // is resized only when its share of the screen moved, and the rest are numbers it keeps.
+      if (
+        this.settings.airVolumeResolution !== air[0] ||
+        this.settings.airVolumeAmount !== air[1] ||
+        this.settings.airVolumeSteps !== air[2] ||
+        this.settings.airVolumeHistory !== air[3] ||
+        this.settings.airVolumeShadows !== air[4] ||
+        this.settings.volumetrics !== air[5]
+      ) {
+        this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+      }
+      // The clouds (the seventh wave) likewise: their target resized only when their share of the screen moved.
+      if (
+        this.settings.volCloudsResolution !== clouds[0] ||
+        this.settings.volCloudsAmount !== clouds[1] ||
+        this.settings.volCloudsSteps !== clouds[2] ||
+        this.settings.volCloudsLight !== clouds[3] ||
+        this.settings.volCloudsHistory !== clouds[4] ||
+        this.settings.volumetrics !== clouds[5]
+      ) {
+        this.byPassId.get('airClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+      }
     }
-    // The volume takes its quality and strength from `setSize` too, never by reading the settings in a frame: its target
-    // is resized only when its share of the screen moved, and the rest are numbers it keeps.
-    if (
-      this.settings.airVolumeResolution !== air[0] ||
-      this.settings.airVolumeAmount !== air[1] ||
-      this.settings.airVolumeSteps !== air[2] ||
-      this.settings.airVolumeHistory !== air[3] ||
-      this.settings.airVolumeShadows !== air[4] ||
-      this.settings.volumetrics !== air[5]
-    ) {
-      this.byPassId.get('airVolume')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
-    }
-    // The clouds (the seventh wave) likewise: their target resized only when their share of the screen moved.
-    if (
-      this.settings.volCloudsResolution !== clouds[0] ||
-      this.settings.volCloudsAmount !== clouds[1] ||
-      this.settings.volCloudsSteps !== clouds[2] ||
-      this.settings.volCloudsLight !== clouds[3] ||
-      this.settings.volCloudsHistory !== clouds[4] ||
-      this.settings.volumetrics !== clouds[5]
-    ) {
-      this.byPassId.get('airClouds')?.setSize(this.sizeV.x, this.sizeV.y, this.settings);
-    }
+  }
+
+  /**
+   * `configure`'s resizes on WebGPU (pass 1, wave 6's fixer): the settings that resize a pass, as the WebGL lines read them, each
+   * pass sized again by the scene-size rule (`sizePassGpu`).
+   */
+  private configureSizesGpu(ssao: number, water: number, cloudQuality: unknown, cloudAmount: unknown, air: readonly unknown[], clouds: readonly unknown[]): void {
+    const s = this.settings;
+    if (s.ssaoResolution !== ssao) this.resizePassGpu('ssao');
+    if (s.waterReflectionResolution !== water) this.resizePassGpu('waterReflections');
+    if (s.volumetricCloudQuality !== cloudQuality || s.volumetricCloudAmount !== cloudAmount) this.resizePassGpu('volumetricClouds');
+    const airMoved = s.airVolumeResolution !== air[0] || s.airVolumeAmount !== air[1] || s.airVolumeSteps !== air[2] || s.airVolumeHistory !== air[3] || s.airVolumeShadows !== air[4] || s.volumetrics !== air[5];
+    if (airMoved) this.resizePassGpu('airVolume');
+    const cloudsMoved = s.volCloudsResolution !== clouds[0] || s.volCloudsAmount !== clouds[1] || s.volCloudsSteps !== clouds[2] || s.volCloudsLight !== clouds[3] || s.volCloudsHistory !== clouds[4] || s.volumetrics !== clouds[5];
+    if (cloudsMoved) this.resizePassGpu('airClouds');
+  }
+
+  /** A registered pass sized again on WebGPU by the scene-size rule (pass 1, wave 6's fixer); nothing where it is not on this chain. */
+  private resizePassGpu(id: FxPassId): void {
+    const p = this.byPassId.get(id);
+    if (p) this.sizePassGpu(p);
   }
 
   /**
@@ -385,7 +429,11 @@ export class PostFX {
       this.wantScan = false;
       this.scan(this.sceneTarget);
     }
-    updateContext(ctx, input, this.sizeV);
+    // On WebGPU (pass 1, wave 6's fixer) the frame's context at the scene's size, a share of the canvas's under the upscaled
+    // smoothing: the passes before the smoothing read the scene's pixels by it (the occlusion's full-size texels, its probe's middle);
+    // the smoothing and the passes after it read their own targets' sizes. The WebGL line is the one cf79ca5 had.
+    if (GPU.webgpu) updateContext(ctx, input, this.inputV);
+    else updateContext(ctx, input, this.sizeV);
     const check = this.checkErrors;
     if (check) {
       this.lastCheck = [];
@@ -444,21 +492,25 @@ export class PostFX {
     }
 
     // 3. The chain. Only the first pass ever sees the scene target, and nothing ever writes it.
-    let read: THREE.WebGLRenderTarget = this.sceneTarget;
-    let write = this.bufferA;
-    this.lastToScreen = last >= 0 ? this.defs[last].id : null;
-    for (let i = 0; i <= last; i++) {
-      if (!this.on[i]) continue;
-      const pass = this.passes[i];
-      const toScreen = i === last;
-      pass.prepare(ctx);
-      this.timer.begin(pass.timerLabel);
-      const wrote = pass.render(ctx, read, toScreen ? null : write);
-      this.timer.end(pass.timerLabel);
-      if (check) recordError(r, this.lastCheck!, pass.timerLabel);
-      if (wrote && !toScreen) {
-        read = write;
-        write = read === this.bufferA ? this.bufferB : this.bufferA;
+    // On WebGPU (pass 1, wave 6) the passes before the edge smoothing draw in the scene's size and the rest in the canvas's.
+    if (GPU.webgpu) this.chainGpu(ctx, last, check);
+    else {
+      let read: THREE.WebGLRenderTarget = this.sceneTarget;
+      let write = this.bufferA;
+      this.lastToScreen = last >= 0 ? this.defs[last].id : null;
+      for (let i = 0; i <= last; i++) {
+        if (!this.on[i]) continue;
+        const pass = this.passes[i];
+        const toScreen = i === last;
+        pass.prepare(ctx);
+        this.timer.begin(pass.timerLabel);
+        const wrote = pass.render(ctx, read, toScreen ? null : write);
+        this.timer.end(pass.timerLabel);
+        if (check) recordError(r, this.lastCheck!, pass.timerLabel);
+        if (wrote && !toScreen) {
+          read = write;
+          write = read === this.bufferA ? this.bufferB : this.bufferA;
+        }
       }
     }
     r.setRenderTarget(null);
@@ -650,6 +702,8 @@ export class PostFX {
     if (r.getRenderTarget() !== null) r.setRenderTarget(null);
     for (const p of this.productList) p.dispose();
     for (const p of this.passes) p.dispose();
+    // On WebGPU (pass 1, wave 6) the scene's own two buffers, where they are not the canvas's.
+    if (GPU.webgpu) this.disposeLowGpu();
     this.bufferA.dispose();
     this.bufferB.dispose();
     // This frees the depth texture with it, which is why a shared target detaches it first.
@@ -684,7 +738,83 @@ export class PostFX {
     view.external = pass?.debugTextures?.().find((t) => t.name === want) ?? null;
   }
 
+  /**
+   * The chain's walk on WebGPU (pass 1, wave 6): the WebGL walk's own steps, the passes before the edge smoothing drawing in the
+   * scene's size (`lowA`, `lowB`) and, from the smoothing's place on, in the canvas's (`bufferA`, `bufferB`), the smoothing writing
+   * one of the canvas's from one of the scene's. Where the sizes agree the two pairs are one. Nothing allocated.
+   */
+  private chainGpu(ctx: FxFrameContext, last: number, check: boolean): void {
+    this.lastToScreen = last >= 0 ? this.defs[last].id : null;
+    const w = this.walkTargets;
+    w.scene = this.sceneTarget;
+    w.lowA = this.lowA ?? this.bufferA;
+    w.lowB = this.lowB ?? this.bufferB;
+    w.bufferA = this.bufferA;
+    w.bufferB = this.bufferB;
+    walkChainGpu(ctx, this.passes, this.on, last, w, this.timer, check ? this.checkAfter : null);
+  }
+
+  /** The walk's targets on WebGPU, one record for the chain's life (pass 1, wave 6). */
+  private readonly walkTargets = { scene: null as unknown as THREE.WebGLRenderTarget, lowA: null as unknown as THREE.WebGLRenderTarget, lowB: null as unknown as THREE.WebGLRenderTarget, bufferA: null as unknown as THREE.WebGLRenderTarget, bufferB: null as unknown as THREE.WebGLRenderTarget };
+
+  /** The error check after each pass on WebGPU's walk, while one is asked for. */
+  private readonly checkAfter = (label: string): void => {
+    if (this.lastCheck) recordError(this.renderer, this.lastCheck, label);
+  };
+
+  /** A pass sized on WebGPU (pass 1, wave 6): before the edge smoothing at the scene's size, from it on at the canvas's. */
+  private sizePassGpu(p: FxPass): void {
+    if (passAtSceneSize(p.id)) p.setSize(this.inputV.x, this.inputV.y, this.settings);
+    else p.setSize(this.sizeV.x, this.sizeV.y, this.settings);
+  }
+
+  /** A buffer the passes before the edge smoothing draw in at the scene's size (the canvas's own kind). */
+  private static lowBuffer(name: string, w: number, h: number): THREE.WebGLRenderTarget {
+    const t = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, samples: 0 });
+    t.texture.name = name;
+    return t;
+  }
+
+  /** Every target and pass sized on WebGPU (pass 1, wave 6): the scene, its products and what comes before the smoothing at the scene's size. */
+  private setSizeGpu(w: number, h: number): void {
+    const s = GPU.rt!.chain.inputSize(w, h, this.settings, this.inputV);
+    const iw = s.x;
+    const ih = s.y;
+    this.sceneTarget.setSize(iw, ih);
+    this.bufferA.setSize(w, h);
+    this.bufferB.setSize(w, h);
+    if (iw !== w || ih !== h) {
+      if (this.lowA === null || this.lowA === this.bufferA) {
+        this.lowA = PostFX.lowBuffer('fx.lowA', iw, ih);
+        this.lowB = PostFX.lowBuffer('fx.lowB', iw, ih);
+      }
+      this.lowA.setSize(iw, ih);
+      this.lowB!.setSize(iw, ih);
+    } else {
+      this.disposeLowGpu();
+      this.lowA = this.bufferA;
+      this.lowB = this.bufferB;
+    }
+    for (const p of this.productList) p.setSize(iw, ih, this.settings);
+    for (const p of this.passes) this.sizePassGpu(p);
+    this.ctx.width = iw;
+    this.ctx.height = ih;
+  }
+
+  /** The scene's two buffers let go where they are not the canvas's own. */
+  private disposeLowGpu(): void {
+    if (this.lowA !== null && this.lowA !== this.bufferA) this.lowA.dispose();
+    if (this.lowB !== null && this.lowB !== this.bufferB) this.lowB.dispose();
+    this.lowA = null;
+    this.lowB = null;
+  }
+
   private setSizeAll(w: number, h: number): void {
+    // On WebGPU (pass 1, wave 6) the scene at the edge smoothing's size and the rest at the canvas's.
+    if (GPU.webgpu) {
+      this.setSizeGpu(w, h);
+      return;
+    }
     this.sceneTarget.setSize(w, h);
     this.bufferA.setSize(w, h);
     this.bufferB.setSize(w, h);

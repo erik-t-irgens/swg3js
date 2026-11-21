@@ -195,7 +195,10 @@ function check(t: { v: readonly string[] }): { errors: string[]; warns: string[]
   const menu = text('src/ui/menu.ts');
   ok(/<optgroup label="\$\{g\}">\$\{run\}<\/optgroup>/.test(menu), 'and the menu lists a choice with groups under its groups');
   const main = text('src/main.ts');
-  ok(/private themeOn = applyTheme\(this\.settings\.hudTheme\);/.test(main) && main.indexOf('private themeOn = applyTheme') - main.indexOf('private readonly settings: Settings = loadSettings();') < 600, 'the game puts the saved theme on straight after reading the settings, before the interface is built');
+  // The settings' read, which on WebGPU also starts a new player (no settings saved, no character: the wave's fixer) on the quality
+  // tiers' High (the GPU port's pass 1, wave 6) and on WebGL is the read it was.
+  const readAt = main.indexOf('private readonly settings: Settings = GPU.webgpu ? startOnTier(loadSettings(), DEFAULT_SETTINGS, screenScale(), isNewPlayer(settingsSaved(), loadCharacters().length), saveSettings) : loadSettings();');
+  ok(/private themeOn = applyTheme\(this\.settings\.hudTheme\);/.test(main) && readAt > 0 && main.indexOf('private themeOn = applyTheme') - readAt > 0 && main.indexOf('private themeOn = applyTheme') - readAt < 600, 'the game puts the saved theme on straight after reading the settings, before the interface is built');
   const apply = /private applyHudSettings\(\): void \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
   ok(/const theme = themeById\(S\.hudTheme\)\.id;\n\s+if \(theme !== this\.themeOn\) this\.themeOn = applyTheme\(theme\);/.test(apply), 'and a theme switched is put on when the settings are applied, only when it changes');
   ok(/case 'hudTheme':\n\s+\/\/ A size, a backing store and a few switches: no shader and no element is made\.\n\s+this\.applyHudSettings\(\);/.test(main), 'which the switch does the moment it moves');

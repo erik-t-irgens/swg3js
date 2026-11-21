@@ -53,6 +53,10 @@ import { bodyStandIns, bodyStandInsReport } from './bodyStandIns.ts';
 import { boneFrame, bonePoolReport } from './bonePool.ts';
 import { setBonePool } from './patchBones.ts';
 import { GPU_MOTION, MOTION, MOTION_VIEW, laidMotion, motionCensus, motionFrame, motionReport } from './motion.ts';
+import { jitterBegin, jitterEnd, JITTER } from './taa/taaJitter.ts';
+import { TAA_DIALS, TAA_TUNE, tuneTaa } from './taa/taaTune.ts';
+import { GpuTaaPass, taaPassNow } from './taa/taaPass.ts';
+import { SCENE_SIZE, sceneSizeNow } from './taa/taaSize.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -78,10 +82,25 @@ export const RT_HOOKS: {
 /** Three's own methods the runtime stood in for on the renderer, kept for whoever builds on them (the warm-up). */
 export const NATIVE: { compileAsync: ((scene: THREE.Object3D, camera: THREE.Camera, target?: THREE.Scene | null) => Promise<unknown>) | null } = { compileAsync: null };
 
+/**
+ * Which adapter is asked for (pass 1, wave 6): the strong card, or with `?gpu=low` on the address the low-power one, where the
+ * processor has graphics of its own, so the quality tiers' card budgets can be measured on a weaker card than the strong one
+ * (the design's section 9). Read once, at start; the browser may answer with the same adapter either way, which the report says.
+ */
+function readPowerPreference(): 'high-performance' | 'low-power' {
+  try {
+    return new URLSearchParams(location.search).get('gpu') === 'low' ? 'low-power' : 'high-performance';
+  } catch {
+    return 'high-performance';
+  }
+}
+
+const POWER = readPowerPreference();
+
 async function askAdapter(): Promise<AdapterInfo | null> {
   const gpu = (navigator as Any).gpu;
   if (!gpu) return null;
-  const a = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const a = await gpu.requestAdapter({ powerPreference: POWER });
   if (!a) return null;
   const i = a.info ?? {};
   return { vendor: String(i.vendor ?? ''), architecture: String(i.architecture ?? ''), description: String(i.description ?? ''), device: String(i.device ?? ''), fallback: !!(a.isFallbackAdapter ?? i.isFallbackAdapter), features: [...a.features].map(String).sort() };
@@ -109,6 +128,15 @@ function shim(r: Any): void {
   if (!r.shadowMap.render) r.shadowMap.render = () => {};
 }
 
+/** The canvas multisampled (the default), unless this browser's storage says '0' (a measure of the canvas's cost, pass 1, wave 6). */
+function readCanvasMsaa(): boolean {
+  try {
+    return localStorage.getItem('swg.gpu.canvasMsaa') !== '0';
+  } catch {
+    return true;
+  }
+}
+
 export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDepth: boolean; timestamps: boolean }): Promise<GpuRuntime> {
   if (!(navigator as Any).gpu) throw new Error('this browser has no navigator.gpu');
   const adapter = await askAdapter();
@@ -117,12 +145,18 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   // card's clock (`gpuTimer.ts`) begins round each pass only while the frame report times the card: `opts.timestamps` (the old
   // `swg.gpu.timestamps` switch) no longer turns anything on.
   void opts.timestamps;
-  const renderer: Any = new WebGPURenderer({ canvas, antialias: true, powerPreference: 'high-performance', stencil: true, reversedDepthBuffer: opts.reversedDepth } as Any);
+  // The canvas is multisampled 4x for the Effects-off picture (fixed as it is made). Pass 1, wave 6 measures what that costs the
+  // effects chain's last draw, which goes onto the same canvas: `localStorage['swg.gpu.canvasMsaa'] = '0'` and a reload makes it
+  // with one sample, for that measure alone (the Effects-off picture is then stepped).
+  const canvasMsaa = readCanvasMsaa();
+  const renderer: Any = new WebGPURenderer({ canvas, antialias: canvasMsaa, powerPreference: POWER, stencil: true, reversedDepthBuffer: opts.reversedDepth } as Any);
   await renderer.init();
   if (renderer.backend?.isWebGPUBackend !== true) throw new Error('three fell back to its WebGL2 backend');
   const device = renderer.backend.device;
   const granted: string[] = device ? [...device.features].map(String).sort() : [];
   shim(renderer);
+  /** The canvas's drawing buffer size into `out`: the scene's size while no effects chain stands (pass 1, wave 6's fixer). Made once. */
+  const canvasSize = (out: THREE.Vector2): THREE.Vector2 => renderer.getDrawingBufferSize(out);
   // Three's own reset of its counters runs at its own animation frame, which the game's frame does not line up with: the
   // counters are never reset by three, and the frame's draws are read as what they rose by (`endFrame`).
   renderer.info.autoReset = false;
@@ -250,6 +284,31 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         laidMotion(mesh, positions);
       },
     },
+    // Pass 1, wave 6: the edge smoothing's jitter round the scene's passes, the scene's size for its pixels' readers, and the dials.
+    taa: {
+      begin(camera: THREE.PerspectiveCamera, fx: Any) {
+        if (!fx.passWanted('taa')) return;
+        const pass = fx.pass('taa') as GpuTaaPass | undefined;
+        if (!pass || !pass.canDraw()) return;
+        // The upscaled share's dial moved: the chain sized again before the scene is drawn (its history starts over).
+        if (SCENE_SIZE.upscaled && SCENE_SIZE.share !== TAA_TUNE.share) fx.setSize();
+        jitterBegin(camera, fx.sceneTarget.width, fx.sceneTarget.height);
+      },
+      end() {
+        if (JITTER.on) jitterEnd();
+      },
+      sceneSize(out: THREE.Vector2) {
+        // The chain's scene size while a chain stands, else the canvas's: with Effects off the scene is drawn onto the canvas (wave 6's fixer).
+        return sceneSizeNow(out, taaPassNow() !== null, canvasSize);
+      },
+      dials(helper: string) {
+        return helper === 'gpu' ? TAA_DIALS : null;
+      },
+      // The quality tiers' share (`Settings.smoothingShare`), through the dial's own setter; `begin` sizes the chain again.
+      setShare(share: number) {
+        if (Number.isFinite(share)) tuneTaa({ share });
+      },
+    },
     renderer: renderer as THREE.WebGLRenderer,
     environment,
     standIns,
@@ -339,6 +398,12 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         if (typeof o.pixels === 'number' && Number.isFinite(o.pixels) && o.pixels > 0) MOTION_VIEW.pixels = o.pixels;
         out.view = { ...MOTION_VIEW, reads: "red rightward and green upward about mid grey, full at `pixels` pixels a frame; half bright unmarked, full bright where marked reactive", drawing: MOTION_VIEW.on && !(GPU_MOTION.on && MOTION.applied) ? 'nothing: the scene target carries no motion output (the switch off, or the patch not applied)' : MOTION_VIEW.on ? 'the motion buffer in place of the picture, where Effects are on' : 'the picture' };
       }
+      // Pass 1, wave 6: the edge smoothing's numbers live (the dials' own setter).
+      const taa = o.taa as Record<string, unknown> | undefined;
+      if (taa && typeof taa === 'object') {
+        const said = tuneTaa(taa);
+        out.taa = { ...TAA_TUNE, ...(said.length ? { said } : {}) };
+      }
       // What the node copies carry of the materials the scene holds now (step 4, item 5): checked, never rebuilt.
       if (o.carries === true) out.carries = carriesReport(renderer, (o.scene as THREE.Object3D | undefined) ?? null);
       return out;
@@ -349,7 +414,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     },
     makeSun(scene: THREE.Scene, camera: THREE.PerspectiveCamera, o: GpuSunOptions) {
       worldScene = scene;
-      sunNow = makeSun(renderer, scene, camera, o);
+      // Pass 1, wave 6: the cascades made again at another size in play record every bundle again (`sun.ts`'s `resized`).
+      sunNow = makeSun(renderer, scene, camera, { ...o, resized: () => bundles.relight() });
       // Pass 1, wave 3: the cascades held by age only at the revision the held node was read against (`heldCsm.ts`).
       if (sunNow.notHeld !== null && !forcedOff.has('shadow hold')) forcedOff.set('shadow hold', sunNow.notHeld);
       return sunNow;
@@ -399,7 +465,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       const out: Record<string, unknown> = {
         backend: 'WebGPU (three WebGPURenderer, WebGPU backend)',
         three: THREE.REVISION,
-        adapter: { vendor: adapter.vendor, architecture: adapter.architecture, description: adapter.description, device: adapter.device, fallbackAdapter: adapter.fallback },
+        adapter: { vendor: adapter.vendor, architecture: adapter.architecture, description: adapter.description, device: adapter.device, fallbackAdapter: adapter.fallback, asked: POWER, switch: "?gpu=low on the address asks for the low-power adapter (pass 1, wave 6: the quality tiers' card budgets measured on a processor's own graphics); the browser may answer with the strong one either way" },
         features: { asked: 'every feature the adapter offers (three asks for all of them)', offered: adapter.features, granted },
         reversedDepth: renderer.reversedDepthBuffer === true,
         frame: { draws: frame.draws, triangles: frame.triangles, drawsSteppedOver: frame.skipped },
@@ -435,6 +501,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         bones: bonePoolReport(),
         // Pass 1, wave 5: the motion output.
         motion: motionReport(),
+        // Pass 1, wave 6: the canvas's samples (the Effects-off picture's smoothing, and what the chain's last draw goes onto).
+        canvas: { multisampled: canvasMsaa, samples: canvasMsaa ? 4 : 1, switch: "localStorage['swg.gpu.canvasMsaa'] = '0' and a reload makes the canvas with one sample, to measure what the 4x canvas costs the chain's last draw (the Effects-off picture is then stepped)" },
         patches: patchReport(),
         // The performance step: the frame's draws issued for less of the main thread, each behind its switch.
         draw: drawCostReport(),
