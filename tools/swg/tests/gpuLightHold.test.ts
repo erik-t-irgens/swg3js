@@ -124,7 +124,7 @@ const plainModel = (m: Any): Any => {
   lightHoldPart.apply(other, new THREE.MeshStandardMaterial());
   ok(other.setupLightingModel({}) === mine, 'any other model is handed back as it is');
   const start = readFileSync(new URL('../../../src/core/gpu/start.ts', import.meta.url), 'utf8');
-  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);/.test(start), 'start.ts puts it on first, so the highlight and the cards build on the held model');
+  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart, eyeGlowPart\);/.test(start), 'start.ts puts it on first, so the highlight and the cards build on the held model (the eye\'s glow, pass 2 wave 2, last)');
   const ground = readFileSync(new URL('../../../src/core/gpu/gpuGround.ts', import.meta.url), 'utf8');
   ok((ground.match(/return new HeldLightingModel\(\);/g) ?? []).length === 1 && /export class GroundLightingModel extends \(HeldLightingModel as Any\)/.test(ground), "the ground's version 3 takes the held model, the tile program and the rings the ground's own on it");
 }

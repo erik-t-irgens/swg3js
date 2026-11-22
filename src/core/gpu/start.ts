@@ -60,6 +60,11 @@ import { SCENE_SIZE, sceneSizeNow } from './taa/taaSize.ts';
 import { hazeFogNode, hazeReport, roomsFogNode } from '../../sky/air/airHaze.ts';
 // Pass 2, wave 1 (maker A): the air's tables, reached by the game through the runtime (`GpuRuntime.airTables`).
 import { makeAirTables } from '../../sky/air/airTables.ts';
+// Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/`), its glow part on the node copies and its frame and console.
+import { eyeGlowPart } from '../../sky/exposure/eyeBuffer.ts';
+import { eyeBegin, eyeFrameGpu, eyeReady, eyeReport, preSwitch } from '../../sky/exposure/eyeGpu.ts';
+// The wave's fixer: the scene stored pre-exposed by last frame's eye exposure (`src/sky/exposure/preExpose.ts`).
+import { installPreExpose } from '../../sky/exposure/preExpose.ts';
 import { AIR_SKY_STATS } from '../../sky/air/airSky.ts';
 import { DISC_TUNE } from '../../sky/skyDials.ts';
 import { SEE_STATS } from '../../sky/air/airSee.ts';
@@ -182,11 +187,15 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
   // The models' own looks on the node copies three makes (step 4): three's indirect light held at 0.187's first (pass 1,
   // wave 2: `gpuLightHold.ts`, which three's development commit 577fb27 changed), then the detail map's colour, then the
   // client's highlight, then the leaf cards' changes to that highlight's lighting (`gpuCard.ts`).
-  LOOK_PARTS.push(lightHoldPart, detailPart, specPart, cardPart);
+  // Pass 2, wave 2: last, the eye's glow on every lit material's emissive term and every unlit one's colour (`eyeBuffer.ts`).
+  LOOK_PARTS.push(lightHoldPart, detailPart, specPart, cardPart, eyeGlowPart);
   installLooks(renderer);
   // The Effects-off picture drawn the way WebGL draws it (step 6, item 5): every material's output tone-mapped and encoded
   // onto the canvas, before any material is built.
   installInline(renderer, LOOKS_AT_LOAD.inline);
+  // Pass 2, wave 2's fixer: the scene stored pre-exposed (`src/sky/exposure/preExpose.ts`), the output's arithmetic first, the
+  // store after it, before any material is built.
+  installPreExpose();
   // The performance step's switches (`drawCost.ts`), read before the patches that hold two of them.
   readDrawSwitches();
   // The four private patches (item 8), and the performance step's replay, each only where three is the revision it was
@@ -323,6 +332,14 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     },
     // Pass 2, wave 1 (maker A): the air's four tables on the device (`src/sky/air/airTables.ts`), made once a session.
     airTables: (record: Float64Array) => makeAirTables(renderer as THREE.WebGLRenderer, record),
+    // Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/eyeGpu.ts`): its frame before anything is drawn, and its console.
+    eye: {
+      frame: () => eyeFrameGpu(renderer),
+      ready: () => eyeReady(),
+      begin: () => eyeBegin(renderer),
+      preSwitch: (on: boolean) => preSwitch(on),
+      report: (check: boolean) => eyeReport(renderer, check),
+    },
     renderer: renderer as THREE.WebGLRenderer,
     environment,
     standIns,

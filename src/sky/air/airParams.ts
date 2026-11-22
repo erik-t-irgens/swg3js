@@ -230,9 +230,37 @@ export function worldRecord(planetId: string, out: AirRecord = newAirRecord()): 
 export interface AirDialRow {
   visibilityKm: number;
   steer: number;
+  /**
+   * Pass 2, wave 2 (the owner's answer 3 of 21 November, "I'd rather I be able to set the limit higher and lower myself"):
+   * this world's own limits on the fit's ozone, as a share of Earth's; nought takes the all-worlds limits (`AIR_OZONE`).
+   */
+  ozoneMin: number;
+  ozoneMax: number;
 }
 
-export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0 };
+export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0 };
+
+/**
+ * The fit's ozone limits for every world (the owner's dials since pass 2, wave 2), as shares of Earth's: they start where
+ * wave 1 left them and the owner has seen (`airFit.ts`'s `OZONE_MIN` and `OZONE_MAX`, whose reasons are there): at least
+ * three quarters, which keeps a clear twilight's zenith blue over green on every world, and at most four times, the top
+ * six worlds' fits stand at. Moved, every world whose own limits are nought is fitted again in the worker and its tables
+ * made again (numbers only).
+ */
+export const AIR_OZONE = { min: 0.75, max: 4 };
+
+/** The ozone dials' ranges: the all-worlds limits', and a world's own (nought is "the all-worlds limits"). */
+export const AIR_OZONE_RANGE = { all: [0.05, 12] as const, own: [0, 12] as const };
+
+/** A world's ozone limits in force, into `out` as [least, most]: its own where set, else the all-worlds ones, the most never under the least. */
+export function ozoneOf(planetId: string, out: [number, number]): [number, number] {
+  const d = airDialsOf(planetId);
+  const lo = d.ozoneMin > 0 ? d.ozoneMin : AIR_OZONE.min;
+  const hi = d.ozoneMax > 0 ? d.ozoneMax : AIR_OZONE.max;
+  out[0] = lo;
+  out[1] = hi > lo ? hi : lo;
+  return out;
+}
 
 /** The dials as they stand, by world id; a world never moved reads the start. */
 export const AIR_DIALS: Record<string, AirDialRow> = {};
@@ -241,7 +269,7 @@ export const AIR_DIALS: Record<string, AirDialRow> = {};
 export function airDialsOf(planetId: string): AirDialRow {
   let d = AIR_DIALS[planetId];
   if (!d) {
-    d = { visibilityKm: AIR_DIAL_START.visibilityKm, steer: AIR_DIAL_START.steer };
+    d = { visibilityKm: AIR_DIAL_START.visibilityKm, steer: AIR_DIAL_START.steer, ozoneMin: AIR_DIAL_START.ozoneMin, ozoneMax: AIR_DIAL_START.ozoneMax };
     AIR_DIALS[planetId] = d;
   }
   return d;
@@ -259,27 +287,44 @@ export const AIR_DIAL_STATE = { version: 0 };
  */
 export function tuneAirDials(o: Record<string, unknown>): string[] {
   const words: string[] = [];
-  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer } }'];
+  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax } } and { all: { ozoneMin, ozoneMax } }'];
   for (const [id, v] of Object.entries(o)) {
     if (!v || typeof v !== 'object') {
       words.push(`${id}: not a row`);
       continue;
     }
-    const row = airDialsOf(id);
     const vv = v as Record<string, unknown>;
-    for (const key of ['visibilityKm', 'steer'] as const) {
+    // Pass 2, wave 2: `all` is every world's ozone limits (a world's own nought takes them).
+    if (id === 'all') {
+      for (const key of ['ozoneMin', 'ozoneMax'] as const) {
+        if (vv[key] === undefined) continue;
+        const n = Number(vv[key]);
+        if (!Number.isFinite(n)) {
+          words.push(`all.${key}: not a number`);
+          continue;
+        }
+        const [lo, hi] = AIR_OZONE_RANGE.all;
+        const held = n < lo ? lo : n > hi ? hi : n;
+        if (held !== n) words.push(`all.${key} held to ${held}`);
+        AIR_OZONE[key === 'ozoneMin' ? 'min' : 'max'] = held;
+      }
+      for (const k of Object.keys(vv)) if (k !== 'ozoneMin' && k !== 'ozoneMax') words.push(`all.${k}: no such dial (ozoneMin, ozoneMax)`);
+      continue;
+    }
+    const row = airDialsOf(id);
+    for (const key of ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax'] as const) {
       if (vv[key] === undefined) continue;
       const n = Number(vv[key]);
       if (!Number.isFinite(n)) {
         words.push(`${id}.${key}: not a number`);
         continue;
       }
-      const [lo, hi] = AIR_DIAL_RANGE[key];
+      const [lo, hi] = key === 'ozoneMin' || key === 'ozoneMax' ? AIR_OZONE_RANGE.own : AIR_DIAL_RANGE[key];
       const held = n < lo ? lo : n > hi ? hi : n;
       if (held !== n) words.push(`${id}.${key} held to ${held}`);
       row[key] = held;
     }
-    for (const k of Object.keys(vv)) if (k !== 'visibilityKm' && k !== 'steer') words.push(`${id}.${k}: no such dial (visibilityKm, steer)`);
+    for (const k of Object.keys(vv)) if (k !== 'visibilityKm' && k !== 'steer' && k !== 'ozoneMin' && k !== 'ozoneMax') words.push(`${id}.${k}: no such dial (visibilityKm, steer, ozoneMin, ozoneMax)`);
   }
   AIR_DIAL_STATE.version++;
   return words;

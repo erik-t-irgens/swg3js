@@ -582,7 +582,8 @@ export class SwgSky {
     }
     this.group.add(this.dome);
     this.domeScene.add(new THREE.Mesh(this.dome.geometry, this.dome.material));
-    // The reflections' capture draws this scene: our sky's discs are left out of it (`airSky.ts`); nothing reads it on WebGL.
+    // The reflections' capture draws this scene: our sky's discs are spread and capped in it (`airSky.ts`), and on WebGPU it
+    // holds the capture's own copies of the bodies and the skybox too (pass 2, wave 2, `captureSources`); nothing reads it on WebGL.
     this.domeScene.userData.swgSkyCapture = true;
 
     // A six-sided skybox: the client's quads, mirrored in X like every converted mesh.
@@ -877,6 +878,24 @@ export class SwgSky {
     const du = this.dome.material.uniforms;
     const planet = this.data.planet;
     this.dome.material.userData.gpuStandIn = () => GPU.rt!.standIns.airSky(planet, du.uHorizonFog.value as THREE.Color, du.uClear.value as THREE.Color);
+  }
+
+  /**
+   * What the reflections' capture draws of this sky beside its dome (pass 2, wave 2, maker B: `src/sky/capture/skyCapture.ts`,
+   * read on WebGPU alone): the sun's pictures, the moons and the other bodies as they are drawn today (each placed, faded or
+   * hidden by `update` as ever, so under our sky the sun's pictures stay unseen there too), and the skybox where the sky has
+   * one. Never the stars, the dust or a space zone's star quads.
+   */
+  captureSources(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [...this.sun, ...this.supplementalSun, ...this.moon, ...this.supplementalMoon];
+    for (const c of this.celestials) out.push(...c.sprites);
+    if (this.skybox) out.push(this.skybox);
+    return out;
+  }
+
+  /** The dome's material and its draw order (pass 2, wave 2, maker B): the capture draws its own mesh of the dome first, as the sky does. */
+  get domeDraw(): { material: THREE.Material; order: number } {
+    return { material: this.dome.material, order: this.dome.renderOrder };
   }
 
   /** How a texture wraps for its use: a gradient's columns wrap with the day and its rows must not; clouds tile. */

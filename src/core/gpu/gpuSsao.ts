@@ -30,7 +30,7 @@
 import * as THREE from 'three';
 import { NodeMaterial } from 'three/webgpu';
 import * as TSL from 'three/tsl';
-import { chainMaterial, graph, live, ref, type ChainGraph } from './gpuChain.ts';
+import { chainMaterial, graph, live, ref, storedOf, type ChainGraph } from './gpuChain.ts';
 import { asShownFB, liveTexture } from './gpuGround.ts';
 import { FX_MAX_FLASH_LIGHTS, FX_MAX_ROOM_CAST, FX_MAX_ROOM_LIGHTS, FX_MAX_ROOM_SPOTS } from '../fx/lights.ts';
 import {
@@ -763,11 +763,14 @@ export function applyGraph(u: SsaoUniforms, full: boolean, reversed: boolean, de
           );
         });
       }
-      const ceiling = pow(float(2), ao.b.mul(SSAO_CEILING_LOG_SPAN).add(SSAO_CEILING_LOG_MIN)).toVar();
+      // Pass 2, wave 2's fixer: the picture is stored pre-exposed under our sky (`src/sky/exposure/preExpose.ts`), so the lit
+      // ceiling and the fog's colour, both in the scene's units, are stood in the picture's (`storedOf`, 1 under SWG's sky).
+      const stored = storedOf().toVar();
+      const ceiling = pow(float(2), ao.b.mul(SSAO_CEILING_LOG_SPAN).add(SSAO_CEILING_LOG_MIN)).mul(stored).toVar();
       const fogKeep = exp(fogDensity.mul(fogDensity).mul(z).mul(z).negate()).toVar();
-      const surface = max(c.rgb.sub(fogColor.mul(float(1).sub(fogKeep))), 0).toVar();
+      const surface = max(c.rgb.sub(fogColor.mul(stored).mul(float(1).sub(fogKeep))), 0).toVar();
       const lum = lumaOf(surface).div(max(fogKeep, N.fogFloor)).toVar();
-      const albedo = clamp(lum.div(max(ceiling, N.ceilingFloor)), 0, N.albedoMost);
+      const albedo = clamp(lum.div(max(ceiling, stored.mul(N.ceilingFloor))), 0, N.albedoMost);
       // aoMultiBounce
       const vv = pow(ao.r, power);
       const ka = albedo.mul(N.bounce.a[0]).add(N.bounce.a[1]);

@@ -29,6 +29,7 @@ import * as THREE from 'three';
 import * as TSL from 'three/tsl';
 import { chainMaterial, graph, type ChainGraph } from '../gpuChain.ts';
 import { liveTexture } from '../gpuGround.ts';
+import { preRatioNode } from '../../../sky/exposure/preExpose.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -157,6 +158,15 @@ function reproject(p: Parts, at: Any, uvNow: Any, zNear: Any, zFar: Any, tag: st
   return { historyUv, held, motionPx, reactive: clamp(mv.w, 0, 1), changed, onPicture };
 }
 
+/**
+ * Last frame's history in this frame's units (pass 2, wave 2's fixer, `src/sky/exposure/preExpose.ts`): the scene is stored
+ * times last frame's eye exposure, so the history kept a frame ago stands at the factor before; times `pre / preLast`, which is
+ * 1 under SWG's sky and wherever the eye stands still. Its alpha kept.
+ */
+function storedNow(h: Any): Any {
+  return vec4(h.rgb.mul(preRatioNode()), h.a);
+}
+
 /** The history moved along its line to the mean until it lies in the box the spread makes round the mean. */
 function clipToSpread(history: Any, mean: Any, spread: Any): Any {
   const e = spread.rgb.add(N.eps);
@@ -195,7 +205,8 @@ export function traaGraph(u: TaaInputs): ChainGraph {
     const c = clamp(ivec2(floor(at.mul(inSize))), ivec2(0), sizeI.sub(1));
     const d = dilate(p, c, sizeI, u.reversed, 'F');
     const r = reproject(p, d.at, at, d.zNear, d.zFar, 'F');
-    const history = vec4(p.history.sample(r.historyUv).level(0)).toVar('swgTaaFH');
+    // Pass 2, wave 2's fixer: last frame's history was stored at last frame's pre-exposure, brought to this frame's (`storedNow`).
+    const history = storedNow(vec4(p.history.sample(r.historyUv).level(0))).toVar('swgTaaFH');
     // This frame's colour and the spread of its nine round it (values that are not numbers were zeroed by the sanitize).
     const current = vec4(max(p.input.load(c), vec4(0))).toVar('swgTaaFC');
     const m1 = vec4(current).toVar('swgTaaFM1');
@@ -239,7 +250,8 @@ export function taauGraph(u: TaaInputs): ChainGraph {
     const c = clamp(ivec2(tapF), ivec2(0), sizeI.sub(1));
     const d = dilate(p, c, sizeI, u.reversed, 'U');
     const r = reproject(p, d.at, at, d.zNear, d.zFar, 'U');
-    const history = vec4(p.history.sample(r.historyUv).level(0)).toVar('swgTaaUH');
+    // Pass 2, wave 2's fixer: the history brought from last frame's pre-exposure to this frame's (`storedNow`).
+    const history = storedNow(vec4(p.history.sample(r.historyUv).level(0))).toVar('swgTaaUH');
     const keptLock = float(p.aux.sample(r.historyUv).level(0).y).toVar('swgTaaUL');
     const sum = vec4(0).toVar('swgTaaUS');
     const wsum = float(0).toVar('swgTaaUW');

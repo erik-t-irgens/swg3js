@@ -4,7 +4,6 @@ import { GPU, type GpuSun } from '../core/gpuSwitch.ts';
 // Pass 2, wave 1, what draws from the air (maker B): the Sky row read at load, and the air's frame record (pure; no WebGPU build).
 import { skyOurs } from '../sky/skyMode.ts';
 import { AIR } from '../sky/air/airApi.ts';
-import { applyNightFloor } from '../sky/air/nightFloor.ts';
 // Pass 2, wave 1, the air itself (maker A): the world's rows, its twin and its tables (pure; the tables' WebGPU module is a dynamic import inside).
 import { AirRun } from '../sky/air/airRun.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
@@ -57,6 +56,7 @@ import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, 
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { DOME_CUBE, DomeCapture, REFLECTIONS, isRegisteredReflective, joinModelReflections, registerReflective, setEnvironment } from './envmap';
+import type { CaptureRenderer, SkyCapture } from '../sky/capture/skyCapture.ts';
 import { RowMaterials } from './rowMaterials.ts';
 import { RowAttachments, attachFileOf } from './rowAttach.ts';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
@@ -3061,6 +3061,8 @@ export class World {
     this.particles?.dispose();
     this.particles = null;
     if (this.spaceBodies) {
+      // Pass 2, wave 2 (maker B): the reflections' capture lets its copies of them go first (their materials are freed below).
+      if (GPU.webgpu) GPU.rt!.environment.sky?.placePlanets(null);
       this.scene.remove(this.spaceBodies);
       this.disposeSpaceBodies(this.spaceBodies);
       this.spaceBodies = null;
@@ -3531,6 +3533,8 @@ export class World {
     // A star behind a planet must not flare through it: the body itself writes no depth, and its
     // stand-in stands far beyond the sky the flare's occlusion measures, so the flare cannot see it.
     this.swgSky?.setSpaceOccluders(discs);
+    // Pass 2, wave 2 (maker B): on WebGPU the reflections' capture draws the planets too, its copies of them built as they hang.
+    if (GPU.webgpu) this.gpuCaptureMore();
     console.info(`space: ${discs.length} planets and moons in the sky, each writing its depth ${Math.round(standAt)} m out`);
   }
 
@@ -3640,6 +3644,8 @@ export class World {
     this.dropNebulae();
     this.nebulae = built;
     this.scene.add(built.group);
+    // Pass 2, wave 2 (maker B): on WebGPU the reflections' capture draws the sheets WebGPU draws, its copies built as they hang.
+    if (GPU.webgpu) this.gpuCaptureMore();
     console.info(`space: ${built.status}`);
   }
 
@@ -3648,6 +3654,8 @@ export class World {
     const nebulae = this.nebulae;
     if (!nebulae) return;
     this.nebulae = null;
+    // Pass 2, wave 2 (maker B): the reflections' capture lets its copies of the sheets go first.
+    if (GPU.webgpu) GPU.rt!.environment.sky?.placeNebulae(null);
     this.scene.remove(nebulae.group);
     nebulae.dispose((m) => this.forgetMaterials(m));
   }
@@ -3785,6 +3793,8 @@ export class World {
     }
     // Pass 2, wave 1 (maker A): the air goes with its sky.
     if (GPU.webgpu && this.skyAir) this.skyAir = this.skyAir.dispose();
+    // Pass 2, wave 2 (maker B): and the reflections' capture lets go of its scene, whose copies went with it.
+    if (GPU.webgpu) GPU.rt!.environment.sky?.detach();
     this.skyPack = null;
     this.sky.visible = true;
     this.day.swg = false;
@@ -3968,11 +3978,19 @@ export class World {
     this.envWant = null;
     // A sky just hung waits for its dome's capture pipeline (`gpuSkyReady`), its timer left where it stood.
     if (this.envHeld) return;
-    this.envTimer += dt;
-    if (this.envTimer < 4) return;
-    this.envTimer = 0;
-    const renderer = this.renderer;
-    const captured = dome.capture((camera) => camera.update(renderer, sky.domeScene));
+    // Pass 2, wave 2 (maker B): the sky as drawn, a face of the kept cube a frame by its own draws and the filter on a seventh,
+    // every `CAPTURE_TUNE.every` seconds or as soon as the light has turned `sunMoveDeg` (`src/sky/capture/skyCapture.ts`). An
+    // ask (`envTimer` at 99: a sky just hung, the reflections readied behind a screen, the source switched, an hour moved by
+    // hand) takes all six faces and the filter at once, as the four-second capture did. The kept target is the same texture at
+    // every capture, so the registry is handed it once.
+    const steps = env.sky;
+    if (!steps || steps.dome !== dome) return;
+    if (this.envTimer >= 99) {
+      this.envTimer = 0;
+      steps.clock.asked = true;
+    }
+    steps.clock.dt = dt;
+    const captured = steps.step(this.renderer as unknown as CaptureRenderer, this.day.lightDir);
     if (captured) this.useEnvironment(captured, null);
   }
 
@@ -4078,12 +4096,15 @@ export class World {
    * What the dome's captures have made, for `__debug.reflections()`: how many captures, how many targets (one for the
    * session), cubes refused for their size, the kept target's height (the one in every reflective program's key), and
    * whether the environment every surface holds is the dome's kept texture now (the 'game' source on an area with a cube
-   * of its own holds that cube's instead).
+   * of its own holds that cube's instead). On WebGPU (pass 2, wave 2, maker B) `steps` says how the real sky is taken:
+   * the clock, the faces and filters drawn, what the capture draws beside the dome (`SkyCapture.report`).
    */
-  domeReport(): { captures: number; targetsMade: number; refused: number; height: number | null; held: boolean } {
+  domeReport(): { captures: number; targetsMade: number; refused: number; height: number | null; held: boolean; steps?: Record<string, unknown> | null } {
     const d = this.dome;
     const target = d?.target ?? null;
-    return { captures: d?.stats.captures ?? 0, targetsMade: d?.stats.targetsMade ?? 0, refused: d?.stats.refused ?? 0, height: target ? target.height : null, held: !!target && this.envTexture === target.texture };
+    const out: { captures: number; targetsMade: number; refused: number; height: number | null; held: boolean; steps?: Record<string, unknown> | null } = { captures: d?.stats.captures ?? 0, targetsMade: d?.stats.targetsMade ?? 0, refused: d?.stats.refused ?? 0, height: target ? target.height : null, held: !!target && this.envTexture === target.texture };
+    if (GPU.webgpu) out.steps = GPU.rt!.environment.sky?.report() ?? null;
+    return out;
   }
 
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
@@ -5038,10 +5059,8 @@ export class World {
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
   private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
-    // Pass 2, wave 1: under our sky the night floor (until wave 2's eye) holds the lights the air wrote at no less than SWG's own
-    // of the hour times its share by night, and at no less than today's night brightness through the twilight
-    // (`src/sky/air/nightFloor.ts`); by day, and under SWG's sky, nothing changes.
-    if (GPU.webgpu && AIR.frame.on) applyNightFloor(L, AIR.swg, AIR.swgNight, this.day.sunDir);
+    // Pass 2, wave 2: wave 1's night floor is gone; under our sky the nights are the air's own, made readable by the eye
+    // (`src/sky/exposure/`).
     this.sun.color.copy(L.main);
     this.sun.intensity = SWG_MAIN_LIGHT * L.mainScale;
     // A storm row that turns shadows off fades them through the cascades' intensity (never a light,
@@ -8451,8 +8470,13 @@ export class World {
     const dome = (this.dome ??= rt.environment.makeDome());
     const face = dome.camera.children[0] as THREE.Camera | undefined;
     if (!face) return;
+    // Pass 2, wave 2 (maker B): what the capture draws beside the dome, this sky's moons, pictures and skybox and whatever
+    // planets and nebulae stand (`gpuCaptureParts`), each a mesh of its own over the live one's geometry and material, built
+    // with the dome, every one shown for the walk.
+    const steps = rt.environment.sky;
+    if (steps) this.gpuCaptureParts(steps, sky);
     const mark = rt.compileMark();
-    rt.compileNow(() => this.withTarget(r, dome.cube, () => r.compile(sky.domeScene, face, sky.domeScene)));
+    rt.compileNow(() => this.withTarget(r, dome.cube, () => (steps ? steps.compileWith(() => r.compile(sky.domeScene, face, sky.domeScene)) : r.compile(sky.domeScene, face, sky.domeScene))));
     this.envHeld = true;
     void rt.compiledSince(mark).then(() => {
       this.envHeld = false;
@@ -8460,6 +8484,40 @@ export class World {
       this.envTimer = 99;
       this.refreshEnvironment(0);
     });
+  }
+
+  /**
+   * On WebGPU alone (pass 2, wave 2, maker B): the hung sky's capture scene given its copies of everything the capture draws
+   * beside the dome (`src/sky/capture/skyCapture.ts`): the sky's own moons, pictures and skybox placed about the sky's group,
+   * which rides the camera; in space the planets about theirs; and the nebula sheets, fixed in the world, about the camera.
+   */
+  private gpuCaptureParts(steps: SkyCapture, sky: SwgSky): void {
+    const dome = sky.domeDraw;
+    steps.attach(sky.domeScene, sky.group, this.sun, this.hemi, dome.material, dome.order, sky.captureSources());
+    steps.placePlanets(this.spaceBodies);
+    steps.placeNebulae(this.nebulae?.group ?? null);
+  }
+
+  /**
+   * On WebGPU alone (pass 2, wave 2, maker B): a space zone's planets or nebulae hung or let go after its sky: the capture's
+   * copies of them made again in the hung sky's scene and built there and then (`compileNow`, as `gpuSkyReady` builds the
+   * dome), the capture held until they have landed and taken again at once when they have, so it never draws a copy unbuilt.
+   */
+  private gpuCaptureMore(): void {
+    const rt = GPU.rt!;
+    const steps = rt.environment.sky;
+    const sky = this.swgSky;
+    const r = this.renderer;
+    const dome = this.dome;
+    if (!steps || !sky || !r || !dome || steps.scene !== sky.domeScene || !rt.environment.capturing) return;
+    const face = dome.camera.children[0] as THREE.Camera | undefined;
+    if (!face) return;
+    // Nothing to build where none stands now (a set let go): the clock's next refresh draws without it.
+    if (steps.placePlanets(this.spaceBodies) + steps.placeNebulae(this.nebulae?.group ?? null) === 0) return;
+    const mark = rt.compileMark();
+    rt.compileNow(() => this.withTarget(r, dome.cube, () => steps.compileWith(() => r.compile(sky.domeScene, face, sky.domeScene))));
+    steps.hold();
+    void rt.compiledSince(mark).then(() => steps.release());
   }
 
   /** Every drawable standing in the scene now (`gpuMadeNow`'s `had`), on WebGPU alone. */
@@ -11587,7 +11645,9 @@ export class World {
       this.waterFar.position.z = playerPos.z;
     }
     this.sun.target.position.copy(playerPos);
-    this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
+    // Pass 2, wave 2: under our sky the night light aims at the brightest body up, as the air's twin found it (`AIR.frame.lightDir`).
+    if (GPU.webgpu && AIR.frame.on) this.sun.position.copy(playerPos).addScaledVector(AIR.frame.lightDir, 220);
+    else this.sun.position.copy(playerPos).addScaledVector(this.day.lightDir, 220);
     // The loop has already said where the player stands and what a blow does; `onAttack` is kept
     // as the fallback for a caller that has not (a test, an old call site), and the flag is asked
     // every frame rather than once: a fallback that looked at `hurt` alone would fill the target

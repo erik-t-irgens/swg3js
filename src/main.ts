@@ -437,9 +437,14 @@ import { TIER_KEYS, TIER_LABELS, isNewPlayer, screenScale, startOnTier, tierValu
 import { readSkyMode, skyRowState, SKY_AT_LOAD } from './sky/skyMode.ts';
 import { isSkyHour, skyHourTime, sunSineAt, SKY_HOURS } from './sky/skyHours.ts';
 import { DISC_TUNE, skyDialsFor, tuneSky } from './sky/skyDials.ts';
+import { CAPTURE_TUNE, captureDialsFor, tuneCapture } from './sky/capture/captureTune.ts';
 // Pass 2, wave 1 (maker A): the console's `air` part of `__debug.sky` (a world's visibility and steer dials).
 import { skyAirArgument } from './sky/air/airDials.ts';
-import { NIGHT_FLOOR } from './sky/air/nightFloor.ts';
+// Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/`: pure, the WebGPU side through the runtime) and the sky's match.
+import { EYE_IN } from './sky/exposure/eyeRun.ts';
+import { eyeDialsFor } from './sky/exposure/eyeDials.ts';
+import { tuneEye } from './sky/exposure/eyeMath.ts';
+import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
 import { AIR } from './sky/air/airApi.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -2129,7 +2134,8 @@ class App {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     if (GPU.webgpu) World.anisotropy = Math.min(8, (this.renderer as unknown as { getMaxAnisotropy(): number }).getMaxAnisotropy());
     else World.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
-    this.renderer.toneMappingExposure = S.exposure;
+    // Pass 2, wave 2: on WebGPU three's exposure is the eye's frame's (`GpuRuntime.eye`, from the Exposure row in stops).
+    if (!GPU.webgpu) this.renderer.toneMappingExposure = S.exposure;
     // On WebGPU the upscaled smoothing's share is the setting's (pass 1, wave 6: the quality tiers' lever), before any chain is sized by it.
     if (GPU.webgpu) GPU.rt!.taa.setShare(S.smoothingShare);
 
@@ -6493,7 +6499,10 @@ class App {
        * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
        * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
        */
-      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number; capture?: boolean; dome?: 'kept' | 'scene' } = {}) => {
+      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number; capture?: boolean; dome?: 'kept' | 'scene'; tune?: Record<string, unknown> } = {}) => {
+        // Pass 2, wave 2 (maker B): the real sky's capture on WebGPU, its clock and its sun (`src/sky/capture/captureTune.ts`;
+        // the debug menu's `reflections` sliders set it through the same call). Numbers only: nothing compiles.
+        const tuned = opts.tune === undefined ? [] : GPU.webgpu ? tuneCapture(opts.tune) : ["tune: the sky's stepped capture is WebGPU's (WebGL takes it whole every four seconds)"];
         if (opts.source === 'sky' || opts.source === 'game') {
           setReflectionSource(opts.source);
           this.world.reflectionsChanged();
@@ -6534,6 +6543,8 @@ class App {
           preview: PREVIEW_REFLECTIONS.strength,
           dome: REFLECTIONS.dome,
           capture: this.world.domeReport(),
+          ...(tuned.length ? { said: tuned } : {}),
+          ...(GPU.webgpu ? { tune: { ...CAPTURE_TUNE } } : {}),
         };
       },
       /**
@@ -8116,10 +8127,34 @@ class App {
        * The sky (pass 2, wave 1, `src/sky/skyHours.ts`): `sky('dawn' | 'noon' | 'dusk' | 'night')` puts the world at that hour and
        * holds the day; `sky()` hands the day back to the shared clock; each reports the sky drawn (ours or SWG's), the air's
        * record, its visibility and the tables' last rebuild, the haze and the discs, and the converted sky's parts.
-       * `sky({ floor, disc, pair, hours })` moves the look's dials as the debug menu's sky sliders do, and `sky('skybox')` and the
+       * `sky({ disc, pair, hours })` moves the look's dials as the debug menu's sky sliders do, and `sky('skybox')` and the
        * like toggle a part of the converted sky (the dome, the skybox faces, the stars, space dust, the sun and star sprites).
+       * Pass 2, wave 2: `sky({ match: '<name>' })` saves the spot, the camera, its field of view, the hour and the weather under
+       * the name and holds them, or, saved already (by any tab of this address), travels there and holds them as saved;
+       * `sky({ match: null })` lets go; `sky({ matches: true })` lists them; `sky({ match: '<name>', save: true })` saves over
+       * one; `sky({ match: '<name>', forget: true })` lets one go.
        */
-      sky: (o?: string | Record<string, unknown>) => (o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world') : this.skyConsole(o)),
+      sky: (o?: string | Record<string, unknown>) =>
+        o && typeof o === 'object' && ('match' in o || 'matches' in o)
+          ? this.skyMatch(o)
+          : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites'
+            ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')
+            : this.skyConsole(o),
+      /**
+       * The eye (pass 2, wave 2, `src/sky/exposure/`): `await exposure()` reads the card's buffer back (never in a frame) and
+       * says the measured scene, the full make-up, the target after the dark-night rule, the eased exposure and the glow
+       * factor, the mode and the dials; `exposure({ tune: { intoLight, intoDark, knee, share, most, centre, floor, glow } })`
+       * moves the dials (the debug menu's `exposure` sliders); `exposure({ check: true })` holds the card's last frame to the
+       * JavaScript of `eyeMath.ts` over the count it kept; `exposure({ pre: false })` stores the scene as before the wave's
+       * fixer (not pre-exposed: a prover's A/B on one screen) and `{ pre: true }` puts it back. WebGPU's alone.
+       */
+      exposure: async (o?: Record<string, unknown>) => {
+        const said = o && typeof o === 'object' && 'tune' in o ? tuneEye(o) : [];
+        if (!GPU.webgpu) return { ...(said.length ? { said } : {}), eye: "WebGPU's: WebGL's exposure is the Graphics page's Exposure row, as before" };
+        if (o && typeof o === 'object' && typeof o.pre === 'boolean') GPU.rt!.eye.preSwitch(o.pre);
+        const report = await GPU.rt!.eye.report(!!(o && typeof o === 'object' && o.check === true));
+        return { ...(said.length ? { said } : {}), ...report };
+      },
       /**
        * Which star lights this space zone, and what stops its rays. No argument: the pick, every
        * star the zone has, and how far the zone file's own light points from the one chosen.
@@ -12728,7 +12763,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? eyeDialsFor(helper) ?? (GPU.webgpu ? captureDialsFor(helper) : null) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -13926,7 +13961,8 @@ class App {
         this.cam.baseFov = S.fov;
         break;
       case 'exposure':
-        this.renderer.toneMappingExposure = S.exposure;
+        // Pass 2, wave 2: WebGPU's Exposure is the eye's stops (`exposureStops`), read by the eye's frame; WebGL's is this row.
+        if (!GPU.webgpu) this.renderer.toneMappingExposure = S.exposure;
         break;
       case 'fog':
         this.world.userFog = S.fog;
@@ -14935,9 +14971,120 @@ class App {
         run: this.world.skyAir ? this.world.skyAir.report() : null,
       },
       draws: GPU.webgpu ? GPU.rt!.airDraw.report() : null,
-      dials: { floor: { ...NIGHT_FLOOR }, disc: { ...DISC_TUNE }, pair: { ...PAIR_TUNE }, hours: { ...SKY_HOURS } },
+      dials: { disc: { ...DISC_TUNE }, pair: { ...PAIR_TUNE }, hours: { ...SKY_HOURS } },
+      ...(MATCH_HOLD.on ? { match: `held at '${MATCH_HOLD.name}' (__debug.sky({ match: null }) lets go)` } : {}),
       parts: this.world.swgSky?.describe() ?? 'no converted sky on this world',
     };
+  }
+
+  /** The browser's storage for the sky's matches, or null where it is refused. */
+  private matchStore(): MatchStore | null {
+    try {
+      return typeof localStorage !== 'undefined' ? localStorage : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `__debug.sky({ match })` (pass 2, wave 2, the owner's answer 2; `src/sky/skyMatch.ts`): one frame shown alike in two tabs.
+   * A name not saved yet saves this frame (the spot, the camera's place, turn and field of view, the hour, the weather) and
+   * holds it; a name saved (by any tab of this address) is travelled to behind a loading screen, and the camera, the hour and
+   * the weather are put and held as saved. `{ match: null }` lets go of all three; `{ matches: true }` lists them.
+   */
+  private async skyMatch(o: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const store = this.matchStore();
+    if (o.matches === true && !('match' in o)) return { matches: matchList(store), holding: MATCH_HOLD.on ? MATCH_HOLD.name : null };
+    const name = o.match;
+    const w = this.world.weather;
+    if (name === null) {
+      const was = MATCH_HOLD.on ? MATCH_HOLD.name : null;
+      MATCH_HOLD.on = false;
+      this.world.day.release();
+      w.force(null);
+      return { let: was ?? 'nothing was held', camera: 'the game\'s again', hour: 'handed back to the shared clock', weather: 'the schedule\'s again' };
+    }
+    if (typeof name !== 'string' || !name.trim()) return { error: "a match is named: __debug.sky({ match: 'tatooine-noon' })" };
+    const key = name.trim();
+    if (o.forget === true) return { forgot: forgetMatch(store, key) ? key : `no match called ${key}` };
+    const have = readMatches(store)[key];
+    const from = `${GPU.webgpu ? 'WebGPU' : 'WebGL'}, ${GPU.webgpu ? (SKY_AT_LOAD.ours ? 'our sky' : "SWG's sky") : "SWG's sky"}`;
+    if (!have || o.save === true) {
+      // Saved: this frame as it stands, and held from now on.
+      const cam = this.cam.camera;
+      const p = this.player;
+      const s = w.state;
+      const rec: SkyMatch = {
+        name: key,
+        saved: new Date().toISOString(),
+        from,
+        planet: this.world.planet.id,
+        zone: this.zone ?? null,
+        pack: this.world.packId,
+        stand: { x: p.pos.x, y: p.pos.y, z: p.pos.z, heading: p.heading },
+        camera: { x: cam.position.x, y: cam.position.y, z: cam.position.z, qx: cam.quaternion.x, qy: cam.quaternion.y, qz: cam.quaternion.z, qw: cam.quaternion.w, fov: cam.fov },
+        time: this.world.day.time,
+        weather: s.enabled ? { level: s.target, kind: w.forcedNow?.kind ?? null, family: s.family || null } : null,
+      };
+      if (!saveMatch(store, rec)) return { error: 'the browser refused to keep the match (its storage is off or full)' };
+      this.holdMatch(rec);
+      return { saved: key, from, where: `${rec.planet} at ${rec.stand.x.toFixed(1)}, ${rec.stand.y.toFixed(1)}, ${rec.stand.z.toFixed(1)}`, hour: clockOf(rec.time), weather: rec.weather, fov: rec.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })', next: `in the other tab: __debug.sky({ match: '${key}' })` };
+    }
+    // Restored: travelled to its world where it is another, the player stood at its spot, the camera, hour and weather held.
+    // On the same world (the wave's fixer) the spot is reached the same way, behind a loading screen of its own as a teleport
+    // to a place is (`teleport`'s tail): the player put down there, the world streamed and settled round the spot, its room
+    // entered and the match held before the screen goes, so the first frame shown is the saved one.
+    if (this.traveling) return { error: 'a journey is under way: ask again once it has arrived' };
+    let travelled = false;
+    const at = new THREE.Vector3(have.stand.x, have.stand.y, have.stand.z);
+    const label = `the match '${key}'`;
+    if (this.world.planet.id !== have.planet || (this.zone ?? null) !== have.zone) {
+      const planet = planetById(have.planet);
+      if (!planet) return { error: `no world is called ${have.planet}` };
+      await this.travel(planet, have.zone ?? undefined, undefined, { at, heading: have.stand.heading, label });
+      travelled = true;
+      this.player.reset(at);
+      this.player.heading = have.stand.heading;
+      this.world.enterCellAt(at);
+      this.holdMatch(have);
+    } else {
+      const planet = this.world.planet;
+      this.hyperspace.abort('teleport');
+      this.ultraCruise.abort();
+      this.ride?.abort('teleport', true);
+      this.traveling = true;
+      this.map.hide();
+      this.input.captured = false;
+      this.loadingScreen.show(planet, label, `on ${planet.name}`);
+      try {
+        await new Promise((r) => setTimeout(r, 250));
+        if (this.player.mounted) this.handleMount();
+        this.player.reset(at);
+        this.player.heading = have.stand.heading;
+        this.world.jumpTo(at);
+        this.physics.stepOnce();
+        await this.settle();
+        this.player.reset(at);
+        this.player.heading = have.stand.heading;
+        this.world.enterCellAt(at);
+        this.holdMatch(have);
+        await this.loadingScreen.hide();
+      } finally {
+        this.traveling = false;
+      }
+      travelled = true;
+    }
+    return { restored: key, savedBy: have.from, here: from, travelled, screen: true, hour: clockOf(have.time), weather: have.weather, fov: have.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })' };
+  }
+
+  /** A match's camera, hour and weather held (the camera by `placeCamera`, every frame, from `MATCH_HOLD`). */
+  private holdMatch(m: SkyMatch): void {
+    holdFrom(m);
+    // The hour written and held outright: the day takes a write as held only when the time moved, and a match saved where it
+    // stands writes the time it already has.
+    this.world.day.time = m.time;
+    this.world.day.held = true;
+    if (m.weather) this.world.weather.force({ level: m.weather.level, kind: (m.weather.kind ?? null) as import('./world/weather').WeatherForce['kind'], family: m.weather.family, snap: true });
   }
 
   /**
@@ -14952,6 +15099,10 @@ class App {
     // The Sky row (pass 2, wave 1, `src/sky/skyMode.ts`): WebGPU's alone, taken at the next start of the game; and our sky's haze
     // detail, WebGPU's and our sky's alone.
     if (key === 'skyAir') return skyRowState(GPU.webgpu, this.settings.skyAir);
+    // Pass 2, wave 2: the eye's two rows are WebGPU's (the Exposure in stops, the Eye adaptation), the old Exposure WebGL's.
+    if (key === 'exposure' && GPU.webgpu) return { hide: true };
+    if ((key === 'exposureStops' || key === 'eyeAdapt') && !GPU.webgpu) return { hide: true };
+    if (key === 'eyeAdapt' && !SKY_AT_LOAD.ours) return { off: "SWG's sky keeps today's exposure" };
     if (key === 'hazeResolution') return !GPU.webgpu ? { hide: true } : SKY_AT_LOAD.ours ? null : { off: "SWG's sky draws no haze of the air" };
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
     // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
@@ -21053,6 +21204,24 @@ class App {
       this.editor.placeCamera();
       return;
     }
+    // Pass 2, wave 2: a sky match held (`__debug.sky({ match })`, `src/sky/skyMatch.ts`): the camera exactly as saved, every
+    // frame, from the kept record (nothing made); the field of view written and the projection made again only when it moved.
+    if (MATCH_HOLD.on) {
+      const c = this.cam.camera;
+      const h = MATCH_HOLD;
+      c.position.x = h.x;
+      c.position.y = h.y;
+      c.position.z = h.z;
+      c.quaternion.x = h.qx;
+      c.quaternion.y = h.qy;
+      c.quaternion.z = h.qz;
+      c.quaternion.w = h.qw;
+      if (c.fov !== h.fov) {
+        c.fov = h.fov;
+        c.updateProjectionMatrix();
+      }
+      return;
+    }
     const { player, input } = this;
     const flown = player.mounted ?? player.piloting;
     // Off every vehicle: the next ride's hovering cockpit starts its heading target afresh, even on the same hull.
@@ -24717,6 +24886,9 @@ class App {
     // play (a level group's copies, the flora batches) ever reached the GPU after its first frame.
     if (!GPU.webgpu) info.calls = 0;
     info.triangles = 0;
+    // Pass 2, wave 2's fixer: with a chain, the scene's pre-exposure rolled on the card once a drawn frame, before the scene is
+    // stored into its target (`src/sky/exposure/preExpose.ts`).
+    if (GPU.webgpu && this.postfx) GPU.rt!.eye.begin();
     // Decided before the scene is drawn, so the lit water and the reflections pass never disagree
     // about who adds the water's environment term this frame. Before the clouds are fed, too: the
     // camera's water it works out is what says the volumetrics' clouds refuse under water, and the
@@ -37088,6 +37260,22 @@ class App {
       // Behind a fully opaque loading screen nothing drawn can be seen, so the world is drawn at most every
       // `LOADING_TUNE.drawEveryMs` (its `update` above still runs every frame, and every frame is drawn once the
       // screen begins to go): drawn every frame it was half of a screen's main thread, 22 s of a 44 s screen.
+      // Pass 2, wave 2 (maker A): the eye's frame on WebGPU before the draw (`src/sky/exposure/eyeRun.ts`): its inputs into
+      // the kept record, then three's exposure and, where the card does not adapt, the eye's buffer.
+      if (GPU.webgpu) {
+        const e = EYE_IN;
+        e.dt = rawDt;
+        e.air = SKY_AT_LOAD.ours && AIR.frame.on && !this.world.planet.space;
+        e.chain = this.postfx !== null;
+        // The wave's fixer: the chain draws its eye pass this frame (wanted by its own rule, which an Effects switch under way
+        // already reads as off, and its computes landed); where it does not, the main thread answers into the buffer.
+        e.eye = this.postfx !== null && this.postfx.passWanted('exposure') && GPU.rt!.eye.ready();
+        e.adapt = this.settings.eyeAdapt;
+        e.stops = this.settings.exposureStops;
+        e.loading = this.traveling || this.loadingScreen.opaque;
+        e.level = AIR.frame.level;
+        GPU.rt!.eye.frame();
+      }
       const screenHides = LOADING_TUNE.screenDraws && this.loadingScreen.opaque;
       if (!screenHides || tFrame - this.screenDrawnAt >= LOADING_TUNE.drawEveryMs) {
         this.drawFrame();

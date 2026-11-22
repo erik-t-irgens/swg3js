@@ -135,7 +135,11 @@ const store = new Map<string, string>();
   // new pass, under no master of the volumetrics' and on with the chain alone, as the smoothing is.
   const hazeDef = newDefs.find((d) => d.id === 'haze');
   ok(!!hazeDef && !hazeDef.requires?.length && hazeDef.toggles.length === 1 && hazeDef.toggles[0] === 'effects' && !hazeDef.typical, "our sky's haze is new too, requiring no master, on with the chain, not typical");
-  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 4 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newPasses.includes('haze') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing, the fourth our sky\'s haze)');
+  // The GPU port's pass 2, wave 2 added the eye (`exposure`), which WebGL never registers and nor does SWG's sky: the fifth new
+  // pass, under no master of the volumetrics' and on with the chain alone, as the haze is.
+  const eyeDef = newDefs.find((d) => d.id === 'exposure');
+  ok(!!eyeDef && !eyeDef.requires?.length && eyeDef.toggles.length === 1 && eyeDef.toggles[0] === 'effects' && !eyeDef.typical, 'the eye is new too, requiring no master, on with the chain, not typical');
+  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 5 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newPasses.includes('haze') && newPasses.includes('exposure') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing, the fourth our sky\'s haze, the fifth the eye)');
   // W7b's `yieldsTo` (the design's §4.1 item 6c): the September row alone names it, it names the clouds alone, and the
   // decision over every combination of the September switch, the clouds' switch, the master and the effects -- with the
   // registry's own answer for whether the clouds are wanted, so nothing is stood in -- is the old chain's wherever the

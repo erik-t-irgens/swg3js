@@ -28,6 +28,8 @@ import * as TSL from 'three/tsl';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { LUMA } from '../fx/gradeMath.ts';
 import { liveTexture } from './gpuGround.ts';
+import { eyeExposureNode } from '../../sky/exposure/eyeBuffer.ts';
+import { PRE_FIXED, preNode } from '../../sky/exposure/preExpose.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -102,7 +104,19 @@ export function chainMaterial(name: string): NodeMaterial {
   m.fog = false;
   m.toneMapped = false;
   m.vertexNode = vec4(positionGeometry.xy, 0, 1);
+  // Pass 2, wave 2's fixer: a chain pass draws into no scene target (`postfx.ts`'s R1), so its output is never stored
+  // pre-exposed (`src/sky/exposure/preExpose.ts`); every chain graph is the same key whatever this says (its own fragment).
+  m.userData.swgChain = true;
   return m;
+}
+
+/**
+ * The scene's own units from the picture's (pass 2, wave 2's fixer: the scene is stored times `pre`, last frame's eye
+ * exposure, `src/sky/exposure/preExpose.ts`): the factor a number in the scene's units is multiplied by to stand in the
+ * picture's, 1 under SWG's sky and before the eye's computes have landed.
+ */
+export function storedOf(): Any {
+  return max(preNode(), PRE_FIXED.least);
 }
 
 /** A mesh on the triangle, never culled, marked as the chain's. */
@@ -147,7 +161,8 @@ export function sanitizeGraph(u: { tScene: { value: THREE.Texture | null } }): C
     If(notFinite(c.x).or(notFinite(c.y)).or(notFinite(c.z)).or(notFinite(c.w)), () => {
       c.assign(vec4(0, 0, 0, 1));
     });
-    return vec4(clamp(c.rgb, 0, CHAIN_NUMBERS.sanitize.ceiling), 1);
+    // Pass 2, wave 2's fixer: the ceiling is the scene's, stood in the picture's units (`storedOf`, 1 where nothing is pre-exposed).
+    return vec4(clamp(c.rgb, vec3(0), vec3(storedOf().mul(CHAIN_NUMBERS.sanitize.ceiling))), 1);
   })();
   return graph(m, 1, { uniforms: {}, textures: { tScene: scene } });
 }
@@ -166,7 +181,10 @@ export function brightGraph(bloom: UnrealBloomPass): ChainGraph {
   const defaultOpacity = live(u.defaultOpacity);
   m.fragmentNode = Fn(() => {
     const texel = vec4(input.sample(uv())).toVar('swgBrightT');
-    const v = dot(texel.xyz, vec3(lum[0], lum[1], lum[2]));
+    // Pass 2, wave 2: the threshold against the luminance as the eye exposes it (`eyeBuffer.ts`; 1 where the eye does not
+    // adapt), so what blooms is what is bright on the screen, at noon and at night alike; the picture stored pre-exposed
+    // (the wave's fixer, `storedOf`), so the eye's exposure over the store's.
+    const v = dot(texel.xyz, vec3(lum[0], lum[1], lum[2])).mul(eyeExposureNode().div(storedOf()));
     const outputColor = vec4(defaultColor, defaultOpacity);
     const alpha = smoothstep(threshold, threshold.add(smoothWidth), v);
     return mix(outputColor, texel, alpha);
@@ -302,8 +320,12 @@ export function gradeGraph(u: GradeUniforms): ChainGraph {
   const split = live(u.uSplit);
   const saturation = live(u.uSaturation);
   const contrast = live(u.uContrast);
-  const pivot = live(u.uPivot);
+  const pivot0 = live(u.uPivot);
   const compare = live(u.uCompare);
+  // Pass 2, wave 2: display mid-grey in the picture's own units, the pivot (0.18 over the player's compensation) over the eye's
+  // exposure too (`eyeBuffer.ts`), so the grade's contrast turns about the same grey on the screen at noon and at night; the
+  // picture stored pre-exposed (the wave's fixer, `storedOf`), so times the store's.
+  const pivot = pivot0.mul(storedOf()).div(max(eyeExposureNode(), 1e-8));
   const G = CHAIN_NUMBERS.grade;
   const LUMA3 = vec3(G.luma[0], G.luma[1], G.luma[2]);
   m.fragmentNode = Fn(() => {
@@ -338,7 +360,7 @@ export function gradeGraph(u: GradeUniforms): ChainGraph {
     });
     return vec4(c, 1);
   })();
-  return graph(m, 1, { uniforms: { uAmount: amount, uBalance: balance, uShadowTint: shadowTint, uHighlightTint: highlightTint, uSplit: split, uSaturation: saturation, uContrast: contrast, uPivot: pivot, uCompare: compare }, textures: { tDiffuse: input } });
+  return graph(m, 1, { uniforms: { uAmount: amount, uBalance: balance, uShadowTint: shadowTint, uHighlightTint: highlightTint, uSplit: split, uSaturation: saturation, uContrast: contrast, uPivot: pivot0, uCompare: compare }, textures: { tDiffuse: input } });
 }
 
 // ---------------------------------------------------------------- the output's copy (three's `OutputPass` reads `tDiffuse`)
@@ -366,10 +388,19 @@ export function motionViewGraph(u: { tMotion: { value: THREE.Texture | null }; s
   return graph(m, 1, { uniforms: { size, pixels }, textures: { tMotion: input } });
 }
 
-/** The picture copied as it is into three's frame-buffer target, whose own output pass tone-maps and encodes it. */
+/**
+ * The picture copied into three's frame-buffer target (or straight onto the canvas under the inline output), whose tone
+ * mapping and encoding follow at the renderer's exposure (the player's compensation); pass 2, wave 2: times the eye's
+ * exposure first (`eyeBuffer.ts`; 1 where the eye does not adapt and under SWG's sky), over the factor the scene was stored
+ * at (the wave's fixer, `src/sky/exposure/preExpose.ts`; 1 under SWG's sky).
+ */
 export function outputGraph(u: { tDiffuse: { value: THREE.Texture | null } }): ChainGraph {
   const m = chainMaterial('fx.gpu.output');
   const input = tex(u.tDiffuse);
-  m.fragmentNode = Fn(() => vec4(input.sample(uv())))();
+  m.fragmentNode = Fn(() => {
+    const c = vec4(input.sample(uv())).toVar('swgOutC');
+    // The wave's fixer: the picture is stored times `pre` (`storedOf`), so the eye's exposure over it.
+    return vec4(c.rgb.mul(eyeExposureNode().div(storedOf())), c.a);
+  })();
   return graph(m, 1, { uniforms: {}, textures: { tDiffuse: input } });
 }

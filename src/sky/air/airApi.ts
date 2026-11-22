@@ -217,6 +217,16 @@ export interface AirFrame {
   steer: number;
   /** The per-channel gain the steer puts on everything the air adds (the sky's radiance and the haze's light); 1 at 0. */
   readonly gain: THREE.Vector3;
+  /**
+   * Pass 2, wave 2: the night light's aim, the brightest body up (the sun by day, the moon by night, whichever sends more
+   * light to the ground through the air), a unit world vector; the world's main light shines from it.
+   */
+  readonly lightDir: THREE.Vector3;
+  /**
+   * Pass 2, wave 2: the light on a level surface facing up, in luminance, scene units: each body's light here times the sine of
+   * its height, and the sky's. What the eye's "off" follows (`src/sky/exposure/eyeRun.ts`).
+   */
+  level: number;
 }
 
 /** The frame record, made once: the air's maker writes it, everything else reads it. */
@@ -242,6 +252,8 @@ export function makeAirFrame(): AirFrame {
     overcast: 0.5,
     steer: 0.5,
     gain: new THREE.Vector3(1, 1, 1),
+    lightDir: new THREE.Vector3(0, 1, 0),
+    level: 1.5,
   };
 }
 
@@ -315,8 +327,8 @@ export const AIR_UNITS = { scene: 1.5 };
 
 /**
  * The one holder (filled by the air's maker): the frame record, the tables on WebGPU (null on WebGL and until they are
- * made), and SWG's own lighting of this hour as the sky's ramps gave it before the twin wrote over it (the night floor's
- * and the steer's reference, kept in place).
+ * made), and SWG's own lighting of this hour as the sky's ramps gave it before the twin wrote over it (the steer's
+ * reference, kept in place). Wave 1's night floor and its night (`swgNight`) are gone with wave 2's eye.
  */
 export const AIR = {
   frame: makeAirFrame(),
@@ -334,21 +346,5 @@ export const AIR = {
     fog: new THREE.Color(0.5, 0.5, 0.5),
     fogDensity: 0.5,
     clear: new THREE.Color(0.5, 0.5, 0.6),
-  },
-  /**
-   * SWG's own lighting at the night's middle (`nightFloor.ts`'s `NIGHT_INDEX`) for the sky's mix in force, read off the
-   * ramps whenever the mix moves (`SwgSky.lightingAt`): the night floor's brightness, held at every hour until wave 2.
-   * Black (so no floor) until the first read.
-   */
-  swgNight: {
-    main: new THREE.Color(0, 0, 0),
-    mainScale: 0.5,
-    ambient: new THREE.Color(0, 0, 0),
-    ambientScale: 0.5,
-    fill: new THREE.Color(0, 0, 0),
-    fillScale: 0.5,
-    bounce: new THREE.Color(0, 0, 0),
-    bounceScale: 0.5,
-    fog: new THREE.Color(0, 0, 0),
   },
 };

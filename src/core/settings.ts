@@ -71,8 +71,15 @@ export interface Settings extends FxSettings {
   skyAir: number;
   /** How strongly the normal maps bend the lighting, 0 flat to 2 doubled. */
   normalStrength: number;
-  /** Tone mapping exposure. */
+  /** Tone mapping exposure (WebGL's row; WebGPU's is `exposureStops`). */
   exposure: number;
+  /**
+   * The GPU port's pass 2, wave 2 (`src/sky/exposure/`), WebGPU's rows: the eye's compensation in stops (-2 to 2, nought at
+   * start: the eye's own exposure), and the eye adaptation (1 on: the scene measured and eased like an eye; 0 off: the
+   * exposure follows the sun's height). WebGL never reads them.
+   */
+  exposureStops: number;
+  eyeAdapt: number;
   /** How far placed objects (buildings, props) load, as a scale of the game's ranges. */
   objectReach: number;
   /** Detailed ground chunks around the player, in chunks each way. */
@@ -436,6 +443,8 @@ export const DEFAULT_SETTINGS: Settings = {
   skyAir: 1,
   normalStrength: 1,
   exposure: 1,
+  exposureStops: 0,
+  eyeAdapt: 1,
   objectReach: 1,
   terrainRadius: 6,
   farRadius: 6,
@@ -677,6 +686,12 @@ export function migrateSettings(saved: Record<string, unknown>): Record<string, 
     out.motionBlur ??= out.speedBlur;
     delete out.speedBlur;
   }
+  // Pass 2, wave 2: WebGPU's Exposure is stops of compensation over the eye; a brightness chosen before on the old row (a
+  // factor, which WebGL keeps) starts the new one at the same factor in stops, held to its ±2.
+  if (typeof out.exposure === 'number' && out.exposure > 0 && out.exposureStops === undefined) {
+    const s = Math.log2(out.exposure);
+    out.exposureStops = s < -2 ? -2 : s > 2 ? 2 : Math.round(s * 4) / 4;
+  }
   return out;
 }
 
@@ -715,6 +730,10 @@ export function settingsSaved(): boolean {
 export function saveSettings(s: Settings): void {
   try {
     const changed: Record<string, unknown> = Object.fromEntries(Object.entries(s).filter(([k, v]) => v !== DEFAULT_SETTINGS[k as keyof Settings]));
+    // The GPU port's pass 2, wave 2's fixer: WebGPU's Exposure in stops is saved beside any old brightness kept for WebGL, even
+    // at its nought, so the migration (`migrateSettings`, which takes the old brightness only where no stops are saved) runs
+    // once: dropped for being at its default, a nought the player chose was taken from the old row again at every start.
+    if ('exposure' in changed && !('exposureStops' in changed)) changed.exposureStops = s.exposureStops;
     // The volumetrics' wave the file was written in, where it holds a quality key, so a quality key a later wave adds is
     // filled only in a file from before it (`volFillQuality`), never in one that left it out for being at its default.
     volStampQuality(changed);

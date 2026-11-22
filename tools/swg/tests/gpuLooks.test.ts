@@ -207,7 +207,9 @@ function wrapped(spec = { mode: 'phong', color: [0.5, 0.25, 0.125], power: 20 },
 
   const world = read('src/world/world.ts');
   const gpu = world.slice(world.indexOf('  private refreshEnvironmentGpu('), world.indexOf('  private useEnvironment('));
-  ok(/const dome = \(this\.dome \?\?= env\.makeDome\(\)\);/.test(gpu) && /const captured = dome\.capture\(\(camera\) => camera\.update\(renderer, sky\.domeScene\)\);/.test(gpu) && /if \(captured\) this\.useEnvironment\(captured, null\);/.test(gpu), "the world's WebGPU half captures our sky through the kept dome, whose target is never handed over to be freed");
+  // Since pass 2, wave 2 the kept dome is taken through the real sky's capture made with it (`skyCapture.ts`: a face a frame and
+  // the filter on a seventh, `skyCaptureSteps.test.ts`), never `CubeCamera.update`; its kept target is still never handed over.
+  ok(/const dome = \(this\.dome \?\?= env\.makeDome\(\)\);/.test(gpu) && /const steps = env\.sky;\s*if \(!steps \|\| steps\.dome !== dome\) return;/.test(gpu) && /const captured = steps\.step\(/.test(gpu) && /if \(captured\) this\.useEnvironment\(captured, null\);/.test(gpu), "the world's WebGPU half captures our sky through the kept dome, whose target is never handed over to be freed");
   ok(/const target = env\.filterCube\(tex\);/.test(gpu) && /this\.useEnvironment\(target\.texture, target as unknown as THREE\.WebGLRenderTarget\);/.test(gpu) && /usable\.faces\.map\(\(f\) => skyPack\.url\(f\)\)/.test(gpu), "an area's own cube (the 'game' source) goes to a target of its own, out of the sky's own pack");
   ok(/if \(!env\.capturing\) \{\s*if \(this\.envTexture\) \{\s*this\.envTexture = null;\s*this\.envWant = null;\s*setEnvironment\(null\);/.test(gpu), "the look switch off hands the registry its stand-in");
   ok(!/fromScene/.test(gpu), "and the 'scene' comparison is WebGL's alone");
@@ -274,7 +276,8 @@ function wrapped(spec = { mode: 'phong', color: [0.5, 0.25, 0.125], power: 20 },
   ok(renderer.library.fromMaterial(standIn) === standIn && met.length === 0, 'nor a node material, its own copy');
   const start = read('src/core/gpu/start.ts');
   // Pass 1, wave 2: three's indirect light held at 0.187's goes on before them all (`gpuLightHold.ts`), the model they build on.
-  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);/.test(start), 'the game hands the node library the held indirect light first, then the detail, then the highlight, then the leaf cards (which change the highlight\'s model)');
+  // Pass 2, wave 2: the eye's glow last (`src/sky/exposure/eyeBuffer.ts`), over whatever the parts before it made of the colour.
+  ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart, eyeGlowPart\);/.test(start), 'the game hands the node library the held indirect light first, then the detail, then the highlight, then the leaf cards (which change the highlight\'s model), then the eye\'s glow');
 }
 
 // ---------------------------------------------------------------- 5. step 3's stand-ins, mended here

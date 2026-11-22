@@ -25,7 +25,7 @@
     "test:weather": "node tools/swg/tests/weather.test.ts && node tools/swg/tests/wetness.test.ts && node --expose-gc tools/swg/tests/uploadRange.test.ts",
     "test:water": "node tools/swg/tests/water.test.ts && node tools/swg/tests/basinWater.test.ts && node tools/swg/tests/waterLine.test.ts && node tools/swg/tests/waterSurface.test.ts && node tools/swg/tests/swell.test.ts && node tools/swg/tests/afloat.test.ts && node tools/swg/tests/seaFeed.test.ts && node tools/swg/tests/underwater.test.ts && node tools/swg/tests/underwaterSpecks.test.ts && node tools/swg/tests/ripples.test.ts && node tools/swg/tests/lavaImmunity.test.ts && node tools/swg/tests/skyCapture.test.ts",
     "test:lava": "node tools/swg/tests/lavaSeam.test.ts && node tools/swg/tests/lavaHarm.test.ts && node tools/swg/tests/lavaImmunity.test.ts && node tools/swg/tests/lavaSink.test.ts",
-    "test:sky": "node tools/swg/tests/airFit.test.ts && node tools/swg/tests/airTwin.test.ts && node tools/swg/tests/airRun.test.ts && node tools/swg/tests/dayCount.test.ts && node tools/swg/tests/skyDraw.test.ts && node tools/swg/tests/skyDrawAlloc.test.ts",
+    "test:sky": "node tools/swg/tests/airFit.test.ts && node tools/swg/tests/airTwin.test.ts && node tools/swg/tests/airRun.test.ts && node tools/swg/tests/dayCount.test.ts && node tools/swg/tests/skyDraw.test.ts && node tools/swg/tests/skyDrawAlloc.test.ts && node tools/swg/tests/eye.test.ts && node tools/swg/tests/eyeAlloc.test.ts && node tools/swg/tests/skyCaptureSteps.test.ts && node tools/swg/tests/skyCaptureAlloc.test.ts",
     "test:grade": "node tools/swg/tests/grade.test.ts",
     "test:heat": "node tools/swg/tests/heat.test.ts",
     "test:flare": "node tools/swg/tests/flare.test.ts",

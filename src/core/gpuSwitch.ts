@@ -13,6 +13,7 @@
 
 import type * as THREE from 'three';
 import type { DomeCapture } from '../world/envmap.ts';
+import type { SkyCapture } from '../sky/capture/skyCapture.ts';
 import type { GroundTileUniforms } from '../world/terrainTextures.ts';
 import type { RingUniforms } from '../world/horizon/horizonRings.ts';
 import type { BakeGrid } from '../world/horizon/horizonMath.ts';
@@ -105,6 +106,11 @@ export interface GpuEnvironment {
   readonly standIn: THREE.Texture | null;
   /** The dome's capture, made once for the session and warmed with one capture of an empty scene. */
   makeDome(): DomeCapture;
+  /**
+   * The real sky's capture over the dome (pass 2, wave 2, maker B: `src/sky/capture/skyCapture.ts`): what the sky draws, a face
+   * a frame and the filter on a seventh. Made with the dome; null before it.
+   */
+  readonly sky: SkyCapture | null;
   /** An area's own cube (the 'game' source) filtered at its own size into a target of its own, the caller's to free. */
   filterCube(cube: THREE.Texture): THREE.RenderTarget;
   /** What `__debug.gpu()` says of it. */
@@ -230,10 +236,32 @@ export interface GpuAirDraw {
   report(): Record<string, unknown>;
 }
 
+/**
+ * The eye (pass 2, wave 2, `src/sky/exposure/eyeGpu.ts`): the exposure measured and eased on the card into a buffer every
+ * reader of the exposure reads there, never read back in a frame.
+ */
+export interface GpuEye {
+  /** Once a game frame before anything is drawn, after the frame wrote `EYE_IN` (`src/sky/exposure/eyeRun.ts`): three's exposure and the buffer where the card does not adapt. */
+  frame(): void;
+  /** The wave's fixer: whether the eye's computes have landed (the eye pass can draw where the chain wants it). */
+  ready(): boolean;
+  /**
+   * The wave's fixer: once a drawn frame with a chain, before the scene (`src/sky/exposure/preExpose.ts`): the scene's
+   * pre-exposure rolled on the card, last frame's eye exposure the factor this frame's scene is stored at.
+   */
+  begin(): void;
+  /** The prover's switch (`__debug.exposure({ pre })`): off stores the scene as before the fixer (the buffer at `[1, 1]`), live. */
+  preSwitch(on: boolean): void;
+  /** What `__debug.exposure()` says, read back from the card (asked, never in a frame); `check` holds the card's frame to `eyeMath.ts`'s. */
+  report(check: boolean): Promise<Record<string, unknown>>;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** What draws from the air under our sky (pass 2, wave 1). */
   readonly airDraw: GpuAirDraw;
+  /** The eye (pass 2, wave 2). */
+  readonly eye: GpuEye;
   /**
    * The air's four tables (pass 2, wave 1, maker A: `src/sky/air/airTables.ts`), made once a session on the device and put in
    * `AIR.tables`, following `record` (the world's blended air record, read by reference); the same tables on a later call.

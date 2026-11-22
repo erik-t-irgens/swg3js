@@ -29,9 +29,12 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * The WebGPU side: everything under src/core/gpu/, and the GPU port's pass 2 files under src/sky/air/ that read three's WebGPU
  * build (the air's tables, the sky drawn from them, the haze and the see-through layer), which only that side reaches (its
  * runtime and stand-ins, `start.ts`, `standIns.ts`); the pass's pure modules beside them (the air's interface, record, fit,
- * twin, the haze's arithmetic, the night floor) the WebGL path may load.
+ * twin, the haze's arithmetic) the WebGL path may load. Wave 2's eye likewise: its buffer and its passes (`src/sky/exposure/`
+ * `eyeBuffer.ts`, `eyeGpu.ts`) the WebGPU side's, its arithmetic, its main thread's frame and its dials pure; and its fixer's
+ * store of the scene pre-exposed (`preExpose.ts`, a wrap of three's node materials' output and the card's buffer) the WebGPU
+ * side's too.
  */
-const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts']);
+const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts']);
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;
@@ -380,7 +383,7 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     for (const g of ['looks.ts', 'gpuSpec.ts', 'gpuDetail.ts', 'gpuEnv.ts', 'gpuSpecSelfTest.ts', 'gpuCard.ts', 'gpuCardSelfTest.ts']) ok(existsSync(join(SRC, 'core', 'gpu', g)), `step 4's ${g} is under src/core/gpu/`);
     const startText = readFileSync(join(SRC, 'core', 'gpu', 'start.ts'), 'utf8');
     // Pass 1, wave 2: three's indirect light held at 0.187's goes on first (`gpuLightHold.ts`).
-    ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart\);\s*installLooks\(renderer\);/.test(startText) && startText.indexOf('installLooks(renderer);') > startText.indexOf('const fallback: FallbackStats = installFallback(renderer);'), "start.ts: the looks go on the node library after the fallback's wrap");
+    ok(/LOOK_PARTS\.push\(lightHoldPart, detailPart, specPart, cardPart, eyeGlowPart\);\s*installLooks\(renderer\);/.test(startText) && startText.indexOf('installLooks(renderer);') > startText.indexOf('const fallback: FallbackStats = installFallback(renderer);'), "start.ts: the looks go on the node library after the fallback's wrap");
   }
   // The leaf cards' part (step 4, item 4): the two files of the WebGL path it touches are the mirrors, whose new names are
   // the numbers their own functions and the WebGL shader text use; and the one guarded site is inside `forceGpuOff`, which

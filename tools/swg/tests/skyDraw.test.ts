@@ -5,7 +5,7 @@
 //  2. Tatooine's pair rule: the second sun `PAIR_TUNE.belowDeg` under the caster on its own azimuth, and over a whole day of
 //     `DayCycle` itself it rises after the caster and sets before it; the dial moves it;
 //  3. `__debug.sky`'s hours (`skyHours.ts`) against `DayCycle.update` itself, on SWG's own path and on the plain arc;
-//  4. the night floor (`nightFloor.ts`): nought by day, the share by night, every light held at no less than SWG's times it;
+//  4. the night floor retired by wave 2's eye (its file, the world's call, the dome's hold, its dials), and the night light's aim;
 //  5. the sky's dials (`skyDials.ts`), each set through `tuneSky`, held to its range;
 //  6. the Sky row (`skyMode.ts`): read once, WebGL always SWG's, the storage's word, the row's note;
 //  7. the haze's arithmetic (`airHazeMath.ts`): the see-through layer and the pass equal every layer drawn the old way and hazed
@@ -18,7 +18,7 @@
 //
 // Run: node tools/swg/tests/skyDraw.test.ts
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
@@ -26,7 +26,6 @@ import * as TSL from 'three/tsl';
 import { DayCycle } from '../../../src/world/daycycle.ts';
 import { STAR_SYSTEMS, PAIR_TUNE, casterOf, kelvinToLinear, pairDirectionIn, secondOf, starsOf } from '../../../src/sky/stars.ts';
 import { SKY_HOURS, SKY_HOUR_NAMES, isSkyHour, skyHourTime, sunSineAt, type SkyHour } from '../../../src/sky/skyHours.ts';
-import { NIGHT_FLOOR, applyNightFloor, nightFloorWeight, type FloorLighting } from '../../../src/sky/air/nightFloor.ts';
 import { DISC_TUNE, SKY_TUNE_RANGE, skyDialSet, tuneSky } from '../../../src/sky/skyDials.ts';
 import { SKY_AT_LOAD, readSkyMode, resetSkyModeForTests, skyOurs, skyRowState } from '../../../src/sky/skyMode.ts';
 import { covers, hazeBeyondIn, hazePixelIn, intoLayer, isSkyDepth, layerStackIn, rayDistance, referencePixelIn, seeKindOf, timesAlpha, viewZOfDepth, type SeeKind } from '../../../src/sky/air/airHazeMath.ts';
@@ -176,88 +175,29 @@ const DEG = Math.PI / 180;
   ok(day.held === false, 'and released, the shared clock has it again');
 }
 
-// ---------------------------------------------------------------- 4. the night floor
+// ---------------------------------------------------------------- 4. the night floor, retired by wave 2's eye, and the night light
 {
-  ok(NIGHT_FLOOR.share === 1 && NIGHT_FLOOR.dayAt === 0.05 && NIGHT_FLOOR.nightAt === -0.1, "the floor starts at today's night in full, from about 3° up to 6° down");
-  ok(nightFloorWeight(0.5) === 0 && nightFloorWeight(0.06) === 0 && nightFloorWeight(-0.11) === 1 && nightFloorWeight(-0.9) === 1, 'nought by day, whole by night');
-  let last = -1;
-  let rising = true;
-  for (let y = 0.05; y >= -0.1; y -= 0.005) {
-    const w = nightFloorWeight(y);
-    if (w < last) rising = false;
-    last = w;
-  }
-  ok(rising, 'and rising without a step through the twilight');
-  const mk = (r: number, s: number): FloorLighting => ({ main: { r, g: r, b: r }, mainScale: s, ambient: { r, g: r, b: r }, ambientScale: s, bounce: { r: 0, g: 0, b: 0 }, bounceScale: 0, fill: { r: 1, g: 0.5, b: 0.2 }, fillScale: 0, fog: { r: 0, g: 0, b: 0 } });
-  const lumOf = (c: { r: number; g: number; b: number }) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-  // The first part alone (no night's brightness to hold): today's colours of the hour by the sun's height.
-  const dark = mk(0, 0);
-  const swg = mk(1, 0.3);
-  swg.fog = { r: 0.1, g: 0.11, b: 0.19 };
-  const L = mk(1, 1e-5);
-  applyNightFloor(L, swg, dark, { y: 0.4 });
-  ok(L.mainScale === 1e-5 && L.fog.r === 0, 'by day the floor leaves the air\'s light and its fog alone');
-  applyNightFloor(L, swg, dark, { y: -0.5 });
-  ok(near(L.mainScale, 0.3, 1e-12) && near(L.ambientScale, 0.3, 1e-12), "by night a dark air's light is held at SWG's own");
-  ok(L.fog.r === 0.1 && L.fog.g === 0.11 && L.fog.b === 0.19, "and the fog's colour the rain and the wet look read is held at SWG's own of the hour, not the air's black moonlit horizon (the review)");
-  const bright = mk(1, 2);
-  applyNightFloor(bright, swg, dark, { y: -0.5 });
-  ok(bright.mainScale === 2, 'and a brighter air\'s light is left as it is');
-  NIGHT_FLOOR.share = 0;
-  const L2 = mk(1, 1e-5);
-  applyNightFloor(L2, swg, mk(1, 0.8), { y: -0.5 });
-  ok(L2.mainScale === 1e-5 && L2.fog.r === 0, 'with the share at nought the night is the air\'s physical one, its brightness too');
-  NIGHT_FLOOR.share = 1;
-  // The second part: today's night brightness held at every hour in the light's own colour (the review: dawn and dusk 8 times
-  // darker than the night either side, since the first part lets go by the sun's height while the air is far under it).
-  const night = mk(0.5, 0.4); // today's night at its middle: a grey of luminance 0.5 at scale 0.4, brightness 0.2
-  night.fill = { r: 0.5, g: 0.5, b: 0.5 };
-  night.fillScale = 0.4;
-  const red = { r: 1 / 0.2126, g: 0, b: 0 };
-  const dusk = mk(0, 0.01);
-  dusk.main = { ...red };
-  dusk.ambient = { r: 0.6, g: 0.5, b: 1.6 };
-  dusk.ambientScale = 0.002;
-  applyNightFloor(dusk, swg, night, { y: 0.06 });
-  ok(near(dusk.mainScale * lumOf(dusk.main), 0.2, 1e-12) && dusk.main.r === red.r && dusk.main.g === 0, `just over the floor's day edge the reddened sun is held at today's night brightness (${(dusk.mainScale * lumOf(dusk.main)).toFixed(3)}) in its own red`);
-  ok(near(dusk.ambientScale * lumOf(dusk.ambient), 0.2, 1e-12) && dusk.ambient.b === 1.6, 'and so is its sky, in its own colour');
-  ok(dusk.fillScale === 0 && night.fillScale === 0.4, 'the fill (a second sun\'s alone) is never lifted by the night\'s brightness');
-  const blackBounce = mk(0, 0);
-  const nb = mk(0.5, 0.4);
-  nb.bounce = { r: 0.2, g: 0.3, b: 0.4 };
-  nb.bounceScale = 0.5;
-  applyNightFloor(blackBounce, swg, nb, { y: 0.1 });
-  ok(near(blackBounce.bounceScale * lumOf(blackBounce.bounce), 0.5 * lumOf(nb.bounce), 1e-12) && near(blackBounce.bounce.b / blackBounce.bounce.r, 2, 1e-12), "a light the air leaves black takes the night's colour at the night's brightness");
-  const noon = mk(1, 1.2);
-  applyNightFloor(noon, swg, night, { y: 0.9 });
-  ok(noon.mainScale === 1.2 && noon.ambientScale === 1.2, 'by day the air, far brighter than the night, is left exactly as it is');
-  // A sun setting through the whole band over an air that dims as the real one does: no hour darker than today's night.
-  let worst = Infinity;
-  let worstAt = 0;
-  for (let y = 0.3; y >= -0.4; y -= 0.002) {
-    const air = mk(1, y > 0 ? 3 * y * y : 1e-7);
-    applyNightFloor(air, mk(1, 0.3), night, { y });
-    const l = air.mainScale * lumOf(air.main);
-    if (l < worst) {
-      worst = l;
-      worstAt = y;
-    }
-  }
-  ok(worst >= 0.2 - 1e-12, `a sun setting through the band never leaves the main light under today's night brightness (least ${worst.toFixed(4)} at a sine of ${worstAt.toFixed(3)}, the night's 0.2)`);
-  const src = text('src/world/world.ts');
-  ok(/if \(GPU\.webgpu && AIR\.frame\.on\) applyNightFloor\(L, AIR\.swg, AIR\.swgNight, this\.day\.sunDir\);\r?\n    this\.sun\.color\.copy\(L\.main\);/.test(src), 'the world lays the floor under the air\'s lights before it turns them into lights, on WebGPU under the air alone');
+  // Pass 2, wave 2: the floor is gone whole (its file, the world's call, the dome's hold and the dials), the nights the air's
+  // own, made readable by the eye (`src/sky/exposure/`); the night light aims at the brightest body up.
+  ok(!existsSync(join(root, 'src/sky/air/nightFloor.ts')), 'the night floor\'s file is gone (wave 2 retired it)');
+  const worldSrc = text('src/world/world.ts');
+  ok(!/applyNightFloor|swgNight|nightFloor\.ts/.test(worldSrc), 'the world lays no floor under the air\'s lights');
+  ok(/if \(GPU\.webgpu && AIR\.frame\.on\) this\.sun\.position\.copy\(playerPos\)\.addScaledVector\(AIR\.frame\.lightDir, 220\);\r?\n    else this\.sun\.position\.copy\(playerPos\)\.addScaledVector\(this\.day\.lightDir, 220\);/.test(worldSrc), "under our sky the main light shines from the air's brightest body up, elsewhere from the day's light as before");
+  ok(!/NIGHT_FLOOR|floorShare/.test(text('src/sky/air/airSky.ts')), 'the dome holds no floor');
+  ok(!/NIGHT_INDEX|lightingAt\(/.test(text('src/sky/air/airRun.ts')) && /o\.night = moonLum > sunLum;/.test(text('src/sky/air/airRun.ts')), "the air's night is the moon's light over the sun's at the ground, not the clock's split");
+  ok(!('floor' in SKY_TUNE_RANGE), 'and the sky\'s dials have no floor');
 }
 
 // ---------------------------------------------------------------- 5. the dials
 {
   const set = skyDialSet();
-  ok(set.helper === 'sky' && set.groups.length >= 4, 'the sky\'s dials are the `sky` helper\'s');
+  // Three groups of its own since wave 2 took the night floor's away (the discs, the pair, the hours), and the air's beside them.
+  ok(set.helper === 'sky' && set.groups.length >= 3, 'the sky\'s dials are the `sky` helper\'s');
   for (const g of set.groups) {
     for (const d of g.dials) {
       if (d.kind !== 'number') continue;
       const was = d.get();
-      // The floor's night edge is kept under its day edge as well as in its range.
-      const most = d.key === 'floor.nightAt' ? Math.min(d.max, NIGHT_FLOOR.dayAt - 0.01) : d.max;
+      const most = d.max;
       d.set(d.max + 100);
       const top = d.get();
       d.set(d.min - 100);
@@ -266,8 +206,7 @@ const DEG = Math.PI / 180;
       ok(near(top, most, 1e-12) && near(bottom, d.min, 1e-12) && near(d.get(), was, 1e-12), `the dial ${d.key} sets through tuneSky and is held to ${d.min} to ${most}`);
     }
   }
-  ok(tuneSky({ floor: { dayAt: -0.2, nightAt: 0 } }).some((s) => s.startsWith('floor.nightAt')) && NIGHT_FLOOR.nightAt < NIGHT_FLOOR.dayAt, "the floor's night edge is kept under its day edge");
-  tuneSky({ floor: { dayAt: 0.05, nightAt: -0.1 } });
+  ok(tuneSky({ floor: { share: 1 } }).length === 0 && !('floor' in SKY_TUNE_RANGE), "the night floor's dials are gone with it (a `floor` part is no section of the sky's dials now)");
   ok(tuneSky({ disc: { nope: 1 } }).length === 1 && tuneSky({ disc: { limb: 'a' } }).length === 1, 'a dial that is not there, or a value not a number, is said');
   ok(DISC_TUNE.limb === 0.6 && DISC_TUNE.edge === 0.15 && DISC_TUNE.gain === 1 && SKY_TUNE_RANGE.disc.gain[1] === 4, "the discs start at our sun's limb, a pixel's rim and the star's own light");
 }

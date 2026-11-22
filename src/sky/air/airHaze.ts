@@ -26,7 +26,7 @@ import * as TSL from 'three/tsl';
 import type { FxFrameContext } from '../../core/fx/context.ts';
 import { FX_CAMERA, type FxPass, type FxWarmItem } from '../../core/fx/pass.ts';
 import type { FxPassId, FxProductId, FxSettings } from '../../core/fxRegistry.ts';
-import { chainMaterial, graph, type ChainGraph } from '../../core/gpu/gpuChain.ts';
+import { chainMaterial, graph, storedOf, type ChainGraph } from '../../core/gpu/gpuChain.ts';
 import { liveTexture } from '../../core/gpu/gpuGround.ts';
 import { AIR, HAZE_REACH_M } from './airApi.ts';
 import { buildsLayer, seeTextureOf } from './airSee.ts';
@@ -181,8 +181,11 @@ export function hazeGraph(u: HazeInputs, air: boolean, terms: HazeTerms | null =
       }
       const room = s.a.lessThan(0).and(p0.z.greaterThan(0.5));
       const hazed = sky.not().and(room.not()).and(p0.w.greaterThan(0.5));
+      // Pass 2, wave 2's fixer: the picture and the layer are stored pre-exposed (`src/sky/exposure/preExpose.ts`), so the
+      // air's own light, in the scene's units, is stood in theirs (`storedOf`); what gets through is a share and takes none.
+      const ls = l.mul(storedOf()).toVar('swgHazeLS');
       If(hazed, () => {
-        out.assign(c.rgb.mul(t).add(l.mul(abs(s.a))).add(s.rgb));
+        out.assign(c.rgb.mul(t).add(ls.mul(abs(s.a))).add(s.rgb));
       });
       // The pass stands after the sanitize: a value of the air's that is not a number (a table not yet drawn, a ray the tables
       // cannot reach) would be spread by the bloom into a black box, so such a pixel takes the composite alone.
@@ -190,7 +193,8 @@ export function hazeGraph(u: HazeInputs, air: boolean, terms: HazeTerms | null =
         out.assign(c.rgb.add(s.rgb));
       });
     }
-    return vec4(clamp(out, 0, HAZE_NUMBERS.ceiling), 1);
+    // The ceiling is the scene's (the sanitize's), stood in the picture's units (the wave's fixer).
+    return vec4(clamp(out, vec3(0), vec3(storedOf().mul(HAZE_NUMBERS.ceiling))), 1);
   })();
   HAZE_STATS.built++;
   const textures: Record<string, Any> = { input, depth, see };

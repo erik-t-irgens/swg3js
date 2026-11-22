@@ -44,6 +44,8 @@ import { JITTER } from './taa/taaJitter.ts';
 import { skyOurs } from '../../sky/skyMode.ts';
 import { markSeeTarget } from '../../sky/air/airSee.ts';
 import { GpuHazePass } from '../../sky/air/airHaze.ts';
+import { GpuEyePass } from '../../sky/exposure/eyeGpu.ts';
+import { markSceneTarget } from '../../sky/exposure/preExpose.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -382,6 +384,8 @@ export const CHAIN_PASSES: ReadonlyMap<FxPassId, keyof typeof LOOKS_AT_LOAD | nu
   ['haze', null],
   // Pass 1, wave 6: the edge smoothing (`taa/`), the spine's own once the motion buffer is: no switch at load of its own.
   ['taa', null],
+  // Pass 2, wave 2: the eye (`src/sky/exposure/eyeGpu.ts`), the spine's own under our sky (the Sky row, read at load).
+  ['exposure', null],
   ['bloom', 'bloom'],
   ['colorGrade', 'grade'],
   ['output', null],
@@ -424,6 +428,8 @@ export function chainRuntime(renderer: Any): GpuChain {
       const t = new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth, ...(motion ? { count: see ? 3 : 2 } : {}) });
       if (motion) markMotionTarget(t);
       if (see) markSeeTarget(t);
+      // Pass 2, wave 2's fixer: what the scene is stored into pre-exposed (`src/sky/exposure/preExpose.ts`'s gate).
+      markSceneTarget(t);
       return t;
     },
     spine(fx: PostFX, width: number, height: number, settings: FxSettings): void {
@@ -442,6 +448,9 @@ export function chainRuntime(renderer: Any): GpuChain {
       if (skyOurs()) fx.registerPass(new GpuHazePass(renderer, fx.sceneTarget, settings));
       // Pass 1, wave 6: the edge smoothing, after the occlusion and before the bloom (the registry's place), over this chain's scene target.
       fx.registerPass(new GpuTaaPass(renderer, fx.sceneTarget, settings));
+      // Pass 2, wave 2: the eye, after everything that adds light and before the bloom (the registry's place); SWG's sky
+      // registers none, and its chain is the one it was.
+      if (skyOurs()) fx.registerPass(new GpuEyePass(renderer));
       if (CHAIN_PORTED.has('bloom')) fx.registerPass(new GpuBloomPass(width, height, settings.bloomStrength));
       fx.registerPass(new GpuOutputPass());
     },

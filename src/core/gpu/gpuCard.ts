@@ -93,6 +93,7 @@ import { CROWN_DIR_FLOOR } from '../../world/leafShadow.ts';
 import { chainHas } from '../../world/compileHooks.ts';
 import { ClientLightingModel, clientSpecularNode, filmNode } from './gpuSpec.ts';
 import { GPU_LOOKS, LOOKS_AT_LOAD, type LookPart } from './looks.ts';
+import { eyeExposureNode } from '../../sky/exposure/eyeBuffer.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -258,7 +259,10 @@ export function clientCurveNode(texel: Any, g: Any, sunShadow: Any, k: Knobs = c
   const display = select(k.shadowLook.greaterThan(0.5), mix(display0, k.row7, k.row7Alpha.mul(float(1).sub(clamp(sunShadow, 0, 1)))), display0);
   const colour = acesInverseNode(toLinearNode(display)).div(max(k.exposureRef, f.exposure));
   const lum = dot(colour, vec3(LUMINANCE[0], LUMINANCE[1], LUMINANCE[2]));
-  return select(lum.greaterThan(k.bloomCap), colour.mul(k.bloomCap.div(lum)), colour);
+  // Pass 2, wave 2: a card under this curve is drawn as it is shown (its value carried back from the display), so it is over
+  // the eye's exposure too (`src/sky/exposure/eyeBuffer.ts`; 1 where the eye does not adapt): it shows as it did at an
+  // exposure of 1 however far the eye opens, where at a dark night's 2^17 it was a white blob.
+  return select(lum.greaterThan(k.bloomCap), colour.mul(k.bloomCap.div(lum)), colour).div(max(eyeExposureNode(), f.exposure));
 }
 
 // ---------------------------------------------------------------- the part

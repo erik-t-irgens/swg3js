@@ -57,6 +57,10 @@ export function sectionOfPass(camera: unknown, scene: Any, cascades: Map<unknown
   const c = camera ? cascades.get(camera) : undefined;
   if (c) return c;
   if (scene?.overrideMaterial?.isShadowPassMaterial === true) return 'lamp shadows';
+  // Pass 2, wave 2 (maker B): the reflections' capture of the sky, a face of its cube (`SwgSky.domeScene`) or a level of its
+  // filter (the dome's own generator's box mesh, marked in `gpuEnv.ts`).
+  if (scene?.userData?.swgSkyCapture === true) return 'sky capture: faces';
+  if (scene?.userData?.swgSkyFilter === true) return 'sky capture: filter';
   const name = String(scene?.name ?? '');
   if (scene?.userData?.gpuChain === true || name.startsWith('fx.gpu.')) {
     if (/ssao|gtao|normals|linearDepth|depthHalf/i.test(name)) return 'chain: ssao';

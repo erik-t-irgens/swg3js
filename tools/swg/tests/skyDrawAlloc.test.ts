@@ -1,5 +1,5 @@
-// What draws from the air makes nothing a frame (the GPU port's pass 2, wave 1, maker B): `skyDrawAllocOwn.ts` (Tatooine's pair,
-// the night floor and the haze pass's prepare and render) run in twelve processes at once, each the least of three clean
+// What draws from the air makes nothing a frame (the GPU port's pass 2, wave 1, maker B): `skyDrawAllocOwn.ts` (Tatooine's pair
+// and the haze pass's prepare and render; the night floor went with wave 2's eye) run in twelve processes at once, each the least of three clean
 // windows of 60,000 frames, every process asserted under 0.05 bytes a frame with no collection in its window (`testing.md`).
 //
 // Run: node tools/swg/tests/skyDrawAlloc.test.ts
@@ -44,6 +44,6 @@ const all = await Promise.all(Array.from({ length: 12 }, () => run()));
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   const per = Math.max(0, a.made) / a.frames;
-  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the pair, the night floor and the haze pass make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
+  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the pair and the haze pass make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
 }
 console.log(`\nskyDrawAlloc: ${checks} checks passed`);

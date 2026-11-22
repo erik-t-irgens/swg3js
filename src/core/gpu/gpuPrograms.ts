@@ -36,6 +36,7 @@ import { asShownFB } from './gpuGround.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { withMotionOutput } from './motion.ts';
 import { hazeOwnNode } from '../../sky/air/airHaze.ts';
+import { withGlow } from '../../sky/exposure/eyeBuffer.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -324,7 +325,8 @@ export function lavaNode(): NodeMaterial {
   const crusted = select(index.lessThan(k.crustHalf), mix(crust, lava.rgb, clamp(index, 0, 1).mul(k.crustSpan)), lava.rgb);
   const rgb0 = select(crustOn.greaterThan(0.5), crusted, lava.rgb);
   const glow = mix(smoothstep(glowFrom, glowTo, lava.a.mul(factor)), glowMean, far);
-  finish(m, vec4(rgb0.mul(intensity.mul(float(k.glowBase).add(glowK.mul(glow)))), 1), null, first);
+  // Pass 2, wave 2: the lava's own light times the eye's glow factor (`src/sky/exposure/eyeBuffer.ts`), as every emissive thing's.
+  finish(m, withGlow(vec4(rgb0.mul(intensity.mul(float(k.glowBase).add(glowK.mul(glow)))), 1)), null, first);
   return m as NodeMaterial;
 }
 
@@ -386,7 +388,8 @@ export function marksNode(): NodeMaterial {
   const alpha = select(saber, sAlpha, cAlpha);
   // WebGL writes the canvas's own value (no chunk): written as it is under the inline output (swgRawOut), carried back only into three's frame-buffer target.
   m.swgRawOut = true;
-  finish(m, asShownFB(vec4(col, alpha)), vBorn.lessThan(k.unborn).or(age.lessThan(0)).or(age.greaterThan(vLife)).or(alpha.lessThanEqual(0)));
+  // Pass 2, wave 2: times the eye's glow factor where an exposure is applied after it (a chain), none straight onto the canvas.
+  finish(m, asShownFB(withGlow(vec4(col, alpha), true)), vBorn.lessThan(k.unborn).or(age.lessThan(0)).or(age.greaterThan(vLife)).or(alpha.lessThanEqual(0)));
   return m as NodeMaterial;
 }
 
@@ -412,7 +415,8 @@ export function bladeNode(): NodeMaterial {
   const along = smoothstep(k.tipFrom, k.tipIn, vUv.y).mul(float(1).sub(smoothstep(k.endFrom, k.endTo, vUv.y)));
   // WebGL writes the canvas's own value (no chunk): written as it is under the inline output (swgRawOut), carried back only into three's frame-buffer target.
   m.swgRawOut = true;
-  finish(m, asShownFB(vec4(colour.mul(across.mul(along).mul(vFade).mul(bright)), 1)), null);
+  // Pass 2, wave 2: a saber's light times the eye's glow factor where an exposure is applied after it (a chain), none straight onto the canvas.
+  finish(m, asShownFB(withGlow(vec4(colour.mul(across.mul(along).mul(vFade).mul(bright)), 1), true)), null);
   return m as NodeMaterial;
 }
 
@@ -447,7 +451,9 @@ export function particlesNode(weather: boolean): NodeMaterial {
   const hullMin = weather ? own('uHullMin', new THREE.Vector3()) : null;
   const hullMax = weather ? own('uHullMax', new THREE.Vector3()) : null;
   const t = map.sample(vUv);
-  const c = t.mul(vColour);
+  // Pass 2, wave 2: a batch of the client's (fire, sparks, glows, smoke, all unlit and painted for an exposure of 1) times the
+  // eye's glow factor (`src/sky/exposure/eyeBuffer.ts`); the weather's own variant is lit by the sky's lights and takes the eye.
+  const c = weather ? t.mul(vColour) : withGlow(t.mul(vColour));
   // Pass 2, wave 1: under our sky (read at load) a batch of the world's is hazed at its own distance by the air's own haze volume,
   // as every see-through thing is (`src/sky/air/airHaze.ts`'s `hazeOwnNode`): a glow keeps what gets through, a smoke what gets
   // through and the air in front of it. The weather's own variant, and SWG's sky, keep the batch's own fog as before.
@@ -529,7 +535,8 @@ export function tunnelNode(): NodeMaterial {
   col = col.add(v3(k.streak).mul(s).mul(k.streakGain).mul(glowK));
   col = col.add(v3(k.core).mul(smoothstep(k.coreFrom, 1, z)).mul(k.coreGain).mul(glowK));
   col = col.add(v3(k.rim).mul(rim).mul(k.rimGain).mul(glowK));
-  finish(m, vec4(col, 1), keep.lessThan(0));
+  // Pass 2, wave 2: the tunnel's light times the eye's glow factor (in a jump the eye does not adapt: 1).
+  finish(m, withGlow(vec4(col, 1)), keep.lessThan(0));
   return m as NodeMaterial;
 }
 

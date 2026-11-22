@@ -1,15 +1,14 @@
-// The sky's dials of look (the GPU port's pass 2, wave 1; src/ui/dials.ts): the night floor until wave 2, the sun discs, the
-// pair's height under the caster and the hours' low sun, on sliders in the debug menu when `sky` is picked. Each is set
-// through `tuneSky`, exactly as `__debug.sky({ floor, disc, pair, hours })` sets it, so the menu's copied line is that
-// helper's own argument. Feel and look are the owner's: each number starts where the wave says, with its reason beside the
-// table it moves (`nightFloor.ts`, `DISC_TUNE` here, `stars.ts`'s `PAIR_TUNE`, `skyHours.ts`), and nobody tunes it by
-// measuring. A world's own air (its visibility and its steer toward SWG) is the air's maker's (`airParams.ts`), and more groups
-// join the same set through `SKY_DIAL_GROUPS`.
+// The sky's dials of look (the GPU port's pass 2, wave 1; src/ui/dials.ts): the sun discs, the pair's height under the
+// caster and the hours' low sun, on sliders in the debug menu when `sky` is picked (wave 1's night floor went with wave 2's
+// eye, whose dials are the `exposure` helper's). Each is set through `tuneSky`, exactly as `__debug.sky({ disc, pair, hours
+// })` sets it, so the menu's copied line is that helper's own argument. Feel and look are the owner's: each number starts
+// where the wave says, with its reason beside the table it moves (`DISC_TUNE` here, `stars.ts`'s `PAIR_TUNE`,
+// `skyHours.ts`), and nobody tunes it by measuring. A world's own air (its visibility, its steer toward SWG and its ozone's
+// limits) is the air's maker's (`airParams.ts`), and more groups join the same set through `SKY_DIAL_GROUPS`.
 //
 // Pure: no three, no DOM; a node test moves every dial through the real tables.
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { NIGHT_FLOOR } from './air/nightFloor.ts';
 import { PAIR_TUNE } from './stars.ts';
 import { SKY_HOURS } from './skyHours.ts';
 
@@ -25,19 +24,17 @@ export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1 };
 
 /** The ranges every number of `tuneSky` is held to, the sliders' and the console's alike. */
 export const SKY_TUNE_RANGE = {
-  floor: { share: [0, 1], dayAt: [-0.2, 0.3], nightAt: [-0.4, 0.1] },
   disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4] },
   pair: { belowDeg: [0, 12] },
   hours: { lowDeg: [0.5, 15] },
 } as const;
 
 type Section = keyof typeof SKY_TUNE_RANGE;
-const TABLES: { [K in Section]: Record<string, number> } = { floor: NIGHT_FLOOR, disc: DISC_TUNE, pair: PAIR_TUNE, hours: SKY_HOURS };
+const TABLES: { [K in Section]: Record<string, number> } = { disc: DISC_TUNE, pair: PAIR_TUNE, hours: SKY_HOURS };
 
 /**
- * Set the sky's look from the console's argument (`{ floor: { share }, disc: { limb, edge, gain }, pair: { belowDeg }, hours:
- * { lowDeg } }`): each number held to its range, words for anything held or refused. The night floor's two edges keep their
- * order (the day edge over the night edge).
+ * Set the sky's look from the console's argument (`{ disc: { limb, edge, gain }, pair: { belowDeg }, hours: { lowDeg } }`):
+ * each number held to its range, words for anything held or refused.
  */
 export function tuneSky(o: Record<string, unknown>): string[] {
   const said: string[] = [];
@@ -64,10 +61,6 @@ export function tuneSky(o: Record<string, unknown>): string[] {
       TABLES[s][k] = held;
     }
   }
-  if (NIGHT_FLOOR.nightAt >= NIGHT_FLOOR.dayAt) {
-    NIGHT_FLOOR.nightAt = NIGHT_FLOOR.dayAt - 0.01;
-    said.push(`floor.nightAt: held under the day edge, at ${NIGHT_FLOOR.nightAt.toFixed(2)}`);
-  }
   return said;
 }
 
@@ -77,19 +70,7 @@ function dial(s: Section, k: string, label: string, step: number, unit: string, 
   return { kind: 'number', key: `${s}.${k}`, label, note, min: r[0], max: r[1], step, unit, get: () => TABLES[s][k], set: (v) => tuneSky({ [s]: { [k]: v } }), text };
 }
 
-/** The degrees a sine of the sun's elevation stands for. */
-const degreesOf = (v: number) => `${((Math.asin(v < -1 ? -1 : v > 1 ? 1 : v) * 180) / Math.PI).toFixed(1)}°`;
-
 const GROUPS: DialGroup[] = [
-  {
-    title: 'The night floor (until wave 2)',
-    note: "The air's nights are physically dark and nothing adapts to them before wave 2's eye, so by night the lights, the fog's colour and the dome are held at no less than today's own of the hour times this share, and at every hour the sun's light and the sky's keep at least today's night brightness in their own colour, which only binds through the twilight. By day the air is far brighter and the day is its alone.",
-    dials: [
-      dial('floor', 'share', "Share of today's night", 0.05, '', "1 is today's night brightness in full; 0 the air's physical night (near black), its twilight too."),
-      dial('floor', 'dayAt', 'Begins under the sun at', 0.01, '', "The sine of the sun's height over the horizon above which today's colours of the hour are not held (the night's brightness still is, in the air's colours).", degreesOf),
-      dial('floor', 'nightAt', 'Whole under the sun at', 0.01, '', "The sine of the sun's height under which today's colours of the hour are held whole; -0.1 is about the end of civil twilight.", degreesOf),
-    ],
-  },
   {
     title: 'The sun discs',
     note: "Each star of the world's system as a disc of its own colour and size (src/sky/stars.ts), reddening and dimming through the air, gone under the land, faded by the storms.",

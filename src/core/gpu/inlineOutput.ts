@@ -46,6 +46,11 @@ const toCanvas = uniform(0)
   .setGroup(renderGroup)
   .onRenderUpdate((f: Any) => (drawsInline(f) ? 1 : 0));
 
+/** That uniform, for a graph that must know it draws straight onto the canvas (pass 2, wave 2: the eye's glow on a program WebGL writes as the canvas's own value, `src/sky/exposure/eyeBuffer.ts`). */
+export function toCanvasNode(): Any {
+  return toCanvas;
+}
+
 /** Three's own output arithmetic on one colour: its tone mapping (when the material takes it) and the colour space. */
 export function inlineOut(out: Any, toneMapped: boolean, toneMapping: THREE.ToneMapping, colorSpace: string): Any {
   // Three's own nodes: the tone mapping keeps the alpha (a vec4 in, a vec4 out), as does the colour space.

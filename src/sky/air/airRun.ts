@@ -1,7 +1,7 @@
 // The air of one world in play (the GPU port's pass 2, wave 1): its rows fitted behind the loading screen by the fit's
 // worker (`airFit.ts`), the mix's rows blended into the twin each frame (`airTwin.ts`), the frame record the drawers read
 // (`AIR.frame`), `SwgSky.lighting`'s fields written from the twin (after keeping SWG's own of the hour in `AIR.swg`, the
-// steer's and the night floor's reference), and the card's tables drawn once a frame (`airTables.ts`, WebGPU only, loaded
+// steer's reference), and the card's tables drawn once a frame (`airTables.ts`, WebGPU only, loaded
 // by a dynamic import so nothing of three's WebGPU build reaches the WebGL path).
 //
 // The world makes one of these on WebGPU under our sky (`World.loadSky`) and nowhere else: on WebGL, and under SWG's sky,
@@ -12,12 +12,11 @@
 import * as THREE from 'three';
 import { GPU } from '../../core/gpuSwitch.ts';
 import { AIR, AIR_UNITS, type AirTables } from './airApi.ts';
-import { AIR_DIAL_STATE, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, recordWords, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+import { AIR_DIAL_STATE, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
 import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, buildDepthTable, buildPsiTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
 import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
 import { registerAirDials } from './airDials.ts';
-import { NIGHT_INDEX } from './nightFloor.ts';
 
 /** The scene's units, worked once as the module loads (`sceneUnits`: a clear Tatooine noon's sun at today's key light there). */
 AIR_UNITS.scene = sceneUnits();
@@ -39,8 +38,6 @@ export interface AirMix {
   readonly mixLength: number;
   mixBlock(i: number): object | null;
   readonly mixWeights: Float64Array;
-  /** SWG's lighting at a column of its ramps for the mix in force (`SwgSky.lightingAt`): the night floor's night, read as the mix moves. */
-  lightingAt?(index: number, out: typeof AIR.swgNight): void;
 }
 
 /** The sky's lighting fields the run writes (`SwgSky.lighting`), each a colour and its scale. */
@@ -71,6 +68,11 @@ export class AirRun {
   /** The dials' count last seen, and the visibility the rows were last set to. */
   private dialSeen = -1;
   private visSet = 0.5;
+  /** Pass 2, wave 2: the ozone's limits the rows were last fitted under (the owner's dials), and a kept pair to read the dials into. */
+  private readonly ozSet: [number, number] = [0.75, 4];
+  private readonly ozNow: [number, number] = [0.75, 4];
+  /** How many times a moved ozone limit asked for a refit, for the report. */
+  refits = 0;
   private worker: Worker | null = null;
   private fitAsked = 0;
   private fitAnswered = 0;
@@ -106,6 +108,7 @@ export class AirRun {
     const dials = airDialsOf(planet);
     this.visSet = dials.visibilityKm;
     setVisibility(this.base, dials.visibilityKm);
+    ozoneOf(planet, this.ozSet);
     this.dialSeen = AIR_DIAL_STATE.version;
     // The world's column densities on this thread at once (a millisecond): the transmittance is exact from the first frame,
     // whatever the fit's worker has yet to answer.
@@ -131,7 +134,7 @@ export class AirRun {
     const sky = fitSkyOf(this.planet, this.sky.sunElevationDegrees, this.sky.blocks);
     const gradients: Record<string, string> = {};
     for (const f of fitGradients(sky)) gradients[f] = this.urlOf(f);
-    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients };
+    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1] };
     this.worker.postMessage(ask);
   }
 
@@ -200,8 +203,8 @@ export class AirRun {
 
   /**
    * One frame, after the sky's own update and before the world turns the lighting into lights: the mix blended where it
-   * moved, the twin's sums, the frame record, SWG's lighting of the hour kept and the air's written over it (the world
-   * lays the night floor under it). The camera's height over the world's datum (metres) and the weather's overcast are the
+   * moved, the twin's sums, the frame record, SWG's lighting of the hour kept and the air's written over it, the night
+   * light's aim and the level light the eye's "off" follows. The camera's height over the world's datum (metres) and the weather's overcast are the
    * caller's to write into `heightM` and `overcast` first: a number handed across a call is a number made. Allocates nothing.
    */
   frame(day: AirDay, mix: AirMix, L: Lighting): void {
@@ -210,11 +213,20 @@ export class AirRun {
     const dials = airDialsOf(this.planet);
     if (AIR_DIAL_STATE.version !== this.dialSeen) {
       this.dialSeen = AIR_DIAL_STATE.version;
+      // Pass 2, wave 2: the ozone's limits moved (the owner's dials): the rows fitted again in the worker, whose answer the
+      // twin and the tables follow as they follow a moved visibility (numbers only, nothing built).
+      const oz = ozoneOf(this.planet, this.ozNow);
+      const ozMoved = oz[0] !== this.ozSet[0] || oz[1] !== this.ozSet[1];
+      if (ozMoved) {
+        this.ozSet[0] = oz[0];
+        this.ozSet[1] = oz[1];
+        this.refits++;
+      }
       if (dials.visibilityKm !== this.visSet) {
         this.visSet = dials.visibilityKm;
         this.setRowsVisibility(this.visSet);
         this.ask();
-      }
+      } else if (ozMoved) this.ask();
     }
     this.blendMix(mix);
     const tw = this.twin;
@@ -276,7 +288,7 @@ export class AirRun {
     f.fogDensity = o.fogDensity;
     f.overcast = overcast > 0 ? (overcast < 1 ? overcast : 1) : 0;
     f.steer = dials.steer;
-    // SWG's lighting of this hour, kept before the air writes over it: the steer's and the night floor's reference.
+    // SWG's lighting of this hour, kept before the air writes over it: the steer's reference.
     const w = AIR.swg;
     w.main.copy(L.main as THREE.Color);
     w.mainScale = L.mainScale;
@@ -290,12 +302,29 @@ export class AirRun {
     w.fogDensity = L.fogDensity;
     w.clear.copy(L.clear as THREE.Color);
     o.steer = dials.steer;
-    o.night = !day.isDay;
+    // Pass 2, wave 2: the night light aims at the brightest body up, by what each sends to the ground through the air (the
+    // twin's light here: nought for a body under the land), so the sun by day and SWG's nearly full moon by night
+    // (`MOON_SHARE`, until wave 5's phases), and the world's main light shines from it (`AIR.frame.lightDir`). No light is
+    // added: it is the one main light, aimed.
+    const sh = o.sunHere;
+    const mh = o.moonHere;
+    const sunLum = LUMA_R * sh[0] + LUMA_G * sh[1] + LUMA_B * sh[2];
+    const moonLum = LUMA_R * mh[0] + LUMA_G * mh[1] + LUMA_B * mh[2];
+    o.night = moonLum > sunLum;
+    f.lightDir.copy(o.night ? m : s);
+    // The light on a level surface the eye's "off" follows (`src/sky/exposure/eyeRun.ts`): each body's light times the sine of
+    // its height, and the sky's.
+    const s2h = o.sun2Here;
+    const up = o.skyUp;
+    const sy = s.y > 0 ? s.y : 0;
+    const my = m.y > 0 ? m.y : 0;
+    const s2y = two && f.sun2Dir.y > 0 ? f.sun2Dir.y : 0;
+    f.level = sunLum * sy + moonLum * my + (LUMA_R * s2h[0] + LUMA_G * s2h[1] + LUMA_B * s2h[2]) * s2y + (LUMA_R * up[0] + LUMA_G * up[1] + LUMA_B * up[2]);
     steerGain(o, w.fog, f.gain);
     writeTwinLighting(o, w, L);
     f.fogColour.copy(L.fog as THREE.Color);
-    // Today's night stands as a floor under these until wave 2 (`nightFloor.ts`): the world lays it as it turns them into
-    // lights (`World.applySwgLighting`), from `AIR.swg` as kept above and `AIR.swgNight` as the mix last moved.
+    // Wave 1's night floor is gone (wave 2): the nights are physical, made readable by the eye's dark-night rule
+    // (`src/sky/exposure/eyeMath.ts`).
   }
 
   /** The mix's rows blended into the twin, only where a row or a weight moved. */
@@ -319,9 +348,6 @@ export class AirRun {
     this.lastN = n;
     if (n > 0) this.twin.blendRows(this.mixRecs, this.mixPsis, this.mixW, n);
     else this.twin.useRecord(this.base, this.basePsi);
-    // Today's night at its middle for this mix: the night floor's brightness (`nightFloor.ts`), read off SWG's ramps only
-    // when the mix moves, since its column never does.
-    if (mix.lightingAt) mix.lightingAt(NIGHT_INDEX, AIR.swgNight);
   }
 
   /**
@@ -364,6 +390,9 @@ export class AirRun {
       planet: this.planet,
       on: f.on,
       dials: { ...airDialsOf(this.planet) },
+      ozoneLimits: { least: this.ozSet[0], most: this.ozSet[1], refits: this.refits },
+      level: Number(f.level.toPrecision(4)),
+      night: this.twin.out.night,
       visibilityKm: Number(f.visibilityKm.toFixed(2)),
       fogDensityPerM: Number(f.fogDensity.toPrecision(3)),
       sceneUnits: Number(AIR_UNITS.scene.toFixed(4)),

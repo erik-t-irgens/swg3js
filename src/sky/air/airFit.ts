@@ -343,8 +343,11 @@ export function holdNoonSun(rec: AirRecord, target: number, noonEl: number): voi
   }
 }
 
-/** The ozone scaled (`OZONE_MIN` to `OZONE_MAX` of Earth's) toward a target zenith colour with the sun 3 degrees under: answers the scale. */
-export function fitOzone(rec: AirRecord, target: Float64Array): number {
+/**
+ * The ozone scaled (`least` to `most` of Earth's: `OZONE_MIN` and `OZONE_MAX` to start, the owner's dials since pass 2, wave 2,
+ * `airParams.ts`'s `AIR_OZONE` and a world's own) toward a target zenith colour with the sun 3 degrees under: answers the scale.
+ */
+export function fitOzone(rec: AirRecord, target: Float64Array, least: number = OZONE_MIN, most: number = OZONE_MAX): number {
   if (!hasHue(target)) return 1;
   const want = new Float64Array(2);
   logRatios(target, want);
@@ -363,8 +366,8 @@ export function fitOzone(rec: AirRecord, target: Float64Array): number {
   };
   // A golden-section search over the scale.
   const phi = (Math.sqrt(5) - 1) / 2;
-  let a = OZONE_MIN;
-  let b = OZONE_MAX;
+  let a = least > 0 ? least : OZONE_MIN;
+  let b = most > a ? most : a;
   let c = b - phi * (b - a);
   let d = a + phi * (b - a);
   let fc = cost(c);
@@ -395,7 +398,7 @@ export function fitOzone(rec: AirRecord, target: Float64Array): number {
  * Every row of a world fitted (the worker's one job, and the node tests'): `visibilityKm` the owner's clear-day dial for
  * this world. Rows whose records come out the same share their tables.
  */
-export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null): FitResult {
+export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX): FitResult {
   const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
   const rows = sky.blocks;
   const shares = visibilityShares(rows);
@@ -420,7 +423,7 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
     const fromPicture = (u: number, v: number): boolean => !!file && !!gradient && gradient(file, u, v, colour);
     const noonBefore = noonSunLuminance(rec, noonEl);
     if (fromPicture(NOON_U, NOON_V) || (!file && bytes && row.ramp && rampLinear(bytes, row.ramp.rows, CLEAR_ROW, NOON_COLUMN, colour))) fitTint(rec, colour, noonEl, tint);
-    if (fromPicture(DUSK_U, DUSK_V) || (!file && bytes && row.ramp && rampLinear(bytes, row.ramp.rows, CLEAR_ROW, DUSK_COLUMN, colour))) ozone = fitOzone(rec, colour);
+    if (fromPicture(DUSK_U, DUSK_V) || (!file && bytes && row.ramp && rampLinear(bytes, row.ramp.rows, CLEAR_ROW, DUSK_COLUMN, colour))) ozone = fitOzone(rec, colour, ozoneLeast, ozoneMost);
     // The hue fitted, the day's strength put back: the noon sun as bright through this row's air as through the world's own.
     holdNoonSun(rec, noonBefore, noonEl);
     tint[0] = rec[F.rayR] / EARTH.rayleigh[0];
@@ -469,6 +472,9 @@ export interface FitAsk {
   visibilityKm: number;
   /** Each gradient picture the rows name, by file, at the address the worker fetches it from. */
   gradients: Record<string, string>;
+  /** Pass 2, wave 2: the ozone's limits for this world (the owner's dials, `airParams.ts`'s `ozoneOf`); absent, `OZONE_MIN` and `OZONE_MAX`. */
+  ozoneMin?: number;
+  ozoneMax?: number;
 }
 
 /** What the worker answers: the rows' records and tables as transferable arrays, in row order. */
@@ -489,7 +495,7 @@ export interface FitReply {
 /** A fit worked into the reply the worker posts (the tables of rows sharing one are copied so each can be transferred). */
 export function fitReply(ask: FitAsk, gradient: GradientSampler | null = null): FitReply {
   try {
-    const r = fitWorld(ask.sky, ask.visibilityKm, gradient);
+    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX);
     return {
       id: ask.id,
       planet: r.planet,

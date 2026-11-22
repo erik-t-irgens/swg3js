@@ -8,7 +8,7 @@
 // Pure: no three, no DOM.
 import type { DialGroup, NumberDial } from '../../ui/dials.ts';
 import { SKY_DIAL_GROUPS } from '../skyDials.ts';
-import { AIR_DIAL_RANGE, airDialsOf, tuneAirDials } from './airParams.ts';
+import { AIR_DIAL_RANGE, AIR_OZONE, AIR_OZONE_RANGE, airDialsOf, tuneAirDials } from './airParams.ts';
 
 /** The worlds whose air has dials (the converted worlds, Hoth's heroic among them as `adventure2`). */
 export const AIR_DIAL_WORLDS: readonly [string, string][] = [
@@ -43,14 +43,50 @@ function dial(id: string, key: 'visibilityKm' | 'steer', label: string, step: nu
   };
 }
 
-/** A world's two dials as one group of the sky's set. */
+/** A world's own ozone limit (pass 2, wave 2): nought is "the all-worlds limit". */
+function ozoneDial(id: string, key: 'ozoneMin' | 'ozoneMax', label: string, note: string): NumberDial {
+  const [min, max] = AIR_OZONE_RANGE.own;
+  return {
+    kind: 'number',
+    key: `air.${id}.${key}`,
+    label,
+    note,
+    min,
+    max,
+    step: 0.05,
+    unit: '×',
+    get: () => airDialsOf(id)[key],
+    set: (v) => tuneAirDials({ [id]: { [key]: v } }),
+    text: (v) => (v > 0 ? `${v.toFixed(2)}×` : 'all worlds\''),
+  };
+}
+
+/** A world's dials as one group of the sky's set. */
 export function airDialGroup(id: string, name: string): DialGroup {
   return {
     title: `The air of ${name}`,
-    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), and how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone).",
+    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone), and its own limits on the fit's ozone (nought: the all-worlds limits).",
     dials: [
       dial(id, 'visibilityKm', 'Clear-day visibility', 0.5, 'km', "How far a dark thing stays seen on a clear day (2% contrast): 40 km is a very clear day. Weather scales from here, so nearer than 2 km in storms is in reach."),
       dial(id, 'steer', 'Steer to SWG', 0.05, '', "0 draws the physical air alone (realism first); 1 bends the sky's light and the lights' colours to SWG's of the hour, channel by channel."),
+      ozoneDial(id, 'ozoneMin', 'Ozone at least', "This world's own floor on the fit's ozone, as a share of Earth's; nought takes the all-worlds floor. Moved, its rows are fitted again (a second or so) and its sky follows."),
+      ozoneDial(id, 'ozoneMax', 'Ozone at most', "This world's own top on the fit's ozone; nought takes the all-worlds top. A lower top turns a low sun's magenta back toward red where the fit stands at the top (Naboo, Kashyyyk, Endor, Rori, Lok, Yavin 4)."),
+    ],
+  };
+}
+
+/** The all-worlds ozone limits (pass 2, wave 2, the owner's answer 3): two dials over every world whose own are nought. */
+export function airOzoneGroup(): DialGroup {
+  const one = (key: 'ozoneMin' | 'ozoneMax', label: string, note: string): NumberDial => {
+    const [min, max] = AIR_OZONE_RANGE.all;
+    return { kind: 'number', key: `air.all.${key}`, label, note, min, max, step: 0.05, unit: '×', get: () => AIR_OZONE[key === 'ozoneMin' ? 'min' : 'max'], set: (v) => tuneAirDials({ all: { [key]: v } }) };
+  };
+  return {
+    title: "The air's ozone, all worlds",
+    note: "How far the fit may move each world's ozone from Earth's toward the dusk SWG paints: ozone's absorption of the orange is what keeps a clear twilight's zenith blue. Moved, every world whose own limits are nought is fitted again (the one you stand on at once, a second or so in the worker) and its sky follows; nothing is built.",
+    dials: [
+      one('ozoneMin', 'Ozone at least', "0.75 to start (wave 1's): at three quarters of Earth's a clear twilight's zenith is blue over green on every world's fitted clear row; lower lets SWG's red dusks come through greener."),
+      one('ozoneMax', 'Ozone at most', "4 to start (what you have seen): six worlds' fits stand at it, which turns a low sun magenta-red there (Kachirho's dawn); lower it to temper that, higher to let the fit go further."),
     ],
   };
 }
@@ -61,12 +97,13 @@ let registered = false;
 export function registerAirDials(): void {
   if (registered) return;
   registered = true;
+  SKY_DIAL_GROUPS.push(airOzoneGroup);
   for (const [id, name] of AIR_DIAL_WORLDS) SKY_DIAL_GROUPS.push(() => airDialGroup(id, name));
 }
 
 /** The console's `air` part of `__debug.sky({ air })`: the dials moved, words for anything held or refused. */
 export function skyAirArgument(o: unknown): string[] {
   if (o === undefined) return [];
-  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer } }'];
+  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer, ozoneMin, ozoneMax }, all: { ozoneMin, ozoneMax } }'];
   return tuneAirDials(o as Record<string, unknown>);
 }
