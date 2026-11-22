@@ -149,7 +149,7 @@ interface Frame {
 }
 
 /** One of the drawn material's own uniforms, by name, read at every draw: the very object WebGL's program reads. */
-function own(name: string, init: unknown): Any {
+export function own(name: string, init: unknown): Any {
   return uniform(init as never).onObjectUpdate((f: Frame) => f.material?.uniforms?.[name]?.value);
 }
 
@@ -183,7 +183,7 @@ function ownClass(Base: Any): Any {
 const OwnTexture = ownClass(TextureNode);
 const OwnTexture3D = ownClass(Texture3DNode);
 
-function ownTexture(name: string, fallback: THREE.Texture, three = false): Any {
+export function ownTexture(name: string, fallback: THREE.Texture, three = false): Any {
   const n = new (three ? OwnTexture3D : OwnTexture)(fallback) as Any;
   n.ownName = name;
   n.fallback = fallback;
@@ -198,7 +198,7 @@ function ownTexture(name: string, fallback: THREE.Texture, three = false): Any {
  * of one graph never share a fallback (the lava's ramp and crust each have their own).
  */
 let fallbacks: { white: THREE.DataTexture; crust: THREE.DataTexture; float: THREE.DataTexture; volume: THREE.Data3DTexture } | null = null;
-function fallbackTextures(): NonNullable<typeof fallbacks> {
+export function fallbackTextures(): NonNullable<typeof fallbacks> {
   if (!fallbacks) {
     const plainWhite = (): THREE.DataTexture => {
       const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
@@ -238,7 +238,7 @@ function everyDraw(m: Any): void {
 }
 
 /** A node material of the kind every graph here is: unlit, its fragment the whole of it, no fog of three's unless asked. */
-function program(name: string, fog: boolean): Any {
+export function program(name: string, fog: boolean): Any {
   const m = new NodeMaterial() as Any;
   m.name = name;
   m.lights = false;
@@ -258,7 +258,7 @@ const v3 = (c: readonly number[]): Any => vec3(c[0], c[1], c[2]);
  * sample is read under a per-pixel `select` hands it here (the lava's crust and ramp). All three are kept on the material as
  * `gpuParts` for the node test, which walks them (a function's body is built only by a builder).
  */
-function finish(m: Any, out: Any, gone: Any | null, first: readonly (readonly [Any, Any])[] = []): void {
+export function finish(m: Any, out: Any, gone: Any | null, first: readonly (readonly [Any, Any])[] = []): void {
   m.fragmentNode =
     gone || first.length
       ? Fn(() => {

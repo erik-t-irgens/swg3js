@@ -7370,7 +7370,7 @@ switch (cmd) {
     const {
       stationTemplate, parseSpacePlanets, parsePlanetAppearance, spaceBody, parseSpaceEnvironment, scatterField, parseHyperspaceScene, warpTimings, cleanText, cleanZoneTitle, stationStrings,
       INVENTED_FIELDS, INVENTED_SCENERY, hyperspacePoints, placeScenery, arrivalOf, stationApproachEnd, checkPointFrame, nearestObject,
-      dockEffects, fieldShapes, laneNodes, ZONE_MAP_ICONS, zoneIconPaths, launchArrival, landingsFor,
+      dockEffects, fieldShapes, laneNodes, ZONE_MAP_ICONS, zoneIconPaths, launchArrival, landingsFor, parseSpaceDistant, distantEntry,
     } = await import('./space.mjs');
     // The emulator's launch and landing points (`core3ref`), read once for every zone; none with `--core3=none`.
     const c3space = core3SourceFor(options);
@@ -7628,6 +7628,16 @@ switch (cmd) {
       }
       const nsum = nebulaSummary(nebulae);
       console.log(`  nebulae: ${nsum.count} (${nsum.glow} glow, ${nsum.mist} mist), ${nsum.striking} with lightning, shake up to ${nsum.jitter}, farthest edge ${(nsum.farthest / 1000).toFixed(1)} km${lightning ? `; lightning ${lightning.flipbook?.frames ?? '?'} frames at ${lightning.flipbook?.fps ?? '?'}/s` : ''}`);
+      // The terrain's distant particle systems (the GPU port's pass 2, wave 3): Kessel's Maw, Kashyyyk's exploding asteroid
+      // and the star fields, each effect converted into the pack (cached per pack) and its place and turn in the game's frame.
+      const distant = [];
+      for (const d of parseSpaceDistant(trnRoot)) {
+        const e = vfs.has(d.appearance) ? convertParticle(vfs, d.appearance, outDir) : { failed: 'not in the archives' };
+        if (e.failed) console.log(`  distant ${d.appearance}: ${e.failed}`);
+        const entry = distantEntry(d, e.failed ? null : (e.file ?? null), e.bounds?.max?.[0] ?? null);
+        distant.push(entry);
+        console.log(`  distant ${d.appearance.replace(/^.*\//, '')} (${entry.kind}): ${entry.infinite ? 'riding with the camera' : 'standing'} at ${entry.at.join(', ')}, turned ${d.yaw}, ${d.pitch}, ${d.roll}${entry.radius !== null ? `, ${Math.round(entry.radius)} m round` : ''}`);
+      }
       // The fields' shapes (the map draws these; the asteroids themselves are in layout.json).
       const fields = fieldShapes(fieldRows);
       const hyperspace = {
@@ -7638,7 +7648,7 @@ switch (cmd) {
         frameCheck,
       };
       // `materialFormat`: the zone's models (stations, asteroids) are converted here, and carried no stamp.
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify(withLate({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, launches, landings, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, vfs, 'space'), null, 2));
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify(withLate({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, launches, landings, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx, distant }, vfs, 'space'), null, 2));
       const zoneModels = [...models.values()].filter((m) => !m.failed);
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: zoneModels } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
@@ -7648,7 +7658,7 @@ switch (cmd) {
       const made = points.filter((p) => p.source === 'invented').length;
       const borrowed = points.filter((p) => p.source === 'borrowed').length;
       const pointNotes = [made && `${made} invented`, borrowed && `${borrowed} borrowed`].filter(Boolean).join(', ');
-      console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${nebulae.length} nebulae, ${fields.length} fields, ${Object.values(lanes).reduce((n, l) => n + l.lanes.length, 0)} docking lanes, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
+      console.log(`-> ${outDir}: ${title}, ${stations.length} station${stations.length === 1 ? '' : 's'}, ${asteroids} asteroids in ${models.size} models, ${planets.length} planets and moons${env.skybox ? `, skybox ${env.skybox}` : ', no skybox named'}, ${env.lights.length} lights, ${env.celestials.length} star sprites, ${env.stars?.count ?? 0} stars, ${env.dust?.count ?? 0} dust${scenery.length ? `, ${scenery.length} scenery` : ''}, ${nebulae.length} nebulae, ${distant.length} distant system${distant.length === 1 ? '' : 's'}, ${fields.length} fields, ${Object.values(lanes).reduce((n, l) => n + l.lanes.length, 0)} docking lanes, ${points.length} hyperspace points${pointNotes ? ` (${pointNotes})` : ''}, arrival at ${arrival.kind === 'launch' ? 'launch point' : `point ${arrival.point ?? 'the origin'}`}`);
     }
     printEffectSummary();
     break;

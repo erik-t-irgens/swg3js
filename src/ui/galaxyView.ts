@@ -12,6 +12,7 @@ import { projectedBehind } from '../core/depthMode.ts';
 import { colourHex, onPaletteChange } from '../core/palette.ts';
 import * as THREE from 'three';
 import { drawnSystems, GALAXY_TUNE, systemPlace, type GalaxySystemDef, type GalaxyRoute } from '../data/galaxy.ts';
+import { sampleDisc } from '../sky/night/galaxyDensity.ts';
 
 /**
  * Invented: how the galaxy view looks and how its mouse feels. Every number here is ours, and every
@@ -228,35 +229,25 @@ export class GalaxyView {
   }
 
   /**
-   * The star disc the systems stand in: a seeded spiral. It is ours: the archives hold a picture of
-   * the galaxy, but nothing that says where our squares fall on it. Built here and built again by a
-   * retune, so the disc's own numbers can be tried live; only the buffers are new, never a material.
+   * The star disc the systems stand in: points drawn out of the galaxy's one density (`galaxyDensity.ts`'s `sampleDisc`, the
+   * GPU port's pass 2, wave 3), the very function every system's night sky bakes its Milky Way from, so the band in the sky is
+   * this disc seen from the system. It is ours: the archives hold a picture of the galaxy, but nothing that says where our
+   * squares fall on it. Built here and built again by a retune, so the disc's own numbers can be tried live; only the buffers
+   * are new, never a material.
    */
   private buildDiscGeometry(): THREE.BufferGeometry {
     const n = Math.max(0, Math.round(GALAXY_TUNE.discStars));
-    const pos = new Float32Array(n * 3);
+    const drawn = sampleDisc(n, 20030626);
     const col = new Float32Array(n * 3);
-    let seed = 20030626;
-    const rnd = () => {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      return seed / 4294967296;
-    };
     for (let i = 0; i < n; i++) {
-      const arm = Math.floor(rnd() * Math.max(1, GALAXY_TUNE.discArms));
-      const t = Math.pow(rnd(), 0.65);
-      const angle = arm * ((Math.PI * 2) / Math.max(1, GALAXY_TUNE.discArms)) + t * 3.1 + (rnd() - 0.5) * (0.6 + 0.5 * (1 - t));
-      const r = t * GALAXY_TUNE.discRadius * (0.85 + rnd() * 0.3);
-      pos[i * 3] = Math.cos(angle) * r;
-      pos[i * 3 + 1] = (rnd() - 0.5) * GALAXY_TUNE.discThickness * (1.2 - t);
-      pos[i * 3 + 2] = Math.sin(angle) * r;
       // Bluer out at the rim, warmer in toward the middle: a look, not a measurement.
-      const warm = 1 - t;
+      const warm = 1 - Math.min(1, drawn.t[i]);
       col[i * 3] = 0.6 + warm * 0.35;
       col[i * 3 + 1] = 0.66 + warm * 0.2;
       col[i * 3 + 2] = 0.85;
     }
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('position', new THREE.BufferAttribute(drawn.pos, 3));
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
     return g;
   }

@@ -279,7 +279,8 @@ ok(landmarksOf(pack)[0].at.join(',') === '800,0,0' && landmarksOf(pack).length =
 ok(arrivalAt(pack)!.join(',') === '0,0,0' && arrivalAt(null) === null, 'the arrival in the game frame');
 const cat = new HyperspaceCatalogue([{ id: 'space_test', name: 'Test orbit', title: 'Test System', pack, destinations: dests }]);
 ok(cat.find('space_test:station_test')?.name === 'Test Space Station' && cat.find('nope') === null && cat.pack('space_test') === pack && cat.pack('other') === null, 'the catalogue finds a destination by key and a pack by zone');
-const status = spaceZoneStatus('space_test', { ...pack, materialFormat: MATERIAL_FORMAT }, 12);
+// (Pass 2, wave 3: a converted zone carries its terrain's distant particle systems, an empty list where it has none.)
+const status = spaceZoneStatus('space_test', { ...pack, materialFormat: MATERIAL_FORMAT, distant: [] }, 12);
 ok(!status.stale && status.line === 'space_test: Test System, 1 station, 1 scenery, 12 objects, 0 nebulae, 0 fields, 0 docking lanes, 2 hyperspace points (1 invented), arrival at launch point, no warp effects', 'the status line of a converted zone');
 ok(spaceZoneStatus('space_old', { zone: 'space_old', stations: [] }, 3).stale && spaceZoneStatus('space_none', null, 0).stale, 'a missing pack or one converted before hyperspace wants the command');
 

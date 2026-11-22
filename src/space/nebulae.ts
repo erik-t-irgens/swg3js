@@ -62,6 +62,7 @@ import {
 } from './nebulaMath.ts';
 import { setViewShake } from '../core/camera.ts';
 import { targetable } from './shipCombat.ts';
+import { GPU } from '../core/gpuSwitch.ts';
 
 /**
  * How many floats one sheet carries in a set's `source`: the fields in the order `makeSet` adds
@@ -407,6 +408,136 @@ export class Nebulae {
     this.group.frustumCulled = false;
     const records = strikeRecords(rows, NEBULA_TUNE);
     for (let i = 0; i < records; i++) this.live.push({ row: -1, a: new THREE.Vector3(), b: new THREE.Vector3(), until: 0, roll: 0 });
+    // Pass 2, wave 3 (maker B): on WebGPU each nebula is a group placed from its own middle, never from the world's.
+    if (GPU.webgpu) this.gpuMiddlesMade(rows.length);
+  }
+
+  // ---------------------------------------------------------------- WebGPU (pass 2, wave 3, maker B: `src/core/gpu/gpuNebulae.ts`)
+  //
+  // Each nebula is a group kept relative to its anchor, its own middle (pass 1's design, section 11): on WebGPU a sheet's two
+  // place attributes hold its centre less its nebula's middle and that nebula's row, and every frame each nebula's middle less
+  // the eye is worked here in doubles into a small table the sheets' graph reads by row (`uMiddles`), so the card works every
+  // sheet's place from the eye with small numbers. The `source` the mist's sort reads keeps the world's places, exactly as on
+  // WebGL, and the sort is WebGL's own; whatever it writes into the attributes is put back relative afterwards.
+
+  /** Each nebula's middle less the eye, four floats a row (the fourth spare), written each frame; null on WebGL. */
+  private gpuMiddles: Float32Array | null = null;
+  private gpuMiddlesTex: THREE.DataTexture | null = null;
+  /** Each sheet set's row of every sheet, by its place in `source` (WebGPU alone), filled with the sheets. */
+  private readonly gpuRowOf = new Map<SheetSet, Int32Array>();
+
+  /** The table of middles less the eye, one texel a nebula, fetched by row (nearest both ways, so read with no sampler). */
+  private gpuMiddlesMade(rows: number): void {
+    const data = new Float32Array(Math.max(1, rows) * 4);
+    const tex = new THREE.DataTexture(data, Math.max(1, rows), 1, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    this.gpuMiddles = data;
+    this.gpuMiddlesTex = tex;
+    this.textures.push(tex);
+  }
+
+  /** A sheet set's material handed its graph and the table of middles (WebGPU's own uniform, which WebGL's program does not declare). */
+  private gpuSheets(material: THREE.ShaderMaterial): void {
+    material.uniforms.uMiddles = { value: this.gpuMiddlesTex };
+    material.userData.gpuStandIn = () => GPU.rt!.standIns.nebula('sheets');
+  }
+
+  /** A bolt's material handed its graph and its two ends less the eye (`gpuBolts`). */
+  private gpuBolt(material: THREE.ShaderMaterial): void {
+    material.uniforms.uFromEye = { value: new THREE.Vector3() };
+    material.uniforms.uToEye = { value: new THREE.Vector3(0, 1, 0) };
+    material.userData.gpuStandIn = () => GPU.rt!.standIns.nebula('bolt');
+  }
+
+  /**
+   * After a fill on WebGPU: each sheet's row found by its nebula's middle as `fill` wrote it (rows that share a middle share
+   * every number this reads), then the attributes put relative. Run where the sheets are placed, never in a frame.
+   */
+  private gpuRows(): void {
+    for (const set of this.sets) {
+      let rowOf = this.gpuRowOf.get(set);
+      if (!rowOf) this.gpuRowOf.set(set, (rowOf = new Int32Array(set.capacity)));
+      const { source, count } = set;
+      for (let i = 0; i < count; i++) {
+        const o = i * SHEET_FLOATS;
+        let found = 0;
+        for (let r = 0; r < this.rows.length; r++) {
+          const at = this.rows[r].at;
+          if (this.rows[r].shader === set.look && Math.fround(at[0]) === source[o + 3] && Math.fround(at[1]) === source[o + 4] && Math.fround(at[2]) === source[o + 5]) {
+            found = r;
+            break;
+          }
+        }
+        rowOf[i] = found;
+      }
+      this.gpuRelative(set, false);
+    }
+  }
+
+  /**
+   * The two place attributes of a set put relative: each sheet's centre less its nebula's middle (worked in doubles from the
+   * world's places `source` holds) and its row, in the order the attributes hold the sheets (`sorted`: the sort's own order).
+   * Allocates nothing.
+   */
+  private gpuRelative(set: SheetSet, sorted: boolean): void {
+    const rowOf = this.gpuRowOf.get(set);
+    if (!rowOf) return;
+    const { source, count } = set;
+    const order = set.orderView;
+    const centre = set.data[0].array as Float32Array;
+    const middle = set.data[1].array as Float32Array;
+    for (let i = 0; i < count; i++) {
+      const from = sorted ? order[i] : i;
+      const at = this.rows[rowOf[from]].at;
+      const o = from * SHEET_FLOATS;
+      centre[i * 3] = source[o] - at[0];
+      centre[i * 3 + 1] = source[o + 1] - at[1];
+      centre[i * 3 + 2] = source[o + 2] - at[2];
+      middle[i * 3] = rowOf[from];
+      middle[i * 3 + 1] = 0;
+      middle[i * 3 + 2] = 0;
+    }
+    set.data[0].needsUpdate = true;
+    set.data[1].needsUpdate = true;
+  }
+
+  /**
+   * Once a frame on WebGPU: each nebula's middle less the eye into the table (doubles, then floats), and a set the sort has
+   * just rewritten put back relative in its new order. Allocates nothing.
+   */
+  private gpuSheetsFrame(eye: THREE.Vector3): void {
+    const t = this.gpuMiddles;
+    if (!t || !this.gpuMiddlesTex) return;
+    for (let r = 0; r < this.rows.length; r++) {
+      const at = this.rows[r].at;
+      t[r * 4] = at[0] - eye.x;
+      t[r * 4 + 1] = at[1] - eye.y;
+      t[r * 4 + 2] = at[2] - eye.z;
+    }
+    this.gpuMiddlesTex.needsUpdate = true;
+    // The sort (WebGL's own) copied the world's places into the attributes this very frame.
+    if (this.sortTime === this.time) for (const set of this.sets) if (set.sorted) this.gpuRelative(set, true);
+  }
+
+  /** Once a frame on WebGPU: each bolt drawn handed its two ends less the eye, worked in doubles. Allocates nothing. */
+  private gpuBolts(eye: THREE.Vector3): void {
+    for (const beam of this.beams) {
+      if (!beam.mesh.visible) continue;
+      const u = beam.material.uniforms;
+      const from = u.uFrom.value as THREE.Vector3;
+      const to = u.uTo.value as THREE.Vector3;
+      const fe = u.uFromEye.value as THREE.Vector3;
+      const te = u.uToEye.value as THREE.Vector3;
+      fe.x = from.x - eye.x;
+      fe.y = from.y - eye.y;
+      fe.z = from.z - eye.z;
+      te.x = to.x - eye.x;
+      te.y = to.y - eye.y;
+      te.z = to.z - eye.z;
+    }
   }
 
   /**
@@ -609,6 +740,8 @@ export class Nebulae {
     // Unlit and dry: out of the shadow cascades, and never wrapped by the weather.
     material.userData.unlit = true;
     material.userData.dry = true;
+    // Pass 2, wave 3 (maker B): drawn on WebGPU by a node graph of its own, placed from the zone's anchor.
+    if (GPU.webgpu) this.gpuSheets(material);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `nebula:${look}`;
     mesh.frustumCulled = false;
@@ -692,6 +825,8 @@ export class Nebulae {
     // Whatever order the mist was in was for the sheets that are gone.
     this.sortTime = -Infinity;
     this.sortedAt.set(Infinity, Infinity, Infinity);
+    // Pass 2, wave 3 (maker B): on WebGPU each sheet just placed is handed to the card from its own nebula's middle.
+    if (GPU.webgpu) this.gpuRows();
   }
 
   /** The haze inside a nebula: a sphere about the camera, one per look, hidden until the camera is in one. */
@@ -726,6 +861,8 @@ export class Nebulae {
       material.name = `nebula:haze:${kind}`;
       material.userData.unlit = true;
       material.userData.dry = true;
+      // Pass 2, wave 3 (maker B): drawn on WebGPU by a node graph of its own; a sphere at the eye, placed by three's model-view.
+      if (GPU.webgpu) material.userData.gpuStandIn = () => GPU.rt!.standIns.nebula('haze');
       const mesh = new THREE.Mesh(geometry, material);
       mesh.name = `nebula:haze:${kind}`;
       mesh.frustumCulled = false;
@@ -819,6 +956,8 @@ export class Nebulae {
       material.name = 'nebula:lightning';
       material.userData.unlit = true;
       material.userData.dry = true;
+      // Pass 2, wave 3 (maker B): drawn on WebGPU by a node graph of its own, handed its ends less the eye.
+      if (GPU.webgpu) this.gpuBolt(material);
       const mesh = new THREE.Mesh(geometry, material);
       mesh.name = `nebula:lightning:${i}`;
       mesh.frustumCulled = false;
@@ -877,7 +1016,10 @@ export class Nebulae {
       if (jitter > 0) setViewShake(Math.min(1, jitter) * inside.depth);
     }
     this.sortMist(eye);
+    // Pass 2, wave 3 (maker B): on WebGPU each nebula's middle less the eye, and the sheets the sort just rewrote put relative.
+    if (GPU.webgpu) this.gpuSheetsFrame(eye);
     this.updateStrikes(dt, eye);
+    if (GPU.webgpu) this.gpuBolts(eye);
   }
 
   /** The haze: the look of the nebula the camera is in, its colour, how solid it is by depth, and on the camera like the sky. */

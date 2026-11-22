@@ -82,7 +82,8 @@ const constant = (name: string) => Number(new RegExp(`const ${name} = ([\\d.]+);
 ok(constant('SPACE_BODY_DISTANCE') === SPACE_BODY_FRAME.distance && constant('SPACE_BODY_SIZE') === SPACE_BODY_FRAME.radius, 'SPACE_BODY_FRAME is the frame the game draws the bodies in');
 
 // A pack whose bodies were sized from the halo's scale asks for the space command again.
-const packOf = (planets: object[]) => ({ version: 3, materialFormat: MATERIAL_FORMAT, zone: 'space_test', title: 'Test', stations: [], planets, hyperspace: { points: [] } });
+// (Pass 2, wave 3: an up-to-date pack carries its terrain's distant particle systems, an empty list where it has none.)
+const packOf = (planets: object[]) => ({ version: 3, materialFormat: MATERIAL_FORMAT, zone: 'space_test', title: 'Test', stations: [], planets, hyperspace: { points: [] }, distant: [] });
 ok(spaceZoneStatus('space_test', packOf([{ appearance: 'a.pln', direction: [0, -1, 0], size: 0 }]), 0).stale, 'bodies with no radius: converted before the sizes were read');
 ok(!spaceZoneStatus('space_test', packOf([tat, lost]), 0).stale && !spaceZoneStatus('space_test', packOf([]), 0).stale, 'bodies with a radius, or with a null one, or none at all: up to date');
 
@@ -255,6 +256,7 @@ const full = {
   fields: [{}, {}, {}],
   lanes: { m: { lanes: [{ lane: 'a' }, { lane: 'b' }], drydocks: [], bays: [] } },
   hyperspace: { points: [{ source: 'table' }], effects: { enter: 'a', exit: 'b' }, frameCheck: { checked: 0, sameCloser: 0, mirroredCloser: 0 } },
+  distant: [],
 };
 const v3 = spaceZoneStatus('space_test', full, 40);
 ok(!v3.stale && v3.line.includes('2 nebulae (1 with lightning), 3 fields, 2 docking lanes'), `the status line says what version 3 added (${v3.line})`);
@@ -263,5 +265,8 @@ ok(spaceZoneStatus('space_test', { version: 1, zone: 'z', stations: [] }, 0).lin
 // Its models carried no material stamp before format 6, so a pack without one is asked for again.
 const { materialFormat: _stamp, ...unstamped } = full;
 ok(spaceZoneStatus('space_test', unstamped, 40).stale && spaceZoneStatus('space_test', { ...full, materialFormat: MATERIAL_FORMAT - 1 }, 40).line.includes('material format'), 'a pack with no material stamp, or an older one, wants the space command again');
+// Pass 2, wave 3: one converted before the distant particle systems were read (no `distant` at all) is asked for again.
+const { distant: _distant, ...undistant } = full;
+ok(spaceZoneStatus('space_test', undistant, 40).stale && spaceZoneStatus('space_test', undistant, 40).line.includes('distant particle systems'), 'a pack converted before the distant particle systems wants the space command again');
 
 console.log(`${checks} checks passed`);

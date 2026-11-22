@@ -231,7 +231,7 @@ export interface FlareLook {
   /** Time constants (s) for the visibility rising and falling. */
   rise: number;
   fall: number;
-  /** Mustafar's night sun flares (the exception to "off at night"). */
+  /** A flare at night: Mustafar's night sun under SWG's sky (the exception to "off at night"), the moon's under our sky on WebGPU. */
   nightSuns: boolean;
   /** Show only the flare, on black. */
   debugOnly: boolean;

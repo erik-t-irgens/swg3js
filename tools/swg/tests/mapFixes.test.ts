@@ -557,7 +557,8 @@ function methodOf(src: string, sig: string): string {
   // An orbit's pack converted before the launch points is asked for again; one with them is not.
   const orbit = { version: SPACE_PACK_VERSION, title: 'Tatoo System', stations: [], hyperspace: { points: [], effects: { enter: 'a', exit: 'b' } }, materialFormat: MATERIAL_FORMAT, planets: [], arrival: { kind: 'launch' } };
   ok(spaceZoneStatus('space_tatooine', orbit, 0).stale && /launch points/.test(spaceZoneStatus('space_tatooine', orbit, 0).line), 'an orbit converted before the launch points is asked for again');
-  ok(!spaceZoneStatus('space_tatooine', { ...orbit, launches: [] }, 0).stale, 'and one with them is not');
+  // (Pass 2, wave 3: an up-to-date orbit also carries its distant particle systems, an empty list where its terrain has none.)
+  ok(!spaceZoneStatus('space_tatooine', { ...orbit, launches: [], distant: [] }, 0).stale, 'and one with them is not');
   // Tubes lie in their own rooms: Tatooine's large facility, its points carried into the model's mirrored frame.
   const tat = packJson('tatooine', 'manifest.json');
   if (!tat) console.log('skip the tubes of Tatooine\'s large facility: no Tatooine pack');

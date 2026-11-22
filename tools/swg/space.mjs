@@ -215,6 +215,80 @@ export function parseSpaceEnvironment(root) {
   return out;
 }
 
+/**
+ * A zone's distant particle systems, from the DIST forms of its terrain file (the GPU port's pass 2, wave 3: Kessel's Maw).
+ * Each is FORM DIST > 0000: the particle appearance's path, then six floats and a byte -- the place in metres (x, y, z, in
+ * the client's frame), the turn as yaw, pitch and roll in degrees (the frame convention of the file's celestials and parallel
+ * lights), and whether it stands at an infinite distance (1: it rides with the camera, as the sky does; 0: it stands in the
+ * world at its place). Read on every retail zone that has any: Kessel's three black holes and three star fields, Kashyyyk's
+ * exploding asteroid (the one at 0) and six star fields, and star fields in Deep Space, Ord Mantell's six, the Nova Orion and
+ * the three tutorial zones; every chunk is 56 or 71 bytes, the path and exactly 25 more. A chunk shorter than that is left out.
+ */
+export function parseSpaceDistant(root) {
+  const out = [];
+  for (const form of findAll(root, 'DIST')) {
+    const chunk = form.children.find((ch) => ch.tag === '0000' || ch.tag === 'DATA');
+    if (!chunk) continue;
+    const b = chunk.data;
+    const { value, next } = readCString(b, 0);
+    if (!value || next + 25 > b.length) continue;
+    const f = (i) => b.readFloatLE(next + 4 * i);
+    out.push({ appearance: value.replace(/\\/g, '/'), at: [f(0), f(1), f(2)], yaw: f(3), pitch: f(4), roll: f(5), infinite: b[next + 24] !== 0 });
+  }
+  return out;
+}
+
+/**
+ * A distant system's turn in the game's frame, as the nine numbers of a 3x3 matrix by rows. Our reading of the client's
+ * object turn: yaw about the object's own up, then pitch about its own right, then roll about its own forward
+ * (`Ry(yaw) Rx(pitch) Rz(roll)`, the order and signs `sunDirection` already reads the celestials and the lights by: a
+ * yaw then a pitch puts the forward where that function says), mirrored in X as every converted transform is (S R S, S =
+ * diag(-1, 1, 1)). The roll's sign is unconfirmed: no retail object of the kind is drawn anywhere else to check it by.
+ */
+export function distantBasis(yawDeg, pitchDeg, rollDeg) {
+  const r = Math.PI / 180;
+  const [cy, sy] = [Math.cos(yawDeg * r), Math.sin(yawDeg * r)];
+  const [cp, sp] = [Math.cos(pitchDeg * r), Math.sin(pitchDeg * r)];
+  const [cr, sr] = [Math.cos(rollDeg * r), Math.sin(rollDeg * r)];
+  // Ry(yaw) Rx(pitch), then times Rz(roll), in the client's frame.
+  const a = [
+    [cy, sy * sp, sy * cp],
+    [0, cp, -sp],
+    [-sy, cy * sp, cy * cp],
+  ];
+  const m = a.map((row) => [row[0] * cr + row[1] * sr, -row[0] * sr + row[1] * cr, row[2]]);
+  // Mirrored: an entry with exactly one index on X changes sign.
+  const s = [-1, 1, 1];
+  const out = [];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) out.push(Math.round(s[i] * s[j] * m[i][j] * 1e6) / 1e6 + 0);
+  return out;
+}
+
+/** Whether a distant system is one of the client's particle star fields, which every zone with any repeats; everything else is a feature of the zone (Kessel's black holes, Kashyyyk's asteroid). */
+export function distantKind(appearance) {
+  return /(^|\/)pt_starfield/i.test(String(appearance ?? '')) ? 'starfield' : 'feature';
+}
+
+/**
+ * One distant system's space.json entry, in the game's frame (the pack's version-3 rule: what is drawn is mirrored once here):
+ * the appearance and the converted effect's file (null when it did not convert), the place with X mirrored, the file's own
+ * yaw, pitch and roll kept as read, the turn as `basis` (`distantBasis`), whether it rides with the camera, its kind and the
+ * effect's reach in metres from the converted effect's bounds (null without one).
+ */
+export function distantEntry(d, file = null, radius = null) {
+  const r4 = (x) => Math.round(x * 1e4) / 1e4 + 0;
+  return {
+    appearance: d.appearance,
+    file,
+    at: [r4(-d.at[0]), r4(d.at[1]), r4(d.at[2])],
+    turn: { yaw: r4(d.yaw), pitch: r4(d.pitch), roll: r4(d.roll) },
+    basis: distantBasis(d.yaw, d.pitch, d.roll),
+    infinite: d.infinite,
+    kind: distantKind(d.appearance),
+    radius: Number.isFinite(radius) && radius > 0 ? Math.round(radius * 100) / 100 : null,
+  };
+}
+
 /** A small seeded random generator (mulberry32), so a field scatters the same way every conversion. */
 export function seeded(seed) {
   let a = (seed >>> 0) || 1;
@@ -1043,6 +1117,9 @@ export function spaceZoneStatus(zone, pack, objects) {
   if ((pack.planets ?? []).some((p) => p && p.radius === undefined)) return { line: `${zone}: ${counts}, planets converted before their sizes were read`, stale: true };
   // An orbit converted before its worlds' launch points and the stations' landing places (`launches`, `landings`).
   if (SPACE_ZONES[zone] && !Array.isArray(pack.launches)) return { line: `${zone}: ${counts}, converted before the launch points and the landing places`, stale: true };
+  // A pack converted before its terrain's distant particle systems were read (Kessel's Maw, Kashyyyk's exploding asteroid:
+  // `distant`, every zone's, an empty list where the terrain has none).
+  if (!Array.isArray(pack.distant)) return { line: `${zone}: ${counts}, converted before the distant particle systems (Kessel's Maw)`, stale: true };
   const points = pack.hyperspace.points;
   const by = (source) => points.filter((p) => p.source === source).length;
   const notes = [by('invented') && `${by('invented')} invented`, by('borrowed') && `${by('borrowed')} borrowed`].filter(Boolean);

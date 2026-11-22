@@ -56,6 +56,11 @@ export interface GpuStandIns {
   particles(weather: boolean): THREE.Material;
   /** The hyperspace tunnel (step 5). */
   tunnel(): THREE.Material;
+  /**
+   * A space zone's nebulae (pass 2, wave 3, `gpu/gpuNebulae.ts`): the sheets (both looks), the haze inside one and a lightning
+   * bolt, one graph a kind, each material's own uniforms read as it is drawn, read through the eye.
+   */
+  nebula(kind: 'sheets' | 'haze' | 'bolt'): THREE.Material;
   /** The ground's tile program: the chunk's own colour-map colour where it carries one ('tint' the tile chunks', 'color' vertex colours), else a mid grey, lit. */
   ground(source: 'tint' | 'color' | 'grey'): THREE.Material;
   /** The portal renderer's depth reset behind the doorways: writes the far depth where its stencil passes, no colour. */
@@ -256,12 +261,44 @@ export interface GpuEye {
   report(check: boolean): Promise<Record<string, unknown>>;
 }
 
+/**
+ * One sky's night under our sky (pass 2, wave 3, maker A: `src/sky/night/nightGpu.ts`): the Milky Way baked for the system, the
+ * stars' cards and the towns' glow, hung in the sky's group by the world before the sky is built.
+ */
+export interface GpuNightSky {
+  /** What the world hangs in the sky's camera-following group. */
+  readonly group: THREE.Object3D;
+  /** The world's towns (`pois.json`'s rows, the raw frame) about its layout's centre. */
+  setCities(rows: readonly import('../story/cities.ts').CityRow[] | null, centre: { x: number; z: number } | null): void;
+  /** The band's bake compiled behind the loading screen; then `drawBake` draws it (answers its milliseconds of the main thread). */
+  warm(): Promise<void>;
+  drawBake(): number;
+  /** Once a game frame after the air's (the camera's place written into `nightIn` first). */
+  frame(): void;
+  report(): Record<string, unknown>;
+  /** The band's picture read back (the console's and the prover's). */
+  readBand(): Promise<Float32Array>;
+  /** The prover's switch: the night not drawn (an A/B on one screen). */
+  off: boolean;
+  dispose(forget?: (materials: Iterable<THREE.Material>) => void): void;
+}
+
+/** The night sky's runtime (pass 2, wave 3, maker A). */
+export interface GpuNight {
+  /** A sky's night, made once the air's tables exist: the world's id, the system's key and how its place on the map is worked. */
+  make(planet: string, key: string, placeOf: () => { x: number; y: number; z: number }): GpuNightSky;
+  /** The frame's camera place the night reads (`NIGHT_IN`: written into its fields, never handed across a call). */
+  readonly nightIn: { camX: number; camZ: number };
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** What draws from the air under our sky (pass 2, wave 1). */
   readonly airDraw: GpuAirDraw;
   /** The eye (pass 2, wave 2). */
   readonly eye: GpuEye;
+  /** The night sky under our sky (pass 2, wave 3, maker A). */
+  readonly night: GpuNight;
   /**
    * The air's four tables (pass 2, wave 1, maker A: `src/sky/air/airTables.ts`), made once a session on the device and put in
    * `AIR.tables`, following `record` (the world's blended air record, read by reference); the same tables on a later call.

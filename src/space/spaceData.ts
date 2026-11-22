@@ -309,6 +309,11 @@ export interface SpacePack {
   /** Version 3: what a dock plays, by the part it plays. Empty on an older pack. */
   dockEffects?: Record<string, DockEffect>;
   /**
+   * The terrain's distant particle systems (the GPU port's pass 2, wave 3: Kessel's Maw, Kashyyyk's exploding asteroid, the
+   * star fields), in the game's frame. Empty on a pack converted before them and on a zone whose terrain has none.
+   */
+  distant?: DistantSystem[];
+  /**
    * Only on a made-up system: the seed it was drawn from, how far it reaches from its middle in
    * metres, and which converted zone's sky it borrows. Its presence is what says "nothing in this
    * zone is the client's", and it is what an ultra-fast cruise asks for before it will run.
@@ -347,8 +352,26 @@ function normalise(zone: string, raw: Partial<SpacePack> & { stations?: Partial<
     fields: Array.isArray(raw.fields) ? raw.fields : [],
     lanes: raw.lanes && typeof raw.lanes === 'object' ? raw.lanes : {},
     dockEffects: raw.dockEffects && typeof raw.dockEffects === 'object' ? raw.dockEffects : {},
+    distant: Array.isArray(raw.distant) ? raw.distant : [],
     sandbox: raw.sandbox && typeof raw.sandbox === 'object' ? raw.sandbox : null,
   };
+}
+
+/**
+ * One distant particle system of a zone's terrain (the converter's `distantEntry`), in the game's frame: the effect it plays
+ * (null where it did not convert), where it stands (from the camera when it rides with it, else in the world), its turn as a
+ * 3x3 matrix by rows, the file's own yaw, pitch and roll, whether it rides with the camera, whether it is one of the client's
+ * star fields or a feature of the zone, and the effect's reach in metres (null without one).
+ */
+export interface DistantSystem {
+  appearance: string;
+  file: string | null;
+  at: Vec3;
+  turn: { yaw: number; pitch: number; roll: number };
+  basis: number[];
+  infinite: boolean;
+  kind: 'feature' | 'starfield';
+  radius: number | null;
 }
 
 /** The empty answer, shared: the map asks per station per frame and nothing may allocate there. */

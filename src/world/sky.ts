@@ -788,7 +788,9 @@ export class SwgSky {
     }
 
     // Stars: the client scatters `count` points and colours them from a small ramp image (more of them in space, where they are the view).
-    if (data.stars && data.stars.count > 0) {
+    // Pass 2, wave 3 (maker A): under our sky on WebGPU over a planet the night sky draws each system's own stars as cards
+    // (`src/sky/night/`), so these are not made; WebGL, SWG's sky and space keep them.
+    if (data.stars && data.stars.count > 0 && !(GPU.webgpu && skyOurs() && !space)) {
       const n = Math.min(data.stars.count, space ? 30000 : 6000);
       const pos = new Float32Array(n * 3);
       const col = new Float32Array(n * 3);

@@ -443,6 +443,9 @@ import { skyAirArgument } from './sky/air/airDials.ts';
 // Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/`: pure, the WebGPU side through the runtime) and the sky's match.
 import { EYE_IN } from './sky/exposure/eyeRun.ts';
 import { eyeDialsFor } from './sky/exposure/eyeDials.ts';
+// Pass 2, wave 3 (maker A): the night sky's console helper and its dials (`src/sky/night/`).
+import { starsConsole } from './sky/night/nightConsole.ts';
+import { starsDialsFor } from './sky/night/nightTune.ts';
 import { tuneEye } from './sky/exposure/eyeMath.ts';
 import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
@@ -8156,6 +8159,14 @@ class App {
         return { ...(said.length ? { said } : {}), ...report };
       },
       /**
+       * The night sky (pass 2, wave 3, `src/sky/night/`): `stars()` says what this world's night draws (its system, the stars a
+       * tier draws and how faint they reach, the band's bake, the sky's turn, the towns' glow) with the dials and the line that
+       * keeps them; `stars({ tune, counts, tilt, flare })` moves the dials as the debug menu's `stars` sliders do; `stars({ shape
+       * })` the galaxy's shape the map's disc and the band both read; `await stars({ band: true })` reads the band back and holds
+       * a few texels to the density's own sums. WebGPU's under our sky.
+       */
+      stars: (o?: Record<string, unknown>) => starsConsole({ webgpu: GPU.webgpu, ours: SKY_AT_LOAD.ours, space: !!this.world.planet?.space, planet: this.world.planet?.id ?? null, night: this.world.skyNight }, o),
+      /**
        * Which star lights this space zone, and what stops its rays. No argument: the pick, every
        * star the zone has, and how far the zone file's own light points from the one chosen.
        * `suns({ rule: 'disc' })` lights it from the largest disc instead of the brightest glow and
@@ -12763,7 +12774,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? eyeDialsFor(helper) ?? (GPU.webgpu ? captureDialsFor(helper) : null) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? eyeDialsFor(helper) ?? starsDialsFor(helper) ?? (GPU.webgpu ? captureDialsFor(helper) : null) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });

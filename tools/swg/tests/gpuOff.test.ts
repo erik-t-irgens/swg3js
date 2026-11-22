@@ -32,9 +32,11 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * twin, the haze's arithmetic) the WebGL path may load. Wave 2's eye likewise: its buffer and its passes (`src/sky/exposure/`
  * `eyeBuffer.ts`, `eyeGpu.ts`) the WebGPU side's, its arithmetic, its main thread's frame and its dials pure; and its fixer's
  * store of the scene pre-exposed (`preExpose.ts`, a wrap of three's node materials' output and the card's buffer) the WebGPU
- * side's too.
+ * side's too. Wave 3's night sky (maker A, `src/sky/night/`): its graphs and its sky (`nightGpu.ts`) and the lens flare's pass
+ * (`gpuFlare.ts`) the WebGPU side's, reached through the runtime and the chain; its density, catalogue, turn, towns, dials,
+ * flare sources and console pure.
  */
-const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts']);
+const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts']);
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;
@@ -702,7 +704,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     // WebGPU's alone), so its guard gains that and the build is asked once more after the air is made, inside `if (airSky)`.
     const airSkyAt = w.indexOf('const airSky = GPU.webgpu && skyOurs() && !sky.data.space;');
     const airBlock = w.indexOf('if (airSky) {', airSkyAt);
-    ok(airSkyAt > 0 && airBlock > airSkyAt && w[airBlock + 1] === 'this.setHazeFog();' && w[airBlock + 2] === 'sky.airReady();' && w[airBlock + 3] === 'this.gpuSkyReady(sky);' && w[airBlock + 4] === '}', "world.ts: our sky is built after the air's tables, inside a guard that is WebGPU's alone");
+    // Pass 2, wave 3 (maker A): the night sky (`src/sky/night/`) is hung between the air's tables and the sky's build, inside the
+    // same guard (its two lines of words, its wait, the stale load's way out), so the build takes it with the dome.
+    ok(airSkyAt > 0 && airBlock > airSkyAt && w[airBlock + 1] === 'this.setHazeFog();' && w[airBlock + 2] === 'sky.airReady();' && w[airBlock + 3].startsWith('// Pass 2, wave 3 (maker A)') && w[airBlock + 4].startsWith('//') && w[airBlock + 5] === 'await this.loadNight(sky, token);' && w[airBlock + 6] === 'if (token !== this.loadToken) return;' && w[airBlock + 7] === 'this.gpuSkyReady(sky);' && w[airBlock + 8] === '}', "world.ts: our sky is built after the air's tables and the night hung, inside a guard that is WebGPU's alone");
     const hung: [string, string][] = [
       ['if (GPU.webgpu && !airSky) this.gpuSkyReady(sky);', 'this.sky.visible = false;'],
       ['if (GPU.webgpu) this.gpuMadeNow([group]);', '// A star behind a planet must not flare through it: the body itself writes no depth, and its'],
@@ -719,7 +723,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const had = w.indexOf('const had = GPU.webgpu ? this.gpuDrawablesNow() : null;');
     ok(had > 0 && w[had + 1] === 'try {' && w[had + 2] === 'this.load(planet, packId);', "world.ts: what stood before a swap is taken on WebGPU alone (nothing on WebGL), right before 499c5d5's load");
     const calls = w.filter((x) => /this\.gpu(MadeNow|SkyReady|DrawablesNow)\(/.test(x) && !/^(\/\/|\*)/.test(x));
-    ok(calls.length === 8 && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);' || x === 'this.gpuSkyReady(sky);') && calls.filter((x) => x === 'this.gpuSkyReady(sky);').length === 1, `world.ts: the swap's builds, a turret's and the warm-up bolts' are reached from WebGPU guards alone (and the sky's from within its own, our sky's from within airSky's): ${calls.join('; ')}`);
+    // Pass 2, wave 3 (maker B): a ninth, the nebulae built as they hang (a jump's swap hangs them with no screen over them).
+    ok(calls.length === 9 && calls.includes('if (GPU.webgpu) this.gpuMadeNow([built.group]);') && calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);' || x === 'this.gpuSkyReady(sky);') && calls.filter((x) => x === 'this.gpuSkyReady(sky);').length === 1, `world.ts: the swap's builds, a turret's, the warm-up bolts' and the nebulae's are reached from WebGPU guards alone (and the sky's from within its own, our sky's from within airSky's): ${calls.join('; ')}`);
     // The two hooks are the turret manager's and the bolts' own, unset unless the world sets them, each called only where set.
     const tu = lines('src/combat/turrets.ts');
     const bo = lines('src/combat/bolts.ts');
@@ -862,6 +867,42 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const run = readFileSync(join(SRC, 'sky', 'air', 'airRun.ts'), 'utf8');
     ok(!/import\(/.test(run.replace(/\/\/.*$/gm, '')) && run.includes('const t = GPU.rt.airTables(this.twin.record);'), 'airRun.ts: the tables are reached through the runtime, with no dynamic import of their own');
     for (const f of ['airApi.ts', 'airParams.ts', 'airTwin.ts', 'airFit.ts', 'airRun.ts', 'airDials.ts']) ok(!/from 'three\/(webgpu|tsl)'/.test(readFileSync(join(SRC, 'sky', 'air', f), 'utf8')), `${f} imports nothing of three's WebGPU build (the WebGL path loads it)`);
+  }
+  // Pass 2, wave 3's fixer: the flare's seen gate opened on WebGPU wherever the air does not write the sources (a space zone, a
+  // sky with no air), the sky's own sources after it as 4ecee44 had them; the nightSuns switch handed to the air inside the
+  // air's WebGPU branch.
+  {
+    const w = lines('src/world/world.ts');
+    const open = w.flatMap((x, i) => (x === 'if (GPU.webgpu) openFlareSeen();' ? [i] : []));
+    ok(open.length === 1 && w[open[0] + 1] === 'if (this.swgSky) {' && w[open[0] + 2] === 'const count = this.swgSky.flareLights(out, nightSuns);', "world.ts: the flare's gate is opened on WebGPU alone, right before the sky's own sources as 4ecee44 had them");
+    const air = w.indexOf('if (GPU.webgpu && this.skyAir && this.swgSky && !this.swgSky.data.space) {');
+    const hand = w.indexOf('AIR_FLARE_IN.nightSuns = nightSuns;');
+    ok(air > 0 && hand > air && hand < open[0] && w[hand + 1] === 'return airFlareLights(out, AIR.frame, discs);' && w.filter((x) => x.includes('openFlareSeen(')).length === 1, "world.ts: the nightSuns switch is handed in the air's WebGPU branch alone, and the gate opened from the one guard");
+  }
+  // Pass 2, wave 3, maker B: a space zone's distant particle systems (`src/space/distant.ts`), loaded, moved with the camera and
+  // taken out by WebGPU guards with no WebGL branch, each before or after the line 4ecee44 had there; the module the world
+  // imports takes nothing of three's WebGPU build. (The nebulae's own guards are held by `gpuNebulae.test.ts`.)
+  {
+    const w = lines('src/world/world.ts');
+    const at = (line: string): number => {
+      const found = w.flatMap((x, i) => (x === line ? [i] : []));
+      ok(found.length === 1, `world.ts: the distant systems' WebGPU line is there once: ${line}`);
+      return found[0];
+    };
+    const load = at('if (GPU.webgpu) await this.loadDistant(token, spawn);');
+    ok(w[load - 3] === 'await this.loadNebulae(pack);' && w[load - 2] === 'if (token !== this.loadToken) return null;' && w[load + 1] === 'if (token !== this.loadToken) return null;', "world.ts: they are loaded behind the screen after the nebulae, on WebGPU alone");
+    const frame = at('if (GPU.webgpu && this.distant) this.distant.frame(camPos);');
+    ok(w[frame - 2] === 'if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);', 'world.ts: moved with the camera after the bodies, on WebGPU alone');
+    const drop = at('if (GPU.webgpu) this.dropDistant();');
+    ok(w[drop - 2] === 'this.streamHold = false;' && w[drop + 1] === 'this.particles?.dispose();', 'world.ts: taken out before their effects go, on WebGPU alone');
+    ok(w.filter((x) => /this\.(loadDistant|dropDistant)\(/.test(x) && !/^(\/\/|\*)/.test(x)).length === 3 && w.filter((x) => x.includes('this.distant.frame(')).length === 1, 'world.ts: reached from those guards alone (the load drops an older set itself)');
+    // The nebulae adopted before they hang on WebGPU alone (the capture's warm-up lists its copies at once), the line 4ecee44 had after it.
+    const adopt = at('if (GPU.webgpu) this.adoptMaterials(built.group);');
+    ok(w[adopt + 1] === 'this.scene.add(built.group);' && w[adopt - 3] === 'this.nebulae = built;', "world.ts: the nebulae's materials adopted just before they hang, on WebGPU alone");
+    const hung = at('if (GPU.webgpu) this.gpuMadeNow([built.group]);');
+    ok(w[hung - 3] === 'if (GPU.webgpu) this.gpuCaptureMore();' && w[hung + 1] === 'console.info(`space: ${built.status}`);', 'world.ts: and built as they hang (a jump has no screen over them), on WebGPU alone, before the line 4ecee44 had');
+    const distant = readFileSync(join(SRC, 'space', 'distant.ts'), 'utf8');
+    ok(!/from 'three\/(webgpu|tsl)'/.test(distant) && !/from '\.\.\/core\/gpu\//.test(distant), 'distant.ts imports nothing of three\'s WebGPU build (the WebGL path loads it)');
   }
   // The boot: WebGPU only when it was asked for, through the one function that imports it.
   const main = lines('src/main.ts');

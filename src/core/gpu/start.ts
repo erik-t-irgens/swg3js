@@ -68,6 +68,8 @@ import { installPreExpose } from '../../sky/exposure/preExpose.ts';
 import { AIR_SKY_STATS } from '../../sky/air/airSky.ts';
 import { DISC_TUNE } from '../../sky/skyDials.ts';
 import { SEE_STATS } from '../../sky/air/airSee.ts';
+// Pass 2, wave 3 (maker A): the night sky (`src/sky/night/nightGpu.ts`): the Milky Way, the stars and the towns' glow.
+import { NIGHT_IN, NightSky } from '../../sky/night/nightGpu.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -339,6 +341,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       begin: () => eyeBegin(renderer),
       preSwitch: (on: boolean) => preSwitch(on),
       report: (check: boolean) => eyeReport(renderer, check),
+    },
+    // Pass 2, wave 3 (maker A): the night sky (`src/sky/night/nightGpu.ts`), one a sky, made once the air's tables exist.
+    night: {
+      make: (planet: string, key: string, placeOf: () => { x: number; y: number; z: number }) => new NightSky(renderer, { planet, key, placeOf }),
+      nightIn: NIGHT_IN,
     },
     renderer: renderer as THREE.WebGLRenderer,
     environment,

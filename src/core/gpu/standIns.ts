@@ -17,6 +17,7 @@ import type { GpuStandIns, LiveColour } from '../gpuSwitch.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 import { groundFamiliesNode, groundTilesNode, ringNode } from './gpuGround.ts';
 import { bladeNode, lavaNode, marksNode, particlesNode, tunnelNode } from './gpuPrograms.ts';
+import { nebulaBoltNode, nebulaHazeNode, nebulaSheetNode } from './gpuNebulae.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { HeldLightingModel } from './gpuLightHold.ts';
 import { markMotion, withMotionOutput } from './motion.ts';
@@ -113,6 +114,10 @@ export function makeStandIns(): GpuStandIns {
     },
     tunnel() {
       return LOOKS_AT_LOAD.tunnel ? tunnelNode() : drawsNothing('tunnel');
+    },
+    nebula(kind) {
+      // Pass 2, wave 3 (maker B): a space zone's nebulae (`gpuNebulae.ts`), which nothing drew on WebGPU before.
+      return kind === 'sheets' ? nebulaSheetNode() : kind === 'haze' ? nebulaHazeNode() : nebulaBoltNode();
     },
     depthReset(reversed) {
       // The doorway's depth reset: a full-screen triangle standing inside the clip range whose fragments write the far

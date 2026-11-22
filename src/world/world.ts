@@ -1,9 +1,13 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
-import { GPU, type GpuSun } from '../core/gpuSwitch.ts';
+import { GPU, type GpuNightSky, type GpuSun } from '../core/gpuSwitch.ts';
 // Pass 2, wave 1, what draws from the air (maker B): the Sky row read at load, and the air's frame record (pure; no WebGPU build).
 import { skyOurs } from '../sky/skyMode.ts';
 import { AIR } from '../sky/air/airApi.ts';
+// Pass 2, wave 3 (maker A): where a world's night is seen from, and its flare's sources from the air (pure; no WebGPU build).
+import { nightPlaceOf } from '../sky/night/nightPlace.ts';
+import { AIR_FLARE_IN, airFlareDiscs, airFlareLights, openFlareSeen, type AirFlareDiscs } from '../sky/night/flareSources.ts';
+import type { CityRow } from '../story/cities.ts';
 // Pass 2, wave 1, the air itself (maker A): the world's rows, its twin and its tables (pure; the tables' WebGPU module is a dynamic import inside).
 import { AirRun } from '../sky/air/airRun.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
@@ -160,6 +164,7 @@ import { FOOT_TUNE, type FootGround } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type Nebula, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug, type NebulaShip } from '../space/nebulae.ts';
+import { DistantSet, installDistantDebug, setDistantCurrent } from '../space/distant.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
@@ -2705,6 +2710,9 @@ export class World {
         // materials behind the loading screen and nothing of theirs is ever made on a live frame.
         await this.loadNebulae(pack);
         if (token !== this.loadToken) return null;
+        // Pass 2, wave 3 (maker B): the terrain's distant particle systems (Kessel's Maw), prepared and placed behind the screen.
+        if (GPU.webgpu) await this.loadDistant(token, spawn);
+        if (token !== this.loadToken) return null;
       }
       // The rivers' steep stretches' fall effects (Map-maker II's sixth wave), made ready and stood now that the particles
       // exist, behind the screen; a world with no river stands none.
@@ -3058,6 +3066,8 @@ export class World {
     this.doors.unload();
     // A hold belongs to the world it was taken out on: nothing may carry one into the next one.
     this.streamHold = false;
+    // Pass 2, wave 3 (maker B): the zone's distant particle systems taken out while their effects still stand.
+    if (GPU.webgpu) this.dropDistant();
     this.particles?.dispose();
     this.particles = null;
     if (this.spaceBodies) {
@@ -3288,6 +3298,9 @@ export class World {
 
   /** The zone's nebulae while a space zone is loaded: its sheets, the haze inside one and its lightning. */
   nebulae: Nebulae | null = null;
+
+  /** Pass 2, wave 3 (maker B): the zone's distant particle systems (Kessel's Maw, Kashyyyk's asteroid), placed on WebGPU alone. */
+  distant: DistantSet | null = null;
 
   /**
    * Hold the placed-object streamer where it is: no tier loaded, none dropped. Set while something
@@ -3625,6 +3638,8 @@ export class World {
     const data = this.spaceData;
     // The console hook answers in every zone, including one whose table has no nebulae at all.
     installNebulaDebug();
+    // Pass 2, wave 3 (maker B): and the distant systems' hook (it says what is placed, nothing on WebGL), a console word alone.
+    installDistantDebug();
     if (!data) return;
     const fx = this.particles;
     const built = await Nebulae.build(
@@ -3643,9 +3658,15 @@ export class World {
     }
     this.dropNebulae();
     this.nebulae = built;
+    // Pass 2, wave 3 (maker B): on WebGPU the sheets are adopted (the portal renderer's stencil fields, which three keys a
+    // pipeline on) before the capture's warm-up below lists its copies of them, or the copies are built again at their first draw.
+    if (GPU.webgpu) this.adoptMaterials(built.group);
     this.scene.add(built.group);
     // Pass 2, wave 2 (maker B): on WebGPU the reflections' capture draws the sheets WebGPU draws, its copies built as they hang.
     if (GPU.webgpu) this.gpuCaptureMore();
+    // Pass 2, wave 3 (maker B): and the sheets themselves built as they hang, as the planets are: a jump's swap hangs them with no
+    // screen over them (carried from Kessel to Kashyyyk, the mist was built by its first draw).
+    if (GPU.webgpu) this.gpuMadeNow([built.group]);
     console.info(`space: ${built.status}`);
   }
 
@@ -3658,6 +3679,49 @@ export class World {
     if (GPU.webgpu) GPU.rt!.environment.sky?.placeNebulae(null);
     this.scene.remove(nebulae.group);
     nebulae.dispose((m) => this.forgetMaterials(m));
+  }
+
+  /**
+   * Pass 2, wave 3 (maker B): the zone's distant particle systems (`src/space/distant.ts`), on WebGPU alone: each effect's
+   * batches made and its textures uploaded behind the loading screen, so the warm-up builds them, then placed where the
+   * pack puts them; the ones that ride with the camera are moved with it each frame. A pack converted before them has none.
+   */
+  private async loadDistant(token: number, spawn: THREE.Vector3): Promise<void> {
+    installDistantDebug();
+    const fx = this.particles;
+    if (!fx || !this.spaceData) return;
+    // Placed about the arrival; the first frame puts the ones that ride with the camera on it.
+    const eye = spawn;
+    const set = await DistantSet.build(
+      {
+        prepare: (file) => fx.prepare(file, this.renderer),
+        place: (file, matrix, o) => fx.place(file, matrix, false, false, null, false, { sound: false, reach: o.reach, size: o.size }),
+        move: (handle, matrix) => fx.move(handle as EffectHandle, matrix),
+        resize: (handle, size) => fx.resize(handle as EffectHandle, size),
+        remove: (handle) => fx.remove(handle as EffectHandle),
+      },
+      this.spaceData,
+      eye,
+      () => token === this.loadToken && fx === this.particles,
+    );
+    if (!set) return;
+    if (token !== this.loadToken) {
+      set.dispose();
+      return;
+    }
+    this.dropDistant();
+    this.distant = set;
+    setDistantCurrent(set);
+    console.info(`space: ${set.placed.length} distant particle system${set.placed.length === 1 ? '' : 's'} (${set.placed.map((p) => p.entry.appearance.replace(/^.*\//, '')).join(', ')})`);
+  }
+
+  /** Pass 2, wave 3 (maker B): the distant systems taken out with their zone. */
+  private dropDistant(): void {
+    const set = this.distant;
+    if (!set) return;
+    this.distant = null;
+    setDistantCurrent(null);
+    set.dispose();
   }
 
   /** `spawn` is where the player arrives: the weather reads the area there, and its sky's textures load before the loading screen lifts. */
@@ -3703,6 +3767,10 @@ export class World {
     if (airSky) {
       this.setHazeFog();
       sky.airReady();
+      // Pass 2, wave 3 (maker A): the night sky (the Milky Way baked, the stars, the towns' glow) hung in the sky's group
+      // before it is built, so `gpuSkyReady` builds it with the dome (`src/sky/night/`).
+      await this.loadNight(sky, token);
+      if (token !== this.loadToken) return;
       this.gpuSkyReady(sky);
     }
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
@@ -3783,11 +3851,67 @@ export class World {
     this.skyAir?.drawTables(camera);
   }
 
+  /**
+   * The night sky under our sky on WebGPU (pass 2, wave 3, maker A: `src/sky/night/`), null on WebGL, under SWG's sky, in space
+   * and between worlds: the Milky Way baked for the world's system, its stars and its towns' glow.
+   */
+  skyNight: GpuNightSky | null = null;
+
+  /**
+   * The night made for this sky once the air's tables exist, hung in the sky's group (and marked for the actors' passes as the
+   * group was) before the sky is built, its towns read from the world's `pois.json`, and its band's bake compiled and drawn,
+   * all behind the loading screen.
+   */
+  private async loadNight(sky: SwgSky, token: number): Promise<void> {
+    this.dropNight();
+    if (!AIR.tables) return;
+    const at = nightPlaceOf(this.planet.id);
+    const night = GPU.rt!.night.make(this.planet.id, at.key, at.placeOf);
+    this.skyNight = night;
+    sky.group.add(night.group);
+    markActor(night.group);
+    const pack = this.packId;
+    void packJson<{ pois?: CityRow[]; center?: { x: number; z: number } }>(pack, 'pois.json', import.meta.env.BASE_URL, { probe: false })
+      .then((f) => {
+        if (this.skyNight === night && f) night.setCities(f.pois ?? null, this.layoutCenter ?? f.center ?? null);
+      })
+      .catch(() => {});
+    await night.warm();
+    if (token !== this.loadToken || this.skyNight !== night) return;
+    night.drawBake();
+  }
+
+  /**
+   * Once a game frame on WebGPU under our sky, after the air's frame: the night's (`GpuNightSky.frame`), the camera's place
+   * written into its fields first (a number handed across a call is a number made). Nothing with no night.
+   */
+  private nightFrame(camPos: THREE.Vector3): void {
+    const night = this.skyNight;
+    if (!night) return;
+    const at = GPU.rt!.night.nightIn;
+    at.camX = camPos.x;
+    at.camZ = camPos.z;
+    night.frame();
+  }
+
+  /** The flare's bodies under our sky (`airFlareDiscs`), worked once a sky at its first frame (`skyLights`). */
+  private flareDiscs: AirFlareDiscs | null = null;
+
+  /** The night let go, with its sky. */
+  private dropNight(): void {
+    this.flareDiscs = null;
+    if (!this.skyNight) return;
+    this.skyNight.dispose((m) => this.forgetMaterials(m));
+    this.skyNight = null;
+  }
+
   private dropSky(): void {
     // The clouds' borrowed pictures let go before the sky that owns them is disposed (W4's rule for borrowed textures): a
     // disposed picture still bound would be uploaded again at the next draw. Only once the clouds have been made.
     if (cloudsFeedMade()) cloudsFeed().letGoPictures();
     if (this.swgSky) {
+      // Pass 2, wave 3 (maker A): the night goes before its sky, out of the sky's group.
+      if (GPU.webgpu) this.dropNight();
       this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
     }
@@ -11593,6 +11717,8 @@ export class World {
         this.skyAir.heightM = camPos.y;
         this.skyAir.overcast = this.weather.state.enabled ? this.weather.fx.overcast : 0;
         this.skyAir.frame(this.day, this.swgSky, L);
+        // Pass 2, wave 3 (maker A): the night sky after the air (its turn read off the air's sun).
+        this.nightFrame(camPos);
         this.applySwgLighting(L, playerPos);
       } else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
@@ -11602,6 +11728,8 @@ export class World {
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
     if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);
+    // Pass 2, wave 3 (maker B): the distant particle systems that ride with the camera moved with it, as the sky is.
+    if (GPU.webgpu && this.distant) this.distant.frame(camPos);
     // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
     if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
     // The Force's beams: the flicker, the flip-book and the fade of any one nothing is holding.
@@ -12291,6 +12419,17 @@ export class World {
   /** What the lens flare follows this frame, one fixed slot per body: the sky's glowing suns (a space zone's brightest stars). Allocates nothing. */
   skyLights(out: readonly import('../core/fx/lensFlare').FxSkyLight[], nightSuns = true): number {
     if (!this.planet) return 0;
+    // Pass 2, wave 3 (maker A): under our sky on WebGPU the flare follows the air's sun discs and, at night, the moon, each
+    // coloured by what the air lets through (`src/sky/night/flareSources.ts`); SWG's sun pictures are not drawn there.
+    if (GPU.webgpu && this.skyAir && this.swgSky && !this.swgSky.data.space) {
+      const discs = (this.flareDiscs ??= airFlareDiscs(this.planet.id, this.swgSky.data.sun, this.swgSky.data.moon));
+      AIR_FLARE_IN.skyDistance = this.swgSky.flareSkyDistance;
+      AIR_FLARE_IN.nightSuns = nightSuns;
+      return airFlareLights(out, AIR.frame, discs);
+    }
+    // The wave's fixer: anywhere else (a space zone's stars, a sky with no air) the sources are SWG's sprites, whose alpha is the
+    // flare's rule as on WebGL, so on WebGPU the pass's seen gate, the air's alone, stands open (`openFlareSeen`).
+    if (GPU.webgpu) openFlareSeen();
     if (this.swgSky) {
       const count = this.swgSky.flareLights(out, nightSuns);
       // Inside a nebula the gas stands between the camera and the star: the flare fades with how

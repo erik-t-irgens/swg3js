@@ -723,8 +723,12 @@ else {
     [slice("      // Pass 2, wave 1: under our sky on WebGPU the sun's pictures are retired", '      this.place(this.sun, lightDir, sunAlpha);'), ''],
     ['      this.place(this.sun, lightDir, sunAlpha);\n', '      this.place(this.sun, lightDir, alpha);\n'],
     ['tmpVec), sunAlpha);\n', 'tmpVec), alpha);\n'],
+    // Pass 2, wave 3 (maker A): SWG's star field is not made under our sky on WebGPU over a planet, where the night sky's cards
+    // stand for it (`src/sky/night/`): its two lines of words and the clause, no program's text either.
+    [slice('    // Pass 2, wave 3 (maker A): under our sky on WebGPU over a planet the night sky draws', '    if (data.stars && data.stars.count > 0 &&'), ''],
+    [' && !(GPU.webgpu && skyOurs() && !space)) {', ') {'],
   ];
-  ok(OURS.every(([p]) => nowSk.split(p).length === 2), "our sky's lines in sky.ts are there exactly once each (the Sky row's import, the sun pictures' switch, its use, the capture's mark, airReady, the night floor's ramp read)");
+  ok(OURS.every(([p]) => nowSk.split(p).length === 2), "our sky's lines in sky.ts are there exactly once each (the Sky row's import, the sun pictures' switch, its use, the capture's mark, airReady, the night floor's ramp read, the night's star field)");
   const unOurs = OURS.reduce((s, [p, q]) => s.replace(p, () => q), nowSk);
   const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), BODIES.reduce((s, [p, q]) => s.replace(p, () => q), unOurs)).replace(GPU_IMPORT, '').replace(GPU_DOME, '');
   const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');

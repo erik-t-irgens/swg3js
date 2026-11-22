@@ -46,6 +46,7 @@ import { markSeeTarget } from '../../sky/air/airSee.ts';
 import { GpuHazePass } from '../../sky/air/airHaze.ts';
 import { GpuEyePass } from '../../sky/exposure/eyeGpu.ts';
 import { markSceneTarget } from '../../sky/exposure/preExpose.ts';
+import { GpuLensFlarePass } from '../../sky/night/gpuFlare.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -387,6 +388,9 @@ export const CHAIN_PASSES: ReadonlyMap<FxPassId, keyof typeof LOOKS_AT_LOAD | nu
   // Pass 2, wave 2: the eye (`src/sky/exposure/eyeGpu.ts`), the spine's own under our sky (the Sky row, read at load).
   ['exposure', null],
   ['bloom', 'bloom'],
+  // Pass 2, wave 3 (maker A): the lens flare under our sky (`src/sky/night/gpuFlare.ts`), following the air's discs and the
+  // moon through the eye; registered under our sky alone, so SWG's sky on WebGPU draws as it did (`flareHere`).
+  ['lensFlare', null],
   ['colorGrade', 'grade'],
   ['output', null],
   // The console's view of a pass's working texture or a product (the occlusion's __debug.ssao({ view })): with the occlusion.
@@ -399,6 +403,11 @@ export const CHAIN_PORTED = new Set<FxPassId>([...CHAIN_PASSES].filter(([, at]) 
 /** The passes a row of the Graphics page belongs to, read off the registry's knobs. */
 const KNOB_PASS = new Map<string, FxPassId | null>(FX_KNOBS.map((k) => [k.key, k.pass]));
 
+/** Whether a ported pass is drawn this session: every one but the lens flare, which is our sky's alone (pass 2, wave 3). */
+function flareHere(pass: FxPassId): boolean {
+  return pass !== 'lensFlare' || skyOurs();
+}
+
 /** What each graph binds (rule 4), for the console. */
 export const CHAIN_BINDS = {
   sanitize: '1 texture (the scene target) and its sampler',
@@ -407,6 +416,7 @@ export const CHAIN_BINDS = {
   colorGrade: '1 texture (the chain buffer) and its sampler',
   taa: "each resolve 5 textures (this frame's picture, the history's colour and its distance, the scene's depth, the motion buffer), the history's two with a sampler (read at level 0), the others loaded; then the colour copied into the chain buffer",
   output: "1 texture (the chain buffer) and its sampler, drawn straight onto the canvas under the inline output (the start); with it left out, three's own output pass 1 more (its frame-buffer target)",
+  lensFlare: "under our sky alone (pass 2, wave 3): the occlusion 6 (the scene's depth loaded, last frame's visibility loaded, the four cloud sheets sampled at their mip), the elements 1 (the visibility, loaded in the vertex stage), the composite 2 (the chain buffer and the flare's half-size target)",
 };
 
 export function chainRuntime(renderer: Any): GpuChain {
@@ -458,6 +468,8 @@ export function chainRuntime(renderer: Any): GpuChain {
       // The occlusion reads the frame's lights from the context, as on WebGL, and the water's own twins for its coverage.
       if (CHAIN_PORTED.has('ssao')) fx.registerPass(new GpuSsaoPass(gpuSsaoHost(fx), deps.water ?? null, renderer));
       if (CHAIN_PORTED.has('colorGrade')) fx.registerPass(new GpuColorGradePass());
+      // Pass 2, wave 3 (maker A): the lens flare under our sky, its sources the air's discs and the moon (`flareSources.ts`).
+      if (CHAIN_PORTED.has('lensFlare') && flareHere('lensFlare')) fx.registerPass(new GpuLensFlarePass(renderer));
     },
     inputSize(width: number, height: number, settings: FxSettings, out: THREE.Vector2): THREE.Vector2 {
       // The upscaled smoothing draws the scene at its share of the canvas, only where the smoothing can draw (a motion buffer).
@@ -466,13 +478,14 @@ export function chainRuntime(renderer: Any): GpuChain {
     knobPorted(key: string): boolean {
       if (key === 'effects') return atLoad;
       const pass = KNOB_PASS.get(key);
-      return atLoad && !!pass && CHAIN_PORTED.has(pass);
+      return atLoad && !!pass && CHAIN_PORTED.has(pass) && flareHere(pass);
     },
     knobWhy(key: string): string | null {
       // Only a row that would move WebGPU but for a switch at load says so; every other is simply not on WebGPU yet.
       const pass = KNOB_PASS.get(key);
       if (key !== 'effects' && !(pass && CHAIN_PASSES.has(pass))) return null;
       if (!atLoad) return "the effects chain is left out at load on WebGPU (localStorage['swg.gpu.chain'] = '0')";
+      if (pass && !flareHere(pass)) return "drawn on WebGPU under our sky alone (the Sky row), whose discs and moon it follows";
       const at = pass ? CHAIN_PASSES.get(pass) : null;
       if (at && !LOOKS_AT_LOAD[at]) return `left out at load on WebGPU (localStorage['swg.gpu.${at}'] = '0')`;
       return null;
