@@ -1,0 +1,176 @@
+// Save to game (the GPU port's pass 2, wave 4; the owner's answer to the design's question 1): the viewer's choices made
+// into the game's own bodies file, `public/sky/bodies.json`, which the game reads at its next loading screen
+// (`src/sky/look/bodiesFile.ts`) and the owner commits as he does his maps.
+//
+// What it carries, and nothing else:
+//   - `looks`: every look a place or an applied system wears that the game can make from numbers alone: his generated looks
+//     (recipe, seed, dials, size, air) whole, and a look of his pictures only where every picture it wears is one of his own
+//     photos marked "ship with the game"; a look of his imported pictures otherwise goes as its generated twin, and one with
+//     no twin as nothing (the game then shows SWG's picture there). No picture or mesh name of his imports is ever written:
+//     a layer's picture is blanked unless shipped, every layer's mesh is left to the game's own defaults, notes are left out.
+//   - `uses`: which place wears which of those looks (a place whose look cannot go is left out: SWG's picture there).
+//   - `systems`: the star systems he has applied (`starSystems` and the first round's `systems`, `applied` true), as saved.
+//   - `air`: each ground world's air dials, from the look its own planet wears in its space zone (the look's air edits the
+//     world's record: its ground sky and its rim from orbit together, the design's 2.6).
+//   - `pictures`: each photo of his marked to ship and worn by a look here, by its file name under `pictures/`.
+//   - `credits`: a line naming him, from the page (`credit`).
+// A film or game still is never shipped, whatever its mark (`stillKind`), and a picture is shipped only from the pictures
+// he added from the page (`pictures` of his file), never one of the imported folder's own.
+//
+// Pure (no fs, no page), so the node test runs it as it stands (`tools/swg/tests/viewerSave.test.ts`).
+
+/** The bodies file's version: a reader refuses a file of a later version. */
+export const GAME_BODIES_VERSION = 1;
+
+/** The kinds of picture that never ship, whatever their mark: a still from a film or a game, kept for reference. */
+export const stillKind = (kind) => kind === 'still';
+
+/** The look id of a place's look as the game names it: the viewer's own id. */
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** The viewer's world names that the game names otherwise (its sky's zone against the game's planet id). */
+export const GAME_WORLD = { kashyyyk_main: 'kashyyyk' };
+
+/** A ground world's planet in its space zone (`space_<zone>:planet_<name>`), as the viewer's places name it: the world, or null. */
+export function worldOfPlanetPlace(placeId, worlds) {
+  const m = /^space_([a-z0-9_]+):planet_([a-z0-9_]+?)(?:#\d+)?$/.exec(String(placeId));
+  if (!m) return null;
+  for (const w of worlds) {
+    const plain = w.replace(/_main$/, '');
+    if (m[2] === plain && (m[1] === plain || m[1] === w)) return GAME_WORLD[w] ?? w;
+  }
+  return null;
+}
+
+/**
+ * A photo's name in the game's pictures folder: his own name, which the viewer's rules already keep plain, with `.jpeg`
+ * written `.jpg` (a release takes `.jpg` and `.png` pictures and refuses any other kind, `tools/launcher/pack.mjs`).
+ */
+export const gamePictureName = (name) => String(name).replace(/\.jpeg$/i, '.jpg');
+
+/** Every file name a look's layers wear. */
+function picturesOf(look) {
+  const out = [];
+  for (const L of Object.values(look?.layers || {})) {
+    if (!isObj(L)) continue;
+    if (L.on !== false && typeof L.tex === 'string' && L.tex) out.push(L.tex);
+    if (isObj(L.flow) && L.flow.on && typeof L.flow.tex === 'string' && L.flow.tex) out.push(L.flow.tex);
+  }
+  return out;
+}
+
+/**
+ * A look's name as the game's file carries it: its plain name alone, every bracketed remark left out, since the viewer's
+ * names of twins say what they twin ("Nur (twin of his Kamino map as he wears it)" goes as "Nur"), and what his imports are
+ * is never written (the fixer of pass 2, wave 4a). A name that is nothing but a remark goes as nothing.
+ */
+export function gameLookName(name) {
+  return String(name || '').replace(/\s*[([{][^)\]}]*[)\]}]?/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+/** Numbers only: a look's layers with every picture blanked unless shipped (named under `pictures/` then) and no mesh named. */
+function numbersOnly(look, shipped) {
+  const out = { name: gameLookName(look.name), kind: look.kind === 'sphere' || look.kind === 'dome' || look.kind === 'sheet' ? look.kind : 'sphere' };
+  const layers = {};
+  for (const [slot, L] of Object.entries(look.layers || {})) {
+    if (!isObj(L)) continue;
+    const c = JSON.parse(JSON.stringify(L));
+    delete c.mesh;
+    if (typeof c.tex === 'string') c.tex = c.tex && shipped.has(c.tex) ? 'pictures/' + gamePictureName(c.tex) : '';
+    if (isObj(c.flow) && typeof c.flow.tex === 'string') c.flow.tex = c.flow.tex && shipped.has(c.flow.tex) ? 'pictures/' + gamePictureName(c.flow.tex) : '';
+    layers[slot] = c;
+  }
+  out.layers = layers;
+  if (isObj(look.adjust)) {
+    const a = JSON.parse(JSON.stringify(look.adjust));
+    out.adjust = a;
+  }
+  if (isObj(look.generated)) out.generated = JSON.parse(JSON.stringify(look.generated));
+  if (isObj(look.air)) out.air = JSON.parse(JSON.stringify(look.air));
+  return out;
+}
+
+/**
+ * The game's bodies file from the page's choices: `data` is `{ looks, uses, starSystems?, systems?, pictures?, credit?,
+ * worlds?, twins? }` as the page holds them (`twins` its answer of each look's generated twin, `twinOfLook`, by look id),
+ * `opts.at` the moment (ISO). Allocation is no matter here: it runs once a press.
+ */
+export function gameBodiesFile(data, opts = {}) {
+  const looks = isObj(data.looks) ? data.looks : {};
+  const pictures = isObj(data.pictures) ? data.pictures : {};
+  const twins = isObj(data.twins) ? data.twins : {};
+  const worlds = Array.isArray(data.worlds) ? data.worlds.map(String) : [];
+  // His own photos marked to ship: added from the page, marked, and no still.
+  const shippable = new Set(Object.entries(pictures).filter(([, p]) => isObj(p) && p.ship === true && !stillKind(p.kind)).map(([n]) => n));
+  const out = { version: GAME_BODIES_VERSION, made: String(opts.at || ''), credits: '', looks: {}, uses: {}, systems: {}, air: {}, pictures: {} };
+  const used = new Set();
+  /** The look id the game wears for `id`: itself where it can go, else its twin, else null. */
+  const wearable = (id, seen = 0) => {
+    const look = looks[id];
+    if (!isObj(look) || seen > 2) return null;
+    if (isObj(look.generated)) return id;
+    const wears = picturesOf(look);
+    // a look of a mesh of his (a dome, its halo or rings) never ships: only a sphere or a flat card of shipped photos does
+    const meshOk = look.kind === 'sphere' || look.kind === 'sheet';
+    if (meshOk && wears.length && wears.every((n) => shippable.has(n))) return id;
+    const twin = twins[id];
+    return typeof twin === 'string' && twin !== id ? wearable(twin, seen + 1) : null;
+  };
+  const take = (id) => {
+    if (out.looks[id]) return;
+    const look = numbersOnly(looks[id], shippable);
+    out.looks[id] = look;
+    for (const L of Object.values(look.layers)) {
+      if (typeof L.tex === 'string' && L.tex.startsWith('pictures/')) used.add(L.tex.slice('pictures/'.length));
+      if (isObj(L.flow) && typeof L.flow.tex === 'string' && L.flow.tex.startsWith('pictures/')) used.add(L.flow.tex.slice('pictures/'.length));
+    }
+    // a look drawn behind another (its `over`) goes with it
+    const over = looks[id]?.adjust?.over?.look;
+    if (typeof over === 'string') {
+      const w = wearable(over);
+      if (w) take(w);
+    }
+  };
+  for (const [place, id] of Object.entries(isObj(data.uses) ? data.uses : {})) {
+    if (typeof id !== 'string' || !id) continue;
+    const w = wearable(id);
+    if (!w) continue;
+    take(w);
+    out.uses[place] = w;
+  }
+  // the systems he applied, as saved, and the looks their bodies name
+  for (const [key, src] of [['starSystems', data.starSystems], ['systems', data.systems]]) {
+    if (!isObj(src)) continue;
+    for (const [id, e] of Object.entries(src)) {
+      if (!isObj(e) || e.applied !== true || !isObj(e.system)) continue;
+      const sys = JSON.parse(JSON.stringify(e.system));
+      delete sys.future;
+      out.systems[key === 'systems' ? 'v1:' + id : id] = sys;
+      for (const b of Array.isArray(sys.bodies) ? sys.bodies : []) {
+        if (isObj(b) && typeof b.look === 'string') {
+          const w = wearable(b.look);
+          if (w) {
+            take(w);
+            b.look = w;
+          } else delete b.look;
+        }
+      }
+    }
+  }
+  // each ground world's air dials, from the look its planet wears in its space zone
+  for (const [place, id] of Object.entries(out.uses)) {
+    const world = worldOfPlanetPlace(place, worlds);
+    const air = out.looks[id]?.air;
+    if (world && isObj(air) && !out.air[world]) out.air[world] = JSON.parse(JSON.stringify(air));
+  }
+  for (const name of [...used].sort()) out.pictures[gamePictureName(name)] = { kind: String(pictures[name]?.kind || 'other') };
+  const credit = typeof data.credit === 'string' ? data.credit.trim().slice(0, 120) : '';
+  const photos = Object.keys(out.pictures).length;
+  out.credits = credit ? `Sky looks${photos ? ' and photos' : ''} by ${credit}, made in the space body viewer.` : 'Sky looks made in the space body viewer.';
+  return out;
+}
+
+/** The photos a made file wears (their own names), for the writer to copy beside it. */
+export function shippedPictures(made) {
+  return Object.keys(made?.pictures || {});
+}

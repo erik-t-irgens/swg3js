@@ -66,6 +66,8 @@ class Tables implements AirTables {
   private readonly u2 = new THREE.Vector4(); // ozone r, g, b, mie absorption
   private readonly u3 = new THREE.Vector4(); // ozone centre, ozone half width, mie g, sun radius
   private readonly u4 = new THREE.Vector4(); // ground r, g, b, 0
+  /** Pass 2, wave 4a: the haze's colour, each channel's share of the Mie scattering (1, 1, 1 a grey haze). */
+  private readonly u5 = new THREE.Vector3(1, 1, 1);
   /** heightKm, overcast, the sun's azimuth as (cx, cz). */
   private readonly uView = new THREE.Vector4(0.5, 0, 1, 0);
   private readonly uSun = new THREE.Vector3(0, 1, 0);
@@ -165,6 +167,7 @@ class Tables implements AirTables {
     this.u2.set(r[F.ozR], r[F.ozG], r[F.ozB], r[F.mieA]);
     this.u3.set(r[F.ozC], r[F.ozW], r[F.mieG], r[F.sunRadius]);
     this.u4.set(r[F.groundR], r[F.groundG], r[F.groundB], 0);
+    this.u5.set(r[F.mieTintR], r[F.mieTintG], r[F.mieTintB]);
   }
 
   /** `AIR.frame`'s numbers into the frame's uniforms' vectors. */
@@ -402,8 +405,8 @@ class Tables implements AirTables {
   }
 
   /** The uniform objects, for the graphs (built once). */
-  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
-    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
+  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
+    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
   }
 
   /** The targets' textures, for the graphs. */
@@ -431,6 +434,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
   const u2 = live(U.u2);
   const u3 = live(U.u3);
   const u4 = live(U.u4);
+  // Pass 2, wave 4a: the haze's colour (each channel's share of the Mie scattering; its extinction stays grey).
+  const mieTint = live(U.u5);
   const view = live(U.view);
   const sunDir = live(U.sun);
   const sun2Dir = live(U.sun2);
@@ -508,13 +513,16 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     );
   };
 
-  /** One light's share of a step's source (`viewRadiance`'s inner loop): its transmittance, both phases and its multiple scattering. */
+  /**
+   * One light's share of a step's source (`viewRadiance`'s inner loop): its transmittance, both phases and its multiple
+   * scattering. `sM` the haze's scattering by channel (pass 2, wave 4a: its colour times its scattering, a vec3).
+   */
   const lightSource = (px: Any, rr: Any, d: Any, L: Any, Ltop: Any, sR: Any, sM: Any): Any => {
     const muL = px.dot(L).div(rr);
     const c = d.dot(L);
     const tl = transmittanceTo(rr, muL);
     const ps = psiAt(rr, muL);
-    return Ltop.mul(tl.mul(sR.mul(rayleighPhase(c)).add(vec3(sM.mul(miePhase(c))))).add(ps.mul(sR.add(vec3(sM)))));
+    return Ltop.mul(tl.mul(sR.mul(rayleighPhase(c)).add(sM.mul(miePhase(c)))).add(ps.mul(sR.add(sM))));
   };
 
   /**
@@ -533,7 +541,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const rr = p.length().toVar('airVR');
       const m = densities(rr.sub(bottom)).toVar('airVM');
       const sR = rayS.mul(m.x).toVar('airVSR');
-      const sM = mieS.mul(m.y).toVar('airVSM');
+      const sM = mieTint.mul(mieS.mul(m.y)).toVar('airVSM');
       const sigma = extinction(m).toVar('airVSig');
       const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM));
       L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));
@@ -602,7 +610,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         const p = vec3(d.x.mul(tm), r.add(d.y.mul(tm)), d.z.mul(tm)).toVar('airMP');
         const rr = p.length().toVar('airMR');
         const m = densities(rr.sub(bottom)).toVar('airMM');
-        const sigS = rayS.mul(m.x).add(vec3(mieS.mul(m.y))).toVar('airMSS');
+        const sigS = rayS.mul(m.x).add(mieTint.mul(mieS.mul(m.y))).toVar('airMSS');
         const sigma = extinction(m).toVar('airMSig');
         const tl = transmittanceTo(rr, p.dot(sun).div(rr)).toVar('airMTl');
         const g = stepIntegral(sigma, dt).toVar('airMG');
@@ -686,7 +694,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         const rr = p.length().toVar('airHR');
         const m = densities(rr.sub(bottom)).toVar('airHM');
         const sR = rayS.mul(m.x).toVar('airHSR');
-        const sM = mieS.mul(m.y).toVar('airHSM');
+        const sM = mieTint.mul(mieS.mul(m.y)).toVar('airHSM');
         const sigma = extinction(m).toVar('airHSig');
         const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM));
         L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));

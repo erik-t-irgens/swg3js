@@ -70,6 +70,8 @@ import { DISC_TUNE } from '../../sky/skyDials.ts';
 import { SEE_STATS } from '../../sky/air/airSee.ts';
 // Pass 2, wave 3 (maker A): the night sky (`src/sky/night/nightGpu.ts`): the Milky Way, the stars and the towns' glow.
 import { NIGHT_IN, NightSky } from '../../sky/night/nightGpu.ts';
+// Pass 2, wave 4a (maker B): the moons and planets as lit spheres through the air (`src/sky/bodies/skyBody.ts`).
+import { SkyBodies, bakeCache } from '../../sky/bodies/skyBody.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -346,6 +348,15 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     night: {
       make: (planet: string, key: string, placeOf: () => { x: number; y: number; z: number }) => new NightSky(renderer, { planet, key, placeOf }),
       nightIn: NIGHT_IN,
+    },
+    // Pass 2, wave 4a (maker B): the moons and planets (`src/sky/bodies/skyBody.ts`), one set a sky, made behind its screen.
+    skyBodies: {
+      make: (cards) => SkyBodies.make(cards),
+      bake(forget: boolean) {
+        const c = bakeCache();
+        if (forget) c.forgetMemo();
+        return { ...c.stats, forgotMemo: forget };
+      },
     },
     renderer: renderer as THREE.WebGLRenderer,
     environment,

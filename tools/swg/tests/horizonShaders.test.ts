@@ -727,8 +727,18 @@ else {
     // stand for it (`src/sky/night/`): its two lines of words and the clause, no program's text either.
     [slice('    // Pass 2, wave 3 (maker A): under our sky on WebGPU over a planet the night sky draws', '    if (data.stars && data.stars.count > 0 &&'), ''],
     [' && !(GPU.webgpu && skyOurs() && !space)) {', ') {'],
+    // Pass 2, wave 4a (maker B): under our sky on WebGPU over a planet the moons' and planets' discs are cards of our own
+    // (`src/sky/bodies/`): their two imports, the cards' field, the block that makes them and the accessor; no program's text.
+    [slice('// Pass 2, wave 4a (maker B): under our sky on WebGPU the moons and planets are cards of our own', "import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';\n") + "import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';\n", ''],
+    [slice('  /**\n   * Pass 2, wave 4a (maker B): the moons and planets whose discs are cards', '  /** What the lens flare follows'), ''],
+    [slice('      // Pass 2, wave 4a (maker B): under our sky on WebGPU over a planet each moon', "    }\n\n    // The lens flare's sources over a planet"), ''],
+    [slice('  /** Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (empty', "  /** The dome's material and its draw order"), ''],
+    // Pass 2, wave 4 (maker A): the console's toggle of SWG's cloud sheets (`sky('clouds')`, the space body viewer's "same
+    // sky" proof): its name in the toggle's type, its line of words and its line; no program's text.
+    ["  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites' | 'clouds'): Record<string, unknown> {", "  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {"],
+    [slice("    // Pass 2, wave 4 (maker A): SWG's cloud sheets, so the air's sky can be seen alone", "    if (toggle === 'skybox'"), ''],
   ];
-  ok(OURS.every(([p]) => nowSk.split(p).length === 2), "our sky's lines in sky.ts are there exactly once each (the Sky row's import, the sun pictures' switch, its use, the capture's mark, airReady, the night floor's ramp read, the night's star field)");
+  ok(OURS.every(([p]) => nowSk.split(p).length === 2), "our sky's lines in sky.ts are there exactly once each (the Sky row's import, the sun pictures' switch, its use, the capture's mark, airReady, the night floor's ramp read, the night's star field, the bodies' cards)");
   const unOurs = OURS.reduce((s, [p, q]) => s.replace(p, () => q), nowSk);
   const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), BODIES.reduce((s, [p, q]) => s.replace(p, () => q), unOurs)).replace(GPU_IMPORT, '').replace(GPU_DOME, '');
   const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');

@@ -445,9 +445,13 @@ import { EYE_IN } from './sky/exposure/eyeRun.ts';
 import { eyeDialsFor } from './sky/exposure/eyeDials.ts';
 // Pass 2, wave 3 (maker A): the night sky's console helper and its dials (`src/sky/night/`).
 import { starsConsole } from './sky/night/nightConsole.ts';
+// Pass 2, wave 4a (maker B): the moons and planets' console (`src/sky/bodies/`).
+import { skyBodiesConsole } from './sky/bodies/bodyConsole.ts';
 import { starsDialsFor } from './sky/night/nightTune.ts';
 import { tuneEye } from './sky/exposure/eyeMath.ts';
 import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
+// Pass 2, wave 4 (maker A): what the last loading screen read of the space body viewer's Save to game (pure).
+import { bodiesReport } from './sky/look/bodiesFile.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
 import { AIR } from './sky/air/airApi.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -8140,7 +8144,10 @@ class App {
       sky: (o?: string | Record<string, unknown>) =>
         o && typeof o === 'object' && ('match' in o || 'matches' in o)
           ? this.skyMatch(o)
-          : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites'
+          : // Pass 2, wave 4 (maker A): `sky({ bodies: true })`, what the last loading screen read of the viewer's Save to game.
+            o && typeof o === 'object' && 'bodies' in o
+            ? bodiesReport()
+            : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' || o === 'clouds'
             ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')
             : this.skyConsole(o),
       /**
@@ -8166,6 +8173,15 @@ class App {
        * a few texels to the density's own sums. WebGPU's under our sky.
        */
       stars: (o?: Record<string, unknown>) => starsConsole({ webgpu: GPU.webgpu, ours: SKY_AT_LOAD.ours, space: !!this.world.planet?.space, planet: this.world.planet?.id ?? null, night: this.world.skyNight }, o),
+      /**
+       * The moons and planets (pass 2, wave 4a, `src/sky/bodies/`): `skyBodies()` says each body's picture, what it shows, its
+       * air form this frame (the tier's rule: Low Painted, Medium Scattered under a quarter of the screen, High and Ultra
+       * Scattered at 12 and 16 steps), its tables and how they were had (baked, from storage, or put off to the next screen);
+       * `skyBodies({ tune })` moves the dials, `({ form: 'scattered' | 'painted' | 'none' | 'tier' })` every body at once,
+       * `({ bake: 'forget' })` the session's memo of bakes. WebGPU's under our sky.
+       */
+      skyBodies: (o?: Record<string, unknown>) =>
+        skyBodiesConsole({ webgpu: GPU.webgpu, ours: SKY_AT_LOAD.ours, space: !!this.world.planet?.space, bodies: this.world.skyBodies, bake: GPU.webgpu && GPU.rt ? (forget: boolean) => GPU.rt!.skyBodies.bake(forget) : null }, o),
       /**
        * Which star lights this space zone, and what stops its rays. No argument: the pick, every
        * star the zone has, and how far the zone file's own light points from the one chosen.
@@ -15039,7 +15055,7 @@ class App {
       };
       if (!saveMatch(store, rec)) return { error: 'the browser refused to keep the match (its storage is off or full)' };
       this.holdMatch(rec);
-      return { saved: key, from, where: `${rec.planet} at ${rec.stand.x.toFixed(1)}, ${rec.stand.y.toFixed(1)}, ${rec.stand.z.toFixed(1)}`, hour: clockOf(rec.time), weather: rec.weather, fov: rec.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })', next: `in the other tab: __debug.sky({ match: '${key}' })` };
+      return { saved: key, from, where: `${rec.planet} at ${rec.stand.x.toFixed(1)}, ${rec.stand.y.toFixed(1)}, ${rec.stand.z.toFixed(1)}`, hour: clockOf(rec.time), weather: rec.weather, fov: rec.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })', next: `in the other tab: __debug.sky({ match: '${key}' })`, json: await this.matchJson(rec) };
     }
     // Restored: travelled to its world where it is another, the player stood at its spot, the camera, hour and weather held.
     // On the same world (the wave's fixer) the spot is reached the same way, behind a loading screen of its own as a teleport
@@ -15085,7 +15101,42 @@ class App {
       }
       travelled = true;
     }
-    return { restored: key, savedBy: have.from, here: from, travelled, screen: true, hour: clockOf(have.time), weather: have.weather, fov: have.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })' };
+    return { restored: key, savedBy: have.from, here: from, travelled, screen: true, hour: clockOf(have.time), weather: have.weather, fov: have.camera.fov, held: 'the camera, the hour and the weather, until __debug.sky({ match: null })', json: await this.matchJson(have) };
+  }
+
+  /**
+   * Pass 2, wave 4 (maker A): the match as the space body viewer takes it (`json`; the viewer's page is another origin and
+   * cannot read this page's storage, so it is handed over as JSON: `__viewer.match(json)` or `?match=`): the record, and this
+   * frame's air (the sky's mix by its rows and weights, the camera's height over the datum, the overcast) and eye (the
+   * exposure the card holds and three's own), read once the frame is held. Asked from the console; it waits on the card.
+   */
+  private async matchJson(rec: SkyMatch): Promise<Record<string, unknown>> {
+    await new Promise((r) => setTimeout(r, 400));
+    const sky = this.world.swgSky;
+    const run = this.world.skyAir;
+    let air: Record<string, unknown> | null = null;
+    if (sky && run) {
+      const blocks = sky.data.blocks as readonly object[];
+      const rows: number[] = [];
+      const weights: number[] = [];
+      for (let i = 0; i < sky.mixLength; i++) {
+        const b = sky.mixBlock(i);
+        rows.push(b ? blocks.indexOf(b) : -1);
+        weights.push(sky.mixWeights[i]);
+      }
+      air = { rows, weights, heightM: run.heightM, overcast: run.overcast };
+    }
+    let eye: Record<string, unknown> | null = null;
+    if (GPU.webgpu && GPU.rt) {
+      try {
+        const r = await GPU.rt.eye.report(false);
+        const card = r.card as { exposure?: number } | undefined;
+        eye = { exposure: typeof card?.exposure === 'number' ? card.exposure : 1, renderer: typeof r.rendererExposure === 'number' ? r.rendererExposure : 1 };
+      } catch {
+        eye = null;
+      }
+    }
+    return { ...rec, air, eye };
   }
 
   /** A match's camera, hour and weather held (the camera by `placeCamera`, every frame, from `MATCH_HOLD`). */

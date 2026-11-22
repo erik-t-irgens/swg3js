@@ -10,6 +10,9 @@ import { DOME_COLOUR_GLSL } from './domeColour.ts';
 import { GPU } from '../core/gpuSwitch.ts';
 import { makeSkyBody, turnSkyBody, type SkyBody } from './skyBodies.ts';
 import { skyOurs } from '../sky/skyMode.ts';
+// Pass 2, wave 4a (maker B): under our sky on WebGPU the moons and planets are cards of our own (`src/sky/bodies/`).
+import { bodyCardMaterial, type SkyBodyCard } from '../sky/bodies/bodyCard.ts';
+import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -360,6 +363,11 @@ export class SwgSky {
   private readonly moon: SkyBody[] = [];
   private readonly supplementalMoon: SkyBody[] = [];
   private readonly celestials: { sprites: SkyBody[]; data: Celestial }[] = [];
+  /**
+   * Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (WebGPU under our sky over a planet,
+   * `src/sky/bodies/skyBody.ts` draws them once the air's tables exist); empty elsewhere, where every body is its flat picture.
+   */
+  private readonly cards: SkyBodyCard[] = [];
   /** What the lens flare follows: at most MAX_FLARE_SOURCES, index = flare slot, fixed for the life of the sky. */
   private readonly flareBodies: FlareBody[] = [];
   private readonly stars: THREE.Points | null = null;
@@ -697,6 +705,28 @@ export class SwgSky {
       this.moon.push(...body(data.moon));
       this.supplementalMoon.push(...body(data.supplementalMoon));
       for (const c of data.celestials) this.celestials.push({ sprites: body(c), data: c });
+      // Pass 2, wave 4a (maker B): under our sky on WebGPU over a planet each moon's and planet's disc becomes a card of our
+      // own (`src/sky/bodies/`): lit by the star at its physical light and seen through the world's air, so by day it is pale
+      // against the blue. Its material is one three cannot draw until the air's tables exist and `skyBody.ts` names its
+      // stand-in, so nothing of it is built behind the screen before then. A sun picture or a ship keeps its flat picture.
+      if (GPU.webgpu && skyOurs() && !data.space) {
+        const card = (c: Celestial | null, sprites: SkyBody[], slot: SkyBodyCard['slot']): void => {
+          const file = c?.image?.file;
+          const map = file ? textures.get(file) : undefined;
+          if (!c || !file || !map) return;
+          const air = bodyOfPicture(file);
+          const disc = sprites.find((s) => s.material.map === map);
+          if (air.kind === 'none' || !disc) return;
+          const glow = sprites.find((s) => s !== disc) ?? null;
+          const flat = disc.material;
+          (disc as THREE.Mesh).material = bodyCardMaterial(map, 'painted');
+          flat.dispose();
+          this.cards.push({ disc, glow, file, map, air, slot });
+        };
+        card(data.moon, this.moon, 'moon');
+        card(data.supplementalMoon, this.supplementalMoon, 'moon2');
+        for (const c of this.celestials) card(c.data, c.sprites, 'celestial');
+      }
     }
 
     // The lens flare's sources over a planet: every sun-shaded body with a glow whose two sprites
@@ -893,6 +923,11 @@ export class SwgSky {
     for (const c of this.celestials) out.push(...c.sprites);
     if (this.skybox) out.push(this.skybox);
     return out;
+  }
+
+  /** Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (empty on WebGL and under SWG's sky). */
+  bodyCards(): readonly SkyBodyCard[] {
+    return this.cards;
   }
 
   /** The dome's material and its draw order (pass 2, wave 2, maker B): the capture draws its own mesh of the dome first, as the sky does. */
@@ -1775,9 +1810,11 @@ export class SwgSky {
   }
 
   /** What the sky is made of, for the console; naming a part toggles it, to see what each contributes. */
-  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {
+  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites' | 'clouds'): Record<string, unknown> {
     const sprites = [...this.sun, ...this.supplementalSun, ...this.moon, ...this.supplementalMoon, ...this.celestials.flatMap((c) => c.sprites)];
     if (toggle === 'dome') this.dome.visible = !this.dome.visible;
+    // Pass 2, wave 4 (maker A): SWG's cloud sheets, so the air's sky can be seen alone (the viewer's "same sky" proof).
+    if (toggle === 'clouds') this.cloudGroup.visible = !this.cloudGroup.visible;
     if (toggle === 'skybox' && this.skybox) this.skybox.visible = !this.skybox.visible;
     if (toggle === 'stars' && this.stars) this.stars.visible = !this.stars.visible;
     if (toggle === 'dust' && this.dust) this.dust.points.visible = !this.dust.points.visible;

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Space Body Viewer</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<!-- three is the game's own, from the repo (the viewer's Vite resolves it): the old page's import map onto a CDN is gone. -->
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="mark" aria-hidden="true">&#9680;</span>
+    <div><strong>SPACE BODY <span>VIEWER</span></strong><small>IMPORTED PLANETS &middot; READ IN PLACE &middot; LOCAL ONLY</small></div>
+  </div>
+  <div class="header-meta">
+    <span class="dot" id="dot"></span><span id="rendererLabel">Starting&hellip;</span>
+    <span class="sep"></span>
+    <button type="button" id="addPicture" title="Add a PNG or JPEG to the imported folder, under a kind, ready to use at once (or drop a picture anywhere on the page)">Add a picture&hellip;</button>
+    <input type="file" id="pictureFile" accept="image/png,image/jpeg,.png,.jpg,.jpeg" hidden>
+    <span class="sep"></span>
+    <button type="button" id="undo" disabled title="Nothing to undo (Ctrl+Z)">&#8630; Undo</button>
+    <button type="button" id="redo" disabled title="Nothing to redo (Ctrl+Shift+Z or Ctrl+Y)">Redo &#8631;</button>
+    <span class="sep"></span>
+    <span id="saveState">Defaults</span>
+    <button type="button" id="reload" title="Load space-bodies.json again, dropping unsaved changes">Reload saved</button>
+    <button type="button" id="save" class="primary" title="Write space-bodies.json (the previous one is kept as space-bodies.prev.json)">Save choices</button>
+    <button type="button" id="saveGame" title="Write the game's own bodies file (public/sky/bodies.json): your generated looks, applied systems, air dials and which place wears which look, numbers only; your photos only where marked to ship, with a credits line naming you. The game reads it at its next loading screen; commit it as you do your maps.">Save to game</button>
+  </div>
+</header>
+<main id="app">
+  <aside class="library" aria-label="Looks">
+    <div class="section-title"><h1>Looks</h1><span id="count">&mdash;</span><button type="button" id="newGen" class="small" title="A new planet of your own, made by code from a recipe, a seed and dials (no picture)">+ Generated</button></div>
+    <input id="search" type="search" placeholder="Search looks, textures, meshes&hellip;" aria-label="Search looks">
+    <div id="lib" class="lib"></div>
+    <p class="lib-help" id="libHelp"><strong>More pictures:</strong> press <em>Add a picture&hellip;</em> at the top, or drop a PNG or JPEG anywhere on the page; give it a name and a kind, and it is ready in every texture list. Through Chrome Remote Desktop, first send the file to this PC with its own file transfer (the side panel's <em>Upload file</em>), then add it from there.</p>
+  </aside>
+
+  <section class="stage" id="stage">
+    <canvas id="view" tabindex="0" aria-label="The stage: a look close up, or a place where it will be"></canvas>
+    <canvas id="orrery" hidden aria-label="The System view: the whole system, its orbits as lines, our world marked"></canvas>
+    <div class="marks" id="marks" aria-label="Bodies in view"></div>
+    <div class="stage-top">
+      <div class="now"><p class="eyebrow" id="lookGroup">&nbsp;</p><h2 id="lookName">Choose a look</h2></div>
+      <div class="stage-buttons">
+        <button type="button" id="frame" title="Frame the body, or turn to the chosen place (F)">Frame it</button>
+        <label class="pill"><input type="checkbox" id="stars" checked> Stars</label>
+        <label class="pill"><input type="checkbox" id="autospin" checked> Auto-spin</label>
+        <label class="pill" title="Draw the stage and the place views through the game's own last steps: its glow (bloom), its colour grade for this world and hour, its tone curve and vignette, and from the ground the world's own sky colours where the game's files have them. Off: the plain view."><input type="checkbox" id="gameLook"> Draw as the game does</label>
+        <span class="pill volq" title="Space volumes (glowing gas): High reads the noise live at every step; Medium and Low read a baked noise volume with fewer steps; Auto steps down when frames are slow and back up when there is room"><label for="volQuality">Gas</label><select id="volQuality" aria-label="Space volumes' quality"><option value="auto">Auto</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select><output id="volTier"></output><button type="button" class="small rs" id="volQualityReset" aria-label="Reset" title="Reset to Auto (its start)">&#8634;</button></span>
+        <span class="pill thunder" title="A quiet low rumble a moment after a flash near enough to hear (from the ground; faintly in orbit), made in the page from noise. Off by default."><label><input type="checkbox" id="thunder"> Thunder</label><input type="range" id="thunderVol" min="0" max="1" step="0.01" value="0.5" aria-label="Thunder volume" title="Thunder volume"><button type="button" class="small rs" id="thunderVolReset" aria-label="Reset" title="Reset to 0.5 (its start)">&#8634;</button></span>
+      </div>
+      <div class="compare-line" id="compareLine">
+        <label class="pill" title="Another look beside this one, at the same size and under the same sun (the preview only; not saved)">Compare with&hellip; <select id="compare" aria-label="Compare with"></select></label>
+        <button type="button" class="small linkish" id="compareHint" title="Put the closest imported picture beside it"></button>
+        <button type="button" class="small" id="matchLight" hidden title="A dome carries its light painted in: turn this stage's sun to match it, so both are lit alike">Match its light</button>
+      </div>
+      <div class="air-line" id="airLine">
+        <span class="pill volq air" title="The air round the bodies: each look's own Air setting (Scattered: real air and light; Painted: its own rim or halo, as before; None), or one form for every look at once to compare them. Quality: the steps of the air's march through its shell (Scattered only). Neither changes a saved look; the choice for all is never written to the file."><label for="airAll">Air</label><select id="airAll" aria-label="Air for every look"><option value="own">as each look says</option><option value="scattered">Scattered for all</option><option value="painted">Painted for all</option></select><button type="button" class="small rs" id="airAllReset" aria-label="Reset" title="Reset to as each look says (its start)">&#8634;</button><select id="airQuality" aria-label="The air's quality"><option value="low">Low (8)</option><option value="medium">Medium (12)</option><option value="high">High (16)</option></select><button type="button" class="small rs" id="airQualityReset" aria-label="Reset" title="Reset to Medium (its start)">&#8634;</button></span>
+        <details class="pill wash" id="washBox" title="The air in front of the bodies seen from a world's ground by day (skywash.js): the sky's own light laid over them, what of their light comes through, and the drawn sun's glow in front of a body beside it. Each a step of the undo history; written to the file only off its start. A Scattered body's air in front is the ground world's own (its look's Air dials)."><summary>Day wash</summary>
+          <div class="washbox">
+            <div class="wrow"><label><input type="checkbox" id="washOn"> On (from the ground; none in orbit)</label><span></span><button type="button" class="small rs" id="washOnReset" aria-label="Reset" title="Reset to on (its start)">&#8634;</button></div>
+            <div class="wrow" title="How much of the sky's own light lies in front of a body (1: all of it, as the sky is the air's light with space behind it)"><span>In front</span><input type="range" id="washFront" min="0" max="2" step="0.01" aria-label="In front"><output id="washFrontOut"></output><button type="button" class="small rs" id="washFrontReset" aria-label="Reset" title="Reset to 1 (its start)">&#8634;</button></div>
+            <div class="wrow" title="The air between us and a body, against its own (1): how much of the body's light it takes on the way, more toward the horizon"><span>Thickness</span><input type="range" id="washThick" min="0" max="4" step="0.01" aria-label="Thickness"><output id="washThickOut"></output><button type="button" class="small rs" id="washThickReset" aria-label="Reset" title="Reset to 1 (its start)">&#8634;</button></div>
+            <div class="wrow" title="How much dimmer a body's own light looks by full day, the eye set for the bright sky (0: as by night)"><span>Day dimming</span><input type="range" id="washDim" min="0" max="1" step="0.01" aria-label="Day dimming"><output id="washDimOut"></output><button type="button" class="small rs" id="washDimReset" aria-label="Reset" title="Reset to 0.25 (its start)">&#8634;</button></div>
+            <div class="wrow" title="How much of the drawn sun's own glow lies in front of a body beside it (1: all of it; 0: none, so a moon by the sun is cut darker than the halo round it)"><span>Sun's glow</span><input type="range" id="washSun" min="0" max="3" step="0.01" aria-label="Sun's glow"><output id="washSunOut"></output><button type="button" class="small rs" id="washSunReset" aria-label="Reset" title="Reset to 1 (its start)">&#8634;</button></div>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div class="status" id="status" role="status" hidden></div>
+    <div class="sunbar" id="sunbar">
+      <p class="preview-note" id="previewNote">Preview: this stage's sun is not saved. Each place keeps its own light.</p>
+      <label>Sun azimuth <output id="azOut"></output><input type="range" id="az" min="-180" max="180" step="1" value="-60"></label>
+      <label>Sun elevation <output id="elOut"></output><input type="range" id="el" min="-89" max="89" step="1" value="15"></label>
+      <label>Phase <output id="phOut"></output><input type="range" id="phase" min="-180" max="180" step="1" value="0"></label>
+      <label>Sun brightness <output id="spOut"></output><input type="range" id="sunPower" min="0" max="3" step="0.01" value="1"></label>
+    </div>
+    <div class="sunbar placebar" id="placebar" hidden>
+      <label class="ground-only time">Time of day <output id="timeOut">02:00</output><input type="range" id="time" min="0" max="24" step="0.05" value="2"></label>
+      <div class="ground-only playline">
+        <button type="button" id="play" aria-pressed="false" title="Run the hours, to see the bodies cross the sky">Play</button>
+        <select id="speed" title="How fast the hours run" aria-label="Speed">
+          <option value="0.25">15 min a second</option>
+          <option value="1" selected>1 hour a second</option>
+          <option value="3">3 hours a second</option>
+        </select>
+      </div>
+      <label>Field of view <output id="fovOut"></output><input type="range" id="fov" min="5" max="110" step="1" value="60"></label>
+      <button type="button" id="backToLook" title="Back to the close-up preview of this place's look">&larr; Look preview</button>
+      <label class="ground-only sys-only" title="The day of the first round's system clock: the orbits move from day to day (0 is where every body starts)">Day <output id="dayOut">0</output><input type="range" id="day" min="0" max="400" step="1" value="0"></label>
+      <label class="ground-only sys2-only date" title="The real date, days from today (the world's hour kept): the moons' phases and every real-time motion move with it" hidden>Date <output id="dateOut"></output><input type="range" id="date" min="-180" max="180" step="1" value="0"></label>
+      <button type="button" id="nowBtn" class="ground-only sys2-only nowbtn" title="Back on the clock: the hour and the date follow the real time from here" hidden>Now</button>
+      <div class="ground-only skyrule" id="skyRule"></div>
+    </div>
+    <div class="sunbar systembar" id="systembar" hidden>
+      <label class="time" title="The hour of the world you stand on: its own day, as long as its dayHours (the real moment moves within that day)">Time of day <output id="sysTimeOut">12:00</output><input type="range" id="sysTime" min="0" max="24" step="0.01" value="12"></label>
+      <label class="time" title="The real date, days from today (the world's hour kept): phases and every real-time motion move with it">Date <output id="sysDateOut"></output><input type="range" id="sysDate" min="-180" max="180" step="1" value="0"></label>
+      <button type="button" id="sysNowBtn" class="nowbtn" title="Back on the clock: the hour and the date follow the real time from here">Now</button>
+      <div class="playline">
+        <button type="button" id="sysPlay" aria-pressed="false" title="Run the system's clock">Play</button>
+        <select id="sysSpeed" title="How fast the real clock runs" aria-label="Speed">
+          <option value="0.0006944">1 minute a second</option>
+          <option value="0.0416667">1 hour a second</option>
+          <option value="0.25">6 hours a second</option>
+          <option value="1" selected>1 day a second</option>
+          <option value="7">1 week a second</option>
+          <option value="30">1 month a second</option>
+        </select>
+      </div>
+      <div class="playline">
+        <label class="pill" title="Distances as the model has them, and each body as big as the angle it fills from our world says (zoom with the wheel)"><input type="checkbox" id="trueScale"> True scale</label>
+        <select id="sysCentre" title="What stands in the middle" aria-label="Centre on">
+          <option value="sun">Centre: the sun</option>
+          <option value="parent">Centre: what we go round</option>
+          <option value="world">Centre: our world</option>
+        </select>
+      </div>
+      <div class="playline">
+        <button type="button" id="sysGround" class="primary" title="This sky from the ground, at this moment (a preview until you apply it)">See it from the ground</button>
+        <button type="button" id="sysBack" title="Back to the close-up preview of a look">&larr; Look preview</button>
+      </div>
+    </div>
+    <div class="hint-bottom" id="hint">Drag to orbit &middot; right-drag to pan &middot; wheel to zoom &middot; F frames.</div>
+  </section>
+
+  <aside class="inspector" aria-label="Details">
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="look" aria-selected="true" title="What a body is: its mesh, pictures and colours">Look</button>
+      <button type="button" role="tab" data-tab="place" aria-selected="false" title="Where the game shows a body, with its own settings">Place</button>
+      <button type="button" role="tab" data-tab="places" aria-selected="false" title="Every place in the game's skies and zones">All places</button>
+      <button type="button" role="tab" data-tab="system" aria-selected="false" title="A star's system: its sun, planets, giants and moons going round on the real clock, and the world you stand on turning">System</button>
+    </div>
+    <div id="lookPanel" class="panel"></div>
+    <div id="placePanel" class="panel" hidden></div>
+    <div id="placesPanel" class="panel" hidden></div>
+    <div id="systemPanel" class="panel" hidden></div>
+  </aside>
+</main>
+<dialog id="addDialog" class="add-dialog" aria-labelledby="addTitle"></dialog>
+<div id="dropZone" class="drop-zone" hidden><div>Drop a PNG or JPEG to add it to the imported folder</div></div>
+<script type="module" src="main.js"></script>
+</body>
+</html>

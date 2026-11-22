@@ -12,7 +12,7 @@
 import * as THREE from 'three';
 import { GPU } from '../../core/gpuSwitch.ts';
 import { AIR, AIR_UNITS, type AirTables } from './airApi.ts';
-import { AIR_DIAL_STATE, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+import { AIR_DIAL_STATE, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
 import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, buildDepthTable, buildPsiTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
 import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
@@ -73,6 +73,9 @@ export class AirRun {
   private readonly ozNow: [number, number] = [0.75, 4];
   /** How many times a moved ozone limit asked for a refit, for the report. */
   refits = 0;
+  /** Pass 2, wave 4a: the haze colour the rows were last set to (the world's dials), and what the last fit was asked with. */
+  private readonly hazeSet: [number, number, number] = [1, 1, 1];
+  private readonly hazeAsked: [number, number, number] = [1, 1, 1];
   private worker: Worker | null = null;
   private fitAsked = 0;
   private fitAnswered = 0;
@@ -108,6 +111,11 @@ export class AirRun {
     const dials = airDialsOf(planet);
     this.visSet = dials.visibilityKm;
     setVisibility(this.base, dials.visibilityKm);
+    // Pass 2, wave 4a: the world's haze colour (its dials; grey to start).
+    this.hazeSet[0] = dials.hazeR;
+    this.hazeSet[1] = dials.hazeG;
+    this.hazeSet[2] = dials.hazeB;
+    setHazeTint(this.base, dials.hazeR, dials.hazeG, dials.hazeB);
     ozoneOf(planet, this.ozSet);
     this.dialSeen = AIR_DIAL_STATE.version;
     // The world's column densities on this thread at once (a millisecond): the transmittance is exact from the first frame,
@@ -134,7 +142,10 @@ export class AirRun {
     const sky = fitSkyOf(this.planet, this.sky.sunElevationDegrees, this.sky.blocks);
     const gradients: Record<string, string> = {};
     for (const f of fitGradients(sky)) gradients[f] = this.urlOf(f);
-    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1] };
+    this.hazeAsked[0] = this.hazeSet[0];
+    this.hazeAsked[1] = this.hazeSet[1];
+    this.hazeAsked[2] = this.hazeSet[2];
+    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1], hazeTint: [this.hazeSet[0], this.hazeSet[1], this.hazeSet[2]] };
     this.worker.postMessage(ask);
   }
 
@@ -172,6 +183,8 @@ export class AirRun {
       this.lastN = -1;
       // A dial moved while the worker worked: the rows' haze follows it now, and the fit is asked again.
       if (this.visSet !== r.visibilityKm) this.setRowsVisibility(this.visSet);
+      // Pass 2, wave 4a: likewise the haze's colour (its multiple scattering follows when the asked fit lands).
+      if (this.hazeSet[0] !== this.hazeAsked[0] || this.hazeSet[1] !== this.hazeAsked[1] || this.hazeSet[2] !== this.hazeAsked[2]) this.setRowsHaze();
     }
     const w = this.fitWaiters.splice(0);
     for (const f of w) f();
@@ -201,6 +214,14 @@ export class AirRun {
     this.lastN = -1;
   }
 
+  /** Every row's haze colour set to the world's dials (pass 2, wave 4a), at once on this thread; the fit's worker gives their multiple scattering. */
+  private setRowsHaze(): void {
+    const h = this.hazeSet;
+    setHazeTint(this.base, h[0], h[1], h[2]);
+    for (const rec of this.recs) setHazeTint(rec, h[0], h[1], h[2]);
+    this.lastN = -1;
+  }
+
   /**
    * One frame, after the sky's own update and before the world turns the lighting into lights: the mix blended where it
    * moved, the twin's sums, the frame record, SWG's lighting of the hour kept and the air's written over it, the night
@@ -222,11 +243,20 @@ export class AirRun {
         this.ozSet[1] = oz[1];
         this.refits++;
       }
+      // Pass 2, wave 4a: the haze's colour moved (the owner's dials): the rows take it at once, the worker their multiple scattering.
+      const hz = this.hazeSet;
+      const hazeMoved = dials.hazeR !== hz[0] || dials.hazeG !== hz[1] || dials.hazeB !== hz[2];
+      if (hazeMoved) {
+        hz[0] = dials.hazeR;
+        hz[1] = dials.hazeG;
+        hz[2] = dials.hazeB;
+        this.setRowsHaze();
+      }
       if (dials.visibilityKm !== this.visSet) {
         this.visSet = dials.visibilityKm;
         this.setRowsVisibility(this.visSet);
         this.ask();
-      } else if (ozMoved) this.ask();
+      } else if (ozMoved || hazeMoved) this.ask();
     }
     this.blendMix(mix);
     const tw = this.twin;

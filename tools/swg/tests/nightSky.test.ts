@@ -602,10 +602,12 @@ const SCENE = sceneUnits();
 // ---------------------------------------------------------------- 10. the world and the game hand it over (pinned as text)
 {
   const world = text('src/world/world.ts');
-  ok(/await this\.loadNight\(sky, token\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the night is hung before the sky is built, behind the loading screen (gpuSkyReady builds it with the dome)");
+  // (pass 2, wave 4a: the sky's moons and planets are made ready between the night and the sky's build, so both are built with it)
+  ok(/await this\.loadNight\(sky, token\);\s*if \(token !== this\.loadToken\) return;\s*(\/\/[^\n]*\n\s*)*await this\.loadBodies\(sky\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the night is hung before the sky is built, behind the loading screen (gpuSkyReady builds it with the dome)");
   ok(/sky\.group\.add\(night\.group\);\s*markActor\(night\.group\);/.test(world) && /await night\.warm\(\);/.test(world) && /night\.drawBake\(\);/.test(world), "it hangs in the sky's group, marked as the group was, its bake compiled and drawn");
   ok(/this\.skyAir\.frame\(this\.day, this\.swgSky, L\);\s*\/\/[^\n]*\n\s*this\.nightFrame\(camPos\);/.test(world) && /private nightFrame\(camPos: THREE\.Vector3\): void \{[\s\S]{0,200}at\.camX = camPos\.x;\s*at\.camZ = camPos\.z;\s*night\.frame\(\);/.test(world), "its frame follows the air's, the camera's place written into its fields");
-  ok(/if \(this\.swgSky\) \{\s*\/\/[^\n]*\n\s*if \(GPU\.webgpu\) this\.dropNight\(\);\s*this\.swgSky\.dispose\(/.test(world), 'it goes before its sky');
+  // (pass 2, wave 4a: the bodies' Scattered cards go after it, before the sky too)
+  ok(/if \(this\.swgSky\) \{\s*\/\/[^\n]*\n\s*if \(GPU\.webgpu\) this\.dropNight\(\);\s*(\/\/[^\n]*\n\s*if \(GPU\.webgpu\) this\.dropBodies\(\);\s*)?this\.swgSky\.dispose\(/.test(world), 'it goes before its sky');
   ok(/if \(GPU\.webgpu && this\.skyAir && this\.swgSky && !this\.swgSky\.data\.space\) \{[\s\S]{0,300}AIR_FLARE_IN\.nightSuns = nightSuns;\s*return airFlareLights\(out, AIR\.frame, discs\);/.test(world), "the flare follows the air's discs and the moon under our sky on WebGPU, the nightSuns switch handed in");
   ok(/return airFlareLights\(out, AIR\.frame, discs\);\s*\}\s*(\/\/[^\n]*\n\s*)+if \(GPU\.webgpu\) openFlareSeen\(\);\s*if \(this\.swgSky\) \{\s*const count = this\.swgSky\.flareLights\(out, nightSuns\);/.test(world), "everywhere else on WebGPU the seen gate stands open, before the sky's own sources as 4ecee44 had them");
   const sky = text('src/world/sky.ts');

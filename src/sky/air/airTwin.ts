@@ -343,6 +343,10 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
   len = len > 0 ? len : 0;
   const mieS = rec[F.mieS];
   const mieT = mieS + rec[F.mieA];
+  // Pass 2, wave 4a: the haze's scattering by channel (its colour), its extinction (`mieT`) grey; at 1, 1, 1 each is `mieS` to the bit.
+  const mS0 = mieS * rec[F.mieTintR];
+  const mS1 = mieS * rec[F.mieTintG];
+  const mS2 = mieS * rec[F.mieTintB];
   const g = rec[F.mieG];
   const g2 = g * g;
   const rayH = rec[F.rayH];
@@ -375,7 +379,9 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
     const sR0 = rec[F.rayR] * dR;
     const sR1 = rec[F.rayG] * dR;
     const sR2 = rec[F.rayB] * dR;
-    const sM = mieS * dM;
+    const sM0 = mS0 * dM;
+    const sM1 = mS1 * dM;
+    const sM2 = mS2 * dM;
     const e0 = sR0 + mieT * dM + rec[F.ozR] * dO;
     const ec1 = sR1 + mieT * dM + rec[F.ozG] * dO;
     const e2 = sR2 + mieT * dM + rec[F.ozB] * dO;
@@ -395,9 +401,9 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
       REG[1] = (px * lx + py * ly + pz * lz) / rr;
       transmitReg(rec, depth, ltR, 0);
       psiReg(rec, psi, psR, 0);
-      S0 += lights.top[k * 3] * (ltR[0] * (sR0 * pR + sM * pM) + psR[0] * (sR0 + sM));
-      S1 += lights.top[k * 3 + 1] * (ltR[1] * (sR1 * pR + sM * pM) + psR[1] * (sR1 + sM));
-      S2 += lights.top[k * 3 + 2] * (ltR[2] * (sR2 * pR + sM * pM) + psR[2] * (sR2 + sM));
+      S0 += lights.top[k * 3] * (ltR[0] * (sR0 * pR + sM0 * pM) + psR[0] * (sR0 + sM0));
+      S1 += lights.top[k * 3 + 1] * (ltR[1] * (sR1 * pR + sM1 * pM) + psR[1] * (sR1 + sM1));
+      S2 += lights.top[k * 3 + 2] * (ltR[2] * (sR2 * pR + sM2 * pM) + psR[2] * (sR2 + sM2));
     }
     const st0 = Math.exp(-e0 * dt);
     const st1 = Math.exp(-ec1 * dt);
@@ -447,6 +453,10 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
   const sy = muS;
   const mieS = rec[F.mieS];
   const mieT = mieS + rec[F.mieA];
+  // Pass 2, wave 4a: the haze's scattering by channel (its colour), its extinction grey; at 1, 1, 1 each is `mieS` to the bit.
+  const mS0 = mieS * rec[F.mieTintR];
+  const mS1 = mieS * rec[F.mieTintG];
+  const mS2 = mieS * rec[F.mieTintB];
   let L0 = 0;
   let L1 = 0;
   let L2 = 0;
@@ -477,14 +487,13 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
       const sR0 = rec[F.rayR] * mScratch[0];
       const sR1 = rec[F.rayG] * mScratch[0];
       const sR2 = rec[F.rayB] * mScratch[0];
-      const sM = mieS * mScratch[1];
       const e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
       const ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
       const e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
       lightTransmittance(rec, depth, rr, (px * sx + py * sy) / rr, t3, 0);
-      const s0 = sR0 + sM;
-      const s1 = sR1 + sM;
-      const s2 = sR2 + sM;
+      const s0 = sR0 + mS0 * mScratch[1];
+      const s1 = sR1 + mS1 * mScratch[1];
+      const s2 = sR2 + mS2 * mScratch[1];
       const st0 = Math.exp(-e0 * dt);
       const st1 = Math.exp(-ec1 * dt);
       const st2 = Math.exp(-e2 * dt);
@@ -598,6 +607,10 @@ export function viewRadiance(
   if (maxT < len) len = maxT;
   const mieS = rec[F.mieS];
   const mieT = mieS + rec[F.mieA];
+  // Pass 2, wave 4a: the haze's scattering by channel (its colour), its extinction grey; at 1, 1, 1 each is `mieS` to the bit.
+  const mS0 = mieS * rec[F.mieTintR];
+  const mS1 = mieS * rec[F.mieTintG];
+  const mS2 = mieS * rec[F.mieTintB];
   const g = rec[F.mieG];
   let L0 = 0;
   let L1 = 0;
@@ -621,7 +634,9 @@ export function viewRadiance(
     const sR0 = rec[F.rayR] * mScratch[0];
     const sR1 = rec[F.rayG] * mScratch[0];
     const sR2 = rec[F.rayB] * mScratch[0];
-    const sM = mieS * mScratch[1];
+    const sM0 = mS0 * mScratch[1];
+    const sM1 = mS1 * mScratch[1];
+    const sM2 = mS2 * mScratch[1];
     const e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
     const ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
     const e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
@@ -639,9 +654,9 @@ export function viewRadiance(
       const pM = miePhase(c, g);
       lightTransmittance(rec, depth, rr, muL, lt, 0);
       psiAt(rec, psi, rr, muL, ps, 0);
-      S0 += lights.top[k * 3] * (lt[0] * (sR0 * pR + sM * pM) + ps[0] * (sR0 + sM));
-      S1 += lights.top[k * 3 + 1] * (lt[1] * (sR1 * pR + sM * pM) + ps[1] * (sR1 + sM));
-      S2 += lights.top[k * 3 + 2] * (lt[2] * (sR2 * pR + sM * pM) + ps[2] * (sR2 + sM));
+      S0 += lights.top[k * 3] * (lt[0] * (sR0 * pR + sM0 * pM) + ps[0] * (sR0 + sM0));
+      S1 += lights.top[k * 3 + 1] * (lt[1] * (sR1 * pR + sM1 * pM) + ps[1] * (sR1 + sM1));
+      S2 += lights.top[k * 3 + 2] * (lt[2] * (sR2 * pR + sM2 * pM) + ps[2] * (sR2 + sM2));
     }
     const st0 = Math.exp(-e0 * dt);
     const st1 = Math.exp(-ec1 * dt);

@@ -15,7 +15,10 @@
 // are made here too, for the twin.
 //
 // Pure: plain numbers, so the worker and the node tests run this very code.
-import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+
+/** A grey haze (pass 2, wave 4a): the haze colour every world's dial starts at, the record as it was. */
+const GREY_HAZE: readonly [number, number, number] = [1, 1, 1];
 import { buildDepthTable, buildPsiTable, columnDepths, hitsGround, miePhase, opticalDepth, rayLength, rayleighPhase, DEPTH_FLOATS, PSI_FLOATS } from './airTwin.ts';
 
 /** What the fit reads of one environment row (`SkyBlock`'s fields, so a block is handed as it is). */
@@ -188,13 +191,14 @@ export function singleScatter(rec: AirRecord, el: number, az: number, sunEl: num
       l1 = Math.exp(-depth3[1]);
       l2 = Math.exp(-depth3[2]);
     }
+    // Pass 2, wave 4a: the haze's scattering by channel (its colour; 1, 1, 1 grey, the sum as it was to the bit).
     const sM = rec[F.mieS] * dM;
     const e0 = rec[F.rayR] * dR + mieT * dM + rec[F.ozR] * dO;
     const e1 = rec[F.rayG] * dR + mieT * dM + rec[F.ozG] * dO;
     const e2 = rec[F.rayB] * dR + mieT * dM + rec[F.ozB] * dO;
-    L0 += T0 * l0 * (rec[F.rayR] * dR * pR + sM * pM) * dt;
-    L1 += T1 * l1 * (rec[F.rayG] * dR * pR + sM * pM) * dt;
-    L2 += T2 * l2 * (rec[F.rayB] * dR * pR + sM * pM) * dt;
+    L0 += T0 * l0 * (rec[F.rayR] * dR * pR + sM * rec[F.mieTintR] * pM) * dt;
+    L1 += T1 * l1 * (rec[F.rayG] * dR * pR + sM * rec[F.mieTintG] * pM) * dt;
+    L2 += T2 * l2 * (rec[F.rayB] * dR * pR + sM * rec[F.mieTintB] * pM) * dt;
     T0 *= Math.exp(-e0 * dt);
     T1 *= Math.exp(-e1 * dt);
     T2 *= Math.exp(-e2 * dt);
@@ -398,7 +402,7 @@ export function fitOzone(rec: AirRecord, target: Float64Array, least: number = O
  * Every row of a world fitted (the worker's one job, and the node tests'): `visibilityKm` the owner's clear-day dial for
  * this world. Rows whose records come out the same share their tables.
  */
-export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX): FitResult {
+export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX, hazeTint: readonly [number, number, number] = GREY_HAZE): FitResult {
   const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
   const rows = sky.blocks;
   const shares = visibilityShares(rows);
@@ -446,6 +450,9 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
     copyRecord(fam ? fam.rec : base, rec);
     rec[F.visShare] = shares[i];
     setVisibility(rec, visibilityKm * shares[i]);
+    // Pass 2, wave 4a: the haze's colour is the world's dial's (grey to start), never fitted: the hue and the ozone above are
+    // fitted on a grey haze, so the dial moves only the light the haze adds and its multiple scattering below.
+    setHazeTint(rec, hazeTint[0], hazeTint[1], hazeTint[2]);
     // Rows alike to two figures share one multiple-scattering table (it turns slowly with the numbers; each row keeps its
     // own record, so its transmittance is exact).
     let key = '';
@@ -475,6 +482,8 @@ export interface FitAsk {
   /** Pass 2, wave 2: the ozone's limits for this world (the owner's dials, `airParams.ts`'s `ozoneOf`); absent, `OZONE_MIN` and `OZONE_MAX`. */
   ozoneMin?: number;
   ozoneMax?: number;
+  /** Pass 2, wave 4a: the world's haze colour (its dials, `airParams.ts`'s `hazeR..B`); absent, a grey haze. */
+  hazeTint?: [number, number, number];
 }
 
 /** What the worker answers: the rows' records and tables as transferable arrays, in row order. */
@@ -495,7 +504,7 @@ export interface FitReply {
 /** A fit worked into the reply the worker posts (the tables of rows sharing one are copied so each can be transferred). */
 export function fitReply(ask: FitAsk, gradient: GradientSampler | null = null): FitReply {
   try {
-    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX);
+    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE);
     return {
       id: ask.id,
       planet: r.planet,

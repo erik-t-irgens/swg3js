@@ -27,7 +27,7 @@ export const AIR_DIAL_WORLDS: readonly [string, string][] = [
   ['adventure2', 'Hoth (Echo Base)'],
 ];
 
-function dial(id: string, key: 'visibilityKm' | 'steer', label: string, step: number, unit: string, note: string): NumberDial {
+function dial(id: string, key: 'visibilityKm' | 'steer' | 'hazeR' | 'hazeG' | 'hazeB', label: string, step: number, unit: string, note: string): NumberDial {
   const [min, max] = AIR_DIAL_RANGE[key];
   return {
     kind: 'number',
@@ -65,12 +65,16 @@ function ozoneDial(id: string, key: 'ozoneMin' | 'ozoneMax', label: string, note
 export function airDialGroup(id: string, name: string): DialGroup {
   return {
     title: `The air of ${name}`,
-    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone), and its own limits on the fit's ozone (nought: the all-worlds limits).",
+    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone), its own limits on the fit's ozone (nought: the all-worlds limits), and its haze's colour (1, 1, 1: grey, the sky as it was).",
     dials: [
       dial(id, 'visibilityKm', 'Clear-day visibility', 0.5, 'km', "How far a dark thing stays seen on a clear day (2% contrast): 40 km is a very clear day. Weather scales from here, so nearer than 2 km in storms is in reach."),
       dial(id, 'steer', 'Steer to SWG', 0.05, '', "0 draws the physical air alone (realism first); 1 bends the sky's light and the lights' colours to SWG's of the hour, channel by channel."),
       ozoneDial(id, 'ozoneMin', 'Ozone at least', "This world's own floor on the fit's ozone, as a share of Earth's; nought takes the all-worlds floor. Moved, its rows are fitted again (a second or so) and its sky follows."),
       ozoneDial(id, 'ozoneMax', 'Ozone at most', "This world's own top on the fit's ozone; nought takes the all-worlds top. A lower top turns a low sun's magenta back toward red where the fit stands at the top (Naboo, Kashyyyk, Endor, Rori, Lok, Yavin 4)."),
+      // Pass 2, wave 4a: the haze's colour, a share of its scattering a channel (1, 1, 1 a grey haze: every world starts grey).
+      dial(id, 'hazeR', 'Haze colour: red', 0.01, '', "The share of the haze's scattering in the red: 1 with green and blue at 1 is a grey haze (the start, the sky as it was). What a channel scatters less it absorbs, so the sun through the haze is dimmed, never tinted. A desert's warm dust is about 1, 0.9, 0.7."),
+      dial(id, 'hazeG', 'Haze colour: green', 0.01, '', "The share of the haze's scattering in the green (1 to start: grey). Moved, the world's rows are fitted again for their multiple scattering (a second or so) and its sky and haze follow; nothing is built."),
+      dial(id, 'hazeB', 'Haze colour: blue', 0.01, '', "The share of the haze's scattering in the blue (1 to start: grey). Lower than the green and red for a warm dust or a brown ash."),
     ],
   };
 }
@@ -104,6 +108,6 @@ export function registerAirDials(): void {
 /** The console's `air` part of `__debug.sky({ air })`: the dials moved, words for anything held or refused. */
 export function skyAirArgument(o: unknown): string[] {
   if (o === undefined) return [];
-  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer, ozoneMin, ozoneMax }, all: { ozoneMin, ozoneMax } }'];
+  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB }, all: { ozoneMin, ozoneMax } }'];
   return tuneAirDials(o as Record<string, unknown>);
 }

@@ -1,6 +1,6 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
-import { GPU, type GpuNightSky, type GpuSun } from '../core/gpuSwitch.ts';
+import { GPU, type GpuNightSky, type GpuSkyBodySet, type GpuSun } from '../core/gpuSwitch.ts';
 // Pass 2, wave 1, what draws from the air (maker B): the Sky row read at load, and the air's frame record (pure; no WebGPU build).
 import { skyOurs } from '../sky/skyMode.ts';
 import { AIR } from '../sky/air/airApi.ts';
@@ -10,6 +10,8 @@ import { AIR_FLARE_IN, airFlareDiscs, airFlareLights, openFlareSeen, type AirFla
 import type { CityRow } from '../story/cities.ts';
 // Pass 2, wave 1, the air itself (maker A): the world's rows, its twin and its tables (pure; the tables' WebGPU module is a dynamic import inside).
 import { AirRun } from '../sky/air/airRun.ts';
+// Pass 2, wave 4 (maker A): the space body viewer's Save to game, read again behind every loading screen (pure; no WebGPU build).
+import { readBodiesFile } from '../sky/look/bodiesFile.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
@@ -2275,6 +2277,10 @@ export class World {
     const planet = this.planet;
     this.packStatus = 'loading';
     this.packProgress = 0;
+    // Pass 2, wave 4 (maker A): the space body viewer's Save to game (`src/sky/look/bodiesFile.ts`), asked again at every
+    // loading screen while the pack loads, and waited on before the screen lifts (below), so a Save shows at the next one.
+    // WebGPU's alone: what reads it (the bodies' looks, the air) draws there alone, and WebGL asks for nothing new.
+    if (GPU.webgpu) this.bodiesRead = readBodiesFile().catch(() => null);
     // Where this arrival stands, before anything is awaited: what a world with no pack's rings first stand their windows round (h6b).
     this.madeHorizonEye = spawn;
     const pack = await AssetPack.load(this.packId);
@@ -2593,6 +2599,8 @@ export class World {
     }
     // Pass 2, wave 1 (maker A): the air's fit, which has been working since its sky loaded, landed before the screen lifts.
     if (GPU.webgpu && this.skyAir && !(await this.awaitAirFit(token))) return null;
+    // Pass 2, wave 4 (maker A): the Save to game read before the screen lifts (a few KB, long landed by now); WebGPU's alone.
+    if (GPU.webgpu && !(await this.awaitBodiesRead(token))) return null;
     if (planet.id === 'gallery' && layout) {
       this.gallery?.dispose();
       this.gallery = new Gallery(this.scene, pack.url(''), layout.center, (x, z) => this.terrain.heightAt(x, z));
@@ -3771,6 +3779,10 @@ export class World {
       // before it is built, so `gpuSkyReady` builds it with the dome (`src/sky/night/`).
       await this.loadNight(sky, token);
       if (token !== this.loadToken) return;
+      // Pass 2, wave 4a (maker B): the moons and planets made ready (their air's tables baked or read from storage, their
+      // Scattered cards beside them) before the sky is built, so `gpuSkyReady` builds both forms (`src/sky/bodies/`).
+      await this.loadBodies(sky);
+      if (token !== this.loadToken) return;
       this.gpuSkyReady(sky);
     }
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
@@ -3827,6 +3839,8 @@ export class World {
    * sky, in space and between worlds. (`air` is the volumetrics' moving air, another thing.)
    */
   skyAir: AirRun | null = null;
+  /** Pass 2, wave 4 (maker A): this loading screen's read of the viewer's Save to game (`readBodiesFile`), awaited before it lifts. */
+  private bodiesRead: Promise<unknown> | null = null;
 
   /**
    * The air made for this sky: its rows asked of the fit's worker, which works while the rest of the arrival loads
@@ -3843,6 +3857,12 @@ export class World {
   /** The arrival's last wait on the air (pass 2, wave 1, maker A): its rows' fit landed (bounded), so the first frame shown is the fitted sky's. */
   private async awaitAirFit(token: number): Promise<boolean> {
     if (this.skyAir) await this.skyAir.ready();
+    return token === this.loadToken;
+  }
+
+  /** Pass 2, wave 4 (maker A): this screen's read of the Save to game landed (WebGPU's alone); false when a later arrival began. */
+  private async awaitBodiesRead(token: number): Promise<boolean> {
+    if (this.bodiesRead) await this.bodiesRead;
     return token === this.loadToken;
   }
 
@@ -3897,6 +3917,32 @@ export class World {
   /** The flare's bodies under our sky (`airFlareDiscs`), worked once a sky at its first frame (`skyLights`). */
   private flareDiscs: AirFlareDiscs | null = null;
 
+  /**
+   * The moons and planets under our sky on WebGPU (pass 2, wave 4a, maker B: `src/sky/bodies/skyBody.ts`), null on WebGL,
+   * under SWG's sky, in space and between worlds.
+   */
+  skyBodies: GpuSkyBodySet | null = null;
+
+  /** The sky's bodies made ready behind its loading screen, once the air's tables exist; none where the sky made no card. */
+  private async loadBodies(sky: SwgSky): Promise<void> {
+    this.dropBodies();
+    const cards = sky.bodyCards();
+    if (!cards.length || !AIR.tables) return;
+    const set = await GPU.rt!.skyBodies.make(cards);
+    if (this.swgSky !== sky) {
+      set.dispose((m) => this.forgetMaterials(m));
+      return;
+    }
+    this.skyBodies = set;
+  }
+
+  /** The bodies let go, with their sky. */
+  private dropBodies(): void {
+    if (!this.skyBodies) return;
+    this.skyBodies.dispose((m) => this.forgetMaterials(m));
+    this.skyBodies = null;
+  }
+
   /** The night let go, with its sky. */
   private dropNight(): void {
     this.flareDiscs = null;
@@ -3912,6 +3958,8 @@ export class World {
     if (this.swgSky) {
       // Pass 2, wave 3 (maker A): the night goes before its sky, out of the sky's group.
       if (GPU.webgpu) this.dropNight();
+      // Pass 2, wave 4a (maker B): and the bodies' Scattered cards.
+      if (GPU.webgpu) this.dropBodies();
       this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
     }
@@ -11719,6 +11767,8 @@ export class World {
         this.skyAir.frame(this.day, this.swgSky, L);
         // Pass 2, wave 3 (maker A): the night sky after the air (its turn read off the air's sun).
         this.nightFrame(camPos);
+        // Pass 2, wave 4a (maker B): the moons and planets after the sky has placed their cards and the air its sun.
+        if (this.skyBodies && this.camera) this.skyBodies.frame(this.camera);
         this.applySwgLighting(L, playerPos);
       } else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);

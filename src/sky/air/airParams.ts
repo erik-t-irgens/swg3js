@@ -47,10 +47,20 @@ export const F = {
   visShare: 23,
   /** The Mie's single-scattering albedo: what share of the light a haze particle meets it scatters rather than absorbs. */
   mieAlbedo: 24,
+  /**
+   * Pass 2, wave 4a (the viewer's atmosphere wave B, appended as it appended them, `src/sky/look/airProfile.js`): the haze's
+   * colour, each channel's Mie scattering as a share of `mieS` (its brightest 1; 1, 1, 1 a grey haze, the record as it was).
+   * The haze's extinction stays grey (`mieS + mieA` in every channel): a channel it scatters less it absorbs more (scattering
+   * `mieS · t`, absorption `mieA + mieS · (1 − t)`), as dust, ash and smoke do, so only the light the haze adds (the single
+   * scattering and the multiple scattering's table) is coloured, and the sun through it is dimmed, never tinted.
+   */
+  mieTintR: 25,
+  mieTintG: 26,
+  mieTintB: 27,
 } as const;
 
-/** How many numbers a record holds. */
-export const AIR_FIELD_COUNT = 25;
+/** How many numbers a record holds (the game's 25 and, since pass 2's wave 4a, the haze's colour). */
+export const AIR_FIELD_COUNT = 28;
 
 /**
  * Hillaire's Earth, the published constants of the method (2020, its section 3 and the reference code's defaults): a
@@ -105,7 +115,16 @@ export function newAirRecord(): AirRecord {
   r[F.sunRadius] = (0.2666 * Math.PI) / 180;
   r[F.visShare] = 1;
   r[F.mieAlbedo] = 0.9;
+  // Pass 2, wave 4a: a grey haze, the record as it was.
+  r[F.mieTintR] = r[F.mieTintG] = r[F.mieTintB] = 1;
   return r;
+}
+
+/** A record's haze colour set (pass 2, wave 4a): each channel's share of the Mie scattering, held to [0, 1]. */
+export function setHazeTint(r: AirRecord, red: number, green: number, blue: number): void {
+  r[F.mieTintR] = red > 0 ? (red < 1 ? red : 1) : 0;
+  r[F.mieTintG] = green > 0 ? (green < 1 ? green : 1) : 0;
+  r[F.mieTintB] = blue > 0 ? (blue < 1 ? blue : 1) : 0;
 }
 
 /** One record copied into another. */
@@ -236,9 +255,18 @@ export interface AirDialRow {
    */
   ozoneMin: number;
   ozoneMax: number;
+  /**
+   * Pass 2, wave 4a (the brief's item 6; the viewer's haze colour, wave B): this world's haze colour, each channel's share of
+   * the haze's scattering (`F.mieTintR..B`). **1, 1, 1 to start: a grey haze**, the record as it was (the brief's default,
+   * "every world's haze starting grey"), so every world's sky and ground are drawn as before until the owner moves one; a warm
+   * desert dust is about 1, 0.9, 0.7 (the viewer's desert start), an ash a little browner and darker. Feel is his.
+   */
+  hazeR: number;
+  hazeG: number;
+  hazeB: number;
 }
 
-export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0 };
+export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0, hazeR: 1, hazeG: 1, hazeB: 1 };
 
 /**
  * The fit's ozone limits for every world (the owner's dials since pass 2, wave 2), as shares of Earth's: they start where
@@ -269,14 +297,24 @@ export const AIR_DIALS: Record<string, AirDialRow> = {};
 export function airDialsOf(planetId: string): AirDialRow {
   let d = AIR_DIALS[planetId];
   if (!d) {
-    d = { visibilityKm: AIR_DIAL_START.visibilityKm, steer: AIR_DIAL_START.steer, ozoneMin: AIR_DIAL_START.ozoneMin, ozoneMax: AIR_DIAL_START.ozoneMax };
+    const s = AIR_DIAL_START;
+    d = { visibilityKm: s.visibilityKm, steer: s.steer, ozoneMin: s.ozoneMin, ozoneMax: s.ozoneMax, hazeR: s.hazeR, hazeG: s.hazeG, hazeB: s.hazeB };
     AIR_DIALS[planetId] = d;
   }
   return d;
 }
 
 /** The dials' ranges (the sliders'), and what a value outside is held to. */
-export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const };
+export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const, hazeR: [0, 1] as const, hazeG: [0, 1] as const, hazeB: [0, 1] as const };
+
+/** The dials a world's row holds, as `tuneAirDials` takes them. */
+const ROW_DIALS = ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax', 'hazeR', 'hazeG', 'hazeB'] as const;
+
+/** A world's haze colour in force (its dials), into a record (pass 2, wave 4a). */
+export function applyHazeDials(planetId: string, r: AirRecord): void {
+  const d = airDialsOf(planetId);
+  setHazeTint(r, d.hazeR, d.hazeG, d.hazeB);
+}
 
 /** A count the dials move by, so a reader can tell the numbers moved without comparing them (the tables' rebuild). */
 export const AIR_DIAL_STATE = { version: 0 };
@@ -287,7 +325,7 @@ export const AIR_DIAL_STATE = { version: 0 };
  */
 export function tuneAirDials(o: Record<string, unknown>): string[] {
   const words: string[] = [];
-  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax } } and { all: { ozoneMin, ozoneMax } }'];
+  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB } } and { all: { ozoneMin, ozoneMax } }'];
   for (const [id, v] of Object.entries(o)) {
     if (!v || typeof v !== 'object') {
       words.push(`${id}: not a row`);
@@ -312,7 +350,7 @@ export function tuneAirDials(o: Record<string, unknown>): string[] {
       continue;
     }
     const row = airDialsOf(id);
-    for (const key of ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax'] as const) {
+    for (const key of ROW_DIALS) {
       if (vv[key] === undefined) continue;
       const n = Number(vv[key]);
       if (!Number.isFinite(n)) {
@@ -324,7 +362,7 @@ export function tuneAirDials(o: Record<string, unknown>): string[] {
       if (held !== n) words.push(`${id}.${key} held to ${held}`);
       row[key] = held;
     }
-    for (const k of Object.keys(vv)) if (k !== 'visibilityKm' && k !== 'steer' && k !== 'ozoneMin' && k !== 'ozoneMax') words.push(`${id}.${k}: no such dial (visibilityKm, steer, ozoneMin, ozoneMax)`);
+    for (const k of Object.keys(vv)) if (!(ROW_DIALS as readonly string[]).includes(k)) words.push(`${id}.${k}: no such dial (${ROW_DIALS.join(', ')})`);
   }
   AIR_DIAL_STATE.version++;
   return words;
@@ -391,5 +429,6 @@ export function recordWords(r: AirRecord): Record<string, unknown> {
     sun: { colour: [n(r[F.sunR], 3), n(r[F.sunG], 3), n(r[F.sunB], 3)], strength: n(r[F.sunStrength], 3), radiusDeg: n((r[F.sunRadius] * 180) / Math.PI, 3) },
     visibilityKm: n(visibilityOf(r), 4),
     visShare: n(r[F.visShare], 3),
+    hazeColour: [n(r[F.mieTintR], 3), n(r[F.mieTintG], 3), n(r[F.mieTintB], 3)],
   };
 }

@@ -291,8 +291,30 @@ export interface GpuNight {
   readonly nightIn: { camX: number; camZ: number };
 }
 
+/**
+ * One sky's moons and planets under our sky (pass 2, wave 4a, maker B: `src/sky/bodies/skyBody.ts`): its cards made ready
+ * behind the loading screen (each body's air tables baked or read from the browser's storage, its Scattered twin beside it),
+ * placed by the sky and drawn lit through the world's air.
+ */
+export interface GpuSkyBodySet {
+  /** Once a game frame after the sky has placed its cards. */
+  frame(camera: THREE.PerspectiveCamera): void;
+  report(): Record<string, unknown>;
+  dispose(forget: (materials: Iterable<THREE.Material>) => void): void;
+}
+
+/** The moons and planets' runtime (pass 2, wave 4a, maker B). */
+export interface GpuSkyBodies {
+  /** A sky's cards made ready (its tables had within the bake cache's budget): answers once they are. */
+  make(cards: readonly import('../sky/bodies/bodyCard.ts').SkyBodyCard[]): Promise<GpuSkyBodySet>;
+  /** The bake cache's own words (`__debug.skyBodies({ bake })`), and its memo let go (the prover's). */
+  bake(forget: boolean): Record<string, unknown>;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
+  /** The moons and planets under our sky (pass 2, wave 4a, maker B). */
+  readonly skyBodies: GpuSkyBodies;
   /** What draws from the air under our sky (pass 2, wave 1). */
   readonly airDraw: GpuAirDraw;
   /** The eye (pass 2, wave 2). */

@@ -34,9 +34,14 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * store of the scene pre-exposed (`preExpose.ts`, a wrap of three's node materials' output and the card's buffer) the WebGPU
  * side's too. Wave 3's night sky (maker A, `src/sky/night/`): its graphs and its sky (`nightGpu.ts`) and the lens flare's pass
  * (`gpuFlare.ts`) the WebGPU side's, reached through the runtime and the chain; its density, catalogue, turn, towns, dials,
- * flare sources and console pure.
+ * flare sources and console pure. Wave 4a's moons and planets (maker B, `src/sky/bodies/`): their cards' graphs (`skyBody.ts`)
+ * the WebGPU side's, reached through the runtime; their tiers, air, card material, bake cache and console pure. Wave 4a's
+ * space body viewer (maker A, `src/sky/look/`): the viewer's drawing (its looks' meshes and materials, the bakes, the shapes,
+ * volumes and weather, the place views and stage, and its draw "as the game does" with the game's air, `gameAir.ts`) the WebGPU
+ * side's, reached by the viewer's own page (`viewer/`, outside src/) and never by the game; the looks' table, pictures, lore,
+ * matchers, placeholders, wash and the game's reader of Save to game (`bodiesFile.ts`) pure.
  */
-const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts']);
+const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/bodies/skyBody.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts'].map((f) => `src/sky/look/${f}`)]);
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;
@@ -706,7 +711,7 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const airBlock = w.indexOf('if (airSky) {', airSkyAt);
     // Pass 2, wave 3 (maker A): the night sky (`src/sky/night/`) is hung between the air's tables and the sky's build, inside the
     // same guard (its two lines of words, its wait, the stale load's way out), so the build takes it with the dome.
-    ok(airSkyAt > 0 && airBlock > airSkyAt && w[airBlock + 1] === 'this.setHazeFog();' && w[airBlock + 2] === 'sky.airReady();' && w[airBlock + 3].startsWith('// Pass 2, wave 3 (maker A)') && w[airBlock + 4].startsWith('//') && w[airBlock + 5] === 'await this.loadNight(sky, token);' && w[airBlock + 6] === 'if (token !== this.loadToken) return;' && w[airBlock + 7] === 'this.gpuSkyReady(sky);' && w[airBlock + 8] === '}', "world.ts: our sky is built after the air's tables and the night hung, inside a guard that is WebGPU's alone");
+    ok(airSkyAt > 0 && airBlock > airSkyAt && w[airBlock + 1] === 'this.setHazeFog();' && w[airBlock + 2] === 'sky.airReady();' && w[airBlock + 3].startsWith('// Pass 2, wave 3 (maker A)') && w[airBlock + 4].startsWith('//') && w[airBlock + 5] === 'await this.loadNight(sky, token);' && w[airBlock + 6] === 'if (token !== this.loadToken) return;' && w[airBlock + 7].startsWith('// Pass 2, wave 4a (maker B)') && w[airBlock + 8].startsWith('//') && w[airBlock + 9] === 'await this.loadBodies(sky);' && w[airBlock + 10] === 'if (token !== this.loadToken) return;' && w[airBlock + 11] === 'this.gpuSkyReady(sky);' && w[airBlock + 12] === '}', "world.ts: our sky is built after the air's tables, the night hung and (pass 2, wave 4a) the bodies made ready, inside a guard that is WebGPU's alone");
     const hung: [string, string][] = [
       ['if (GPU.webgpu && !airSky) this.gpuSkyReady(sky);', 'this.sky.visible = false;'],
       ['if (GPU.webgpu) this.gpuMadeNow([group]);', '// A star behind a planet must not flare through it: the body itself writes no depth, and its'],
@@ -854,13 +859,17 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const load = once('if (GPU.webgpu && skyOurs() && !sky.data.space) await this.loadAir(sky, pack, token);');
     ok(w[load - 4].startsWith('await this.weather.attach(') && w[load - 3] === 'if (token !== this.loadToken) return;' && w[load + 1] === 'if (token !== this.loadToken) return;', "world.ts: the air is made after the weather attaches and the arrival's token is asked, after the lines 8a7de51 had there");
     const fit = once('if (GPU.webgpu && this.skyAir && !(await this.awaitAirFit(token))) return null;');
-    ok(w[fit + 1] === "if (planet.id === 'gallery' && layout) {", "world.ts: the arrival's wait on the fit is the WebGPU branch's alone, before the line 8a7de51 had");
+    // Pass 2, wave 4a: the wait on the Save to game's read (its line of words and its one guarded line) joins the fit's, both
+    // the WebGPU branch's alone, still before the line 8a7de51 had; and the read itself is asked under the same guard.
+    ok(w[fit + 1].startsWith('// Pass 2, wave 4 (maker A)') && w[fit + 2] === 'if (GPU.webgpu && !(await this.awaitBodiesRead(token))) return null;' && w[fit + 3] === "if (planet.id === 'gallery' && layout) {", "world.ts: the arrival's waits on the fit and on the Save to game's read are the WebGPU branch's alone, before the line 8a7de51 had");
+    once('if (GPU.webgpu) this.bodiesRead = readBodiesFile().catch(() => null);');
     once('if (GPU.webgpu && this.skyAir) this.skyAir = this.skyAir.dispose();');
     const fog = once('if (GPU.webgpu && this.skyAir) fog.density = L.fogDensity * this.userFog;');
     ok(w[fog + 1] === 'else fog.density = L.fogDensity * this.fogScale * this.userFog;', "world.ts: the fog object's density under the air is the WebGPU branch's, WebGL's the line 8a7de51 had");
     const sky = once('if (GPU.webgpu && this.skyAir) {');
     const els = w.indexOf('} else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);', sky);
-    ok(els > sky && els - sky < 12, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
+    // (pass 2, wave 4a: the bodies' frame, two lines, joins the WebGPU branch after the night's)
+    ok(els > sky && els - sky < 14, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
     const m = lines('src/main.ts');
     const frame = m.flatMap((x, i) => (x === 'if (GPU.webgpu) this.world.airFrame(cam);' ? [i] : []));
     ok(frame.length === 1 && m[frame[0] - 2] === 'this.feedClouds();' && m[frame[0] + 4] === 'if (GPU.webgpu && postfx) GPU.rt!.taa.begin(cam, postfx);', "main.ts: the air's tables are drawn for the camera on WebGPU alone, after the clouds are fed and before the smoothing's nudge");
