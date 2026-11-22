@@ -385,6 +385,8 @@ export class HorizonField {
   disposed = false;
   /** The selection timed for the console (`horizon()` asks): off until asked, a clock read being a number made. */
   timing = false;
+  /** The selection's room ran out once and the console was told (`sayOverflow`): said once a field, never a frame's string. */
+  private overflowSaid = false;
   /** How long the decode worker is waited for (the tests move it). */
   decodeWaitMs = DECODE_WAIT_MS;
   /** What the worker last said that left the rings as they stood (a detail window that failed, the worker gone). */
@@ -1778,6 +1780,9 @@ export class HorizonField {
       s.selector.select(this.frustum, a, this.pyramid, hole);
     }
     s.upload();
+    // The room ran out (the owner's report of 21 November: never at the settings the game offers, a console tune past them
+    // can): what was left out is the farthest ground, and the console is told once, in words.
+    if (s.selector.overflow > 0 && !this.overflowSaid) this.sayOverflow(s.selector);
     // The shape window kept round the eye (wave 3b) while the finer levels are drawn: its blocks made nearest first, put on
     // the card as they come, the uniforms its place in the same frame as a move empties what moved.
     if (sh !== null && r.finest < 0) this.stepShape(sh, u);
@@ -1785,6 +1790,12 @@ export class HorizonField {
     // made poles again, whole when the distance's side moved, a retune when the ground's knobs moved (nothing asked, nothing made).
     if (this.worker && !this.windowAsked) this.askWindow();
     this.stepLive();
+  }
+
+  /** The selection's room ran out: the console told once a field (the one string made, on the one frame it happened). */
+  private sayOverflow(sel: RingSelector): void {
+    this.overflowSaid = true;
+    console.warn(`horizon: the far ground's selection had no room for ${sel.overflow} patches and skirts past its ${sel.patchCap}; the farthest ground was left out, alike in every direction. A lower Terrain distance or Terrain shape detail brings it back whole; horizon().selection.overflow says it at every frame.`);
   }
 
   /**

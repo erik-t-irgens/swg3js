@@ -646,6 +646,13 @@ export interface RingAsk {
 export const LEVEL_COUNT = LEVELS_MOST + 1;
 
 /**
+ * The shares of the reach squared a selection bins its patches by (`RingSelector.select`'s cut when the room runs out):
+ * 1,024 puts the cut within a bin of the distance that fits, a bin being the reach squared over 2,048 times the distance (at
+ * a 16 km reach, 8 m at its edge, 31 m at 4 km, 125 m at 1 km). A kept array of 4 KB, emptied at every walk.
+ */
+export const REACH_BINS = 1024;
+
+/**
  * The CDLOD selection over kept stacks: `select` writes the patches (node corner x, z, level, 0) and the skirts (leaf
  * corner x, z, 0, side + 1: 1 south, 2 east, 3 north, 4 west, the side toward a standing chunk) into the kept arrays and
  * answers how many patches. Pure of the scene: a frustum, a hole, an eye and a reach, so Light and shadow can run it
@@ -656,8 +663,22 @@ export class RingSelector {
   skirts: Float32Array;
   patchCount = 0;
   skirtCount = 0;
-  /** Patches the arrays had no room for (never expected: the arrays are sized past §2.4's counts). */
+  /**
+   * Patches and skirts the full reach selects that the arrays had no room for (never at the settings the game offers: the
+   * room holds every patch they select from any view; a console tune past them can). What is left out is the farthest
+   * ground, cut at one distance all round (`select`). The report's, and the console's once (`HorizonField.update`).
+   */
   overflow = 0;
+  /** Patches and skirts a walk refused for want of room. */
+  private refused = 0;
+  private skirtsRefused = 0;
+  /**
+   * The patches a walk emitted or refused, by their node's nearest point's distance squared in `REACH_BINS` shares of the
+   * reach squared (`binScale`); a second walk leaves out every node from `cutBin` on (`REACH_BINS`: none).
+   */
+  private readonly reachBins = new Int32Array(REACH_BINS);
+  private binScale = 0.5;
+  private cutBin = REACH_BINS;
   readonly perLevel = new Int32Array(LEVEL_COUNT);
   /** Wave 3b: patches of the finer levels, the 4 m level's then the 2 m level's. */
   readonly perFine = new Int32Array(2);
@@ -667,9 +688,13 @@ export class RingSelector {
   private stackJ = new Int32Array(4096);
   private stackL = new Int8Array(4096);
   private readonly box = new THREE.Box3();
-  // Wave h6a: room for the widest finer levels (a 2,048 window's 2 m level and a 4 m bake's 4 m level at their tops, about
-  // 20,000 patches in a ground view), the instance buffer 512 KB.
-  constructor(patchCap = 32768, skirtCap = 8192) {
+  // Room for every patch the settings the game offers can select all round the eye, with nothing culled: the window of 2,048
+  // at its 1.55 km, a 4 m bake and the Terrain distance at 16 km select 102,558 at the most from the ground, and 133,162 with
+  // the horizon dials' Morph share at its top of 0.6 (`horizonDirections.test.ts`), so no field of view, screen or height
+  // runs it out. Wave h6a's 32,768 held its ground view at 60 degrees, 8 km and the shipped morph (about 21,000); the owner's
+  // own view of 21 November (45 degrees on a 3,840 by 1,431 screen, 16 km, the morph at 0.6) selected 34,274, and the
+  // patches the walk came to last were dropped. The instance buffer 2.6 MB, nothing of it uploaded past the patches drawn.
+  constructor(patchCap = 163840, skirtCap = 8192) {
     this.patches = new Float32Array(patchCap * 4);
     this.skirts = new Float32Array(skirtCap * 4);
   }
@@ -681,13 +706,49 @@ export class RingSelector {
   }
 
   select(frustum: THREE.Frustum, a: RingAsk, pyr: MinMaxPyramid | null, hole: HoleGrid): number {
+    this.overflow = 0;
+    this.cutBin = REACH_BINS;
+    this.binScale = REACH_BINS / Math.max(a.reach * a.reach, 1);
+    if (!pyr) {
+      this.clearWalk();
+      return 0;
+    }
+    this.walk(frustum, a, pyr, hole);
+    if (this.refused === 0) {
+      this.overflow = this.skirtsRefused;
+      return this.patchCount;
+    }
+    // The room ran out (the owner's report of 21 November: walked by rows from the south and cut wherever the room ended, it
+    // lost the nearest ground looking south and the farthest looking north). Walked again, cut at the distance all round
+    // whose patches fit (the first walk's patches binned by their nodes' nearest points, which is what the walk culls by), so
+    // what is left out is the farthest ground, alike in every direction to a bin's width (`REACH_BINS`: 8 m at a 16 km
+    // reach's edge) and a patch's. Never at the settings the game offers; a second walk only on a frame that ran out.
+    const patches = this.patchCount + this.refused;
+    const skirts = this.skirtCount + this.skirtsRefused;
+    const cap = this.patchCap;
+    let kept = 0;
+    let b = 0;
+    while (b < REACH_BINS && kept + this.reachBins[b] <= cap) kept += this.reachBins[b++];
+    this.cutBin = b;
+    this.walk(frustum, a, pyr, hole);
+    this.overflow = patches - this.patchCount + (skirts - this.skirtCount);
+    return this.patchCount;
+  }
+
+  private clearWalk(): void {
     this.patchCount = 0;
     this.skirtCount = 0;
     this.holeLeaves = 0;
-    this.overflow = 0;
+    this.refused = 0;
+    this.skirtsRefused = 0;
     this.perLevel.fill(0);
     this.perFine.fill(0);
-    if (!pyr) return 0;
+    this.reachBins.fill(0);
+  }
+
+  /** One walk of the roots and their nodes, every node from `cutBin` on left out. */
+  private walk(frustum: THREE.Frustum, a: RingAsk, pyr: MinMaxPyramid, hole: HoleGrid): void {
+    this.clearWalk();
     const top = Math.min(a.levels - 1, pyr.levels - 1, LEVELS_MOST);
     const S = LEAF * (1 << top);
     const R = a.reach;
@@ -695,8 +756,37 @@ export class RingSelector {
     const i1 = Math.floor((a.ex + R - a.shiftX) / S);
     const j0 = Math.floor((a.ez - R - a.shiftZ) / S);
     const j1 = Math.floor((a.ez + R - a.shiftZ) / S);
-    for (let j = j0; j <= j1; j++) {
-      for (let i = i0; i <= i1; i++) {
+    // The roots are walked nearest first, in square rings round the eye's own root (the owner's report of 21 November), so
+    // the instances go to the card near to far in every direction; walked by rows from the south they went far to near
+    // looking south.
+    const ie = Math.floor((a.ex - a.shiftX) / S);
+    const je = Math.floor((a.ez - a.shiftZ) / S);
+    const rings = Math.max(ie - i0, i1 - ie, je - j0, j1 - je);
+    for (let k = 0; k <= rings; k++) {
+      // A ring of 8k roots (one at k = 0): its row at the least j, its column at the most i, its row at the most j, its
+      // column at the least i.
+      const cells = k === 0 ? 1 : 8 * k;
+      for (let t = 0; t < cells; t++) {
+        let i = ie;
+        let j = je;
+        if (k > 0) {
+          const side = (t / (2 * k)) | 0;
+          const o = t - side * 2 * k;
+          if (side === 0) {
+            i = ie - k + o;
+            j = je - k;
+          } else if (side === 1) {
+            i = ie + k;
+            j = je - k + o;
+          } else if (side === 2) {
+            i = ie + k - o;
+            j = je + k;
+          } else {
+            i = ie - k;
+            j = je + k - o;
+          }
+        }
+        if (i < i0 || i > i1 || j < j0 || j > j1) continue;
         let sp = 0;
         this.stackI[0] = i;
         this.stackJ[0] = j;
@@ -717,6 +807,10 @@ export class RingSelector {
           const hx = Math.max(x0 - a.ex, 0, a.ex - x1);
           const hz = Math.max(z0 - a.ez, 0, a.ez - z1);
           if (hx * hx + hz * hz > R * R) continue;
+          // Its nearest point's bin (`select`'s cut): past the cut, it and every node under it (none nearer) left out. An int32 by
+          // `| 0` (the distance never negative), so the emit below is handed a small integer.
+          const bin = ((hx * hx + hz * hz) * this.binScale) | 0;
+          if (bin >= this.cutBin) continue;
           // The heights its vertices take (a node finer than a leaf: its leaf's); none baked there, none drawn.
           const pl = L > 0 ? L : 0;
           const n = pyr.n >> pl;
@@ -757,7 +851,7 @@ export class RingSelector {
                 continue;
               }
             }
-            this.emitPatch(x0, z0, L);
+            this.emitPatch(x0, z0, L, bin);
             if (meets) {
               // A side on its leaf's own edge, with a standing chunk across it, takes a skirt (a leaf's every side).
               const k = L < 0 ? -L : 0;
@@ -790,7 +884,7 @@ export class RingSelector {
             if (L > ek) split = true;
           }
           if (!split) {
-            this.emitPatch(x0, z0, L);
+            this.emitPatch(x0, z0, L, bin);
             continue;
           }
           if (sp + 4 > this.stackI.length) this.growStack();
@@ -805,7 +899,6 @@ export class RingSelector {
         }
       }
     }
-    return this.patchCount;
   }
 
   private growStack(): void {
@@ -821,10 +914,12 @@ export class RingSelector {
     this.stackL = l;
   }
 
-  private emitPatch(x0: number, z0: number, L: number): void {
+  private emitPatch(x0: number, z0: number, L: number, bin: number): void {
+    // Binned whether it fits or not: the cut a second walk makes counts what the full reach selects.
+    this.reachBins[bin < REACH_BINS ? bin : REACH_BINS - 1]++;
     const k = this.patchCount;
     if (k >= this.patchCap) {
-      this.overflow++;
+      this.refused++;
       return;
     }
     const p = this.patches;
@@ -840,7 +935,7 @@ export class RingSelector {
   private emitSkirt(x0: number, z0: number, L: number, side: number): void {
     const k = this.skirtCount;
     if (k >= this.skirtCap) {
-      this.overflow++;
+      this.skirtsRefused++;
       return;
     }
     const s = this.skirts;
