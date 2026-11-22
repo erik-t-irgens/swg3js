@@ -35,6 +35,7 @@ import * as TSL from 'three/tsl';
 import { asShownFB } from './gpuGround.ts';
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { withMotionOutput } from './motion.ts';
+import { hazeOwnNode } from '../../sky/air/airHaze.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -447,7 +448,11 @@ export function particlesNode(weather: boolean): NodeMaterial {
   const hullMax = weather ? own('uHullMax', new THREE.Vector3()) : null;
   const t = map.sample(vUv);
   const c = t.mul(vColour);
-  const rgb = mix(mix(c.rgb, fogColour, vFog), c.rgb.mul(float(1).sub(vFog)), additive);
+  // Pass 2, wave 1: under our sky (read at load) a batch of the world's is hazed at its own distance by the air's own haze volume,
+  // as every see-through thing is (`src/sky/air/airHaze.ts`'s `hazeOwnNode`): a glow keeps what gets through, a smoke what gets
+  // through and the air in front of it. The weather's own variant, and SWG's sky, keep the batch's own fog as before.
+  const haze = !weather ? hazeOwnNode(c.rgb, additive) : null;
+  const rgb = haze ?? mix(mix(c.rgb, fogColour, vFog), c.rgb.mul(float(1).sub(vFog)), additive);
   let gone = c.a.lessThanEqual(k.cut);
   if (weather) {
     // Below its column's top: the nearest cell, as RoofGrid.topAt; a cell off the grid is never a roof.

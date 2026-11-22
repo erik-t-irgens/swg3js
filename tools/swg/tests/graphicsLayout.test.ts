@@ -207,8 +207,14 @@ else {
   const HORIZON = ['input:farRings', 'input:terrainDistance', 'input:groundDetailDistance', 'select:terrainShapeWindow', 'input:terrainShapeDetail'];
   const hz = HORIZON.map((id) => all.findIndex((c) => c.id === id));
   ok(hz[0] === all.findIndex((c) => c.id === 'input:farRadius') + 1 && hz[1] === hz[0] + 1 && hz[2] === hz[1] + 1 && hz[3] === hz[2] + 1 && hz[4] === hz[3] + 1, `the far ground's switch, the Terrain distance, the Ground detail distance, the Terrain shape window and the Terrain shape detail stand after the far tiles' radius (${hz.join(', ')})`);
+  // The GPU port's pass 2, wave 1 added the Sky row (ours or SWG's, WebGPU's alone) to the Picture section, after the Fog; it is
+  // held apart as the rooms' two are, and the page's reset puts it back at ours.
+  const SKY = ['select:skyAir'];
+  const sk = all.findIndex((c) => c.id === SKY[0]);
+  ok(sk >= 0 && sk === all.findIndex((c) => c.id === 'input:fog') + 1, `the Sky row stands in the Picture section after the Fog (${sk})`);
+  ok(/ skyAir=1 /.test(` ${reset?.act ?? ''} `), "the page's reset puts the sky back at ours, the default");
   // The reset's act, less the ones it now writes as well, is the reset of before.
-  const nc = all.filter((c) => !ADDED.includes(c.id) && !HORIZON.includes(c.id)).map((c) => (c.id === 'button:reset-gfx' ? { ...c, act: c.act.replace(' roomLightSpots=0 roomLightShadows=0', '').replace(' farRings=true terrainDistance=8 groundDetailDistance=2.5 terrainShapeWindow=1024 terrainShapeDetail=0.7', '') } : c));
+  const nc = all.filter((c) => !ADDED.includes(c.id) && !HORIZON.includes(c.id) && !SKY.includes(c.id)).map((c) => (c.id === 'button:reset-gfx' ? { ...c, act: c.act.replace(' roomLightSpots=0 roomLightShadows=0', '').replace(' farRings=true terrainDistance=8 groundDetailDistance=2.5 terrainShapeWindow=1024 terrainShapeDetail=0.7', '').replace(' skyAir=1', '') } : c));
   // (The rings on for everyone since 2026-11-09: the page's reset puts them on, as the defaults now stand.)
   ok(/ farRings=true /.test(reset?.act ?? ''), "the page's reset puts the far rings on, everyone's default since the owner's word");
   const added = all.filter((c) => ADDED.includes(c.id));

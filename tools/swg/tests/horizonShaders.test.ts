@@ -703,7 +703,30 @@ else {
     ],
   ];
   ok(BODIES.every(([p]) => nowSk.split(p).length === 2), "the sky bodies' lines in sky.ts are there exactly once each");
-  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), BODIES.reduce((s, [p, q]) => s.replace(p, () => q), nowSk)).replace(GPU_IMPORT, '').replace(GPU_DOME, '');
+  // The GPU port's pass 2, wave 1 (our sky): the Sky row's import, the sun pictures' switch and its use, the capture's mark on
+  // the dome's scene and the stand-in named once the air is made (`airReady`): no program's text either, so each is taken
+  // back out, every one found exactly once, and the rest must still be PRE_PASS's. (The dome's stand-in line itself sits in
+  // the port's step 3 part, which is taken out whole.)
+  const slice = (from: string, to: string) => {
+    const a = nowSk.indexOf(from);
+    const b = a >= 0 ? nowSk.indexOf(to, a) : -1;
+    return a >= 0 && b > a ? nowSk.slice(a, b) : '\u0000none';
+  };
+  const OURS: [string, string][] = [
+    ["import { skyOurs } from '../sky/skyMode.ts';\n", ''],
+    [slice("  /**\n   * Whether the sun's pictures are shown (pass 2, wave 1)", '  private constructor('), ''],
+    ['    this.sunPictures = !(GPU.webgpu && skyOurs() && !data.space);\n', ''],
+    [slice("    // The reflections' capture draws this scene: our sky's discs", '\n\n') + '\n', ''],
+    [slice("  /**\n   * Our sky's dome named its stand-in (pass 2, wave 1", '  /** How a texture wraps for its use'), ''],
+    // The night floor's night read off the ramps (the wave's fixer): a method our sky's air calls, no program's text.
+    [slice("  /**\n   * SWG's lighting at a column of its ramps (pass 2, wave 1", '  /** A ramp colour, weighted over the mix in linear light'), ''],
+    [slice("      // Pass 2, wave 1: under our sky on WebGPU the sun's pictures are retired", '      this.place(this.sun, lightDir, sunAlpha);'), ''],
+    ['      this.place(this.sun, lightDir, sunAlpha);\n', '      this.place(this.sun, lightDir, alpha);\n'],
+    ['tmpVec), sunAlpha);\n', 'tmpVec), alpha);\n'],
+  ];
+  ok(OURS.every(([p]) => nowSk.split(p).length === 2), "our sky's lines in sky.ts are there exactly once each (the Sky row's import, the sun pictures' switch, its use, the capture's mark, airReady, the night floor's ramp read)");
+  const unOurs = OURS.reduce((s, [p, q]) => s.replace(p, () => q), nowSk);
+  const unSheeted = SHEETS.reduce((s, [p, q]) => s.replace(p, q), BODIES.reduce((s, [p, q]) => s.replace(p, () => q), unOurs)).replace(GPU_IMPORT, '').replace(GPU_DOME, '');
   const back = unSheeted.replace("import { DOME_COLOUR_GLSL } from './domeColour.ts';\n", '').replace('${DOME_COLOUR_GLSL}', body).replace("'uClear' | 'uHorizonFog', THREE.IUniform>> {", "'uClear', THREE.IUniform>> {").replace("'uClear' | 'uHorizonFog', THREE.IUniform>;", "'uClear', THREE.IUniform>;").replace(W5_FIELD, '').replace(w5Parts[1], '').replace(w5Parts[2], 'o.skyDistance = SKY_RADIUS;');
   let at = 0;
   while (at < back.length && back[at] === sk[at]) at++;

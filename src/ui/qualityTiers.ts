@@ -31,7 +31,7 @@ export const START_TIER: TierName = 'high';
 export const TIER_BUDGET = { fps: 60, percentile: 95, mainMs: 1000 / 60, cardMs: 1000 / 60 } as const;
 
 /** The settings the tiers set, in the table's order. */
-export const TIER_KEYS = ['renderScale', 'smoothing', 'smoothingShare', 'shadowMapSize', 'shadowDistance', 'ssao', 'mobileCap', 'grassReach', 'floraTreeReach'] as const;
+export const TIER_KEYS = ['renderScale', 'smoothing', 'smoothingShare', 'shadowMapSize', 'shadowDistance', 'ssao', 'mobileCap', 'grassReach', 'floraTreeReach', 'hazeResolution'] as const;
 export type TierKey = (typeof TIER_KEYS)[number];
 
 /** One row: a value for each tier, Low to Ultra; `null` where a tier leaves the setting as it stands. */
@@ -65,6 +65,9 @@ export const TIER_TABLE: { readonly [K in TierKey]: Row<Settings[K]> } = {
   // so the design's 0.6x and 0.8x of that are the row's own 256 m and 320 m; past it the far tree cards stand in. No reach is
   // further than the ground, so Ultra's 1.25x is the ground's own as High's is (the grass's 1.25x is Ultra's own).
   floraTreeReach: [256, 320, 0, 0],
+  // Our sky's haze (the GPU port's pass 2, wave 1, `src/sky/air/airHaze.ts`): its terms at half size for Low, a pixel from Medium
+  // (the design's 2.2). WebGPU's alone, as the smoothing is.
+  hazeResolution: [0.5, 1, 1, 1],
 };
 
 /** The screen's own device pixels a CSS pixel, as the render scale's default reads it (1 in node). */

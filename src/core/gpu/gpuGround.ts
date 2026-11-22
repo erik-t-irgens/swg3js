@@ -50,6 +50,7 @@ import { motionPrevious, previousUniform } from './motion.ts';
 import { GPU_LOOK } from './gpuLook.ts';
 import { GPU_LOOKS } from './looks.ts';
 import { drawsInline } from './inlineOutput.ts';
+import { skyOurs } from '../../sky/skyMode.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -1106,17 +1107,25 @@ export function ringNode(u: RingUniforms, ground: GroundTileUniforms, opts: { tr
   const fogDensity = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (f.scene?.fog?.isFogExp2 === true ? (f.scene.fog.density as number) : 0));
   const hasFog = uniform(0).setGroup(renderGroup).onRenderUpdate((f: Any) => (f.scene?.fog ? 1 : 0));
   const ownOutput = m.setupOutput;
+  // Pass 2, wave 1: under our sky (the Sky row, read at load) the rings' fog path is retired: the haze pass hazes them at their
+  // own distance into the very sky behind them (`src/sky/air/airHaze.ts`), so neither the horizon fade nor the fog's cheap path
+  // is built and the sky's two pictures are bound nowhere in the ring's fragment (two of its sixteen slots freed); the console's
+  // views stand as ever. SWG's sky builds the graph of before to the node.
+  const retired = skyOurs();
   m.setupOutput = function (this: Any, builder: Any, out: Any) {
     const done = ownOutput.call(this, builder, out);
-    const dir = normalize(v.world.sub(cameraPosition));
-    const gF = smoothstep(r.eye.w.mul(float(1).sub(r.fade.x)), r.eye.w, v.dist);
-    const to = select(r.fade.z.lessThan(0.5), ringSkyN(r, dir), select(hasFog.greaterThan(0.5), fogColour, r.horizonFog));
-    const faded = select(r.fade.y.greaterThan(0.5).and(r.fade.z.lessThan(1.5)), vec4(mix(done.rgb, to, gF), done.a), done);
-    const depth = positionView.z.negate();
-    const fog = float(1).sub(exp(fogDensity.mul(fogDensity).mul(depth).mul(depth).negate()));
-    const cheapSky = select(r.fade.y.greaterThan(0.5).and(r.fade.z.lessThan(0.5)), mix(fogColour, ringSkyN(r, dir), gF), fogColour);
-    const cheap = fogDensity.greaterThan(0).and(fog.greaterThan(r.look.x)).and(r.fade.w.lessThan(0.5));
-    const shaded = select(cheap, vec4(cheapSky, 1), faded);
+    let shaded = done;
+    if (!retired) {
+      const dir = normalize(v.world.sub(cameraPosition));
+      const gF = smoothstep(r.eye.w.mul(float(1).sub(r.fade.x)), r.eye.w, v.dist);
+      const to = select(r.fade.z.lessThan(0.5), ringSkyN(r, dir), select(hasFog.greaterThan(0.5), fogColour, r.horizonFog));
+      const faded = select(r.fade.y.greaterThan(0.5).and(r.fade.z.lessThan(1.5)), vec4(mix(done.rgb, to, gF), done.a), done);
+      const depth = positionView.z.negate();
+      const fog = float(1).sub(exp(fogDensity.mul(fogDensity).mul(depth).mul(depth).negate()));
+      const cheapSky = select(r.fade.y.greaterThan(0.5).and(r.fade.z.lessThan(0.5)), mix(fogColour, ringSkyN(r, dir), gF), fogColour);
+      const cheap = fogDensity.greaterThan(0).and(fog.greaterThan(r.look.x)).and(r.fade.w.lessThan(0.5));
+      shaded = select(cheap, vec4(cheapSky, 1), faded);
+    }
     const lvl = v.level;
     const view = select(
       r.fade.w.lessThan(1.5),

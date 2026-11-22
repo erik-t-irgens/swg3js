@@ -64,6 +64,11 @@ export interface Settings extends FxSettings {
   leafShadows: string;
   /** Multiplier over the planet's own fog density. */
   fog: number;
+  /**
+   * The sky on WebGPU (the GPU port's pass 2, wave 1, `src/sky/skyMode.ts`): 1 ours (the air's sky, sun discs and haze), 0
+   * SWG's (today's sky exactly). Read once as the game loads; WebGL never reads it.
+   */
+  skyAir: number;
   /** How strongly the normal maps bend the lighting, 0 flat to 2 doubled. */
   normalStrength: number;
   /** Tone mapping exposure. */
@@ -428,6 +433,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // The owner's: no leaf takes its own tree's shadow.
   leafShadows: 'self',
   fog: 1,
+  skyAir: 1,
   normalStrength: 1,
   exposure: 1,
   objectReach: 1,

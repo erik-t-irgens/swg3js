@@ -434,6 +434,14 @@ import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
 import { DEFAULT_SETTINGS, HUD_BLOCK_ALIGNS, HUD_DPR_RANGE, HUD_FORCE_EDGES, HUD_FORCE_LOOKS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, HUD_SLOT_LINES, loadSettings, saveSettings, settingsSaved, type Settings } from './core/settings';
 import { TIER_KEYS, TIER_LABELS, isNewPlayer, screenScale, startOnTier, tierValues, type TierName } from './ui/qualityTiers.ts';
+import { readSkyMode, skyRowState, SKY_AT_LOAD } from './sky/skyMode.ts';
+import { isSkyHour, skyHourTime, sunSineAt, SKY_HOURS } from './sky/skyHours.ts';
+import { DISC_TUNE, skyDialsFor, tuneSky } from './sky/skyDials.ts';
+// Pass 2, wave 1 (maker A): the console's `air` part of `__debug.sky` (a world's visibility and steer dials).
+import { skyAirArgument } from './sky/air/airDials.ts';
+import { NIGHT_FLOOR } from './sky/air/nightFloor.ts';
+import { PAIR_TUNE } from './sky/stars.ts';
+import { AIR } from './sky/air/airApi.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -1903,6 +1911,11 @@ class App {
    * it; again by `applyHudSettings` when the switch moves.
    */
   private themeOn = applyTheme(this.settings.hudTheme);
+  /**
+   * The sky the session draws on WebGPU (pass 2, wave 1, `src/sky/skyMode.ts`): read once here, before any world is made,
+   * from the Graphics page's Sky row; WebGL reads it as SWG's and draws as it did.
+   */
+  private readonly skyRead = readSkyMode(GPU.webgpu, this.settings.skyAir);
   /**
    * The mixer. Declared after `settings`, whose value its constructor reads, and assigned at the
    * top of the constructor so anything made later can ask it to play. Its context is made
@@ -8099,8 +8112,14 @@ class App {
         else if (want) this.map.showTab(want);
         return this.map.open ? `map open on ${this.map.tabNow}` : 'map closed';
       },
-      /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
-      sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
+      /**
+       * The sky (pass 2, wave 1, `src/sky/skyHours.ts`): `sky('dawn' | 'noon' | 'dusk' | 'night')` puts the world at that hour and
+       * holds the day; `sky()` hands the day back to the shared clock; each reports the sky drawn (ours or SWG's), the air's
+       * record, its visibility and the tables' last rebuild, the haze and the discs, and the converted sky's parts.
+       * `sky({ floor, disc, pair, hours })` moves the look's dials as the debug menu's sky sliders do, and `sky('skybox')` and the
+       * like toggle a part of the converted sky (the dome, the skybox faces, the stars, space dust, the sun and star sprites).
+       */
+      sky: (o?: string | Record<string, unknown>) => (o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world') : this.skyConsole(o)),
       /**
        * Which star lights this space zone, and what stops its rays. No argument: the pick, every
        * star the zone has, and how far the zone file's own light points from the one chosen.
@@ -12709,7 +12728,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -14870,6 +14889,58 @@ class App {
   }
 
   /**
+   * `__debug.sky` (pass 2, wave 1): an hour named holds the day there (`skyHourTime` over the day's own path: a write of the
+   * time, which the day takes as held), nothing hands it back; a record moves the look's dials (`tuneSky`). Answers what the
+   * sky draws: which sky, the hour, the air's frame and its tables' report (the record, the visibility, the last rebuild),
+   * the haze's and the discs' word on WebGPU.
+   */
+  private skyConsole(o?: string | Record<string, unknown>): Record<string, unknown> {
+    const day = this.world.day;
+    const maxElevation = (day as unknown as { maxElevation: number }).maxElevation;
+    let said: string[] = [];
+    if (isSkyHour(o)) {
+      day.time = skyHourTime(o, day.swg, maxElevation);
+    } else if (o === undefined) day.release();
+    else if (o && typeof o === 'object') {
+      said = tuneSky(o);
+      // Pass 2, wave 1 (maker A): a world's air dials, `{ air: { tatooine: { visibilityKm, steer } } }` (`airDials.ts`).
+      said.push(...skyAirArgument(o.air));
+    }
+    else said = [`${String(o)}: an hour is 'dawn', 'noon', 'dusk' or 'night'`];
+    const f = AIR.frame;
+    const r3 = (v: THREE.Vector3) => [Number(v.x.toFixed(3)), Number(v.y.toFixed(3)), Number(v.z.toFixed(3))];
+    return {
+      ...(said.length ? { said } : {}),
+      sky: GPU.webgpu ? (SKY_AT_LOAD.ours ? 'ours (the air)' : "SWG's") : "SWG's (WebGL draws today's sky)",
+      read: { ...SKY_AT_LOAD },
+      hour: isSkyHour(o) ? o : o === undefined ? 'handed back to the shared clock' : null,
+      time: Number(day.time.toFixed(4)),
+      clock: day.clock(),
+      held: day.held,
+      // The sun at the time just written, from the day's own path (`sunSineAt`): the day takes a written hour up only at its
+      // next update, so its `sunDir` is a frame behind here (the review); a fixed light (space) is the day's own.
+      sunUpDeg: Number(((Math.asin(Math.max(-1, Math.min(1, day.fixed ? day.sunDir.y : sunSineAt(day.time, day.swg, maxElevation)))) * 180) / Math.PI).toFixed(2)),
+      ...(isSkyHour(o) ? { note: "the air's numbers below are the last frame's: they follow the hour at the next frame" } : {}),
+      air: {
+        on: f.on,
+        visibilityKm: Number(f.visibilityKm.toFixed(2)),
+        clearVisibilityKm: Number(f.clearVisibilityKm.toFixed(2)),
+        steer: f.steer,
+        overcast: Number(f.overcast.toFixed(3)),
+        sunDir: r3(f.sunDir),
+        sun2: f.sun2 ? r3(f.sun2Dir) : null,
+        sunHere: f.sunHere.getHexString(),
+        tables: AIR.tables ? AIR.tables.report() : 'not made (WebGL, or SWG\'s sky, or the air not yet started)',
+        // Pass 2, wave 1 (maker A): the world's air itself, its record, its fit, its twin's sums and its dials (`AirRun.report`).
+        run: this.world.skyAir ? this.world.skyAir.report() : null,
+      },
+      draws: GPU.webgpu ? GPU.rt!.airDraw.report() : null,
+      dials: { floor: { ...NIGHT_FLOOR }, disc: { ...DISC_TUNE }, pair: { ...PAIR_TUNE }, hours: { ...SKY_HOURS } },
+      parts: this.world.swgSky?.describe() ?? 'no converted sky on this world',
+    };
+  }
+
+  /**
    * What the page says beside a volumetrics knob (`Menu.knobState`): the master greys with the hatch, says "preparing
    * shaders" while its in-play warm runs, and "from the next arrival" while it is on out of a world with nothing built
    * for it yet; the prints grey on a browser that cannot blend into a float target (every footprint is then today's
@@ -14878,6 +14949,10 @@ class App {
   private volKnobState(key: string): { note?: string; off?: string; hide?: boolean } | null {
     // WebGPU's edge smoothing (pass 1, wave 6) has no row on WebGL, whose edges are the FXAA row's.
     if (!GPU.webgpu && key === 'smoothing') return { hide: true };
+    // The Sky row (pass 2, wave 1, `src/sky/skyMode.ts`): WebGPU's alone, taken at the next start of the game; and our sky's haze
+    // detail, WebGPU's and our sky's alone.
+    if (key === 'skyAir') return skyRowState(GPU.webgpu, this.settings.skyAir);
+    if (key === 'hazeResolution') return !GPU.webgpu ? { hide: true } : SKY_AT_LOAD.ours ? null : { off: "SWG's sky draws no haze of the air" };
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
     // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
     if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };
@@ -24651,6 +24726,8 @@ class App {
     // Before the scene is drawn, because the sheets are in it; the sky wrote their visibility in
     // `world.update`, so a toggle here is seen on the very frame it is made.
     this.feedClouds();
+    // Pass 2, wave 1 (maker A): the air's sky view and haze volume drawn for this camera, before its nudge and the scene's passes.
+    if (GPU.webgpu) this.world.airFrame(cam);
     // With the effects on, the passes draw into their target and the picture goes out through them.
     const postfx = this.postfx;
     // On WebGPU, where the edge smoothing draws, the camera nudged by a fraction of a pixel for the scene's passes (pass 1, wave 6).

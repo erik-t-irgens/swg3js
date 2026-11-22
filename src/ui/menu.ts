@@ -221,6 +221,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'exposure', label: 'Exposure', hint: 'How bright the picture comes out of tone mapping.', kind: 'range', min: 0.5, max: 2, step: 0.05, format: (v) => v.toFixed(2) },
       { key: 'normalStrength', label: 'Normal map strength', hint: 'How strongly the surface detail maps bend the lighting: 0 is flat, 1 as the game has them, 2 doubled.', kind: 'range', min: 0, max: 2, step: 0.05, format: (v) => v.toFixed(2) },
       { key: 'fog', label: 'Fog', hint: 'Over the planet\'s own fog: thinner shows farther, thicker hides more (and what is hidden still draws).', kind: 'range', min: 0.2, max: 3, step: 0.1, format: (v) => `${v.toFixed(1)}×` },
+      // The sky on WebGPU (pass 2, wave 1, `src/sky/skyMode.ts`): left off the page on WebGL, taken at the next start of the game.
+      { key: 'skyAir', label: 'Sky', hint: "Ours: each world's own air, worked from its numbers, draws the sky, reddens and dims the sun's disc toward the horizon, and hazes the ground out to the very sky behind it (Tatooine's two suns among them). SWG's: the sky as the game drew it, its pictures of the sun and its fog. Taken at the next start of the game.", kind: 'select', options: [{ value: 1, label: 'Ours' }, { value: 0, label: "SWG's" }] },
     ],
   },
   {

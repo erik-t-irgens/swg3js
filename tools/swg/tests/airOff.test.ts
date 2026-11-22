@@ -131,7 +131,11 @@ const store = new Map<string, string>();
   // master of the volumetrics' and on with the chain alone.
   const taaDef = newDefs.find((d) => d.id === 'taa');
   ok(!!taaDef && !taaDef.requires?.length && taaDef.toggles.length === 1 && taaDef.toggles[0] === 'effects' && !taaDef.typical, "the GPU port's edge smoothing is new too, requiring no master, on with the chain, not typical");
-  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 3 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing)');
+  // The GPU port's pass 2, wave 1 added our sky's haze (`haze`), which WebGL never registers and nor does SWG's sky: the fourth
+  // new pass, under no master of the volumetrics' and on with the chain alone, as the smoothing is.
+  const hazeDef = newDefs.find((d) => d.id === 'haze');
+  ok(!!hazeDef && !hazeDef.requires?.length && hazeDef.toggles.length === 1 && hazeDef.toggles[0] === 'effects' && !hazeDef.typical, "our sky's haze is new too, requiring no master, on with the chain, not typical");
+  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 4 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newPasses.includes('haze') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing, the fourth our sky\'s haze)');
   // W7b's `yieldsTo` (the design's §4.1 item 6c): the September row alone names it, it names the clouds alone, and the
   // decision over every combination of the September switch, the clouds' switch, the master and the effects -- with the
   // registry's own answer for whether the clouds are wanted, so nothing is stood in -- is the old chain's wherever the

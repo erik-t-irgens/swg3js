@@ -46,6 +46,18 @@ export class DayCycle {
    * that world's day and take it off the clock everybody else shares.
    */
   paused = false;
+  /**
+   * The sky's one time (the GPU port's pass 2, wave 1, the design's 2.11): the day counted unbroken, in days, its
+   * fraction always `time`. It moves with the time by the same step or ease each update, never by a whole day where the
+   * clock's day turns over (at midnight, or at the client's 06:00), so whatever reads the sky's moments in days (the
+   * moons' phases, wave 5) never jumps. Where the time is taken outright from the shared clock it is the shared clock's
+   * own unfloored count (`SharedClock.dayCountIn`), so two browsers sharing a server share it to the day; with no server
+   * it begins at the time and runs on. A time written by hand moves it the shorter way round. Any day length works: it
+   * counts days, not seconds.
+   */
+  count = 0.36;
+  /** Kept for the shared clock's count (`dayCountIn` writes it; read only where the time is taken outright). */
+  private readonly countIn = { shared: 0.5, wall: 0.5 };
   /** What the last update left, so a write from anywhere else is noticed as a write. */
   private lastTime = 0.36;
   /** The wall clock at the last update, which is how a gap in the frames is told from a slow one. */
@@ -93,7 +105,13 @@ export class DayCycle {
     // Somebody wrote the time between updates: the console, or the room air hunting for the hour
     // its doorway faces the sun. Whoever did it meant it, so the shared clock lets go until it is
     // handed back, the same bargain the weather's own console clock strikes.
-    if (this.time !== this.lastTime) this.held = true;
+    if (this.time !== this.lastTime) {
+      this.held = true;
+      // The sky's count follows a hand's write the shorter way round (`count`).
+      let d = this.time - this.lastTime;
+      d -= Math.floor(d + 0.5);
+      this.count += d;
+    }
     this.fast = fast;
     // How long the frames have been away, which is not `dt`: the loop clamps its step to a
     // twentieth of a second, so a tab hidden for two minutes comes back with a step of 0.05 and two
@@ -110,13 +128,19 @@ export class DayCycle {
     // Paused, the step is nought: the time is whatever was last written, and stays it.
     // The fast-forward key runs a whole day in `dayTune.fastDaySeconds` whatever the day's length.
     const step = this.paused ? 0 : fast ? dt / dayTune.fastDaySeconds : dt / this.dayLengthSeconds;
-    if (shared === null) this.time = (this.time + step) % 1;
-    else if (!(dt > 0) || stopped) {
+    // How far the time moved this update, in days, for the sky's unbroken count; or taken outright.
+    let advance = 0;
+    let outright = false;
+    if (shared === null) {
+      this.time = (this.time + step) % 1;
+      advance = step;
+    } else if (!(dt > 0) || stopped) {
       // No time passed, or none of it was drawn: the world is being set up behind a loading screen,
       // an arrival is asking what the sky looks like, or the frames have been away. The right
       // answer is the shared one outright -- easing it would put the wrong sky on the first frame
       // after the screen, and nobody can have seen the sun move to it.
       this.time = shared;
+      outright = true;
     } else {
       let err = shared - this.time;
       err -= Math.floor(err + 0.5);
@@ -136,8 +160,16 @@ export class DayCycle {
         move = Math.max(step * dayTune.minRate, Math.min(step * dayTune.easeMax, err));
       }
       this.time = (this.time + move) % 1;
+      advance = move;
     }
     if (this.time < 0) this.time += 1;
+    // The sky's count: its fraction the time exactly, its whole days the nearest to where it would have walked to (or,
+    // taken outright, to the shared clock's own count), so it never turns over with the clock's day.
+    if (outright) {
+      sharedClock.dayCountIn(this, this.countIn);
+      const c = this.countIn.shared;
+      this.count = this.time + Math.round((c === c ? c : this.count) - this.time);
+    } else this.count = this.time + Math.round(this.count + advance - this.time);
     this.lastTime = this.time;
     this.tellNote();
     const a = (this.time - 0.25) * Math.PI * 2;

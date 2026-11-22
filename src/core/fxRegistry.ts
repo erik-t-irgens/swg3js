@@ -63,6 +63,11 @@ export interface FxSettings {
    * 2 upscaled (the scene drawn at a share of it and filled out over frames). WebGL never reads it.
    */
   smoothing: number;
+  /**
+   * Our sky's haze on WebGPU (the GPU port's pass 2, wave 1, `src/sky/air/airHaze.ts`): 1 the air's terms worked out a pixel, 0.5
+   * worked out at half size and laid on a pixel (the Low tier's). WebGL never reads it.
+   */
+  hazeResolution: number;
   filmGrain: boolean;
   filmGrainStrength: number;
   vignette: boolean;
@@ -106,6 +111,7 @@ export type FxPassId =
   | 'bladeGlow'
   | 'waterReflections'
   | 'heatHaze'
+  | 'haze'
   | 'lightShafts'
   | 'volumetricClouds'
   | 'airClouds'
@@ -247,6 +253,7 @@ export const FX_DEFAULTS: FxSettings = {
   fxaa: true,
   // Full: the design's High tier, which new players start on (the owner's answer to question 3).
   smoothing: 1,
+  hazeResolution: 1,
   filmGrain: false,
   filmGrainStrength: 0.3,
   vignette: true,
@@ -320,6 +327,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'fxaa', pass: 'fxaa', label: 'Edge smoothing', kind: 'toggle', requires: ['effects'], hint: 'Smooths the stepped edges at the end of the chain. The effects path cannot multisample, so this is what stands in for it.' },
   // WebGPU's (the GPU port's pass 1, wave 6): its row is hidden on WebGL, where the edges are FXAA's above.
   { key: 'smoothing', pass: 'taa', label: 'Smoothing', kind: 'select', options: [{ value: 0, label: 'Off' }, { value: 1, label: 'Full' }, { value: 2, label: 'Upscaled' }], requires: ['effects'], hint: 'Edges smoothed over frames: each frame is drawn from a camera nudged by a fraction of a pixel and gathered into the last, so fences, wires and fronds stand still and smooth. Full draws the scene at the screen\'s own size; Upscaled draws it at about 70% and fills the screen out over frames, which is faster and a little softer. Off shows each frame as it is drawn.' },
+  // Our sky's haze on WebGPU (the GPU port's pass 2, wave 1): its terms a pixel or at half size, the Low tier's (`qualityTiers.ts`).
+  { key: 'hazeResolution', pass: 'haze', label: 'Haze detail', kind: 'select', options: [{ value: 0.5, label: 'Half' }, { value: 1, label: 'Full' }], requires: ['effects'], hint: "How finely the air between you and the ground is worked out under our sky: Full a pixel at a time; Half for each two by two of them, each pixel taking the nearest of four at its own distance, which is cheaper and all but the same. WebGPU's alone." },
   { key: 'filmGrain', pass: 'grainVignette', label: 'Film grain', kind: 'toggle', requires: ['effects'], hint: 'A fine grain that changes 24 times a second, strongest in the mid-tones; blacks and whites stay clean.' },
   { key: 'filmGrainStrength', pass: 'grainVignette', label: 'Film grain strength', kind: 'range', min: 0, max: 1, step: 0.05, format: two, requires: ['effects', 'filmGrain'], hint: '0.2 fine, 0.5 film, 1 coarse.' },
   { key: 'vignette', pass: 'grainVignette', label: 'Vignette', kind: 'toggle', requires: ['effects'], hint: 'The picture’s corners a little darker, as through a lens; a touch more while aiming.' },
@@ -351,6 +360,10 @@ export const FX_PASSES: readonly FxPassDef[] = [
   { id: 'bladeGlow', stage: 'scene', toggles: ['bladeGlow'], required: false, needs: [], budgetMs: 0.15, typical: false, canBeLast: false, live: true, why: 'Direct light added to surfaces: after SSAO, since ambient occlusion does not darken a direct light; before water reflections, heat haze, rays, depth of field, motion blur and bloom, so the pool is reflected, bent, blurred and bloomed like any lit surface. It reads the full-resolution scene depth itself, so it asks for no product.' },
   { id: 'waterReflections', stage: 'scene', toggles: ['waterReflections'], required: false, needs: ['linearDepthHalf', 'waterMask'], budgetMs: 0.6, typical: false, canBeLast: false, live: true, why: 'Adds reflected scene light on water pixels. After occlusion so the reflected ground carries it, before the lens so reflections shimmer, defocus, smear and bloom like anything seen directly.' },
   { id: 'heatHaze', stage: 'scene', toggles: ['heatHaze'], required: false, needs: ['heat', 'linearDepthHalf'], budgetMs: 0.16, typical: false, canBeLast: false, live: true, why: 'Displaces what the surfaces look like, so it follows every surface pass; before the atmosphere and the lens, since the air and the glass sit between the heat and the eye.' },
+  // Our sky's haze on WebGPU (the GPU port's pass 2, wave 1: `src/sky/air/airHaze.ts`); WebGL never registers it, and nor does
+  // SWG's sky, so their chains and their typical frames are as they were. On with the chain while the scene target carries the
+  // see-through layer it composites.
+  { id: 'haze', stage: 'scene', toggles: ['effects'], required: false, needs: [], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: "The air between the eye and every solid pixel, from the air's own haze volume to 24 km and its sky view past it: each keeps what gets through the air and gains what the air adds, and what is drawn in front of it (smoke, fire, glass, water), which hazed itself at its own distance, is laid back over it from the see-through layer. After the surfaces (occlusion, blade light, reflections, the heat), so the air hazes what they settled; before the clouds, the dust, the rays and the edge smoothing, so they are composited over the hazed ground and smoothed with it. Not typical: WebGPU's alone, and our sky's." },
   { id: 'lightShafts', stage: 'scene', toggles: ['lightShafts'], required: false, needs: ['linearDepthHalf', 'normalsHalf'], budgetMs: 0.3, typical: false, canBeLast: false, live: true, why: 'Daylight scattered in the air of the room the camera is in, from its doorways, the sunlit patch where it lands, and the glow around the room\'s lamps. Evaluated per pixel along the view ray and stopped by the scene depth, which scene meshes cannot read. Atmosphere: after the surface passes (SSAO has darkened the corners the patch lands among), before god rays, depth of field, motion blur and bloom, so the beams defocus, smear and bloom with the room.' },
   { id: 'volumetricClouds', stage: 'scene', toggles: ['volumetricClouds'], yieldsTo: ['airClouds'], required: false, needs: ['linearDepthHalf'], budgetMs: 6, typical: false, canBeLast: false, live: true, why: 'Cloud the sky is really made of rather than a sheet drawn across it: a raymarch through a slab overhead, lit by the very sun, ambient and haze the rest of the scene is lit by, which is how each world keeps its own colour with no table of its own. After the surface passes, so occlusion, blade light and reflections have already settled what the surfaces are, and after the heat, since the air sits between the heat and the eye; before the god rays, so the sky they are drawn from is the cloudy one and a broken deck makes shafts by itself; before depth of field, motion blur, bloom and the grade, so the clouds defocus, smear, spill and are graded with the picture. It marches at a fraction of the screen and comes back through a depth-aware upsample, since a plain one haloes every ridge. By far the most expensive pass here, which is why it is off by default and has a quality of its own.' },
   // The seventh wave's clouds: under the master (`requires`), the September pass yielding to them while they are wanted;

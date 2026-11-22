@@ -1,6 +1,12 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import { GPU, type GpuSun } from '../core/gpuSwitch.ts';
+// Pass 2, wave 1, what draws from the air (maker B): the Sky row read at load, and the air's frame record (pure; no WebGPU build).
+import { skyOurs } from '../sky/skyMode.ts';
+import { AIR } from '../sky/air/airApi.ts';
+import { applyNightFloor } from '../sky/air/nightFloor.ts';
+// Pass 2, wave 1, the air itself (maker A): the world's rows, its twin and its tables (pure; the tables' WebGPU module is a dynamic import inside).
+import { AirRun } from '../sky/air/airRun.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
@@ -2580,6 +2586,8 @@ export class World {
       }
       if (token !== this.loadToken) return null;
     }
+    // Pass 2, wave 1 (maker A): the air's fit, which has been working since its sky loaded, landed before the screen lifts.
+    if (GPU.webgpu && this.skyAir && !(await this.awaitAirFit(token))) return null;
     if (planet.id === 'gallery' && layout) {
       this.gallery?.dispose();
       this.gallery = new Gallery(this.scene, pack.url(''), layout.center, (x, z) => this.terrain.heightAt(x, z));
@@ -3664,8 +3672,10 @@ export class World {
     this.scene.add(sky.group, sky.cloudGroup);
     markActor(sky.group);
     markActor(sky.cloudGroup);
-    // On WebGPU the sky and its reflection capture are built as it is hung, before a frame meets them (`gpuSkyReady`).
-    if (GPU.webgpu) this.gpuSkyReady(sky);
+    // On WebGPU the sky and its reflection capture are built as it is hung, before a frame meets them (`gpuSkyReady`). Pass 2,
+    // wave 1: under our sky over a planet that waits for the air's tables below, since the dome is drawn from them (`airSky.ts`).
+    const airSky = GPU.webgpu && skyOurs() && !sky.data.space;
+    if (GPU.webgpu && !airSky) this.gpuSkyReady(sky);
     this.sky.visible = false;
     this.day.swg = true;
     this.day.fixed = sky.spaceLightDir;
@@ -3676,6 +3686,17 @@ export class World {
     // so the warm-up that follows compiles them and the first frame shows the area's own sky.
     await this.weather.attach({ pack, sky, terrain: this.terrain, planet: this.planet, packId: this.packId, renderer: this.renderer, at: spawn });
     if (token !== this.loadToken) return;
+    // Pass 2, wave 1 (maker A): under our sky on WebGPU the world's air -- its rows fitted by the fit's worker, the twin and
+    // the card's tables -- made, fitted and warmed here, behind the loading screen (`src/sky/air/airRun.ts`).
+    if (GPU.webgpu && skyOurs() && !sky.data.space) await this.loadAir(sky, pack, token);
+    if (token !== this.loadToken) return;
+    // Pass 2, wave 1 (maker B): the air's tables made, the scene's fog nodes become the haze's the first time (once a session,
+    // behind this screen and before its sweep: three keys every render object on them), and our sky is built as it is hung.
+    if (airSky) {
+      this.setHazeFog();
+      sky.airReady();
+      this.gpuSkyReady(sky);
+    }
     console.info(`sky: ${sky.data.blocks.length} environment blocks, ${sky.hasGradient ? 'gradient sky' : sky.data.skybox ? 'skybox' : 'clear colour'}, ${sky.data.sun ? 'sun' : 'no sun'}, ${sky.data.moon ? 'moon' : 'no moon'}, ${sky.data.stars?.count ?? 0} stars, reflections from ${sky.environment.day ? 'the planet cube maps' : 'the sky'}`);
   }
 
@@ -3725,6 +3746,35 @@ export class World {
   /** What a world of yours' sky in parts could not take (`skyMixFor`), for `__debug.worlds()`. */
   skySaid: string[] = [];
 
+  /**
+   * The world's air under our sky on WebGPU (pass 2, wave 1, maker A: `src/sky/air/airRun.ts`), null on WebGL, under SWG's
+   * sky, in space and between worlds. (`air` is the volumetrics' moving air, another thing.)
+   */
+  skyAir: AirRun | null = null;
+
+  /**
+   * The air made for this sky: its rows asked of the fit's worker, which works while the rest of the arrival loads
+   * (`awaitAirFit` waits on it at the arrival's end), and the card's tables made and warmed for the camera.
+   */
+  private async loadAir(sky: SwgSky, pack: AssetPack, token: number): Promise<void> {
+    this.skyAir?.dispose();
+    const run = new AirRun(this.planet.id, sky.data, (file) => pack.url(file));
+    this.skyAir = run;
+    run.ask();
+    if (this.camera) await run.attachTables(this.camera);
+  }
+
+  /** The arrival's last wait on the air (pass 2, wave 1, maker A): its rows' fit landed (bounded), so the first frame shown is the fitted sky's. */
+  private async awaitAirFit(token: number): Promise<boolean> {
+    if (this.skyAir) await this.skyAir.ready();
+    return token === this.loadToken;
+  }
+
+  /** Once a game frame on WebGPU, after the camera is placed and before the scene's passes: the air's sky view and haze drawn for it. */
+  airFrame(camera: THREE.PerspectiveCamera): void {
+    this.skyAir?.drawTables(camera);
+  }
+
   private dropSky(): void {
     // The clouds' borrowed pictures let go before the sky that owns them is disposed (W4's rule for borrowed textures): a
     // disposed picture still bound would be uploaded again at the next draw. Only once the clouds have been made.
@@ -3733,6 +3783,8 @@ export class World {
       this.swgSky.dispose(this.scene, (m) => this.forgetMaterials(m));
       this.swgSky = null;
     }
+    // Pass 2, wave 1 (maker A): the air goes with its sky.
+    if (GPU.webgpu && this.skyAir) this.skyAir = this.skyAir.dispose();
     this.skyPack = null;
     this.sky.visible = true;
     this.day.swg = false;
@@ -4986,6 +5038,10 @@ export class World {
 
   /** Lights, fog and clear colour straight from the sky's colour ramps for this moment. */
   private applySwgLighting(L: SkyLighting, playerPos: THREE.Vector3): void {
+    // Pass 2, wave 1: under our sky the night floor (until wave 2's eye) holds the lights the air wrote at no less than SWG's own
+    // of the hour times its share by night, and at no less than today's night brightness through the twilight
+    // (`src/sky/air/nightFloor.ts`); by day, and under SWG's sky, nothing changes.
+    if (GPU.webgpu && AIR.frame.on) applyNightFloor(L, AIR.swg, AIR.swgNight, this.day.sunDir);
     this.sun.color.copy(L.main);
     this.sun.intensity = SWG_MAIN_LIGHT * L.mainScale;
     // A storm row that turns shadows off fades them through the cascades' intensity (never a light,
@@ -5012,12 +5068,19 @@ export class World {
     // The client's fill light sits 45 degrees up on the far side from the main light.
     const d = this.day.lightDir;
     const h = Math.hypot(d.x, d.z) || 1;
-    this.fill.position.set(playerPos.x - (d.x / h) * 140, playerPos.y + 140, playerPos.z - (d.z / h) * 140);
+    // Pass 2, wave 1: under our sky on a world of two suns (Tatooine) the fill is the second sun, from its own direction
+    // (`src/sky/stars.ts`'s pair rule, `AIR.frame.sun2Dir`), unshadowed, while it is over the horizon; else where it always sat.
+    const f2 = AIR.frame;
+    if (GPU.webgpu && f2.on && f2.sun2 && f2.sun2Dir.y > 0) this.fill.position.set(playerPos.x + f2.sun2Dir.x * 200, playerPos.y + f2.sun2Dir.y * 200, playerPos.z + f2.sun2Dir.z * 200);
+    else this.fill.position.set(playerPos.x - (d.x / h) * 140, playerPos.y + 140, playerPos.z - (d.z / h) * 140);
     this.fill.target.position.copy(playerPos);
     const fog = this.scene.fog as THREE.FogExp2;
     fog.color.copy(L.fog);
     // The client's fog is Direct3D's EXP2, the same curve as three's, so the density carries over as is.
-    fog.density = L.fogDensity * this.fogScale * this.userFog;
+    // Pass 2, wave 1 (maker A): under our sky the air's own fog-equivalent per metre (`AirRun.frame`), which the planet's
+    // short-view scale does not touch; the fog object is then read only by the rain and the particles (the haze is the node's).
+    if (GPU.webgpu && this.skyAir) fog.density = L.fogDensity * this.userFog;
+    else fog.density = L.fogDensity * this.fogScale * this.userFog;
     // The leaf cards' light (`cardLight.ts`): the ramp's rows for them, the sun's direction toward it, and each
     // cascade's own depth range, which their crown's skip is converted by in that cascade's lookup (the far map's range
     // is the longer one since `farDepth` 'whole'). Written into existing arrays and vectors; nothing allocated.
@@ -6728,6 +6791,21 @@ export class World {
   }
 
   /**
+   * Our sky's fog nodes set (pass 2, wave 1, `src/sky/air/airHaze.ts`): the world scene's the haze's, the rooms' pass's one of
+   * no haze. Each is one node for the session, set the first time the air's tables exist (they are the session's: a world's
+   * air made behind its loading screen, before that screen's sweep builds the world) and never moved after, since three keys
+   * every render object on the scene's fog node; asked after every air is made and when the portals are attached, it sets
+   * only what is not set, and nothing before the tables are made (a node built before them would read no air for good).
+   */
+  private setHazeFog(): void {
+    if (!AIR.tables) return;
+    const s = this.scene as unknown as { fogNode?: unknown };
+    if (s.fogNode === undefined || s.fogNode === null) s.fogNode = GPU.rt!.airDraw.fogNode();
+    const rooms = this.portals?.passScenes.rooms as unknown as { fogNode?: unknown } | undefined;
+    if (rooms && (rooms.fogNode === undefined || rooms.fogNode === null)) rooms.fogNode = GPU.rt!.airDraw.roomsFogNode();
+  }
+
+  /**
    * Cascaded shadow maps: three cascades that follow the camera out to SHADOW_DISTANCE instead
    * of one 280 m box around the player. Every lit material must be set up for it, so materials
    * are scanned as objects appear.
@@ -6746,6 +6824,8 @@ export class World {
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
+    // Pass 2, wave 1: under our sky the rooms' pass draws through a fog node of no haze (the rooms take none this pass).
+    if (GPU.webgpu && skyOurs()) this.setHazeFog();
     // On WebGPU (the GPU port's step 3) the region tiers' render bundles hang under a root of their own, one of those parents.
     if (GPU.webgpu) GPU.rt!.bundles.attach(this.scene, portals.narrowParents);
     // Round every shadow pass (the sixth wave): the batches follow their sources and take over their casting for the
@@ -11447,7 +11527,16 @@ export class World {
         writeWindDay(this.day.time, this.day.dayLengthSeconds, this.windDayCount.shared);
       }
       this.weather.update(dt, playerPos, this.weatherWorld);
-      this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
+      if (GPU.webgpu && this.skyAir) {
+        // Pass 2, wave 1 (maker A): under our sky the air's twin writes the lighting fields after keeping SWG's own of the
+        // hour (`AirRun.frame`), and the world turns them into lights as ever.
+        const L = this.swgSky.update(this.day, camPos, dt);
+        // Its two numbers written into its fields first (a number handed across a call is a number made).
+        this.skyAir.heightM = camPos.y;
+        this.skyAir.overcast = this.weather.state.enabled ? this.weather.fx.overcast : 0;
+        this.skyAir.frame(this.day, this.swgSky, L);
+        this.applySwgLighting(L, playerPos);
+      } else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
     } else this.applyLighting();
     perf.end(SEC.sky);

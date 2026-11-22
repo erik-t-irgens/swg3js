@@ -40,6 +40,8 @@ import { BlendMode, Node } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { isStill } from './stillMark.ts';
 import { unjitteredProjection } from './taa/taaJitter.ts';
+import { SEE_NAME, seeBlendOf, seeOutputs } from '../../sky/air/airSee.ts';
+import type { SeeKind } from '../../sky/air/airHazeMath.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -534,9 +536,10 @@ const AS_MATERIAL: Any = new BlendMode(THREE.MaterialBlending);
 
 /**
  * Whether the pipeline three is making now is a see-through material's (`patchMotion.ts`'s wrap of
- * `WebGPUPipelineUtils.createRenderPipeline`, set for the synchronous part of the call in which three reads each output's blend).
+ * `WebGPUPipelineUtils.createRenderPipeline`, set for the synchronous part of the call in which three reads each output's blend),
+ * and how it goes into our sky's see-through layer (pass 2, wave 1, `src/sky/air/airSee.ts`).
  */
-export const PIPELINE_NOW = { seeThrough: false };
+export const PIPELINE_NOW = { seeThrough: false, see: 'solid' as SeeKind };
 
 /** The renderer's multi-output node while a motion target is drawn into: made once (`motionMrt`). */
 let MRT_NODE: Any = null;
@@ -548,12 +551,18 @@ let MRT_NODE: Any = null;
  */
 export function motionMrt(): Any {
   if (MRT_NODE) return MRT_NODE;
-  const node = mrt({ motion: new MotionNode() }) as Any;
+  // Pass 2, wave 1: our sky's see-through layer rides this node (`airSee.ts`): the colour target's own entry and the layer's,
+  // each inert into a target that carries no layer (SWG's sky, the motion off), where the colour is drawn exactly as before.
+  const node = mrt({ motion: new MotionNode(), ...seeOutputs(SCENE_COLOUR_NAME) }) as Any;
   node.setClearColor('motion', 0x000000, 0);
-  node.getBlendMode = (name: string): Any => (name === 'motion' ? (PIPELINE_NOW.seeThrough ? KEEP_BEHIND : OVERWRITE) : AS_MATERIAL);
+  node.setClearColor(SEE_NAME, 0x000000, 1);
+  node.getBlendMode = (name: string): Any => (name === 'motion' ? (PIPELINE_NOW.seeThrough ? KEEP_BEHIND : OVERWRITE) : name === SEE_NAME ? seeBlendOf(PIPELINE_NOW.see) : AS_MATERIAL);
   MRT_NODE = node;
   return node;
 }
+
+/** The scene target's colour texture's name (`PostFX` names it), the entry three merges the renderer's node over. */
+const SCENE_COLOUR_NAME = 'fx.scene';
 
 /** The blends the pipeline reads, for the node test. */
 export const MOTION_BLENDS = { keepBehind: KEEP_BEHIND, overwrite: OVERWRITE, asMaterial: AS_MATERIAL };

@@ -75,6 +75,8 @@ const SCREENS = [1, 1.25, 1.5, 1.75, 2, 2.5, 3];
   const offGrid = [...n('mobileCap').filter((v) => !inRange(v, 5, 150, 5)).map((v) => `people cap ${v}`), ...n('grassReach').filter((v) => !inRange(v, 0.5, 3, 0.1)).map((v) => `grass ${v}x`)];
   if (offGrid.length) console.log(`note between the steps of their own rows' sliders: ${offGrid.join(', ')}`);
   ok(n('floraTreeReach').every((v) => FLORA_RANGES.floraTreeReach.options.includes(v)), "the tree reaches are the Tree distance row's own options");
+  // The GPU port's pass 2, wave 1: our sky's haze at half size for Low, a pixel from Medium (the Haze detail row's own two).
+  ok(n('hazeResolution').every((v) => v === 0.5 || v === 1), "the haze's detail is the Haze detail row's own (Half 0.5 or Full 1)");
   // The upscaled tiers carry a share and the full ones leave it.
   const up = TIER_TABLE.smoothing.map((v) => v === 2);
   ok(TIER_TABLE.smoothingShare.every((v, i) => (v !== null) === up[i]), 'a share for exactly the tiers that draw upscaled');
@@ -90,6 +92,8 @@ const SCREENS = [1, 1.25, 1.5, 1.75, 2, 2.5, 3];
     mobileCap: [24, 32, 40, 60],
     grassReach: [0.6, 0.8, 1, 1.25],
     floraTreeReach: [256, 320, 0, 0],
+    // The design's 2.2 (pass 2): half resolution on Low, full from Medium.
+    hazeResolution: [0.5, 1, 1, 1],
   };
   for (const k of TIER_KEYS) ok(JSON.stringify(TIER_TABLE[k]) === JSON.stringify(want[k]), `${k} starts as the design has it (${JSON.stringify(want[k])})`);
   // High is the game's own defaults, the render scale and the unused share aside.
@@ -120,7 +124,7 @@ const settingsAt = (tier: (typeof TIER_NAMES)[number], dpr: number, base: S = DE
     ok(new Set(sets).size === 4, `at ${dpr} no two tiers stand alike`);
   }
   // Any one setting moved off a tier reads Custom; for the share, only where the tier draws upscaled.
-  const nudge = (k: string, v: unknown): unknown => (typeof v === 'boolean' ? !v : k === 'shadowMapSize' ? (v === 4096 ? 1024 : 4096) : k === 'floraTreeReach' ? (v === 192 ? 128 : 192) : k === 'smoothing' ? (v === 1 ? 0 : 1) : (v as number) + 0.05);
+  const nudge = (k: string, v: unknown): unknown => (typeof v === 'boolean' ? !v : k === 'shadowMapSize' ? (v === 4096 ? 1024 : 4096) : k === 'floraTreeReach' ? (v === 192 ? 128 : 192) : k === 'smoothing' ? (v === 1 ? 0 : 1) : k === 'hazeResolution' ? (v === 1 ? 0.5 : 1) : (v as number) + 0.05);
   for (const t of TIER_NAMES) {
     for (const k of TIER_KEYS) {
       for (const dpr of [1, 2]) {

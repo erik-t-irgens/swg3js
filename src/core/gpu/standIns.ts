@@ -20,6 +20,7 @@ import { bladeNode, lavaNode, marksNode, particlesNode, tunnelNode } from './gpu
 import { LOOKS_AT_LOAD } from './looks.ts';
 import { HeldLightingModel } from './gpuLightHold.ts';
 import { markMotion, withMotionOutput } from './motion.ts';
+import { airSkyMaterial } from '../../sky/air/airSky.ts';
 
 /**
  * A program of step 5's left out at load (`localStorage['swg.gpu.<part>'] = '0'`): step 3's way, nothing drawn. Every vertex
@@ -59,6 +60,10 @@ export function makeStandIns(): GpuStandIns {
       m.colorNode = mix(colour(horizon), colour(zenith), smoothstep(float(0), up, elev));
       // Pass 1, wave 5: its motion is the camera's turn alone (`motion.ts`).
       return markMotion(m, 'sky');
+    },
+    airSky(planet, horizon, zenith) {
+      // Pass 2, wave 1: our sky (`src/sky/air/airSky.ts`), its motion the camera's turn alone too.
+      return airSkyMaterial(planet, horizon, zenith);
     },
     lava(c) {
       // Step 5: the client's lava itself (`gpuPrograms.ts`), unless its part was left out at load.

@@ -41,6 +41,9 @@ import { markMotionTarget, motionTextureOf, motionWanted, MOTION_VIEW } from './
 import { GpuTaaPass, taaPassNow } from './taa/taaPass.ts';
 import { SCENE_SIZE, sceneSizeFor } from './taa/taaSize.ts';
 import { JITTER } from './taa/taaJitter.ts';
+import { skyOurs } from '../../sky/skyMode.ts';
+import { markSeeTarget } from '../../sky/air/airSee.ts';
+import { GpuHazePass } from '../../sky/air/airHaze.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -375,6 +378,8 @@ function taaEdges(): Record<string, unknown> {
 export const CHAIN_PASSES: ReadonlyMap<FxPassId, keyof typeof LOOKS_AT_LOAD | null> = new Map<FxPassId, keyof typeof LOOKS_AT_LOAD | null>([
   ['sanitize', null],
   ['ssao', 'ssao'],
+  // Pass 2, wave 1: our sky's haze (`src/sky/air/airHaze.ts`), the spine's own under our sky (the Sky row, read at load).
+  ['haze', null],
   // Pass 1, wave 6: the edge smoothing (`taa/`), the spine's own once the motion buffer is: no switch at load of its own.
   ['taa', null],
   ['bloom', 'bloom'],
@@ -413,8 +418,12 @@ export function chainRuntime(renderer: Any): GpuChain {
       // The WebGL path's own target, and with the motion on (pass 1, wave 5: `motion.ts`) a second half-float output beside its
       // colour, which every draw into it writes (motion in red and green, the reactive mark in alpha): 8 bytes a pixel more.
       const motion = motionWanted();
-      const t = new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth, ...(motion ? { count: 2 } : {}) });
+      // Pass 2, wave 1: under our sky a third half-float output, the see-through layer the haze pass composites (`airSee.ts`),
+      // riding the motion's multi-output node: 8 bytes a pixel more. SWG's sky, or the motion off, makes the target of before.
+      const see = motion && skyOurs();
+      const t = new THREE.WebGLRenderTarget(width, height, { type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 0, depthTexture: depth, ...(motion ? { count: see ? 3 : 2 } : {}) });
       if (motion) markMotionTarget(t);
+      if (see) markSeeTarget(t);
       return t;
     },
     spine(fx: PostFX, width: number, height: number, settings: FxSettings): void {
@@ -428,6 +437,9 @@ export function chainRuntime(renderer: Any): GpuChain {
       s.fx = fx;
       LIVE.push(fx);
       fx.registerPass(s);
+      // Pass 2, wave 1: our sky's haze, after the surfaces and before the edge smoothing (the registry's place), over this chain's
+      // scene target and its see-through layer; SWG's sky registers none, and its chain is the one it was.
+      if (skyOurs()) fx.registerPass(new GpuHazePass(renderer, fx.sceneTarget, settings));
       // Pass 1, wave 6: the edge smoothing, after the occlusion and before the bloom (the registry's place), over this chain's scene target.
       fx.registerPass(new GpuTaaPass(renderer, fx.sceneTarget, settings));
       if (CHAIN_PORTED.has('bloom')) fx.registerPass(new GpuBloomPass(width, height, settings.bloomStrength));

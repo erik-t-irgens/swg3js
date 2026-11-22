@@ -70,6 +70,9 @@ export class PassScenes {
     // Never transformed: a proxy's own matrix stays the identity its children's parent (the real scene) has.
     this.shadow.name = 'the shadow pass';
     this.rooms.name = 'the rooms passes';
+    // The rooms' scene known to a graph by the scene three draws (pass 2, wave 1: our sky's see-through layer marks a room's
+    // solid pixels by it, `src/sky/air/airSee.ts`). Never read on WebGL, and in no program's key.
+    this.rooms.userData.swgRoomsPass = true;
   }
 
   /**

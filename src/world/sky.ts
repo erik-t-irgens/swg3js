@@ -9,6 +9,7 @@ import { CARD_ROWS, readCardRows, type CardSkyRows, type RampRead } from './card
 import { DOME_COLOUR_GLSL } from './domeColour.ts';
 import { GPU } from '../core/gpuSwitch.ts';
 import { makeSkyBody, turnSkyBody, type SkyBody } from './skyBodies.ts';
+import { skyOurs } from '../sky/skyMode.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -512,12 +513,19 @@ export class SwgSky {
     return !!f && this.textures.has(f);
   }
 
+  /**
+   * Whether the sun's pictures are shown (pass 2, wave 1): always but under our sky on WebGPU over a planet, where the air
+   * draws each star as a disc (`airSky.ts`) and the pictures are retired. Fixed for the sky's life (the Sky row is read at load).
+   */
+  private readonly sunPictures: boolean;
+
   private constructor(
     readonly data: SkyData,
     private readonly textures: Map<string, THREE.Texture>,
     private readonly pack: AssetPack,
     failed: Set<string>,
   ) {
+    this.sunPictures = !(GPU.webgpu && skyOurs() && !data.space);
     this.failedTextures = failed;
     this.flareSkyDistance = SKY_RADIUS;
     this.defaultBlock = data.blocks.find((b) => b.weatherIndex === 0) ?? data.blocks[0] ?? EMPTY_BLOCK;
@@ -566,10 +574,16 @@ export class SwgSky {
     // view's elevation, both read live from the very colours the hour writes (`src/core/gpu/standIns.ts`).
     if (GPU.webgpu) {
       const du = this.dome.material.uniforms;
-      this.dome.material.userData.gpuStandIn = () => GPU.rt!.standIns.sky(du.uHorizonFog.value as THREE.Color, du.uClear.value as THREE.Color);
+      // Pass 2, wave 1: under our sky (the Sky row, read at load) over a planet the dome's stand-in is the air's sky view and the
+      // world's sun discs (`src/sky/air/airSky.ts`), named only once the air's tables are made (`airReady`): until then the dome
+      // is a program three cannot draw and has no stand-in for, which the fallback steps over unbuilt, so a frame drawn behind
+      // the loading screen before the air is made cannot build the dome without it. A space zone keeps its stand-in.
+      if (!(skyOurs() && !data.space)) this.dome.material.userData.gpuStandIn = () => GPU.rt!.standIns.sky(du.uHorizonFog.value as THREE.Color, du.uClear.value as THREE.Color);
     }
     this.group.add(this.dome);
     this.domeScene.add(new THREE.Mesh(this.dome.geometry, this.dome.material));
+    // The reflections' capture draws this scene: our sky's discs are left out of it (`airSky.ts`); nothing reads it on WebGL.
+    this.domeScene.userData.swgSkyCapture = true;
 
     // A six-sided skybox: the client's quads, mirrored in X like every converted mesh.
     if (data.skybox?.sides) {
@@ -853,6 +867,18 @@ export class SwgSky {
     cloud(1);
   }
 
+  /**
+   * Our sky's dome named its stand-in (pass 2, wave 1, WebGPU under our sky over a planet): the air's sky view and the world's
+   * sun discs once the air's tables are made (`airSky.ts` reads them as it builds), else today's stand-in. The world calls it
+   * once, after the air is made behind the loading screen and before it builds the sky (`World.loadSky`). Nothing on WebGL.
+   */
+  airReady(): void {
+    if (!GPU.webgpu || this.data.space || typeof this.dome.material.userData.gpuStandIn === 'function') return;
+    const du = this.dome.material.uniforms;
+    const planet = this.data.planet;
+    this.dome.material.userData.gpuStandIn = () => GPU.rt!.standIns.airSky(planet, du.uHorizonFog.value as THREE.Color, du.uClear.value as THREE.Color);
+  }
+
   /** How a texture wraps for its use: a gradient's columns wrap with the day and its rows must not; clouds tile. */
   private static applyUse(t: THREE.Texture, use: TextureUse): void {
     if (use === 'gradient') {
@@ -1076,6 +1102,23 @@ export class SwgSky {
     alpha: (row, index, fallback) => this.rampAlpha(row, index, fallback),
   };
 
+  /**
+   * SWG's lighting at a column of its ramps (pass 2, wave 1, the night floor's night: `nightFloor.ts`), for the mix in force,
+   * into `out`: the very reads `update` makes for the four lights and the fog's colour, at `index` rather than the day's own.
+   * Called by our sky's air on WebGPU alone (`AirRun`), as its mix moves; nothing of the sky's own state is moved.
+   */
+  lightingAt(index: number, out: { main: THREE.Color; mainScale: number; ambient: THREE.Color; ambientScale: number; fill: THREE.Color; fillScale: number; bounce: THREE.Color; bounceScale: number; fog: THREE.Color }): void {
+    this.rampColor(this.ambientRow, index, out.ambient, 0.3);
+    out.ambientScale = this.rampScale(this.ambientRow, index);
+    this.rampColor(Row.MainDiffuse, index, out.main, 1);
+    out.mainScale = this.rampScale(Row.MainDiffuse, index);
+    this.rampColor(Row.Fill, index, out.fill, 0);
+    out.fillScale = this.rampScale(Row.Fill, index);
+    this.rampColor(this.bounceRow, index, out.bounce, 0);
+    out.bounceScale = this.rampScale(this.bounceRow, index);
+    this.rampColor(Row.Fog, index, out.fog, 0.5);
+  }
+
   /** A ramp colour, weighted over the mix in linear light: each block reads its own bytes (the fallback where it has no such row). */
   private rampColor(row: number, index: number, out: THREE.Color, fallback: number): THREE.Color {
     let r = 0;
@@ -1258,8 +1301,11 @@ export class SwgSky {
       // Nothing to place: the environment file's bodies were never built here (the constructor), and
       // the zone's own stars are quads that have stood where the file turns them since it loaded.
     } else if (day.isDay) {
-      this.place(this.sun, lightDir, alpha);
-      if (this.data.supplementalSun) this.place(this.supplementalSun, SwgSky.offset(lightDir, this.data.supplementalSun.yaw, this.data.supplementalSun.pitch, tmpVec), alpha);
+      // Pass 2, wave 1: under our sky on WebGPU the sun's pictures are retired (the owner's decision): the air draws each
+      // star of the system as a disc (`airSky.ts`), so the sun's two slots are placed unseen; the moons stay.
+      const sunAlpha = this.sunPictures ? alpha : 0;
+      this.place(this.sun, lightDir, sunAlpha);
+      if (this.data.supplementalSun) this.place(this.supplementalSun, SwgSky.offset(lightDir, this.data.supplementalSun.yaw, this.data.supplementalSun.pitch, tmpVec), sunAlpha);
       this.place(this.moon, tmpVec2.set(0, -1, 0), 0);
       this.place(this.supplementalMoon, tmpVec2, 0);
     } else {

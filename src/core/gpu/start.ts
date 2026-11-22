@@ -57,6 +57,12 @@ import { jitterBegin, jitterEnd, JITTER } from './taa/taaJitter.ts';
 import { TAA_DIALS, TAA_TUNE, tuneTaa } from './taa/taaTune.ts';
 import { GpuTaaPass, taaPassNow } from './taa/taaPass.ts';
 import { SCENE_SIZE, sceneSizeNow } from './taa/taaSize.ts';
+import { hazeFogNode, hazeReport, roomsFogNode } from '../../sky/air/airHaze.ts';
+// Pass 2, wave 1 (maker A): the air's tables, reached by the game through the runtime (`GpuRuntime.airTables`).
+import { makeAirTables } from '../../sky/air/airTables.ts';
+import { AIR_SKY_STATS } from '../../sky/air/airSky.ts';
+import { DISC_TUNE } from '../../sky/skyDials.ts';
+import { SEE_STATS } from '../../sky/air/airSee.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -309,6 +315,14 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         if (Number.isFinite(share)) tuneTaa({ share });
       },
     },
+    // Pass 2, wave 1: what draws from the air under our sky (`src/sky/air/airHaze.ts`, `airSky.ts`).
+    airDraw: {
+      fogNode: () => hazeFogNode(),
+      roomsFogNode: () => roomsFogNode(),
+      report: () => ({ haze: hazeReport(), sky: { ...AIR_SKY_STATS }, discs: { ...DISC_TUNE }, layer: { ...SEE_STATS, built: { ...SEE_STATS.built } } }),
+    },
+    // Pass 2, wave 1 (maker A): the air's four tables on the device (`src/sky/air/airTables.ts`), made once a session.
+    airTables: (record: Float64Array) => makeAirTables(renderer as THREE.WebGLRenderer, record),
     renderer: renderer as THREE.WebGLRenderer,
     environment,
     standIns,

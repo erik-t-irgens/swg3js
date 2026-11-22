@@ -38,6 +38,11 @@ export interface GpuStandIns {
   /** The sky dome: its horizon and zenith colours as a plain gradient by the view's elevation, live. */
   sky(horizon: LiveColour, zenith: LiveColour): THREE.Material;
   /**
+   * The sky dome under our sky (pass 2, wave 1, `src/sky/air/airSky.ts`): the air's sky view and the world's sun discs, today's
+   * dome (its horizon and clear colours, live) the night floor's; today's stand-in while the air's tables are not made.
+   */
+  airSky(planet: string, horizon: THREE.Color, zenith: THREE.Color): THREE.Material;
+  /**
    * Lava: the client's own (step 5, `gpu/gpuPrograms.ts`), its uniforms read off each lava material as it is drawn; its
    * ramp's middle colour, unlit (step 3's), where the part is left out at load (`localStorage['swg.gpu.lava'] = '0'`).
    */
@@ -212,8 +217,28 @@ export interface GpuTaa {
   setShare(share: number): void;
 }
 
+/**
+ * What draws from the air under our sky on WebGPU (pass 2, wave 1, `src/sky/air/airHaze.ts`): the scene's one fog node and the
+ * rooms' pass's, each made once and set once at load (three keys every render object on them), and the console's word.
+ */
+export interface GpuAirDraw {
+  /** The world scene's fog node: see-through things, and solids where no haze pass draws, hazed at their own distance. */
+  fogNode(): unknown;
+  /** The rooms' pass's fog node: no haze. */
+  roomsFogNode(): unknown;
+  /** What `__debug.sky()` says of the haze and the sky's discs. */
+  report(): Record<string, unknown>;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
+  /** What draws from the air under our sky (pass 2, wave 1). */
+  readonly airDraw: GpuAirDraw;
+  /**
+   * The air's four tables (pass 2, wave 1, maker A: `src/sky/air/airTables.ts`), made once a session on the device and put in
+   * `AIR.tables`, following `record` (the world's blended air record, read by reference); the same tables on a later call.
+   */
+  airTables(record: Float64Array): import('../sky/air/airApi.ts').AirTables & { warm(camera: THREE.PerspectiveCamera): Promise<void>; follow(record: Float64Array): void };
   /** The morph bake (pass 1, wave 4). */
   readonly morphBake: GpuMorphBake;
   /** The bone pool (pass 1, wave 4). */
