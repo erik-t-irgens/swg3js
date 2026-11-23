@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { planetPhase } from './dayPhase.ts';
 import { GAME_DAY_SECONDS, dayTune, registerDay, setDayNote, sharedClock } from './sharedClock.ts';
+import type { SkyMotion } from '../sky/system/skyMotion.ts';
 
 /** The client's day: the clock runs 06:00 to 06:00, and the first 70% of it is daylight. */
 const DAY_NIGHT_SPLIT = 0.7;
@@ -75,6 +76,16 @@ export class DayCycle {
   daylight = 1;
   /** Peaks when the sun sits on the horizon. */
   sunset = 0;
+  /**
+   * Pass 2, wave 5 (maker S): the star system the owner applied for this world (`src/sky/system/skyMotion.ts`, set by the world
+   * behind its loading screen through `follow`), or null: today's day exactly, every line below as it was. Under a system of
+   * version 2 the world keeps its own day (its length and its place in the shared day the system's, the clock's server anchor
+   * never read, the wall clock followed even with no server, so its hour and its moons stand on the one real clock), and the
+   * sun, the night body and the day's words are where the system puts them; under one of version 1 the day is the game's own
+   * and the system places the bodies and the night light alone. The motion is moved here, once an update, from the unbroken
+   * count (`count`): the design's one sky time.
+   */
+  motion: SkyMotion | null = null;
 
   private azimuth: number;
   private maxElevation: number;
@@ -92,6 +103,29 @@ export class DayCycle {
     this.azimuth = azimuth;
     this.maxElevation = maxElevation;
     this.phase = phaseFor(azimuth, maxElevation);
+  }
+
+  /**
+   * Pass 2, wave 5 (maker S): follow a world's applied star system, or none (null: today's day). Called behind the loading
+   * screen, before the arrival's first update, which then takes the world's own day outright.
+   */
+  follow(motion: SkyMotion | null): void {
+    if (motion === this.motion) return;
+    this.motion = motion;
+    // The next update takes the day outright (as after a gap in the frames): a day that changed its length and its place in
+    // the shared day must not be eased across to it in view. And its unbroken count takes the new day's whole days even
+    // where the time is held by hand (`recount`): a count carried over from another world's day, in that day's units, would
+    // put the new world's moons whole days from the real clock.
+    this.lastWallAt = 0;
+    this.recount = true;
+  }
+  /** The count's whole days are taken from the day's own clock at the next update (a new world's day: `follow`). */
+  private recount = false;
+
+  /** The day's whole length now, in seconds: a system's own (pass 2, wave 5), else `dayLengthSeconds`. */
+  get lengthNow(): number {
+    const m = this.motion;
+    return m !== null && m.ownsDay ? m.lengthSeconds : this.dayLengthSeconds;
   }
 
   /** Hand the day back to the shared clock after the console has moved it. */
@@ -124,10 +158,13 @@ export class DayCycle {
     const away = (wallNow - this.lastWallAt) / 1000 - Math.max(0, dt);
     const stopped = this.lastWallAt === 0 || away > dayTune.gapSeconds;
     this.lastWallAt = wallNow;
-    const shared = this.held || fast || this.paused ? null : sharedClock.timeOfDay(this.dayLengthSeconds, this.phase);
+    // Pass 2, wave 5 (maker S): a world under its applied star system keeps its own day (`follow`); else, as it was.
+    const motion = this.motion;
+    const own = motion !== null && motion.ownsDay;
+    const shared = this.held || fast || this.paused ? null : own ? sharedClock.ownTimeOfDay(motion) : sharedClock.timeOfDay(this.dayLengthSeconds, this.phase);
     // Paused, the step is nought: the time is whatever was last written, and stays it.
     // The fast-forward key runs a whole day in `dayTune.fastDaySeconds` whatever the day's length.
-    const step = this.paused ? 0 : fast ? dt / dayTune.fastDaySeconds : dt / this.dayLengthSeconds;
+    const step = this.paused ? 0 : fast ? dt / dayTune.fastDaySeconds : dt / (own ? motion.lengthSeconds : this.dayLengthSeconds);
     // How far the time moved this update, in days, for the sky's unbroken count; or taken outright.
     let advance = 0;
     let outright = false;
@@ -165,8 +202,10 @@ export class DayCycle {
     if (this.time < 0) this.time += 1;
     // The sky's count: its fraction the time exactly, its whole days the nearest to where it would have walked to (or,
     // taken outright, to the shared clock's own count), so it never turns over with the clock's day.
-    if (outright) {
-      sharedClock.dayCountIn(this, this.countIn);
+    if (outright || this.recount) {
+      this.recount = false;
+      if (own) sharedClock.ownDayCountIn(motion, this.countIn);
+      else sharedClock.dayCountIn(this, this.countIn);
       const c = this.countIn.shared;
       this.count = this.time + Math.round((c === c ? c : this.count) - this.time);
     } else this.count = this.time + Math.round(this.count + advance - this.time);
@@ -209,6 +248,47 @@ export class DayCycle {
     } else {
       this.lightDir.copy(this.sunDir.y > 0.02 ? this.sunDir : this.moonDir);
     }
+    // Pass 2, wave 5 (maker S): under an applied system the sky's one time moves it, and its sun and night body stand where it
+    // puts them (version 2 the day's words too; version 1 keeps the game's day and takes the system's night body). Space's
+    // fixed light wins, as above.
+    if (motion !== null && !this.fixed) this.fromMotion(motion);
+  }
+
+  /**
+   * The day from the system's motion, after the time and the unbroken count are set (pass 2, wave 5): the motion moved to the
+   * count, then the sun, the night body, the light and the daylight written field by field. Allocates nothing.
+   */
+  private fromMotion(m: SkyMotion): void {
+    m.at(this);
+    const n = m.nightDir;
+    const up = m.nightJ >= 0;
+    this.moonDir.x = n.x;
+    this.moonDir.y = n.y;
+    this.moonDir.z = n.z;
+    if (m.ownsDay) {
+      const s = m.sun;
+      this.sunDir.x = s.x;
+      this.sunDir.y = s.y;
+      this.sunDir.z = s.z;
+      const day = m.isDay || !up;
+      this.lightDir.x = day ? s.x : n.x;
+      this.lightDir.y = day ? s.y : n.y;
+      this.lightDir.z = day ? s.z : n.z;
+      // The non-SWG path's daylight from the sun's height (a smoothstep from -0.1 to 0.22), the system's eclipses taken off.
+      const y = s.y;
+      let k = (y + 0.1) / 0.32;
+      k = k < 0 ? 0 : k > 1 ? 1 : k;
+      this.daylight = k * k * (3 - 2 * k) * m.daylight;
+      this.sunset = y > -0.15 ? Math.exp(-(y < 0 ? -y : y) * 9) : 0;
+    } else {
+      // The game's day: SWG's path as above; by night the light is the system's brightest body where one is up.
+      if (!this.isDay && up) {
+        this.lightDir.x = n.x;
+        this.lightDir.y = n.y;
+        this.lightDir.z = n.z;
+      }
+      this.daylight *= m.daylight;
+    }
   }
 
   /**
@@ -222,17 +302,26 @@ export class DayCycle {
     setDayNote(want);
   }
 
-  /** The client's time ratio: 0 at 06:00, wrapping at the next 06:00. */
+  /** The client's time ratio: 0 at 06:00, wrapping at the next 06:00 (under an applied system's own day, from where its sun is). */
   get ratio(): number {
+    const m = this.motion;
+    if (m !== null && m.ownsDay) return m.ratio;
     return (this.time - 0.25 + 1) % 1;
   }
 
   get isDay(): boolean {
+    const m = this.motion;
+    if (m !== null && m.ownsDay) return m.isDay;
     return this.ratio < DAY_NIGHT_SPLIT;
   }
 
-  /** Day stretched over [0, 0.5) and night over [0.5, 1), which is how the client indexes its colour ramps. */
+  /**
+   * Day stretched over [0, 0.5) and night over [0.5, 1), which is how the client indexes its colour ramps (pass 2, wave 5: under
+   * an applied system's own day, SWG's light time from where its casting sun really is, `system.js`' `day.normalized`).
+   */
   get normalized(): number {
+    const m = this.motion;
+    if (m !== null && m.ownsDay) return m.normalized;
     const r = this.ratio;
     const n = r < DAY_NIGHT_SPLIT ? 0.5 * (r / DAY_NIGHT_SPLIT) : 0.5 + 0.5 * ((r - DAY_NIGHT_SPLIT) / (1 - DAY_NIGHT_SPLIT));
     return n >= 1 ? 0 : n;

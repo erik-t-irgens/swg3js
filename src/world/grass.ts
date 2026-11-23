@@ -46,6 +46,7 @@
 // `localStorage['swg.grass'] = '0'` turns the grass off at load, `swg.farCards = '0'` the far cards.
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import * as THREE from 'three';
+import { letGoDrawn } from './letGo.ts';
 import type { FloraTiling } from '../swg/terrain/trn.ts';
 import { RADIAL_JSON, RADIAL_RGBA, readRadialFile, type RadialFile } from '../swg/terrain/radialFile.ts';
 import { CARD_CURVE_PARS, CARD_LIGHT_UNIFORMS } from './cardLight.ts';
@@ -1166,6 +1167,8 @@ export class GrassField {
     if (c.mesh) {
       c.mesh.parent?.remove(c.mesh);
       c.mesh.geometry.dispose();
+      // Pass 2, wave 5 (agent P): its render objects let go on WebGPU, or three held the mesh for the session (`letGo.ts`).
+      letGoDrawn(c.mesh);
       c.mesh = null;
     }
     c.buffers = null;

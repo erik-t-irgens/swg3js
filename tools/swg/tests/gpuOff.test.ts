@@ -46,9 +46,12 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * chain's last pass (`gpuChain.ts`) alone. Wave 4b's space (maker C, `src/space/`): the planets' air (`spaceRims.ts`) and the
  * gas drawn as volumes (`spaceVolumes.ts`) the WebGPU side's, reached through the runtime (`GPU.rt.spaceRims`, `.spaceVolumes`);
  * which air a planet has, the painted rim's table, the Nebulae row's rule and where a volume stands (`spaceAir.ts`,
- * `nebulaForm.ts`, `loreStarts.js`) pure.
+ * `nebulaForm.ts`, `loreStarts.js`) pure. Wave 5's looks drawn whole (maker L, `src/sky/bodies/lookBody.ts`) the WebGPU side's,
+ * reached through the runtime (`GPU.rt.lookBodies`); which bodies wear one, the dials and his imported looks' state
+ * (`lookWorld.ts`, `lookBodyMath.ts`, `privateSky.ts`) pure, the dev server's ask (`privateSkyDev.ts`) reached under
+ * `import.meta.env.DEV` alone.
  */
-const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/night/dither.ts', 'src/sky/bodies/skyBody.ts', 'src/space/spaceRims.ts', 'src/space/spaceVolumes.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts', 'lookBake.ts'].map((f) => `src/sky/look/${f}`)]);
+const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/night/dither.ts', 'src/sky/bodies/skyBody.ts', 'src/sky/bodies/lookBody.ts', 'src/space/spaceRims.ts', 'src/space/spaceVolumes.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts', 'lookBake.ts'].map((f) => `src/sky/look/${f}`)]);
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;
@@ -882,8 +885,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ok(w[fog + 1] === 'else fog.density = L.fogDensity * this.fogScale * this.userFog;', "world.ts: the fog object's density under the air is the WebGPU branch's, WebGL's the line 8a7de51 had");
     const sky = once('if (GPU.webgpu && this.skyAir) {');
     const els = w.indexOf('} else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);', sky);
-    // (pass 2, wave 4a: the bodies' frame, two lines, joins the WebGPU branch after the night's)
-    ok(els > sky && els - sky < 14, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
+    // (pass 2, wave 4a: the bodies' frame, two lines, joins the WebGPU branch after the night's; pass 2, wave 5, maker L: the
+    // bodies drawn whole in their looks, five lines, after it)
+    ok(els > sky && els - sky < 19, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
     const m = lines('src/main.ts');
     const frame = m.flatMap((x, i) => (x === 'if (GPU.webgpu) this.world.airFrame(cam);' ? [i] : []));
     ok(frame.length === 1 && m[frame[0] - 2] === 'this.feedClouds();' && m[frame[0] + 4] === 'if (GPU.webgpu && postfx) GPU.rt!.taa.begin(cam, postfx);', "main.ts: the air's tables are drawn for the camera on WebGPU alone, after the clouds are fed and before the smoothing's nudge");
@@ -915,8 +919,9 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const load = at('if (GPU.webgpu) await this.loadDistant(token, spawn);');
     ok(w[load - 3] === 'await this.loadNebulae(pack);' && w[load - 2] === 'if (token !== this.loadToken) return null;' && w[load + 1] === 'if (token !== this.loadToken) return null;', "world.ts: they are loaded behind the screen after the nebulae, on WebGPU alone");
     const frame = at('if (GPU.webgpu && this.distant) this.distant.frame(camPos);');
-    // Pass 2, wave 4b (maker C): the planets' air (its line of words and its one guarded line) sits between them.
-    ok(w[frame - 4] === 'if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);' && w[frame - 3].startsWith('// Pass 2, wave 4b (maker C)') && w[frame - 2] === 'if (GPU.webgpu && this.spaceRims && this.camera) this.spaceRimsFrame(this.spaceRims, this.camera);', 'world.ts: moved with the camera after the bodies and the planets\' air, on WebGPU alone');
+    // Pass 2, wave 4b (maker C): the planets' air (its line of words and its one guarded line) sits between them; pass 2, wave 5
+    // (maker L): then the planets drawn whole in their looks (a line of words and one guarded line).
+    ok(w[frame - 6] === 'if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);' && w[frame - 5].startsWith('// Pass 2, wave 4b (maker C)') && w[frame - 4] === 'if (GPU.webgpu && this.spaceRims && this.camera) this.spaceRimsFrame(this.spaceRims, this.camera);' && w[frame - 3].startsWith('// Pass 2, wave 5 (maker L)') && w[frame - 2] === 'if (GPU.webgpu && this.spaceLookBodies) this.spaceLookFrame(this.spaceLookBodies, dt);', 'world.ts: moved with the camera after the bodies, the planets\' air and the planets drawn in their looks, on WebGPU alone');
     const drop = at('if (GPU.webgpu) this.dropDistant();');
     ok(w[drop - 2] === 'this.streamHold = false;' && w[drop + 1] === 'this.particles?.dispose();', 'world.ts: taken out before their effects go, on WebGPU alone');
     ok(w.filter((x) => /this\.(loadDistant|dropDistant)\(/.test(x) && !/^(\/\/|\*)/.test(x)).length === 3 && w.filter((x) => x.includes('this.distant.frame(')).length === 1, 'world.ts: reached from those guards alone (the load drops an older set itself)');

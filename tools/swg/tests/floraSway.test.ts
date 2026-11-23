@@ -69,8 +69,9 @@ const meshesOf = (scenes: THREE.Object3D[]): THREE.Mesh[] => {
   // Wave 8: the plain combinations and the grass's depth material go into the very same draws (and since the
   // performance pass's second wave the skinned bodies' combinations too).
   const loop = body.slice(body.indexOf('for (const set of sets) {'));
-  // The performance pass's sixth wave added the shadow batches' one combination after them.
-  const drawn = loop.indexOf('const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched];');
+  // The performance pass's sixth wave added the shadow batches' one combination after them, and the GPU port's pass 2, wave 5's
+  // fixer the ground's casting keepers (`keepGround`) after that.
+  const drawn = loop.indexOf('const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched, ...keepers];');
   const added = loop.indexOf('this.scene.add(s);');
   const shadowDraw = loop.indexOf('portals.drawShadowsOnly(this.scene)');
   ok(drawn > 0 && added > drawn && shadowDraw > added && /for \(const s of drawn\) \{[\s\S]{0,160}this\.scene\.add\(s\);/.test(loop) && /finally \{\s*for \(const s of drawn\) this\.scene\.remove\(s\);/.test(loop), 'the plain and skinned combinations stand in the scene beside the sway\'s stand-ins for the shadow-only draw of each light set, and are taken out in the `finally`');

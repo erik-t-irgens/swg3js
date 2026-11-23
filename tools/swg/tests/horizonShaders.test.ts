@@ -738,6 +738,11 @@ else {
     ["import type { HeldPlan, SkyHeldEntry } from '../sky/bodies/heldBodies.ts';\n", ''],
     [slice('  /**\n   * Pass 2, wave 4b (maker B): bodies a state of the server chose among', '  stars: { count: number;'), ''],
     [slice('  /**\n   * Pass 2, wave 4b (maker B): the bodies that hang still in this sky', "  /** The dome's material and its draw order"), ''],
+    // Pass 2, wave 5 (maker S): a followed star system's motion places SWG's own cards (its field, `useMotion` and
+    // `placeByMotion` sit inside the bodies' parts above): its import (the type, and since wave 5's fixer the cards' order by
+    // distance, `nearOrder`) and its one line in `update`; no program's text.
+    ["import { nearOrder, type SkyMotion } from '../sky/system/skyMotion.ts';\n", ''],
+    ["    // Pass 2, wave 5 (maker S): SWG's own cards a followed star system names, where it puts them (`placeByMotion`).\n    if (this.motion !== null && !space) this.placeByMotion(this.motion);\n", ''],
     // Pass 2, wave 4 (maker A): the console's toggle of SWG's cloud sheets (`sky('clouds')`, the space body viewer's "same
     // sky" proof): its name in the toggle's type, its line of words and its line; no program's text.
     ["  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites' | 'clouds'): Record<string, unknown> {", "  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {"],

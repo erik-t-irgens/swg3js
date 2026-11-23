@@ -7,9 +7,12 @@
 // rules the map and the world read.
 import { GPU } from '../core/gpuSwitch.ts';
 import { SKY_BODIES, type BodyLook } from '../sky/look/bodiesFile.ts';
-import { lookOfPlace, toneLayer } from '../sky/look/lookPictures.ts';
-import { bodyRecord } from '../sky/bodies/bodyAir.ts';
+import { bakeable, lookOfPlace, toneLayer } from '../sky/look/lookPictures.ts';
+import { bodyRecord, type BodyAir } from '../sky/bodies/bodyAir.ts';
 import { appearanceName, lookRecordOf, rimProfile, spaceBodyAir, spacePlaceIds } from '../space/spaceAir.ts';
+// Pass 2, wave 5 (maker M): the opened systems' bodies (`galaxySystem.ts`).
+import { cleanSystem } from '../sky/system/system.js';
+import { SYSTEM_VIEW_TUNE, planetOfWorld } from './galaxySystem.ts';
 
 /**
  * The globes' numbers (feel is the owner's; each start's reason beside it):
@@ -145,8 +148,150 @@ export function mapLookPlaces(): string[] {
   return Object.keys(f.uses).filter((p) => /^space_[a-z0-9_]+:planet_[a-z0-9_]+$/.test(p) && !!lookOfPlace(p));
 }
 
-/** What the map's bakes did at the last screen (the console's and the prover's). */
-export const MAP_LOOKS = { places: 0, had: 0, putOff: 0, at: '' };
+/** What the map's bakes did at the last screen (the console's and the prover's): the globes', then the opened systems' bodies' (wave 5). */
+export const MAP_LOOKS = { places: 0, had: 0, putOff: 0, at: '', bodies: 0, bodiesHad: 0, bodiesPutOff: 0 };
+
+// ---------------------------------------------------------------- the opened system's bodies (pass 2, wave 5, maker M)
+
+/**
+ * The look a body of an applied star system wears on the map (the GPU port's pass 2, wave 5, maker M): the look its system
+ * names for it, else the look the file's `uses` names for one of its places (Naboo's from Rori, `rori:celestial:cels_naboo`),
+ * else the look a zone's planet of its name wears in space (`space_tatooine:planet_tatooine`: its ground world's id, or the
+ * body's own); null where it wears none (SWG's space picture or its colour). Only generated looks: numbers every player bakes.
+ */
+export function systemBodyLook(body: { readonly look: string | null; readonly places: readonly string[]; readonly id: string }, ground: string | null): { id: string; look: BodyLook } | null {
+  const f = SKY_BODIES.file;
+  if (!f) return null;
+  const take = (id: string | null | undefined): { id: string; look: BodyLook } | null => {
+    if (!id) return null;
+    const look = f.looks[id];
+    return look && bakeable(look) ? { id, look } : null;
+  };
+  const own = take(body.look);
+  if (own) return own;
+  for (const p of body.places) {
+    const hit = take(f.uses[p]);
+    if (hit) return hit;
+  }
+  for (const [place, id] of Object.entries(f.uses)) {
+    const m = /^space_[a-z0-9_]+:planet_([a-z0-9_]+)$/.exec(place);
+    if (!m || (m[1] !== ground && m[1] !== body.id)) continue;
+    const hit = take(id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * Every look the applied star systems' bodies wear on the map, once each (the bakes behind a loading screen): each system of
+ * the file's `systems` that `system.js` reads as an applied one of version 2, each of its bodies by `systemBodyLook`.
+ */
+export function systemLooks(): { id: string; look: BodyLook }[] {
+  const f = SKY_BODIES.file;
+  if (!f) return [];
+  const out: { id: string; look: BodyLook }[] = [];
+  const seen = new Set<string>();
+  for (const [key, raw] of Object.entries(f.systems)) {
+    if (key.startsWith('v1:')) continue;
+    const sys = cleanSystem(raw) as { version?: number; future?: boolean; bodies?: { id: string; look: string | null; places: string[] }[]; grounds?: { world: string; body: string | null; copy: string | null }[] } | null;
+    if (!sys || sys.version !== 2 || sys.future) continue;
+    const ground = new Map<string, string>();
+    for (const g of sys.grounds ?? []) if (!g.copy && g.body) ground.set(g.body, planetOfWorld(g.world)?.id ?? g.world);
+    for (const b of sys.bodies ?? []) {
+      const hit = systemBodyLook(b, ground.get(b.id) ?? null);
+      if (hit && !seen.has(hit.id)) {
+        seen.add(hit.id);
+        out.push(hit);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The opened systems' bodies' pictures as the map will wear them: each look halved to `SYSTEM_VIEW_TUNE.bodySize` and toned
+ * behind the screen that baked it, by the look's id (the bake's own pictures let go), so opening a system bakes nothing and
+ * reads nothing: its pictures are laid on the map's renderer as it opens and freed as it shuts.
+ */
+const BODIES_HAD = new Map<string, { key: string; pics: GlobePictures }>();
+const bodyKeyOf = (look: BodyLook): string => `${JSON.stringify(look.generated ?? null)}@${SYSTEM_VIEW_TUNE.bodySize}`;
+
+/** A body's pictures halved to the size asked and toned as its layers tone it (new arrays always: the bake's are left as they are). */
+function bodyPicturesOf(place: string, look: string, pics: { width: number; height: number; surface: Uint8Array; clouds: Uint8Array | null }, own: BodyLook, size: number): GlobePictures {
+  let w = pics.width;
+  let h = pics.height;
+  let surface = pics.surface;
+  let clouds = pics.clouds;
+  while (w > size && w % 2 === 0 && h % 2 === 0) {
+    surface = halve(surface, w, h);
+    if (clouds) clouds = halve(clouds, w, h);
+    w >>= 1;
+    h >>= 1;
+  }
+  if (surface === pics.surface) surface = surface.slice();
+  if (clouds && clouds === pics.clouds) clouds = clouds.slice();
+  toneLayer(surface, own, 'surface');
+  if (clouds) toneLayer(clouds, own, 'clouds');
+  return { place, look, width: w, height: h, surface, clouds };
+}
+
+/**
+ * A body's pictures as the map wears them, by its look: those halved behind a loading screen, else this session's bake of the
+ * look where it still holds it (`GpuLooks.baked`: never a bake), else null (SWG's picture or its colour). WebGPU's alone.
+ */
+export function systemBodyPictures(hit: { id: string; look: BodyLook }): GlobePictures | null {
+  const key = bodyKeyOf(hit.look);
+  const kept = BODIES_HAD.get(hit.id);
+  if (kept && kept.key === key) return kept.pics;
+  if (!GPU.webgpu || !GPU.rt) return null;
+  const pics = GPU.rt.looks.baked(hit.look, GLOBE_BAKE);
+  return pics ? bodyPicturesOf(hit.id, hit.id, pics, hit.look, SYSTEM_VIEW_TUNE.bodySize) : null;
+}
+
+/**
+ * A body's painted rim's table on the map: its ground world's own record where it is one of the game's worlds with air, else its
+ * look's air or the start for its kind (a giant's, a planet's as a temperate world's), else none (a moon, a comet, a station).
+ */
+export function systemBodyRim(kind: string, ground: string | null, look: BodyLook | null): Float32Array | null {
+  if (ground && spaceBodyAir(`planet_${ground}`).kind === 'world') return globeRim('', `planet_${ground}`);
+  const air: BodyAir = kind === 'giant' ? { kind: 'giant' } : kind === 'planet' ? { kind: 'temperate' } : { kind: 'airless' };
+  const rec = lookRecordOf(air, (look?.air ?? null) as Record<string, unknown> | null);
+  return rec ? rimProfile(rec) : null;
+}
+
+/** A generated look's rings (its `rings` part: style, seed and dials), as the viewer's ring profile takes them; null for none. */
+export function lookRingsOf(look: BodyLook | null): { seed: number; style: string; dials: Record<string, number | string> } | null {
+  const g = look?.generated as { seed?: unknown; rings?: { style?: unknown; dials?: unknown } } | undefined;
+  const r = g?.rings;
+  if (!r || typeof r.style !== 'string' || !r.style || !r.dials || typeof r.dials !== 'object') return null;
+  return { seed: Number(g?.seed) || 1, style: r.style, dials: r.dials as Record<string, number | string> };
+}
+
+/** The opened systems' bakes at a screen (inside `bakeMapLooks`, after the globes'): each look once, within the screen's budget. */
+async function bakeSystemLooks(looks: NonNullable<typeof GPU.rt>['looks'], stale: () => boolean): Promise<boolean> {
+  const hits = systemLooks();
+  MAP_LOOKS.bodies = hits.length;
+  MAP_LOOKS.bodiesHad = 0;
+  MAP_LOOKS.bodiesPutOff = 0;
+  for (const hit of hits) {
+    const key = bodyKeyOf(hit.look);
+    const kept = BODIES_HAD.get(hit.id);
+    if (kept && kept.key === key) {
+      MAP_LOOKS.bodiesHad++;
+      continue;
+    }
+    // (the fixer of pass 2, wave 5) a kit this session has not asked is asked once the screen is gone, never under it (every
+    // applied system's bodies at once held the screen's own pipelines behind some fifty large ones on a cold shader cache)
+    const pics = await looks.bake(hit.id, hit.look, GLOBE_BAKE, false);
+    if (pics) {
+      MAP_LOOKS.bodiesHad++;
+      BODIES_HAD.set(hit.id, { key, pics: bodyPicturesOf(hit.id, hit.id, pics, hit.look, SYSTEM_VIEW_TUNE.bodySize) });
+      looks.release(hit.look, GLOBE_BAKE);
+    } else MAP_LOOKS.bodiesPutOff++;
+    if (stale()) return false;
+  }
+  return !stale();
+}
 
 /**
  * Behind a loading screen on WebGPU, after the screen's own bakes (the sky's bodies, the space planets): every globe's look baked
@@ -187,5 +332,6 @@ export async function bakeMapLooks(stale: () => boolean): Promise<boolean> {
     } else MAP_LOOKS.putOff++;
     if (stale()) return false;
   }
-  return !stale();
+  // Pass 2, wave 5 (maker M): the looks of the applied systems' bodies, for the map's opened systems.
+  return bakeSystemLooks(looks, stale);
 }

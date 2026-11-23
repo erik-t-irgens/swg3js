@@ -48,8 +48,12 @@ export function groundFlash(x, y, z, out) {
   return out;
 }
 
-/** The ground's day: under a system of version 2, the day its sky state holds (where its sun really is); else SWG's at the hour. */
-const dayOfSky = (sky, hours) => (sky && sky.model.version === 2 ? sky.out.day : dayAt(hours));
+/**
+ * The ground's day: under a system of version 2, the day its sky state holds (where its sun really is); else SWG's at the hour.
+ * (The GPU port's pass 2, wave 5) Drawn as the game does under the system the game follows (`gameAir.ts`' `SkyView`), the
+ * game's own day, whatever the system's version.
+ */
+const dayOfSky = (sky, hours) => (sky && (sky.game || sky.model.version === 2) ? sky.out.day : dayAt(hours));
 /** Under a world's system (system.js), a body's drawing distance follows its real distance, so nearer stays in front (a giant hides the sun). */
 const systemDrawDistance = (d) => 1000 + 1800 * Math.min(1, Math.max(0, (Math.log10(Math.max(1e-9, d)) + 4) / 4.5));
 const HIDDEN = { dir: { x: 0, y: -1, z: 0 }, shown: false, why: 'the world\'s system hides it (the system stands for it)', alpha: 0, j: -1 };
@@ -265,6 +269,9 @@ export class PlaceView {
     groundMat.colorNode = vec4(mix(U.ground, U.horizon.mul(0.42), smoothstep(-0.07, 0.0, gd.y)).add(U.flashColour.mul(U.flashAmb.mul(0.3))), 1.0);
     // the lower half of a sphere about the camera: the horizon at exactly 0 degrees
     this.groundCap = new THREE.Mesh(new THREE.SphereGeometry(GROUND_R, 64, 16, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), groundMat);
+    // (the GPU port's pass 2, wave 5) kept: drawn as the game does, the ground wears the game's haze while the world's air draws
+    this.groundCapMat = groundMat;
+    this.nightGroup = null;
     this.groundCap.renderOrder = -20;
     this.groundCap.frustumCulled = false;
     this.group.add(this.skyDome, this.groundCap);
@@ -366,6 +373,7 @@ export class PlaceView {
     const S = this.S;
     this.active = false;
     this.group.visible = false;
+    if (this.nightGroup) { this.nightGroup.removeFromParent(); this.nightGroup = null; }
     this.disposeBodies();
     this.clearStars();
     this.zone = null;
@@ -535,6 +543,8 @@ export class PlaceView {
    */
   where(b, e, day, sky) {
     const p = b.place;
+    // (the GPU port's pass 2, wave 5) a body only a system names stands nowhere until that system is read
+    if (!sky && p.systemBody) return HIDDEN;
     if (sky) {
       if (sky.model.hidden.has(p.id)) return HIDDEN;
       const j = p.systemBody ? p.itemIndex : sky.model.itemOf.get(p.id);
@@ -567,11 +577,17 @@ export class PlaceView {
     const camera = S.camera;
     this.lastSky = sky;
     if (!this.space) { this.updateSky(day, sky); this.updateGroundStorm(day, wall); }
-    else S.stars.visible = ctx.starsOn();
+    else {
+      S.stars.visible = ctx.starsOn();
+      // (the GPU port's pass 2, wave 5) the game's night is a ground sky's
+      if (this.nightGroup) { this.nightGroup.removeFromParent(); this.nightGroup = null; }
+    }
     // wave 4: the game's grade for this frame, from the light the game would have here
     const G = this.gameLook;
     if (G && G.on) {
-      if (this.space) { spaceSource(ctx.zoneSky?.(this.zone), G.source); G.setGrade(this.zone, 'space zone'); }
+      // (the GPU port's pass 2, wave 5) in orbit, and while a world's air is not made, the eye stands at an exposure of 1 (it kept
+      // the last ground sky's, as much as 15 stops after a night)
+      if (this.space) { spaceSource(ctx.zoneSky?.(this.zone), G.source); G.setGrade(this.zone, 'space zone'); G.stageEye(); }
       // (pass 2, wave 4) from the ground the grade reads the world's own air at the hour (updateSky ran it this frame)
       else if (this.airDrawn) { G.airSource(G.source); G.setGrade(gamePlanetOf(this.zone), "the game's air"); }
       else {
@@ -580,6 +596,7 @@ export class PlaceView {
         G.source.space = false;
         G.source.night = 1 - (this.dl ?? 1);
         G.setGrade(this.zone, "neutral (the world's air not made)");
+        G.stageEye();
       }
     }
 
@@ -672,12 +689,27 @@ export class PlaceView {
           b.built.LU.airLight.value.set(0, 0, 0);
           b.built.LU.airTrans.value.set(1, 1, 1);
         }
+        // (the fixer of pass 2, wave 5) drawn as the game does, the body is seen through the game's own air as the game's card
+        // sees it (`gameAir.ts`' `bodySeen`): lit by the star's light at the top of the air over pi, what comes through and the
+        // air's light in front of it the twin's, in the scene's units the eye reads (the wash's own light, in its own units,
+        // under the game's eye made Yavin Prime a flat white disc at dusk)
+        const seen = heldAsGame ? (this._seen || (this._seen = { trans: new THREE.Vector3(), light: new THREE.Vector3(), star: new THREE.Vector3() })) : null;
+        const seenAsGame = !!seen && G.bodySeen(d.x, d.y, d.z, seen);
+        if (seenAsGame) {
+          b._lc = null;
+          b.built.LU.sunColour.value.copy(seen.star);
+          b.built.LU.airTrans.value.copy(seen.trans);
+          b.built.LU.airLight.value.copy(seen.light);
+          b._washed = false;
+        }
         if (heldAsGame) {
           // The game's rule (`skyBody.ts`, `BODY_TUNE.seenMost`): the light a white pixel of the body would send through the air,
           // times the eye's exposure, held to `seenMost` of the screen's white by one factor for the whole disc, so a moon at
           // dusk under an opening eye does not wash the frame white with its bloom and its features still read.
           const tr = b.built.LU.airTrans.value;
-          const white = L.power * (0.2126 * tr.x + 0.7152 * tr.y + 0.0722 * tr.z) * (b.built.LU.gain.value || 0) * G.U.exposure.value;
+          const st = seenAsGame ? seen.star : null;
+          const lum = st ? 0.2126 * tr.x * st.x + 0.7152 * tr.y * st.y + 0.0722 * tr.z * st.z : 0.2126 * tr.x + 0.7152 * tr.y + 0.0722 * tr.z;
+          const white = L.power * lum * (b.built.LU.gain.value || 0) * G.U.exposure.value;
           const most = BODY_TUNE.seenMost;
           if (white > most) b.built.LU.gain.value *= most / white;
         }
@@ -691,6 +723,15 @@ export class PlaceView {
         if (spinDeg) { ck = sky.out.T; if (v2) { const span = (360 / spinDeg) * 64; ck -= Math.floor(ck / span) * span; } }
         updateLook(b.built, { camera, clock: ck, sunWorld: lw || camera.position, face, lightWorld: lw, tilt: e.tilt, spin: spinDeg || e.spin, sphereRadius: sphereR });
       } else if (b.glow) {
+        // (the GPU port's pass 2, wave 5) drawn as the game does from the ground, a sun is the air's own disc on the game's dome
+        // (SWG's sun pictures are retired on WebGPU): its picture and glow are not drawn, nor laid in front of the bodies; its
+        // mark stays where it stands
+        if (!this.space && G && G.on && this.airDrawn) {
+          b.glow.group.visible = false;
+          ring.set(d.x, d.y, d.z).multiplyScalar(ringAt);
+          marks.push({ id: p.id, label: p.shortLabel || p.label, pos: ring, rad: ringRad * 0.22, nolook: !b.lookId });
+          continue;
+        }
         faceTurn(d, b.glow.group.quaternion);
         const square = 2 * dist * Math.tan(half);
         const glowShare = p.swgSize > 0 ? (p.glowSize || 0) / p.swgSize : 1.4;
@@ -800,19 +841,32 @@ export class PlaceView {
     U.game.value = 0;
     const G = this.gameLook;
     this.airDrawn = false;
+    let night = null;
+    let ground = null;
     if (G?.on) {
       const a = G.useWorld(this.zone);
-      if (G.frameAir(a, this.ctx.hours())) {
+      // (the GPU port's pass 2, wave 5) under the system the game follows, the day's unbroken count the page hands over
+      if (G.frameAir(a, this.ctx.hours(), this.ctx.count ? this.ctx.count() : NaN)) {
         this.airDrawn = true;
         if (this.skyDome.material !== a.dome) this.skyDome.material = a.dome;
         U.horizon.value.copy(G.fog);
         U.glowAmt.value = 0;
-        // the game's own night (its stars at their physical light, the Milky Way, wave 3's) is not drawn here yet, and this
-        // stage's star field is no part of the game's sky: none while the game's air draws
+        // this stage's star field is no part of the game's sky: none while the game's air draws; (wave 5) the game's own night
+        // is (its stars at their physical light, the Milky Way, the towns' glow: `src/sky/night/`), and the ground is hazed as
+        // the game's haze pass hazes a solid (`gameAir.ts`' `groundMaterial`)
         this.S.stars.visible = false;
+        night = G.nightFor(this.zone);
+        ground = G.groundMaterial();
       }
     }
     if (!this.airDrawn && this.skyDome.material !== this.skyMat) this.skyDome.material = this.skyMat;
+    const gm = ground || this.groundCapMat;
+    if (this.groundCap.material !== gm) this.groundCap.material = gm;
+    if (this.nightGroup !== night) {
+      this.nightGroup?.removeFromParent();
+      this.nightGroup = night;
+      if (night) this.group.add(night);
+    }
   }
 
   /** Wave 4: the ground's own storm, when the world we stand on has storm cells (its planet look's clouds). */

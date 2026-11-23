@@ -82,6 +82,19 @@ export const HELD_PICTURES = ['moon_deathstar1', 'moon_deathstar2', 'moon_deaths
 /** Each number's range (a held body's numbers are held to them; SWG's celestial size is the square's, 0 to 20). */
 export const HELD_RANGE = { yawDeg: [-360, 360], pitchDeg: [-90, 90], size: [0.01, 20], rollDeg: [-360, 360], light: [0, 8] } as const;
 
+/**
+ * A space place as his Save to game sets it (pass 2, wave 5, maker L; deferred from 4b): its direction's yaw and pitch and its
+ * size across, degrees, as the space body viewer's places read a zone's planet (`places.js`' `spacePlace`: yaw 0 toward -Z, the
+ * file's direction mirrored in X as the game reads it, the size twice the asin of its radius over its distance), and its distance
+ * in the zone's file; each only where he moved it.
+ */
+export interface SpacePlace {
+  yaw?: number;
+  pitch?: number;
+  size?: number;
+  distance?: number;
+}
+
 /** The file as kept. */
 export interface BodiesFile {
   version: number;
@@ -94,6 +107,38 @@ export interface BodiesFile {
   pictures: Record<string, { kind: string }>;
   /** Bodies held still in a ground world's sky, by world, then by the body's own id (`deathstar`, `cruiser`, ...). */
   held: Record<string, Record<string, HeldBody>>;
+  /** Pass 2, wave 5 (maker L): space places he moved or sized, by place (`<zone>:<appearance>`, `#n` where it repeats). */
+  places: Record<string, SpacePlace>;
+}
+
+/** A space place's id as the viewer names it (`spaceAir.ts`' `spacePlaceIds`). */
+const SPACE_PLACE = /^space_[a-z0-9_]{1,40}:[a-z0-9_]{1,60}(?:#\d{1,3})?$/;
+/** Each space place number's range (yaw any turn, the size under a half turn across, the distance positive). */
+export const SPACE_PLACE_RANGE = { yaw: [-720, 720], pitch: [-90, 90], size: [0.01, 179], distance: [0.001, 1e7] } as const;
+
+/** A space place made safe: numbers only, each held to its range; null where none is left. */
+export function cleanSpacePlace(raw: unknown, count: { dropped: number } = { dropped: 0 }): SpacePlace | null {
+  if (!isObj(raw)) {
+    count.dropped++;
+    return null;
+  }
+  const out: SpacePlace = {};
+  for (const k of ['yaw', 'pitch', 'size', 'distance'] as const) {
+    const v = raw[k];
+    if (v === undefined) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      count.dropped++;
+      continue;
+    }
+    const [lo, hi] = SPACE_PLACE_RANGE[k];
+    out[k] = v < lo ? lo : v > hi ? hi : v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** A space place as the file sets it (pass 2, wave 5), or null: the zone's own. */
+export function spacePlaceOf(id: string): SpacePlace | null {
+  return SKY_BODIES.file?.places[id] ?? null;
 }
 
 /**
@@ -265,6 +310,16 @@ export function cleanBodiesFile(raw: unknown): { file: BodiesFile | null; why: s
     }
     if (Object.keys(kept).length) held[world] = kept;
   }
+  // Pass 2, wave 5 (maker L): the space places he moved or sized (additive: a file without the key moves none).
+  const places: Record<string, SpacePlace> = {};
+  for (const [id, p] of Object.entries(isObj(raw.places) ? raw.places : {})) {
+    if (!SPACE_PLACE.test(id)) {
+      count.dropped++;
+      continue;
+    }
+    const c = cleanSpacePlace(p, count);
+    if (c) places[id] = c;
+  }
   const file: BodiesFile = {
     version,
     made: typeof raw.made === 'string' && raw.made.length <= 40 ? raw.made : '',
@@ -275,6 +330,7 @@ export function cleanBodiesFile(raw: unknown): { file: BodiesFile | null; why: s
     air,
     pictures,
     held,
+    places,
   };
   return { file, why: '', dropped: count.dropped };
 }
@@ -350,6 +406,7 @@ export function bodiesReport(): Record<string, unknown> {
           air: Object.keys(f.air),
           pictures: Object.keys(f.pictures),
           held: Object.fromEntries(Object.entries(f.held).map(([w, b]) => [w, Object.keys(b)])),
+          places: Object.keys(f.places),
           dropped: SKY_BODIES.dropped,
         }
       : null,

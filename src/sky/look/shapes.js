@@ -922,11 +922,15 @@ export class Field {
     const fov = camera.isPerspectiveCamera ? camera.fov : 50;
     const K = (_size.y || 900) / (2 * Math.tan((fov * Math.PI) / 360));
     const kChanged = Math.abs(FU.projScale.value - K) > 0.5;
-    FU.projScale.value = K;
+    // (the GPU port's pass 2, wave 5) written only when it moves: a number written into a float uniform's own `value` is a
+    // number made, and the game measures its rocks every frame (a move under half a pixel's scale is no change to see)
+    if (kChanged) FU.projScale.value = K;
     if (!this.L.n || !this.flags) return;
     _inv.copy(this.group.matrixWorld).invert();
     _cam.setFromMatrixPosition(camera.matrixWorld).applyMatrix4(_inv);
-    const moved = _cam.distanceToSquared(this.lastCam);
+    // (the GPU port's pass 2, wave 5) written out: a number handed back by a call the compiler does not build in is a number made
+    const lc = this.lastCam, mx = _cam.x - lc.x, my = _cam.y - lc.y, mz = _cam.z - lc.z;
+    const moved = mx * mx + my * my + mz * mz;
     const need = moved > (this.minDist * 0.03) ** 2 || kChanged;
     if (!need || this.frameNo - this.lastSelect < 2) return;
     this.lastSelect = this.frameNo;

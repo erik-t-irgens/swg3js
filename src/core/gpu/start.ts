@@ -77,6 +77,10 @@ import { LookBaker } from '../../sky/look/lookBake.ts';
 // Pass 2, wave 4b (maker C): a space zone's planets' air (`src/space/spaceRims.ts`) and its gas as volumes (`spaceVolumes.ts`).
 import { SPACE_RIM_IN, SpaceRims } from '../../space/spaceRims.ts';
 import { NEBULA_NOW, SPACE_VOLUME_IN, SpaceVolumes, nebulaFormNow } from '../../space/spaceVolumes.ts';
+// Pass 2, wave 5 (maker L): bodies wearing his looks drawn whole, in a ground sky and in space (`src/sky/bodies/lookBody.ts`).
+import { LOOK_BODY_IN, LookBodies, presetFor } from '../../sky/bodies/lookBody.ts';
+// Pass 2, wave 5 (maker M): the viewer's ring profile handed to the galaxy map's opened system as bytes (`src/ui/galaxySystemView.ts`).
+import { ringProfile, ringScatter } from '../../sky/look/shapes.js';
 // The sky and light fix round (maker L): the lights the player carries, their nodes registered with three as this module
 // loads, before any material is built (`carriedLights.ts`).
 import { CARRIED_LIGHTS } from './carriedLights.ts';
@@ -372,7 +376,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     looks: (() => {
       const baker = new LookBaker(renderer);
       return {
-        bake: (id, look, most) => baker.bake(id, look, most),
+        bake: (id, look, most, mayAsk) => baker.bake(id, look, most, mayAsk),
+        askLater: () => baker.askLater(),
         warm: (look, most) => baker.warm(look, most),
         beginScreen: () => bakeCache().beginScreen(),
         baked: (look, most) => baker.baked(look, most),
@@ -392,6 +397,20 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       form: () => nebulaFormNow(),
       now: NEBULA_NOW,
       volumeIn: SPACE_VOLUME_IN,
+    },
+    // Pass 2, wave 5 (maker L): bodies wearing his looks drawn whole (`src/sky/bodies/lookBody.ts`), one set a sky or a zone.
+    lookBodies: {
+      make: (plans, tier) => LookBodies.make(renderer, plans, tier),
+      ready: (plans, putOff) => LookBodies.ready(renderer, plans, putOff),
+      lookIn: LOOK_BODY_IN,
+      presetFor: (kind) => presetFor(kind),
+    },
+    // Pass 2, wave 5 (maker M): a look's rings for the galaxy map's opened system, as bytes its WebGL renderer lays itself.
+    mapRings: (seed, style, dials) => {
+      const t = ringProfile(seed, style, dials);
+      const out = { data: Uint8Array.from(t.image.data), width: t.image.width, scatter: ringScatter(style) };
+      t.dispose();
+      return out;
     },
     renderer: renderer as THREE.WebGLRenderer,
     environment,
@@ -554,6 +573,9 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         reversedDepth: renderer.reversedDepthBuffer === true,
         frame: { draws: frame.draws, triangles: frame.triangles, drawsSteppedOver: frame.skipped },
         pipelines: { held: pipelinesNow(), madeInPlay: frame.madeInPlay },
+        // Pass 2, wave 5 (the lag, `src/world/letGo.ts`): how many render objects three holds (its strong set, which grew
+        // load after load before the world let its take-downs go), for the owner to watch over a long session.
+        renderObjects: ((renderer as Any)._objects?._renderObjects as Set<unknown> | undefined)?.size ?? null,
         unsupported: Object.fromEntries([...fallback.unsupported.entries()].sort((a, b) => b[1] - a[1])),
         standIns: Object.fromEntries(fallback.standIns.entries()),
         forcedOff: Object.fromEntries(forcedOff.entries()),

@@ -78,6 +78,13 @@ export class BodyCardState {
    * the worn look's own (`skyLooks.ts`) for a body wearing one.
    */
   readonly a5 = new THREE.Vector4(1, 0, 1, 0.3);
+  /**
+   * Pass 2, wave 5 (maker L): whether the body is up this frame (written by the frame), and whether its look is drawn whole
+   * by `lookBody.ts` (set at its making): then this card, its Scattered twin and its halo stand down, and the look's card is
+   * placed from this record.
+   */
+  shown = false;
+  lookDrawn = false;
   /** Its picture and its air's three tables (half floats), or the fallbacks. */
   map: THREE.Texture;
   tT: THREE.Texture;
@@ -527,6 +534,8 @@ export class SkyBodies {
           twin.position.copy(p);
           twin.quaternion.copy(disc.quaternion);
           twin.scale.copy(disc.scale);
+          // its draw order its card's as the sky's frame left it (under an applied system the nearer drawn later: `nearOrder`)
+          twin.renderOrder = disc.renderOrder;
         }
         // The Painted card stands down while the Scattered one draws (the sky shows it again at its next place).
         if (form === 'scattered') disc.visible = false;
@@ -534,6 +543,13 @@ export class SkyBodies {
       // SWG's halo is the Painted form's own layer: hidden where the body's air is drawn by the march, or by none.
       const glow = b.card.glow;
       if (glow && b.air && form !== 'painted') glow.visible = false;
+      // Pass 2, wave 5 (maker L): a body its look draws whole (`lookBody.ts`) keeps its record and stands down here.
+      st.shown = up;
+      if (st.lookDrawn) {
+        disc.visible = false;
+        if (twin) twin.visible = false;
+        if (glow) glow.visible = false;
+      }
     }
   }
 

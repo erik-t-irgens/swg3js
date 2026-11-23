@@ -23,6 +23,9 @@ export class GeneratedSet {
   static keyOf(gen: Record<string, unknown>, withClouds: boolean): string;
 }
 
+/** The viewer's preset looks by id (pass 2, wave 5: an extra body that names no look wears its kind's): their recipe and parts. */
+export const PRESETS: Record<string, { name?: string; recipe?: string; group?: string; shape?: unknown; volume?: unknown; [k: string]: unknown }>;
+
 /** FNV-1a over bytes: a short name for a picture's every texel. */
 export function hashBytes(bytes: ArrayLike<number>): string;
 

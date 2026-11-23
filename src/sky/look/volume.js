@@ -22,7 +22,7 @@ import {
   sqrt, exp, sin, cos, texture, uv, positionLocal, cameraPosition, modelWorldMatrixInverse, screenCoordinate, smoothstep, select,
 } from 'three/tsl';
 import { noise3 } from './generate.js';
-import { weatherUniforms, Storms, STORM_SLOTS } from './weather.js';
+import { weatherUniforms, Storms, STORM_SLOTS, stormArgs, STORM_TAPE } from './weather.js';
 
 const N = 128, TX = 16, TY = 8; // the baked noise volume: N slices of N x N, TX x TY of them in one picture
 const CUBE = 1.1; // the noise volume reaches this far each way (room for the currents to push)
@@ -293,7 +293,7 @@ function flashSum(W, V, p) {
   for (let i = 0; i < STORM_SLOTS; i++) {
     const c = W.cells[i];
     const dv = p.sub(c.xyz.mul(V.flashDepth.mul(FLASH_DEPTH[i % FLASH_DEPTH.length])));
-    g = g.add(c.w.mul(exp(dot(dv, dv).mul(W.invSpread2).mul(W.cellInv[i]).negate())));
+    g = g.add(c.w.mul(exp(dot(dv, dv).mul(W.invSpread2).mul(W.cellInv[i].x).negate())));
   }
   return W.flashColour.mul(g);
 }
@@ -459,8 +459,15 @@ export function buildVolume(gen, set, parent, onFlash, { body = false } = {}) {
   for (const ch of String(gen.seed) + 'volume') h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
   const storms = new Storms(h >>> 0, false);
   storms.onFlash = (x, y, z, peak) => onFlash?.(x, y, z, peak);
-  const vol = { V, W, mesh, live, baked, set, storms, body, tier: 'high', _mi: new THREE.Matrix4(), _v: new THREE.Vector3(), occN: 0 };
+  // (the GPU port's pass 2, wave 5) the storms' step reads its numbers off a kept record (`stormArgs`), written in place a frame
+  const sa = stormArgs();
+  sa.cells = W.cells;
+  sa.sizes = W.cellInv;
+  const vol = { V, W, mesh, live, baked, set, storms, body, tier: 'high', _mi: new THREE.Matrix4(), _v: new THREE.Vector3(), occN: 0, sa };
   syncVolume(vol, gen);
+  // (pass 2, wave 5) the game's gas's lightning recorded ahead and played back (`weather.js`' `STORM_TAPE`); the viewer's live
+  const fd = gen.volume.dials;
+  if (STORM_TAPE.on && +fd.flashes > 0) storms.record(+fd.flashes, Math.max(0.01, +fd.flashSize || 0.14));
   return vol;
 }
 
@@ -513,6 +520,12 @@ export function syncVolume(vol, gen) {
   const sp = Math.max(0.01, +d.flashSize || 0.14);
   W.invSpread2.value = 1 / (sp * sp);
   W.invSpread.value = 1 / sp;
+  // (pass 2, wave 5) the storms' dials kept for the frame (read here when a control moves, never a frame)
+  const sd = (vol.sd ||= { on: false, rate: 0.5, bright: 0.5, spread: 0.5 });
+  sd.on = +d.flashes > 0;
+  sd.rate = +d.flashes;
+  sd.bright = +d.flashBright;
+  sd.spread = sp;
   vol.gen = gen;
 }
 
@@ -552,7 +565,14 @@ export function updateVolume(vol, { motion, wall, lightWorld, sunPower = 1, sunC
     for (let i = 0; i < STORM_SLOTS; i++) if (cells[i].value.w !== 0) cells[i].value.w = 0;
     return;
   }
-  vol.storms.step(wall, +d.flashes > 0, +d.flashes, +d.flashBright, Math.max(0.01, +d.flashSize || 0.14), vol.W.cells, vol.W.cellInv);
+  // (pass 2, wave 5) the step's numbers into its kept record (its dials as `syncVolume` last read them), then the step reads them
+  const sa = vol.sa, sd = vol.sd;
+  sa.now = wall;
+  sa.on = sd.on;
+  sa.rate = sd.rate;
+  sa.bright = sd.bright;
+  sa.spread = sd.spread;
+  vol.storms.stepWith(sa);
 }
 
 /**

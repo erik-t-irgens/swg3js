@@ -321,18 +321,12 @@ export function makeSkyState(model) {
     // (both start as fractions, so writing a fraction later never changes how the field is kept)
     daylight: 0.5, // the share of the stars' light reaching the ground (an eclipse takes some)
     night: 0.5, // night light: see nightBrightness
+    next: 0.5, // (the game, pass 2 wave 5) the time skyAtNext reads, written before the call so no number crosses it
   };
 }
 
-/** The overlap of two discs of radius a and b whose centres are d apart (all angles in radians). */
-function overlap(a, b, d) {
-  if (d >= a + b) return 0;
-  const lo = a < b ? a : b;
-  if (d <= Math.abs(a - b)) return Math.PI * lo * lo;
-  const ca = (d * d + a * a - b * b) / (2 * d * a), cb = (d * d + b * b - a * a) / (2 * d * b);
-  const k = (-d + a + b) * (d + a - b) * (d - a + b) * (d + a + b);
-  return a * a * Math.acos(ca < -1 ? -1 : ca > 1 ? 1 : ca) + b * b * Math.acos(cb < -1 ? -1 : cb > 1 ? 1 : cb) - 0.5 * Math.sqrt(k > 0 ? k : 0);
-}
+// The overlap of two discs of radius a and b whose centres are d apart (all angles in radians) is worked in place in each
+// cover loop below (the game's frame: pass 2, wave 5).
 
 /** One body's part of the night light: its lit share, by its size against a 20° full moon, by its height. */
 export function moonLight(lit, sizeDeg, sinUp) {
@@ -360,7 +354,18 @@ const PN_Y = Math.sin(POLE_ELEVATION * DEG), PN_Z = Math.cos(POLE_ELEVATION * DE
 
 /** The whole sky at sky time T, written into `out` (makeSkyState). Allocates nothing. (Version 2: T is real days since EPOCH_MS.) */
 export function skyAt(model, T, out) {
-  if (model.version === 2) return skyAt2(model, T, out);
+  out.next = T;
+  return skyAtNext(model, out);
+}
+
+/**
+ * The whole sky at the time written into `out.next`: what skyAt does, for the game's frame (pass 2, wave 5), where a number
+ * handed to a call the compiler does not build in is a number made. The arithmetic is skyAt's own, the small helpers
+ * (overlap, moonLight, frac, localHour) worked in place, so the viewer's skies are the same to the bit. Allocates nothing.
+ */
+export function skyAtNext(model, out) {
+  if (model.version === 2) return skyAt2(model, out);
+  const T = out.next;
   const { n, order, parent, period, radius, start, wobble, basis } = model;
   const pos = out.pos, unit = out.unit, ang = out.angle;
   for (let q = 0; q < n; q++) {
@@ -468,8 +473,15 @@ export function skyAt(model, T, out) {
       if (model.itemStar[j] || model.itemSheet[j] || !model.itemDrawn[j] || dist[j] >= dist[k]) continue;
       const j3 = 3 * j;
       const c = dir[k3] * dir[j3] + dir[k3 + 1] * dir[j3 + 1] + dir[k3 + 2] * dir[j3 + 2];
-      const sep = Math.acos(c < -1 ? -1 : c > 1 ? 1 : c);
-      covered += overlap(rs, (model.itemSize[j] * DEG) / 2, sep);
+      const d = Math.acos(c < -1 ? -1 : c > 1 ? 1 : c);
+      // overlap(rs, size / 2, d), worked in place (the frame's rule: no number across a call)
+      const a = rs, b = (model.itemSize[j] * DEG) / 2;
+      if (d >= a + b) continue;
+      const lo = a < b ? a : b;
+      if (d <= Math.abs(a - b)) { covered += Math.PI * lo * lo; continue; }
+      const ca = (d * d + a * a - b * b) / (2 * d * a), cb = (d * d + b * b - a * a) / (2 * d * b);
+      const kk = (-d + a + b) * (d + a - b) * (d - a + b) * (d + a + b);
+      covered += a * a * Math.acos(ca < -1 ? -1 : ca > 1 ? 1 : ca) + b * b * Math.acos(cb < -1 ? -1 : cb > 1 ? 1 : cb) - 0.5 * Math.sqrt(kk > 0 ? kk : 0);
     }
     const share = covered / (Math.PI * rs * rs);
     out.cover[k] = share > 1 ? 1 : share;
@@ -477,9 +489,25 @@ export function skyAt(model, T, out) {
     lightSum += model.itemBright[k] * (1 - out.cover[k]);
   }
   out.daylight = lightAll > 0 ? lightSum / lightAll : 1;
-  out.night = nightBrightness(model, out);
+  nightInto(model, out);
   out.T = T;
   return out;
+}
+
+/** `nightBrightness` written into `out.night` (its sum, in its order, moonLight's in place): no number crosses the call. */
+function nightInto(model, out) {
+  let sum = 0;
+  for (let j = 0; j < model.m; j++) {
+    if (model.itemStar[j] || !model.itemDrawn[j]) continue;
+    const lit = out.lit[j], sinUp = out.dir[3 * j + 1];
+    let l = 0;
+    if (sinUp > 0 && lit > 0) {
+      const s = model.itemSize[j] / NIGHT_REF_SIZE;
+      l = lit * s * s * sinUp;
+    }
+    sum += l * (model.itemSheet[j] ? SHEET_SHARE : 1);
+  }
+  out.night = sum;
 }
 
 /** The sky's direction of a vector given in the system's space (for the page's drawings). */
@@ -852,6 +880,7 @@ function makeSkyState2(model) {
     R: new Float64Array(9), zenith: new Float64Array(3), poleSky: new Float64Array(3),
     dir: new Float64Array(3 * m), light: new Float64Array(3 * m), lit: new Float64Array(m), dist: new Float64Array(m), cover: new Float64Array(m),
     daylight: 0.5, night: 0.5,
+    next: 0.5, // (the game, pass 2 wave 5) the time skyAtNext reads, written before the call so no number crosses it
     hour: 0.5, // the play area's hour of its own day (0 to 24, 12 the sun's highest)
     sunJ: model.casterJ,
     // the day as the ground view reads it (places.js dayAt's shape, from where the sun really is)
@@ -864,8 +893,9 @@ export const localHour = (model, T) => 24 * frac(T / model.dayDays + model.lonDe
 /** The real time in the same day of the world as T at which its hour is `hour`. */
 export const timeAtHour = (model, T, hour) => T - (localHour(model, T) / 24) * model.dayDays + (((hour % 24) + 24) % 24 / 24) * model.dayDays;
 
-/** A locked ground world on its orbit at T: the plane square to its axis, the axis leaning toward its fixed time of year. */
-function lockedOrbit(M, i, T, out) {
+/** A locked ground world on its orbit at T (`out.next`): the plane square to its axis, the axis leaning toward its fixed time of year. */
+function lockedOrbit(M, i, out) {
+  const T = out.next;
   const pos = out.pos, unit = out.unit, ob = out.basis, ax = out.axis;
   const p3 = 3 * M.parent[i], s3 = 3 * M.sunI, yb = 9 * M.yearOf[i];
   const Nx = M.basis[yb + 6], Ny = M.basis[yb + 7], Nz = M.basis[yb + 8];
@@ -886,7 +916,8 @@ function lockedOrbit(M, i, T, out) {
   l = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
   ux /= l; uy /= l; uz /= l;
   const vx = Ay * uz - Az * uy, vy = Az * ux - Ax * uz, vz = Ax * uy - Ay * ux;
-  const psi = TAU * frac(T / M.lockDay[i]) - Math.PI;
+  const turn = T / M.lockDay[i];
+  const psi = TAU * (turn - Math.floor(turn)) - Math.PI;
   const a = psi + M.wobble[i] * Math.sin(psi);
   const c = Math.cos(a), s = Math.sin(a), i3 = 3 * i, o = 9 * i;
   unit[i3] = c * ux + s * vx; unit[i3 + 1] = c * uy + s * vy; unit[i3 + 2] = c * uz + s * vz;
@@ -898,8 +929,9 @@ function lockedOrbit(M, i, T, out) {
   ax[i3] = Ax; ax[i3 + 1] = Ay; ax[i3 + 2] = Az;
 }
 
-/** Version 2's sky at real time T (days since EPOCH_MS). Allocates nothing. */
-function skyAt2(M, T, out) {
+/** Version 2's sky at real time T (days since EPOCH_MS), written into `out.next` before the call. Allocates nothing. */
+function skyAt2(M, out) {
+  const T = out.next;
   const { n, order, parent, period, radius, start, basis } = M;
   const pos = out.pos, unit = out.unit, ang = out.angle;
   for (let q = 0; q < n; q++) {
@@ -912,7 +944,7 @@ function skyAt2(M, T, out) {
       ang[i] = 0;
       continue;
     }
-    if (M.lockDay[i] > 0) { lockedOrbit(M, i, T, out); continue; }
+    if (M.lockDay[i] > 0) { lockedOrbit(M, i, out); continue; }
     const p3 = 3 * p;
     const f = M.follow[i];
     if (f >= 0) {
@@ -967,7 +999,8 @@ function skyAt2(M, T, out) {
     l = Math.sqrt(px * px + py * py + pz * pz);
     if (l < 1e-12) { px = ex; py = ey; pz = ez; l = 1; }
     px /= l; py /= l; pz /= l;
-    const H = TAU * frac(T / M.dayDays + M.lonDeg / 360) - Math.PI;
+    const hd = T / M.dayDays + M.lonDeg / 360;
+    const H = TAU * (hd - Math.floor(hd)) - Math.PI;
     const qx = Ay * pz - Az * py, qy = Az * px - Ax * pz, qz = Ax * py - Ay * px;
     const cH = Math.cos(H), sH = Math.sin(H);
     mx = cH * px + sH * qx; my = cH * py + sH * qy; mz = cH * pz + sH * qz;
@@ -984,7 +1017,8 @@ function skyAt2(M, T, out) {
   out.zenith[0] = Zx; out.zenith[1] = Zy; out.zenith[2] = Zz;
   const PX = R[0] * Ax + R[1] * Ay + R[2] * Az, PY = R[3] * Ax + R[4] * Ay + R[5] * Az, PZ = R[6] * Ax + R[7] * Ay + R[8] * Az;
   out.poleSky[0] = PX; out.poleSky[1] = PY; out.poleSky[2] = PZ;
-  out.hour = localHour(M, T);
+  const hh = T / M.dayDays + M.lonDeg / 360; // localHour(M, T), in place
+  out.hour = 24 * (hh - Math.floor(hh));
 
   // every item: its direction, the light on it, how much of it is lit, how far
   const dir = out.dir, light = out.light, lit = out.lit, dist = out.dist;
@@ -1058,8 +1092,15 @@ function skyAt2(M, T, out) {
       if (M.itemStar[j] || M.itemSheet[j] || !M.itemDrawn[j] || dist[j] >= dist[k]) continue;
       const j3 = 3 * j;
       const c = dir[k3] * dir[j3] + dir[k3 + 1] * dir[j3 + 1] + dir[k3 + 2] * dir[j3 + 2];
-      const sep = Math.acos(c < -1 ? -1 : c > 1 ? 1 : c);
-      covered += overlap(rs, (M.itemSize[j] * DEG) / 2, sep);
+      const d = Math.acos(c < -1 ? -1 : c > 1 ? 1 : c);
+      // overlap(rs, size / 2, d), worked in place (the frame's rule: no number across a call)
+      const a = rs, b = (M.itemSize[j] * DEG) / 2;
+      if (d >= a + b) continue;
+      const lo = a < b ? a : b;
+      if (d <= Math.abs(a - b)) { covered += Math.PI * lo * lo; continue; }
+      const ca = (d * d + a * a - b * b) / (2 * d * a), cb = (d * d + b * b - a * a) / (2 * d * b);
+      const kk = (-d + a + b) * (d + a - b) * (d - a + b) * (d + a + b);
+      covered += a * a * Math.acos(ca < -1 ? -1 : ca > 1 ? 1 : ca) + b * b * Math.acos(cb < -1 ? -1 : cb > 1 ? 1 : cb) - 0.5 * Math.sqrt(kk > 0 ? kk : 0);
     }
     const sh = covered / (Math.PI * rs * rs);
     out.cover[k] = sh > 1 ? 1 : sh;
@@ -1067,7 +1108,7 @@ function skyAt2(M, T, out) {
     lightSum += M.itemBright[k] * (1 - out.cover[k]);
   }
   out.daylight = lightAll > 0 ? lightSum / lightAll : 1;
-  out.night = nightBrightness(M, out);
+  nightInto(M, out);
 
   // the day as the ground view reads it: SWG's light time (0 sunrise, 0.25 noon, 0.5 sunset, 0.75
   // midnight) from where the casting sun really is, so the game's colour ramp and slots follow it

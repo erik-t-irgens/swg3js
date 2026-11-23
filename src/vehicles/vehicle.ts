@@ -10,6 +10,7 @@ import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly.
 import { partnerLoss } from '../space/shipDamage.ts';
 import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing.ts';
 import { cellIndexOf } from './cells.ts';
+import { letGoDrawn } from '../world/letGo.ts';
 import { RACE_TUNE } from './raceTune.ts';
 
 /**
@@ -2585,5 +2586,8 @@ export class Vehicle {
       const m = o as THREE.Mesh;
       if (m.isMesh && m.geometry && !(m.userData.shared as boolean | undefined)) m.geometry.dispose();
     });
+    // Pass 2, wave 5 (agent P): and let go by three's WebGPU renderer, whose render objects of its pieces (on the garage's own
+    // materials and the shadow pass's, which outlive it) otherwise held the whole hull for the session (`letGo.ts`).
+    letGoDrawn(this.group);
   }
 }

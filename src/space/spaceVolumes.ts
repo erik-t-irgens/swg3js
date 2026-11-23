@@ -28,6 +28,8 @@ import { skyDirection } from './loreStarts.js';
 import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
 import { tierIndexOf } from '../sky/night/nightTier.ts';
 import { liveSettings } from '../core/settings.ts';
+import { lookDrawnPlaces } from '../sky/bodies/lookBody.ts';
+import { STORM_TAPE } from '../sky/look/weather.js';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -120,12 +122,16 @@ export class SpaceVolumes {
     for (let i = 0; i < planets.length; i++) s.planetStage[i] = stageDistance(planets[i].distance);
     const file = SKY_BODIES.file;
     const lookOf = (id: string): { generated: Record<string, unknown> | null } | null => file?.looks[id] ?? null;
-    const places = volumePlacesOf(zone, zonePlanets, file ? file.uses : null, (id) => !!(lookOf(id)?.generated as Any)?.volume);
+    // Pass 2, wave 5 (maker L): a planet drawn whole in its look (`lookBody.ts`) carries its own gas round it; none hung here for it.
+    const whole = lookDrawnPlaces();
+    const places = volumePlacesOf(zone, zonePlanets, file ? file.uses : null, (id) => !!(lookOf(id)?.generated as Any)?.volume).filter((p) => !whole.has(p.place));
     // The prover's volumes for this zone (`__debug.spaceVolumes({ test })`), hung at the next zone's screen beside the file's.
     for (const t of TEST_VOLUMES) if (t.zone === zone) places.push({ place: `test:${zone}:${t.look}`, look: t.look, fromFile: false, dir: skyDirection(t.yaw, t.pitch), sizeDeg: t.size, distance: t.distance });
     if (!places.length) return s;
     // The viewer's tiers are module state: the game never draws its live High.
     setVolumeQuality(s.tier);
+    // Pass 2, wave 5 (maker L): the gas's lightning recorded ahead and played back in the frames (`weather.js`' `STORM_TAPE`).
+    STORM_TAPE.on = true;
     for (const place of places) {
       const gen = place.fromFile ? (lookOf(place.look)?.generated as Any) : (presetLook(place.look).generated as Any);
       if (!gen?.volume) continue;
@@ -388,6 +394,8 @@ export function installSpaceVolumesDebug(): void {
 
 const CLEAR = new THREE.Color();
 /** The options `updateVolume` reads, one record for every frame. */
-// `noStorms`: the gas's lightning is left out in the game until the storms' step (`weather.js`, the viewer's) takes its numbers
-// from a kept record: handed across its call each frame, they made numbers a frame (`spaceAlloc.test.ts`).
+// `noStorms`: the gas's lightning is left out in the game. Wave 4b left it out because the storms' step (`weather.js`, the viewer's)
+// took its numbers across its call; pass 2, wave 5 (maker L) gave the step a kept record and a recording played back
+// (`Storms.stepWith`, `record`), which a cloud deck's storms run allocating nothing (`lookBodyAlloc.test.ts`), but the
+// Maelstrom's played back through `updateVolume` still made 8 bytes a frame in `spaceAlloc.test.ts` (cause not found), so it stays out.
 const FRAME_OPTS: { motion: number; wall: number; lightWorld: THREE.Vector3 | null; sunPower: number; sunColour: THREE.Vector3 | null; gain: number; noStorms: boolean } = { motion: 0, wall: 0, lightWorld: null, sunPower: 1, sunColour: null, gain: 1, noStorms: true };

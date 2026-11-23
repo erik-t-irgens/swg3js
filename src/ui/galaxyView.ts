@@ -17,6 +17,10 @@ import { sampleDisc } from '../sky/night/galaxyDensity.ts';
 import { GPU } from '../core/gpuSwitch.ts';
 import { GLOBE_TUNE, type GlobePictures } from './galaxyLooks.ts';
 import { RIM_LIT, RIM_PROFILE_SIZE } from '../space/spaceAir.ts';
+// Pass 2, wave 5 (maker M): a picked system opened into its sun, worlds and moons (the game on WebGPU alone).
+import { SystemDraw, type BodyWear } from './galaxySystemView.ts';
+import { SYSTEM_VIEW_TUNE, type OpenedSystem } from './galaxySystem.ts';
+import { sharedClock } from '../world/sharedClock.ts';
 
 /**
  * Invented: how the galaxy view looks and how its mouse feels. Every number here is ours, and every
@@ -97,9 +101,12 @@ export class GalaxyOrbit {
     this.target.z += (-dx * rz + dy * uz) * perPixel;
   }
 
+  /** Pass 2, wave 5 (maker M): how near the wheel may come while a system is open (`SYSTEM_VIEW_TUNE.distanceMin`), else null. */
+  minDistance: number | null = null;
+
   zoom(steps: number): void {
     const f = Math.pow(GALAXY_VIEW_TUNE.zoomStep, steps);
-    this.orbit.distance = clamp(this.orbit.distance * f, GALAXY_VIEW_TUNE.distanceMin, GALAXY_VIEW_TUNE.distanceMax);
+    this.orbit.distance = clamp(this.orbit.distance * f, this.minDistance ?? GALAXY_VIEW_TUNE.distanceMin, GALAXY_VIEW_TUNE.distanceMax);
   }
 
   /** The wheel over a point: what is under the cursor stays under it. */
@@ -254,6 +261,15 @@ export class GalaxyView {
   private readonly blankRim = blankRimTexture();
   private readonly sunDir = new THREE.Vector3(0.4, 1, 0.6).normalize();
   private readonly rimLight: RimLight = { dir: { value: new THREE.Vector3(0, 1, 0) }, colour: { value: new THREE.Color(0xfff0dc).multiplyScalar(2.2) } };
+  /**
+   * Pass 2, wave 5 (maker M, `galaxySystemView.ts`): the opened system's pool, made with the view on WebGPU (null on WebGL, where
+   * no system opens); the orbit's distance and pitch before it opened (put back as it shuts); the map's program count after its
+   * first frame and now (the prover's: an opened system builds none).
+   */
+  private readonly system: SystemDraw | null;
+  private beforeOpen: { distance: number; pitch: number } | null = null;
+  private programsFirst = 0;
+  private programsNow = 0;
 
   private readonly labelLayer: HTMLElement;
 
@@ -327,8 +343,86 @@ export class GalaxyView {
     this.here.visible = false;
     this.picked.visible = false;
     this.scene.add(this.here, this.picked);
+    // Pass 2, wave 5 (maker M): the opened system's pool, made here so its programs are linked in the first frame's compile.
+    this.system = withLooks ? new SystemDraw(labelLayer, this.blank, this.blankRim, this.rimLight.colour, globeRimMaterial, rimTexture, (this.disc.material as THREE.PointsMaterial).opacity) : null;
+    if (this.system) this.scene.add(this.system.group);
     this.place();
     onPaletteChange(() => this.repaint());
+  }
+
+  // ---------------------------------------------------------------- an opened system (pass 2, wave 5, maker M)
+
+  /** The system opened, or null (always null on WebGL). */
+  get systemOpen(): OpenedSystem | null {
+    return this.system?.opened ?? null;
+  }
+
+  /** SWG's picture a system's globe wears (or keeps under a look), for its main world's body in the opened system; null for none. */
+  globeSwg(systemId: string): THREE.Texture | null {
+    const g = this.globes.find((x) => x.sys.id === systemId);
+    if (!g) return null;
+    const t = g.swgMap !== undefined ? g.swgMap : g.material.map;
+    return t && t !== this.blank ? t : null;
+  }
+
+  /**
+   * A system opened (`galaxySystem.ts`' `OpenedSystem`, worn as `wear` says): the galaxy's globes, routes and names put away, the
+   * view centred on its place at the System view's start, the disc fading behind it. False where it cannot open here (WebGL,
+   * or a system the map does not draw). Never in a frame.
+   */
+  openSystem(opened: OpenedSystem, wear: readonly (BodyWear | null)[]): boolean {
+    const sys = this.system;
+    const g = this.globes.find((x) => x.sys.id === opened.galaxyId);
+    if (!sys || !g) return false;
+    if (!sys.opened) this.beforeOpen = { distance: this.orbit.orbit.distance, pitch: this.orbit.orbit.pitch };
+    for (const x of this.globes) {
+      x.mesh.visible = false;
+      if (x.clouds) x.clouds.visible = false;
+      if (x.rim) x.rim.visible = false;
+      x.label.hidden = true;
+    }
+    this.routeLines.visible = false;
+    this.mutedLines.visible = false;
+    sys.open(opened, g.at, wear);
+    this.orbit.centreOn(g.at.x, g.at.y, g.at.z);
+    this.orbit.orbit.distance = SYSTEM_VIEW_TUNE.startDistance;
+    this.orbit.orbit.pitch = SYSTEM_VIEW_TUNE.startPitch;
+    this.orbit.minDistance = SYSTEM_VIEW_TUNE.distanceMin;
+    return true;
+  }
+
+  /** The opened system shut: the galaxy's globes, routes and names back, the view as it stood before (`restore`). */
+  closeSystem(restore: boolean): void {
+    const sys = this.system;
+    if (!sys || !sys.opened) return;
+    sys.close();
+    for (const x of this.globes) {
+      x.mesh.visible = true;
+      if (x.clouds) x.clouds.visible = (x.clouds.material as THREE.MeshLambertMaterial).map !== this.blank;
+      if (x.rim) x.rim.visible = (x.rim.material as THREE.ShaderMaterial).uniforms.uProfile.value !== this.blankRim;
+    }
+    this.orbit.minDistance = null;
+    if (restore && this.beforeOpen) {
+      this.orbit.orbit.distance = Math.max(this.beforeOpen.distance, GALAXY_VIEW_TUNE.distanceMin);
+      this.orbit.orbit.pitch = this.beforeOpen.pitch;
+    }
+    this.beforeOpen = null;
+    this.place();
+  }
+
+  /** The opened system's body under a point on the canvas, or -1. */
+  pickBody(x: number, y: number, width: number, height: number): number {
+    return this.system ? this.system.pickAt(this.camera, x, y, width, height, GALAXY_VIEW_TUNE.pickPixels) : -1;
+  }
+
+  /** The opened system's body picked (its orbit and name lit), or -1. */
+  setPickedBody(i: number): void {
+    this.system?.pick(i);
+  }
+
+  /** Where an opened system's body stands in the galaxy's frame, or null. */
+  bodyPlace(i: number): THREE.Vector3 | null {
+    return this.system ? this.system.placeOf(i, this.scratch) : null;
   }
 
   /** A colour theme switched: the routes and the two rings read the palette again. Never in a frame. */
@@ -610,25 +704,45 @@ export class GalaxyView {
     this.camera.lookAt(t.x, t.y, t.z);
     this.camera.updateMatrixWorld(true);
     this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
-    // The rings lie across the view, so they read as rings round a globe from any angle.
-    const hereAt = this.hereId ? this.placeOf(this.hereId) : null;
-    this.here.visible = !!hereAt;
-    if (hereAt) {
-      this.here.position.copy(hereAt);
-      this.here.quaternion.copy(this.camera.quaternion);
+    // Pass 2, wave 5 (maker M): an opened system draws in place of the galaxy's marks, the disc fading behind it (WebGPU's alone:
+    // the pool is null on WebGL); the frame's one read of the shared clock is kept in its record.
+    const sys = this.system;
+    if (sys) {
+      sys.now.ms = sharedClock.now();
+      sys.fadeDisc(this.disc.material as THREE.PointsMaterial);
     }
-    const pickAt = this.pickedId ? this.placeOf(this.pickedId) : null;
-    this.picked.visible = !!pickAt;
-    if (pickAt) {
-      this.picked.position.copy(pickAt);
-      this.picked.quaternion.copy(this.camera.quaternion);
-    }
-    this.placeLabels(width, height);
-    // Pass 2, wave 4b (maker C): the cloud shells turn on the clock, and the rims read the map's light in the view's frame.
-    if (this.globes.length && this.globes[0].clouds) {
-      const turn = ((performance.now() / 1000) * GLOBE_TUNE.cloudSpin) % (Math.PI * 2);
-      for (const g of this.globes) if (g.clouds && g.clouds.visible) g.clouds.rotation.y = turn;
-      this.rimLight.dir.value.copy(this.sunDir).transformDirection(this.camera.matrixWorldInverse);
+    if (sys && sys.opened) {
+      // The galaxy's own marks stay away while it is open, whatever arrived meanwhile (a route file, a globe's look).
+      this.routeLines.visible = false;
+      this.mutedLines.visible = false;
+      for (let k = 0; k < this.globes.length; k++) {
+        const g = this.globes[k];
+        g.mesh.visible = false;
+        if (g.clouds) g.clouds.visible = false;
+        if (g.rim) g.rim.visible = false;
+      }
+      sys.frame(this.camera, this.here, this.picked, width, height);
+    } else {
+      // The rings lie across the view, so they read as rings round a globe from any angle.
+      const hereAt = this.hereId ? this.placeOf(this.hereId) : null;
+      this.here.visible = !!hereAt;
+      if (hereAt) {
+        this.here.position.copy(hereAt);
+        this.here.quaternion.copy(this.camera.quaternion);
+      }
+      const pickAt = this.pickedId ? this.placeOf(this.pickedId) : null;
+      this.picked.visible = !!pickAt;
+      if (pickAt) {
+        this.picked.position.copy(pickAt);
+        this.picked.quaternion.copy(this.camera.quaternion);
+      }
+      this.placeLabels(width, height);
+      // Pass 2, wave 4b (maker C): the cloud shells turn on the clock, and the rims read the map's light in the view's frame.
+      if (this.globes.length && this.globes[0].clouds) {
+        const turn = ((performance.now() / 1000) * GLOBE_TUNE.cloudSpin) % (Math.PI * 2);
+        for (const g of this.globes) if (g.clouds && g.clouds.visible) g.clouds.rotation.y = turn;
+        this.rimLight.dir.value.copy(this.sunDir).transformDirection(this.camera.matrixWorldInverse);
+      }
     }
     // The first frame is the only one that may make programs, and it makes them all: after it, every
     // material this view has is linked, and a texture arriving later only swaps a picture. `compile`
@@ -651,15 +765,20 @@ export class GalaxyView {
       const wasRim = first?.rim?.visible ?? false;
       if (first?.clouds) first.clouds.visible = true;
       if (first?.rim) first.rim.visible = true;
+      // Pass 2, wave 5 (maker M): one of each of an opened system's kinds shown for the call too (globe, rim, ring, orbits, glow).
+      if (sys) sys.showForCompile(true);
       renderer.compile(this.scene, this.camera);
+      if (sys) sys.showForCompile(false);
       if (first?.clouds) first.clouds.visible = wasClouds;
       if (first?.rim) first.rim.visible = wasRim;
       this.here.visible = wasHere;
       this.picked.visible = wasPicked;
       this.routeLines.visible = wasRoutes;
       this.mutedLines.visible = wasMuted;
+      if (sys) this.programsFirst = renderer.info.programs?.length ?? 0;
     }
     renderer.render(this.scene, this.camera);
+    if (sys) this.programsNow = renderer.info.programs?.length ?? 0;
     this.frames++;
   }
 
@@ -702,6 +821,8 @@ export class GalaxyView {
       // The fare on each line, the cheaper of the two directions: the map draws every route alike,
       // so this is the only place the game's own price is read back.
       fares: Object.fromEntries(this.routes.map((r) => [`${r.from}-${r.to}`, r.price])),
+      // Pass 2, wave 5 (maker M): the opened system as the map draws it, and the map renderer's programs after its first frame and now.
+      ...(this.system ? { opened: this.system.describe(), programs: { first: this.programsFirst, now: this.programsNow } } : {}),
     };
   }
 }

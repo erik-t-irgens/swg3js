@@ -14,6 +14,7 @@ import { skyOurs } from '../sky/skyMode.ts';
 import { bodyCardMaterial, type SkyBodyCard } from '../sky/bodies/bodyCard.ts';
 import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';
 import type { HeldPlan, SkyHeldEntry } from '../sky/bodies/heldBodies.ts';
+import { nearOrder, type SkyMotion } from '../sky/system/skyMotion.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -380,6 +381,13 @@ export class SwgSky {
    * `src/sky/bodies/skyBody.ts` draws them once the air's tables exist); empty elsewhere, where every body is its flat picture.
    */
   private readonly cards: SkyBodyCard[] = [];
+  /**
+   * Pass 2, wave 5 (maker S): the star system this sky follows (`src/sky/system/skyMotion.ts`, set by the world through
+   * `useMotion`), and SWG's own cards it places: each slot's or celestial's item in the motion, its sprites and their widths
+   * at the system's size. A place the system does not name keeps SWG's rule; one it hides is hidden. Empty with no motion.
+   */
+  private motion: SkyMotion | null = null;
+  private readonly motionCards: { sprites: SkyBody[]; item: number; star: boolean }[] = [];
   /** What the lens flare follows: at most MAX_FLARE_SOURCES, index = flare slot, fixed for the life of the sky. */
   private readonly flareBodies: FlareBody[] = [];
   private readonly stars: THREE.Points | null = null;
@@ -943,6 +951,93 @@ export class SwgSky {
   }
 
   /**
+   * Pass 2, wave 5 (maker S): follow a star system's motion (`src/sky/system/skyMotion.ts`), or none. Each of SWG's own cards
+   * the system names (its sun and second sun, its moons, each celestial) is placed where the system puts it from here on,
+   * widened or narrowed to the system's size (its glow with it), so the bodies' cards (`skyBody.ts`, which read a card's place
+   * and width) follow; a place it hides is hidden. Called once behind the loading screen; nothing a frame calls.
+   */
+  useMotion(motion: SkyMotion | null): void {
+    // Each card back to SWG's own width before another motion widens it.
+    for (const c of this.motionCards) for (const s of c.sprites) s.scale.set(s.userData.swgWidth ?? s.scale.x, s.userData.swgWidth ?? s.scale.y, 1);
+    this.motionCards.length = 0;
+    this.motion = motion;
+    if (!motion || this.data.space) return;
+    const world = motion.world;
+    const byPlace = new Map<string, number>();
+    for (const it of motion.items) if (it.place && !byPlace.has(it.place)) byPlace.set(it.place, it.index);
+    const take = (sprites: SkyBody[], place: string, c: Celestial | null): void => {
+      if (!sprites.length || !c) return;
+      const j = byPlace.get(place);
+      if (j === undefined) return;
+      const it = motion.items[j];
+      // A hidden or undrawn place stands at no width and no opacity; a drawn one at the system's size, its glow kept in step.
+      const want = it.drawn ? (2 * SKY_RADIUS * Math.tan(((it.sizeDeg > 0 ? it.sizeDeg : 1) * Math.PI) / 360)) : 0;
+      const own = (2 * c.size * SKY_RADIUS) / CELESTIAL_DISTANCE;
+      const k = own > 0 ? want / own : 0;
+      for (const s of sprites) {
+        s.userData.swgWidth ??= s.scale.x;
+        const w = (s.userData.swgWidth as number) * k;
+        s.scale.set(w > 0 ? w : 1e-6, w > 0 ? w : 1e-6, 1);
+      }
+      this.motionCards.push({ sprites, item: it.drawn ? j : -1, star: it.star });
+    };
+    take(this.sun, `${world}:sun`, this.data.sun);
+    take(this.supplementalSun, `${world}:sun2`, this.data.supplementalSun);
+    take(this.moon, `${world}:moon`, this.data.moon);
+    take(this.supplementalMoon, `${world}:moon2`, this.data.supplementalMoon);
+    for (const it of motion.items) {
+      if (it.slot !== 'celestial' || it.celestial < 0) continue;
+      const c = this.celestials.find((x) => x.data === this.data.celestials[it.celestial]);
+      if (c && it.place) take(c.sprites, it.place, c.data);
+    }
+  }
+
+  /**
+   * Pass 2, wave 5 (maker S): SWG's own cards the motion names, placed where it puts them this frame (after SWG's rule has
+   * placed them, so a place it does not name keeps that rule): a sun by its height and the storms (and only where SWG's sun
+   * pictures are drawn at all), a moon or a celestial faded by the storms alone (the bodies' own light does the rest), an
+   * undrawn or hidden one put away. Allocates nothing.
+   */
+  private placeByMotion(m: SkyMotion): void {
+    const dir = m.dir;
+    const clear = 1 - this.overcast;
+    const v = tmpVec;
+    for (let i = 0; i < this.motionCards.length; i++) {
+      const c = this.motionCards[i];
+      const j = c.item;
+      let a = 0;
+      // the nearer of two overlapping bodies drawn over the farther (`nearOrder`, the fixer of wave 5)
+      const order = j >= 0 ? -5 + nearOrder(m.dist[j]) : -5;
+      if (j >= 0) {
+        v.x = dir[3 * j];
+        v.y = dir[3 * j + 1];
+        v.z = dir[3 * j + 2];
+        a = clear;
+        if (c.star) {
+          const rise = v.y / 0.08;
+          a = this.sunPictures ? clear * (rise < 0 ? 0 : rise > 1 ? 1 : rise) : 0;
+        }
+      } else {
+        v.x = 0;
+        v.y = -1;
+        v.z = 0;
+      }
+      // `place`, in place (a number handed to a call the compiler does not build in is a number made).
+      const sprites = c.sprites;
+      for (let k = 0; k < sprites.length; k++) {
+        const s = sprites[k];
+        s.position.x = v.x * SKY_RADIUS;
+        s.position.y = v.y * SKY_RADIUS;
+        s.position.z = v.z * SKY_RADIUS;
+        s.material.opacity = a;
+        s.renderOrder = order;
+        s.visible = a > 0.002 && v.y > -0.3;
+        if (s.visible) turnSkyBody(v, s.quaternion);
+      }
+    }
+  }
+
+  /**
    * Pass 2, wave 4b (maker B): the bodies that hang still in this sky (`heldBodies.ts`'s plan: Endor's Death Star at stage 1 or
    * as the owner saved it), each a card of ours placed once where SWG's celestial numbers put it (its yaw and pitch, as the
    * extra celestials are, never turned by the clock), its size as theirs, its roll about the line to it, drawn Painted from
@@ -1423,6 +1518,8 @@ export class SwgSky {
       if (d.cycleTime && d.cycleTime > 0) pitch += (d.pitchDirection ?? 1) * Math.PI * 2 * ((clientTime % d.cycleTime) / d.cycleTime);
       this.place(c.sprites, SwgSky.direction(d.yaw ?? 0, pitch, tmpVec), this.rampAlpha(Row.Ambient, index, 1));
     }
+    // Pass 2, wave 5 (maker S): SWG's own cards a followed star system names, where it puts them (`placeByMotion`).
+    if (this.motion !== null && !space) this.placeByMotion(this.motion);
     if (this.stars) {
       (this.stars.material as THREE.PointsMaterial).opacity = L.starAlpha;
       this.stars.visible = L.starAlpha > 0.01;

@@ -4,6 +4,7 @@
 import type { Look } from '../player/look';
 import type { WireFit } from '../vehicles/shipFit.ts';
 import { sharedClock } from '../world/sharedClock.ts';
+import { takeServerDays } from '../sky/system/worldDays.ts';
 import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
 import { storyHailVersion } from '../story/storyWire.ts';
@@ -153,6 +154,8 @@ interface ServerWord {
   /** Where the server anchored its day when an admin last changed its length (see `server/clock.mjs`). */
   dayAt?: number;
   dayFrom?: number;
+  /** Pass 2, wave 5: the worlds that keep their own day under an applied star system, `{ world: [lengthMs, phase] }` (`server/clock.mjs`). */
+  days?: unknown;
   /** A refusal (`day`'s, for one): what the word is about. */
   do?: string;
   nonce?: string;
@@ -547,6 +550,8 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
+        // Pass 2, wave 5 (maker S): the worlds the server says keep their own day (an applied star system's), for the console.
+        takeServerDays(server.days);
         this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0, veh: Number(server.veh) > 0 ? Math.floor(Number(server.veh)) : 0, race: Number(server.race) > 0 ? Math.floor(Number(server.race)) : 0, states: cleanStates(server.states) });
         // The world states it keeps, which an arrival on a world with states was waiting on (null: a server before them).
         this.onStates(this.session.worldStates, 'hail');

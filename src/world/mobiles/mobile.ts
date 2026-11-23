@@ -23,6 +23,7 @@
 // every creature is this browser's own with its damage applied where it lands.
 import * as THREE from 'three';
 import { cloneShared, reshareSkeletons } from './cloneShared.ts';
+import { letGoDrawn } from '../letGo.ts';
 import { cullsOneByOne, fitCullSpheres, setBodyCulled, type BodyPose } from '../bodyCull.ts';
 import { groundUnder, standingOn } from './groundProbe.ts';
 import { combatSounds, type GunSound } from '../../audio/combatSounds';
@@ -4688,6 +4689,9 @@ export class Mobile implements Living, NpcSubject {
     this.disposeBlade();
     // The rack's copy shares its geometry and materials with the rack: it is let go, never disposed.
     this.holder?.parent?.remove(this.holder);
+    // Pass 2, wave 5 (agent P): and let go by three's WebGPU renderer, whose render objects of it (on the rack's materials, and
+    // the body's below on its cached look's, both outliving it) otherwise held this body for as long as they stood (`letGo.ts`).
+    letGoDrawn(this.holder);
     this.holder = null;
     this.gun = null;
     if (this.model) {
@@ -4696,6 +4700,7 @@ export class Mobile implements Living, NpcSubject {
         if (s.isSkinnedMesh) s.skeleton?.dispose();
       });
       this.inner.remove(this.model);
+      letGoDrawn(this.model);
       this.model = null;
       this.wornBody = null;
     }

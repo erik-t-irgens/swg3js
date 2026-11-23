@@ -308,7 +308,9 @@ for (const way of ['folded', 'in play'] as const) {
   ok(follows('vite.config.ts', ["name: 'private-imports',", "apply: 'serve',"]) && has('vite.config.ts', 'const file = servedFile(IMPORTS_DIR, req.url);') && has('vite.config.ts', 'const file = servedFile(SHIPPED_IMPORTS_DIR, req.url);') && has('vite.config.ts', "if (!file || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {"), 'the imports middlewares are the dev server\'s alone and open only what `servedFile` answers');
   ok(has('src/world/world.ts', 'if (takesNormalScale(m)) std.normalScale.y *= normalYOf(m);') && has('src/world/world.ts', 'std.normalScale.y *= normalYOf(std);'), "the world's normal override takes an import's marker, at adoption and when the override moves");
   ok(has('src/world/layoutStream.ts', 'for (const prim of model.colliderOnly ? [...model.primitives, ...model.colliderOnly] : model.primitives) {') && has('src/world/layoutStream.ts', 'if (prim.material.userData.swgNoCollide === true) continue;'), "the streamer's colliders take the stand-ins and step over a -nocol piece");
-  ok(has('vite.config.ts', 'plugins: [privateAssets(), privateStory(), privateImports(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],'), 'the imports plugin is in, and the shipped list stays the last plugin');
+  // (Pass 2, wave 5, maker L: the dev server's read-only sky pictures, `privateSky()`, join after the imports; the shipped list
+  // still closes the line.)
+  ok(has('vite.config.ts', 'plugins: [privateAssets(), privateStory(), privateImports(), privateSky(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],'), 'the imports plugin is in, and the shipped list stays the last plugin');
   ok(text('.gitignore').some((l) => l.trim() === 'imports-private' || l.trim() === 'imports-private/' || l.trim() === '/imports-private'), 'imports-private is git-ignored');
   ok(/'imports'/.test(readFileSync(join(REPO, 'tools', 'dev', 'shippedPublic.mjs'), 'utf8')), "public/imports is among the shipped public folders a build lists");
 }

@@ -324,7 +324,12 @@ export interface GpuLooks {
    * from the session's memo, the browser's storage, or baked now on the card where the screen's budget has room; null where
    * it is put off to the next screen (draw SWG's picture) or the look is not a generated one. **Behind a loading screen alone.**
    */
-  bake(id: string, look: import('../sky/look/bodiesFile.ts').BodyLook, most: number): Promise<import('../sky/look/lookPictures.ts').LookPictures | null>;
+  bake(id: string, look: import('../sky/look/bodiesFile.ts').BodyLook, most: number, mayAsk?: boolean): Promise<import('../sky/look/lookPictures.ts').LookPictures | null>;
+  /**
+   * (The fixer of pass 2, wave 5) The bake kits put off behind the screen just gone (a `bake` with `mayAsk` false, a look body's
+   * extra) asked now, a few at a time (`LOOK_BODY_TUNE.kitsAfterScreen`), to land in play off the frame: called as each screen goes.
+   */
+  askLater(): number;
   /**
    * A look's bake kit asked for ahead at a loading screen's start (never awaited: its pipelines land while the world loads),
    * nothing where its pictures are stored already. The world asks it for every look its zone's places wear (`warmZoneLooks`).
@@ -397,6 +402,35 @@ export interface GpuSpaceVolumes {
   readonly volumeIn: { sunX: number; sunY: number; sunZ: number; sunR: number; sunG: number; sunB: number; dt: number };
 }
 
+/**
+ * Pass 2, wave 5 (maker L): a world's bodies wearing his looks, drawn whole by the viewer's own drawing of each look
+ * (`src/sky/bodies/lookBody.ts`): one set a sky or a zone, made behind its loading screen.
+ */
+export interface GpuLookBodySet {
+  /** Once a game frame after the bodies' frame (or the zone's planets placed): places, sizes, lights; `motion` the applied system's. */
+  frame(motion: import('../sky/bodies/lookBody.ts').LookMotion | null): void;
+  /** Before the scene's passes: each shown look drawn into its own picture where it is due. */
+  draw(): void;
+  readonly count: number;
+  report(): Record<string, unknown>;
+  dispose(forget: (materials: Iterable<THREE.Material>) => void): void;
+}
+
+/** The look bodies' runtime (pass 2, wave 5, maker L). */
+export interface GpuLookBodies {
+  /** A sky's or a zone's bodies in their looks made ready behind its screen (`tier` the quality tier, 0 Low to 3 Ultra). */
+  make(plans: readonly import('../sky/bodies/lookBody.ts').LookBodyPlan[], tier: number): Promise<GpuLookBodySet>;
+  /**
+   * (The fixer of pass 2, wave 5) The plans whose looks' bake kits land within the screen's wait (`LOOK_BODY_TUNE.kitWaitMs`):
+   * the rest left out, their places into `putOff`, to wear their looks from the next screen. Behind a screen alone.
+   */
+  ready(plans: readonly import('../sky/bodies/lookBody.ts').LookBodyPlan[], putOff: string[]): Promise<import('../sky/bodies/lookBody.ts').LookBodyPlan[]>;
+  /** The frame's numbers (`LOOK_BODY_IN`), written into its fields by the world before `frame`. */
+  readonly lookIn: typeof import('../sky/bodies/lookBody.ts').LOOK_BODY_IN;
+  /** The look an extra body of an applied system wears when it names none: the viewer's preset of its kind's recipe. */
+  presetFor(kind: string): import('../sky/look/bodiesFile.ts').BodyLook | null;
+}
+
 /** The star's direction, the main light (colour times intensity) and the hemisphere's two colours (times its intensity). */
 export interface GpuSpaceRimIn {
   sunX: number;
@@ -438,6 +472,14 @@ export interface GpuRuntime {
   readonly spaceRims: GpuSpaceRims;
   /** A space zone's gas as true volumes, and the Nebulae row (pass 2, wave 4b, maker C). */
   readonly spaceVolumes: GpuSpaceVolumes;
+  /** Bodies wearing his looks drawn whole, in a ground sky and in space (pass 2, wave 5, maker L). */
+  readonly lookBodies: GpuLookBodies;
+  /**
+   * A look's rings for the galaxy map's opened system (pass 2, wave 5, maker M): the viewer's own ring profile (`shapes.js`'
+   * `ringProfile`, a module of this side) as bytes the map's WebGL renderer lays as a picture of its own (1024 by 1, RGBA: the
+   * density, the colour mix, the brightness), and the style's forward scatter (`ringScatter`). A click's, never a frame's.
+   */
+  mapRings(seed: number, style: string, dials: Record<string, number | string>): { data: Uint8Array; width: number; scatter: number };
   /** What draws from the air under our sky (pass 2, wave 1). */
   readonly airDraw: GpuAirDraw;
   /** The eye (pass 2, wave 2). */

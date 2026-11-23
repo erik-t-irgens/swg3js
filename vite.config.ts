@@ -2,12 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
 import { editFileOf, editFileRel } from './src/story/placementPath.ts';
 import { trackFileOf } from './src/race/trackPath.ts';
 import { shippedPublic } from './tools/dev/shippedPublic.mjs';
 import { servedFile } from './tools/dev/servedFile.mjs';
+import { skyPrivateMiddleware } from './tools/dev/skyPrivate.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
@@ -392,9 +393,26 @@ function privateAssets(): Plugin {
  */
 const UNWATCHED = process.env.SWG3JS_WATCH_ASSETS === '1' ? [] : ['**/assets-private/**', '**/imports-private/**'];
 
+/**
+ * His imported looks of the sky in development alone (the GPU port's pass 2, wave 5, maker L; the design's 2.10 seam): his looks
+ * of imported pictures and the places that wear them, and those pictures and meshes, read in place from his file of choices and
+ * his imported folder by the space body viewer's own paths (`SBV_SAVE`, `SBV_IMPORTED`, `SBV_LOOKS`, the process environment over
+ * `.env`), at `/__dev/sky/` (`tools/dev/skyPrivate.mjs`). Served by the dev server alone: no build carries it or asks for it.
+ */
+function privateSky(): Plugin {
+  return {
+    name: 'private-sky',
+    apply: 'serve',
+    configureServer(server) {
+      const env = { ...loadEnv('development', ROOT, ''), ...process.env } as Record<string, string | undefined>;
+      server.middlewares.use(skyPrivateMiddleware(ROOT, env));
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory(), privateImports(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
+  plugins: [privateAssets(), privateStory(), privateImports(), privateSky(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

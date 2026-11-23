@@ -361,14 +361,15 @@
 // where they are now, and the browser keeps what it already built and stops drawing them.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { VEHICLE_WIRE_VERSION, cleanAsk } from './vehicleWire.mjs';
 import { RACE_VERSION, cleanRace, mayRace } from './raceWire.mjs';
 import { PAINT_VERSION } from './shipWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
-import { WorldClock, DAY_MS, DAY_LIMITS, cleanDay } from './clock.mjs';
+import { WorldClock, WorldDays, DAY_MS, DAY_LIMITS, cleanDay, ownDayFraction } from './clock.mjs';
+import { worldDaysOf } from '../src/sky/system/worldDays.ts';
 import { STORE_TUNING, openStore } from './store.mjs';
 import { Sessions, adminFor, checkClaim, firstRegistered, isAdmin, makeNonce, summaryOf } from './identity.mjs';
 import { OWN_TUNING, Ownership, cleanKeep, cleanSpawn, mayBlow, maySee, maySpawn } from './ownership.mjs';
@@ -464,6 +465,7 @@ if (args.includes('--help') || args.includes('-h')) {
   --admin=<player id> who may stand creatures in the world (default: the first player this world met)
   --friendly-fire     let players hurt each other (off by default)
   --day=<seconds>     how long a day is (default ${DAY_MS / 1000}, the game's own)
+  --bodies=<file>     the game's bodies file, read for the worlds that keep their own day under an applied star system (default public/sky/bodies.json)
   --story=<folder>    your own story set (default story-private/ beside the checkout, when it is there)
   --story-tests       run the committed test set's jobs as well (off by default)
   --assets=<folder>   the converted content, read for each planet's layout centre so an arrival can be
@@ -537,6 +539,52 @@ const STORY_DIR = option('story', '') || (existsSync(BESIDE('story-private')) ? 
 const STORY_TESTS = flag('story-tests');
 // The converted content, read for each planet's layout centre and nothing else (storyWorlds.mjs).
 const ASSETS = option('assets', '') || (existsSync(BESIDE('assets-private')) ? BESIDE('assets-private') : '');
+// Pass 2, wave 5 (maker S): the game's bodies file (the space body viewer's Save to game, which every browser reads behind its
+// loading screens), read for the star systems the owner applied and nothing else: each ground world they stand on keeps a day
+// of its own (`clock.mjs`' `WorldDays`), which the story's hour and the hail follow. `--bodies=<file>` names another file;
+// the file is read again when it changes on disk (looked at, at most every few seconds, when asked), so a Save to game reaches
+// the server's day at the same moment it reaches a browser's next loading screen.
+const BODIES = option('bodies', '') || BESIDE(join('public', 'sky', 'bodies.json'));
+const OWN_DAYS = new WorldDays();
+/** The status page's word on the worlds' own days: what keeps one, and each one's hour now on this server's clock (0 to 24). */
+function ownDaysNow() {
+  const days = worldDays();
+  const hours = {};
+  for (const [w, d] of Object.entries(days.table)) hours[w] = Number((24 * ownDayFraction(clock.now(), d)).toFixed(4));
+  return { said: days.describe(), file: BODIES, hours };
+}
+/** The hail's word on the worlds' own days: none at all while every world keeps the game's (an older browser ignores it). */
+function ownDaysHand() {
+  const days = worldDays().hand();
+  return Object.keys(days).length ? { days } : {};
+}
+const ownDaysRead = { at: 0, mtime: -1, said: '' };
+function worldDays() {
+  const now = Date.now();
+  if (now - ownDaysRead.at < 5000) return OWN_DAYS;
+  ownDaysRead.at = now;
+  let mtime = 0;
+  try {
+    mtime = existsSync(BODIES) ? statSync(BODIES).mtimeMs : 0;
+  } catch {
+    mtime = 0;
+  }
+  if (mtime === ownDaysRead.mtime) return OWN_DAYS;
+  ownDaysRead.mtime = mtime;
+  let table = {};
+  try {
+    if (mtime) table = worldDaysOf(JSON.parse(readFileSync(BODIES, 'utf8'))?.systems);
+  } catch (e) {
+    console.warn(`  the bodies file ${BODIES} could not be read for the worlds' own days (${e.message}); every world keeps the game's day`);
+  }
+  OWN_DAYS.set(table);
+  const said = OWN_DAYS.describe();
+  if (said !== ownDaysRead.said) {
+    ownDaysRead.said = said;
+    console.log(`  ${said}`);
+  }
+  return OWN_DAYS;
+}
 
 // ---------------------------------------------------------------------------------------------
 // The truth, the clock and the rooms
@@ -626,7 +674,7 @@ progress.load(store.data);
 // purses and the ledger above; what the server knows of the worlds is storyWorlds.mjs's.
 // The clock goes with it: the game hour a story's condition asks is worked out here, as every browser works
 // out the hour its sky is drawn at.
-const worlds = storyWorlds({ assets: ASSETS, clock });
+const worlds = storyWorlds({ assets: ASSETS, clock, days: () => worldDays() });
 /** The story sets' files: the owner's folder, and the committed test set when it is switched on. */
 function readStorySets() {
   const read = (dir) => {
@@ -1846,6 +1894,8 @@ const server = createServer((req, res) => {
         groups: groups.describe(),
         duels: duels.describe(),
         clock: clock.describe(),
+        // Pass 2, wave 5: the worlds that keep their own day under an applied star system, and the hour each stands at now.
+        ownDays: ownDaysNow(),
         world: store.describe(),
         creatures: ownership.describe(),
         creaturePlaces: npcPlaces.describe(),
@@ -1934,7 +1984,7 @@ server.on('upgrade', (req, socket) => {
   // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself;
   // `progress` that it holds each character's progress, so a browser claims rather than paying itself.
   // `states` the world states it keeps (worldState.mjs), which a browser stands at its next arrival on that world.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION, veh: VEHICLE_WIRE_VERSION, race: RACE_VERSION, states: worldStates.hail() });
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), ...ownDaysHand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION, veh: VEHICLE_WIRE_VERSION, race: RACE_VERSION, states: worldStates.hail() });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

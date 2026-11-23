@@ -30,6 +30,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLANETS, packIdOf } from '../src/data/planets.ts';
 import { hourOfDay, planetPhase } from '../src/world/dayPhase.ts';
+import { ownDayFraction } from './clock.mjs';
 
 /** A pack id a file may be read under: lower-case words, never a path. */
 const PACK = /^[a-z0-9_]{1,64}$/;
@@ -49,7 +50,7 @@ function planetOfPack(world) {
  * every position already is. `clock` is the server's own (`WorldClock`, `clock.mjs`), or null for none, in
  * which case no hour is known here.
  */
-export function storyWorlds({ assets = '', clock = null } = {}) {
+export function storyWorlds({ assets = '', clock = null, days = null } = {}) {
   /** @type {Map<string, { x: number, z: number } | null>} */
   const centres = new Map();
   let read = 0;
@@ -92,6 +93,10 @@ export function storyWorlds({ assets = '', clock = null } = {}) {
      * at the planet's own phase. Null for a world the list of planets does not know, or with no clock.
      */
     hourOf(world) {
+      // Pass 2, wave 5 (maker S): a world under an applied star system keeps its own day (`clock.mjs`' `WorldDays`, read from
+      // the bodies file every browser reads), so its hour is that day's, whatever the game's day or its anchor.
+      const own = clock && days ? days().of(world) : null;
+      if (own) return hourOfDay(ownDayFraction(clock.now(), own));
       const p = clock && typeof world === 'string' ? planetOfPack(world) : null;
       if (!p) return null;
       const phase = planetPhase(p.sky.sunAzimuth, p.sky.sunElevation);
@@ -101,7 +106,7 @@ export function storyWorlds({ assets = '', clock = null } = {}) {
     describe() {
       let known = 0;
       for (const c of centres.values()) if (c) known++;
-      return { assets: assets || 'none (a planet\'s arrivals are taken on the browser\'s word)', centres: known, read, hour: clock ? 'the server\'s own, from its clock and each planet\'s sun' : 'the browser\'s word' };
+      return { assets: assets || 'none (a planet\'s arrivals are taken on the browser\'s word)', centres: known, read, hour: clock ? 'the server\'s own, from its clock and each planet\'s sun' : 'the browser\'s word', ...(clock && days ? { ownDays: days().describe() } : {}) };
     },
   };
 }

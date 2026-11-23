@@ -57,6 +57,9 @@ import { volumeInfo, volumeHash } from '../src/sky/look/build.js';
 import { placeholderLooks, placeholderFor, placeholderOfPlace } from '../src/sky/look/placeholders.js';
 // (the GPU port's pass 2, wave 4b) the bodies held still in a ground sky: the game's file's own rule for them
 import { heldBody, HELD_PICTURES, HELD_START } from './gameBodies.mjs';
+// (the GPU port's pass 2, wave 5) drawn as the game does, the very file Save to game would write, read by the game's own reader
+import { gameBodiesFile } from './gameBodies.mjs';
+import { cleanBodiesFile } from '../src/sky/look/bodiesFile.ts';
 // (looks run 2) a placeholder he never touched stays a default: not written on Save, and an unchanged copy in his file is read as untouched
 import { isUntouchedPlaceholder } from '../src/sky/look/placeholders.js';
 // (looks run 2) a look of his pictures that are not in the imported folder (a player without his imports) falls back to its generated twin
@@ -987,7 +990,7 @@ function frame() {
     if (state.backdrop) tick(state.backdrop);
     if (state.compare) tick(state.compare, true);
     // wave 4: drawn as the game does, the preview is a space zone in plain light
-    if (gameLook.on) { stageSource(gameLook.source); gameLook.setGrade('', 'stage (a space zone in plain light)'); }
+    if (gameLook.on) { stageSource(gameLook.source); gameLook.setGrade('', 'stage (a space zone in plain light)'); gameLook.stageEye(); }
   }
   gameLook.render();
   state.frames++;
@@ -2589,8 +2592,14 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
       else if (p.kind === 'moon' || p.kind === 'moon2') state.hours = 2.4;
     }
   }
+  // (the GPU port's pass 2, wave 5) drawn as the game does from the ground: the game's file as it would be read if Save to game
+  // were pressed now (its air laid before the world's air is asked for, its applied systems followed), and the world's
+  // converted sky read (the motion's places)
+  const gameGround = !p.space && !!state.viewer.gameLook && !!gameLook;
+  if (gameGround) gameLook.setFile(gameFileNow());
   if (p.space) await zoneSky(p.zone);
   else if (state.viewer.gameLook) await worldAir(p.zone);
+  if (gameGround) await gameLook.loaded(p.zone);
   if (token !== state.build) return;
   updatePlaceBar();
   showTab('place');
@@ -2618,11 +2627,16 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
   };
   const worldPlace = p.space ? null : worldPlaceOf(p.zone);
   // (the GPU port's pass 2, wave 4b) drawn as the game does from the ground, the game's bodies alone: SWG's own places (none
-  // of the places of ours, the night sheets and the bodies a system adds) at SWG's positions, until the game applies systems
-  // (wave 5); the place chosen stays, so its panel and aim still work
+  // of the places of ours, the night sheets and the bodies a system adds) at SWG's positions; the place chosen stays, so its
+  // panel and aim still work. (Wave 5) Under a system the game follows (applied, as Save to game would write it), the bodies
+  // stand where the game's motion puts them at the day's count (`gameAir.ts`' `skyView`), with the system's own bodies the
+  // game hangs in their looks (maker L's: drawn, not a sun, not a sheet, no card of SWG's).
   const asGame = !p.space && !!state.viewer.gameLook;
-  if (asGame) ctx.sky = () => null;
-  const places = asGame ? state.places.filter((q) => q.zone === p.zone && (!q.invented || q.id === p.id)) : [...state.places.filter((q) => q.zone === p.zone), ...(p.space ? [] : systemPlaces(p.zone))];
+  if (asGame) {
+    ctx.sky = () => gameLook.skyView(p.zone);
+    ctx.count = () => gameCountOf(p.zone);
+  }
+  const places = asGame ? gamePlacesOf(p) : [...state.places.filter((q) => q.zone === p.zone), ...(p.space ? [] : systemPlaces(p.zone))];
   state.skyItemsKey = p.space ? '' : skyItemsKey(p.zone);
   const lookOfPlace = ctx.lookOf;
   ctx.lookOf = (pid) => { const sp = places.find((q) => q.id === pid && q.systemBody); if (!sp) return lookOfPlace(pid); return sp.lookId && state.looks[sp.lookId] ? { id: sp.lookId, look: state.looks[sp.lookId] } : null; };
@@ -3418,7 +3432,12 @@ function setPictureShip(name, ship) {
  * `public/sky/bodies.json` by default), which the game reads at its next loading screen and he commits as he does his maps.
  * His file of choices is not touched (Save choices is its own button).
  */
-async function saveToGame() {
+/**
+ * What Save to game sends the server (and what "draw as the game does" makes the game's file of, `gameFileNow`): the looks,
+ * which place wears which, the systems, his pictures' marks, the worlds, each look's generated twin, the held bodies, and (the
+ * GPU port's pass 2, wave 5, maker L's ask) the places he moved or sized, of which the writer keeps the space places'.
+ */
+function gameSaveBody() {
   const twins = {};
   for (const [id, l] of Object.entries(state.looks)) {
     const t = l && !l.generated ? twinOfLook(id, l) : null;
@@ -3429,7 +3448,26 @@ async function saveToGame() {
     const lid = state.uses[p.id];
     if (lid && state.looks[lid]) uses[p.id] = lid;
   }
-  const body = { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins, held: cleanHeldChoices(state.held) };
+  return { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins, held: cleanHeldChoices(state.held), places: cleanPlaceEdits(state.placeEdits) };
+}
+
+/**
+ * (the GPU port's pass 2, wave 5) The game's bodies file as the game would read it if Save to game were pressed now: the page's
+ * choices through Save to game's own writer (`gameBodiesFile`) and the game's own reader (`cleanBodiesFile`), so "draw as the
+ * game does" lays the air and follows the systems the game would, from the very same numbers. Made when a ground sky is built
+ * drawn as the game does (once a press, never a frame).
+ */
+function gameFileNow() {
+  try {
+    return cleanBodiesFile(JSON.parse(JSON.stringify(gameBodiesFile(gameSaveBody(), { at: 'now' })))).file;
+  } catch (e) {
+    console.warn('[viewer] the game\'s file as it would be read:', e);
+    return null;
+  }
+}
+
+async function saveToGame() {
+  const body = gameSaveBody();
   try {
     const r = await fetch('/save-game', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error(await r.text());
@@ -3464,6 +3502,15 @@ async function holdMatch(json) {
   state.hours = ((m.time % 1) + 1) % 1 * 24;
   if (!state.viewer.gameLook) setViewer('gameLook', true);
   await selectPlace(p.id, { aim: false });
+  // (the GPU port's pass 2, wave 5) under a system of version 2 the page's own clock to the match's moment too (the day's count
+  // as the game counted it), so the bars and the words say the hour the picture shows
+  const mo = gameLook.motionFor(world);
+  if (mo && mo.version === 2 && typeof m.count === 'number' && Number.isFinite(m.count)) {
+    state.realT = msOfRealDays(mo.timeOfCount(m.count));
+    state.live = false;
+    syncHours();
+    updatePlaceBar();
+  }
   return { ...said, place: p.id, hours: Number(state.hours.toFixed(3)) };
 }
 
@@ -3623,6 +3670,50 @@ function systemPlaces(world) {
   return out;
 }
 const possessiveName = (world) => { const n = worldName(world); return n.endsWith('s') ? n + '\'' : n + '\'s'; };
+
+/**
+ * (the GPU port's pass 2, wave 5) The day's unbroken count "draw as the game does" stands the game's day at, under the system
+ * the game follows for a world: version 2 the world's own day on the real clock (the moment the bars show, as the game's day
+ * counts it: `SkyMotion.timeOfCount`'s inverse), version 1 the game's own day (the day slider's day and the hour); NaN with none.
+ */
+function gameCountOf(world) {
+  const mo = gameLook?.motionFor(world);
+  if (!mo) return NaN;
+  if (mo.version === 2) return v2Time() / mo.dayDays + mo.lonTurn;
+  return state.day + state.hours / 24;
+}
+
+/** A look for a system's body that names none, as the game picks one (`lookBody.ts`' `presetFor`: the first preset of its kind's recipe). */
+function gamePresetLookId(kind) {
+  const recipe = kind === 'giant' ? 'gasgiant' : kind === 'planet' ? 'terran' : 'moon';
+  for (const [id, p] of Object.entries(PRESETS)) if (p.recipe === recipe && !p.shape && !p.volume) return state.looks['generated:' + id] ? 'generated:' + id : null;
+  return null;
+}
+
+/**
+ * (the GPU port's pass 2, wave 5) The bodies a ground sky shows drawn as the game does: SWG's own places (the place chosen kept),
+ * and under the system the game follows each body the game hangs in its look (`lookWorld.ts`' `skyLookPlans`: drawn, no sun, no
+ * sheet, no card of SWG's), each a place of the moment at the motion's own index, wearing his own look of the place where he
+ * chose one (the game in development wears it too), else the look the system names, else the place's, else its kind's preset.
+ */
+function gamePlacesOf(p) {
+  const own = state.places.filter((q) => q.zone === p.zone && (!q.invented || q.id === p.id));
+  const mo = gameLook?.motionFor(p.zone);
+  if (!mo) return own;
+  const out = own.filter((q) => !mo.items.some((it) => it.place === q.id && it.drawn && !it.star && !it.sheet && (it.slot === 'extra' || it.slot === 'none')));
+  mo.items.forEach((it, j) => {
+    if (!it.drawn || it.star || it.sheet || (it.slot !== 'extra' && it.slot !== 'none')) return;
+    const id = it.place ?? `system:${p.zone}:${it.body}#${j}`;
+    const mine = it.place && state.uses[it.place] && state.looks[state.uses[it.place]] && !state.looks[state.uses[it.place]].generated ? wornLookId(state.uses[it.place]) : null;
+    const lookId = mine || (it.look && state.looks[it.look] ? it.look : null) || (it.place && state.uses[it.place] && state.looks[state.uses[it.place]] ? state.uses[it.place] : null) || gamePresetLookId(it.kind);
+    out.push({
+      id, zone: p.zone, space: false, kind: 'celestial', picture: null, label: `${possessiveName(p.zone)} system: ${it.name}`, shortLabel: it.name, what: '', invented: true, cycle: 0, pdir: 1, fields: [], from: {},
+      swg: { size: it.sizeDeg, yaw: 0, pitch: 0, distance: null, tilt: 0, spin: 0, light: { source: 'world-sun', azimuth: 150, elevation: 25 }, brightness: 1 },
+      systemBody: true, lookId, itemIndex: j,
+    });
+  });
+  return out;
+}
 /** What the ground view built for a world's sky: when it changes, the view is built again. */
 function skyItemsKey(world) {
   const c = skyModel(world);
@@ -3631,6 +3722,9 @@ function skyItemsKey(world) {
 }
 function refreshSkyIfNeeded() {
   if (state.mode !== 'place' || !placeView.zone) return;
+  // (the GPU port's pass 2, wave 5) drawn as the game does from the ground, an edit of a system the file applies moves the
+  // game's motion at once (the file as it would be read now, made again)
+  if (state.viewer.gameLook && gameLook && !placeView.space) gameLook.setFile(gameFileNow());
   if (skyItemsKey(placeView.zone) !== state.skyItemsKey) selectPlace(state.placeId, { rebuild: true, aim: false });
   else { updatePlaceBar(); refreshWordsSoon(); }
 }

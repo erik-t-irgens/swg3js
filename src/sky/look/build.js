@@ -16,7 +16,7 @@ import { Fn, dFdx, dFdy, cross, sign, cos } from 'three/tsl';
 import { airShader, cleanAir, recordOf, recordKey, makeTables, stepsOf, airUniformValues, airStartFor, airless } from './airProfile.js';
 import { MESHES, HALOS, RINGS } from './looks.js';
 import { GeneratedSet, sampleLatLong, hashBytes, glowKind, glowKinds, depthOn, blendedLavaColour, lightDialsOf, cycloneSites } from './generate.js';
-import { weatherUniforms, syncWeather, stormDial, flashAt, flashLight, motionPhases, movedDir, movedUV, churnedDir, churnedUV, phaseOffsetDir, phaseOffsetUV, Storms } from './weather.js';
+import { weatherUniforms, syncWeather, stormDial, flashAt, flashLight, motionPhases, movedDir, movedUV, churnedDir, churnedUV, phaseOffsetDir, phaseOffsetUV, Storms, stormArgs, STORM_TAPE } from './weather.js';
 
 // Wave 4: the weather's clocks, set once a frame by the page (setWeatherTime): the motion's (it stands
 // still when the stage's auto-spin is off, as the spin does) and the lightning's (always running), in
@@ -73,6 +73,17 @@ function tablesFor(rec) {
 }
 /** A look's air as tables (the place view's day wash reads the ground world's): its record's, made or shared. */
 export function airTablesOf(air) { return tablesFor(recordOf(cleanAir(air))); }
+// (the GPU port's pass 2, wave 5) The game hands a look worn by a ground world's body that world's own record (the one its
+// ground sky, its rim from a moon and its rim from orbit are drawn with: the design's 2.6), so the look's air is the world's
+// and its dials still shape the light (limb, twilight); the viewer hands none, and draws every look from its own air as before.
+const AIR_RECORDS = new WeakMap();
+/** A look's air record set by its drawer (a `Float64Array` of airProfile's `F`), or put back to the look's own (null). */
+export function setAirRecordFor(look, rec) {
+  if (!look || typeof look !== 'object') return;
+  if (rec && rec.length) AIR_RECORDS.set(look, Float64Array.from(rec));
+  else AIR_RECORDS.delete(look);
+}
+const recordFor = (look, a) => AIR_RECORDS.get(look) || recordOf(a);
 const toHalf = (src, dst) => { for (let i = 0; i < src.length; i++) dst[i] = THREE.DataUtils.toHalfFloat(src[i]); return dst; };
 function airTexture(data, w, h) {
   const t = new THREE.DataTexture(toHalf(data, new Uint16Array(data.length)), w, h, THREE.RGBAFormat, THREE.HalfFloatType);
@@ -84,10 +95,11 @@ function airTexture(data, w, h) {
 /** A built look's air: its uniforms (the record's numbers and the light's dials), its tables as textures, its march. */
 function makeAir(look) {
   const a = cleanAir(airOf(look));
-  const rec = recordOf(a);
+  const rec = recordFor(look, a);
   const tabs = tablesFor(rec);
   const tex = { T: airTexture(tabs.T, tabs.size.tw, tabs.size.th), MS: airTexture(tabs.MS, tabs.size.mw, tabs.size.mh), E: airTexture(tabs.E, tabs.size.ew, 1) };
   const v = airUniformValues(rec, a);
+  const k4 = uniform(new THREE.Vector4(v.bottom, 0.012, 0, 0));
   const U = {
     bottom: uniform(v.bottom), top: uniform(v.top), ray: uniform(new THREE.Vector3(...v.ray)), rayH: uniform(v.rayH),
     mieS: uniform(v.mieS), mieA: uniform(v.mieA), mieH: uniform(v.mieH), mieG: uniform(v.mieG),
@@ -96,7 +108,9 @@ function makeAir(look) {
     oz: uniform(new THREE.Vector3(...v.oz)), ozC: uniform(v.ozC), ozW: uniform(v.ozW), limb: uniform(v.limb), twilight: uniform(v.twilight),
     // where the body is (view space), how many km a scene unit is, the cloud deck's height (a share of the radius,
     // and its radius in km) and its turn against the ground, the clouds' relief in scene units
-    centre: uniform(new THREE.Vector3(0, 0, -4)), kmPer: uniform(v.bottom), cloudH: uniform(0.002), cloudR: uniform(v.bottom * 1.002), cloudRot: uniform(new THREE.Vector2(1, 0)), bumpH: uniform(0.012),
+    // ((the GPU port's pass 2, wave 5) the km a unit and the relief ride in one vector, `k4`'s x and y, written in place each
+    // frame: a number written into a float uniform's own `value` is a number made)
+    k4, centre: uniform(new THREE.Vector3(0, 0, -4)), kmPer: k4.x, cloudH: uniform(0.002), cloudR: uniform(v.bottom * 1.002), cloudRot: uniform(new THREE.Vector2(1, 0)), bumpH: k4.y,
     limbDark: uniform(a.limbDark), glint: uniform(a.glint), glintRough: uniform(a.glintRough), cloudRelief: uniform(a.cloudRelief), cloudForward: uniform(a.cloudForward), cloudShadow: uniform(a.cloudShadow),
     nightFill: uniform(a.nightFill),
   };
@@ -109,7 +123,7 @@ function syncAir(state) {
   if (!AIR) return;
   const a = cleanAir(airOf(state.look));
   AIR.a = a;
-  const rec = recordOf(a);
+  const rec = recordFor(state.look, a);
   const v = airUniformValues(rec, a);
   const U = AIR.U;
   U.bottom.value = v.bottom; U.top.value = v.top; U.ray.value.set(...v.ray); U.rayH.value = v.rayH;
@@ -665,6 +679,65 @@ async function cloudsSphereGeometry(onStatus) {
   const g = sections[0].clone().applyMatrix4(f.matrix); // rides the planet at the survey's x1.002
   g.computeBoundingSphere();
   geoms.set(key, g);
+  return g;
+}
+
+/**
+ * (the GPU port's pass 2, wave 5: the viewer's open item, pictured sphere clouds' meridian streaks) clouds_01 rides the body
+ * at x1.002 of planet_01's own vertices, and the two coarse meshes share one topology, so once the clouds had turned a little
+ * against the body (their own spin) the body's vertices stood through the shell's flat facets between its vertices and cut
+ * dark lines along the meridians, as the generated looks' clouds did before they took a fine shell. Its picture's mapping is
+ * the mesh's own (an artist's sphere: its rows are not even in latitude and its caps end short of the poles), so the fine
+ * shell is clouds_01 itself, each triangle cut into `CLOUD_CUTS` squared, its uv laid across it as the card laid it across the
+ * coarse one, every point pushed out onto the sphere of the generated shell's 1.002 (above every vertex of the body): the
+ * picture lands where it did, and the shell never sags to the body. Made once, shared.
+ */
+const CLOUD_CUTS = 4;
+async function pictureCloudShell(onStatus) {
+  const key = 'clouds_01_mesh|fine';
+  if (geoms.has(key)) return geoms.get(key);
+  const g = cutShell(await cloudsSphereGeometry(onStatus), CLOUD_CUTS, 1.002);
+  geoms.set(key, g);
+  return g;
+}
+
+/** A mesh's every triangle cut into `k` squared, its uv laid across each as on the whole, every point pushed onto the sphere of `r`. */
+export function cutShell(src, k, r) {
+  const p = src.attributes.position, t = src.attributes.uv;
+  const idx = src.index;
+  const tris = idx ? idx.count / 3 : p.count / 3;
+  const per = ((k + 1) * (k + 2)) / 2;
+  const pos = new Float32Array(tris * per * 3), nor = new Float32Array(tris * per * 3), uvs = new Float32Array(tris * per * 2);
+  const index = [];
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), q = new THREE.Vector3();
+  let v = 0;
+  for (let n = 0; n < tris; n++) {
+    const ia = idx ? idx.getX(n * 3) : n * 3, ib = idx ? idx.getX(n * 3 + 1) : n * 3 + 1, ic = idx ? idx.getX(n * 3 + 2) : n * 3 + 2;
+    a.fromBufferAttribute(p, ia); b.fromBufferAttribute(p, ib); c.fromBufferAttribute(p, ic);
+    const base = v;
+    // the points of the cut, row i from a toward b, column j toward c (barycentric (k - i - j, i, j) / k)
+    for (let i = 0; i <= k; i++) for (let j = 0; j <= k - i; j++) {
+      const wa = (k - i - j) / k, wb = i / k, wc = j / k;
+      q.set(a.x * wa + b.x * wb + c.x * wc, a.y * wa + b.y * wb + c.y * wc, a.z * wa + b.z * wb + c.z * wc).normalize();
+      nor[v * 3] = q.x; nor[v * 3 + 1] = q.y; nor[v * 3 + 2] = q.z;
+      pos[v * 3] = q.x * r; pos[v * 3 + 1] = q.y * r; pos[v * 3 + 2] = q.z * r;
+      uvs[v * 2] = t.getX(ia) * wa + t.getX(ib) * wb + t.getX(ic) * wc;
+      uvs[v * 2 + 1] = t.getY(ia) * wa + t.getY(ib) * wb + t.getY(ic) * wc;
+      v++;
+    }
+    // the cut's triangles, wound as the coarse one is
+    const at = (i, j) => base + (i * (2 * k + 3 - i)) / 2 + j;
+    for (let i = 0; i < k; i++) for (let j = 0; j < k - i; j++) {
+      index.push(at(i, j), at(i + 1, j), at(i, j + 1));
+      if (j < k - i - 1) index.push(at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  g.setIndex(index);
+  g.computeBoundingSphere();
   return g;
 }
 
@@ -1493,17 +1566,23 @@ export async function buildLook(look, { onStatus, place = false } = {}) {
   ringGroup.add(ringSpin);
   root.add(bill, axis);
 
+  // (the GPU port's pass 2, wave 5) the numbers written every frame ride in vectors' fields, written in place (a number written
+  // into a float uniform's own `value` is a number made, and the game draws a body's look every frame): `tick` holds the
+  // surface's and the clouds' scrolls and the clock (x, y, z), `cr` a dome's sphere's middle (xyz) and radius (w). The graphs
+  // read the same names as before, each now a vector's field.
+  const tick = uniform(new THREE.Vector4(0, 0, 0, 0));
+  const cr = uniform(new THREE.Vector4(0, 0, -1, 1));
   const LU = {
     light: uniform(new THREE.Vector3(0, 0, 1)),
     ambient: uniform(0.035), sunPower: uniform(1), glow: uniform(new THREE.Vector3()), glowStrength: uniform(0),
-    scroll: uniform(0), cloudScroll: uniform(0), clock: uniform(0),
+    tick, cr, scroll: tick.x, cloudScroll: tick.y, clock: tick.z,
     // A place's own brightness (1 on the preview stage) and the colour of the sun lighting it.
     gain: uniform(1), sunColour: uniform(new THREE.Vector3(1, 1, 1)),
     // (looks run 2) the air in front of the body seen from the ground by day (skywash.js, set by the place
     // view): its own light, linear, and the share of the body's light that comes through. None elsewhere.
     airLight: uniform(new THREE.Vector3(0, 0, 0)), airTrans: uniform(new THREE.Vector3(1, 1, 1)),
     // A dome under a light from the world is shaded as the sphere it stands for (impostorNormal).
-    sphereN: uniform(0), centre: uniform(new THREE.Vector3(0, 0, -1)), sphereR: uniform(1),
+    sphereN: uniform(0), centre: cr.xyz, sphereR: cr.w,
     // a generated look's live shading dials (generate.js's SHADING_DIALS)
     haze: uniform(0), limbDark: uniform(0), dusty: uniform(0), veil: uniform(0), veilColour: uniform(new THREE.Vector4()),
     // a generated look's city lights (generate.js's LIGHT_DIALS), linear
@@ -1597,9 +1676,10 @@ export async function buildLook(look, { onStatus, place = false } = {}) {
       // A generated look's clouds are read by direction alone, so they ride a finely made sphere: on
       // clouds_01's coarser one the shell sagged below the body between its vertices once the clouds had
       // turned a little against the body, cutting dark lines along its meridians (wave 4 found it).
-      const cg = G ? fineCloudShell() : await cloudsSphereGeometry(onStatus);
+      // (the GPU port's pass 2, wave 5) and a pictured look's clouds ride clouds_01 cut fine onto that sphere (pictureCloudShell)
+      const cg = G ? fineCloudShell() : await pictureCloudShell(onStatus);
       const m = add(cloudSpin, cg, G ? (AIR ? generatedCloudsMaterial(U.clouds, LU, G, parts, L.clouds, AIR) : generatedCloudsMaterial(U.clouds, LU, G, parts, L.clouds)) : (AIR ? cloudsMaterial(L.clouds, U.clouds, LU, T, false, AIR) : cloudsMaterial(L.clouds, U.clouds, LU, T, false)), SPHERE_ORDER.clouds);
-      // clouds_01 already sits at x1.002 the body: the shell height is its ratio to the body.
+      // clouds_01 already sits at x1.002 the body (and its fine cut at 1.002): the shell height is its ratio to the body.
       shells.push({ mesh: m, slot: 'clouds', base: 1.002, fallback: 1.002 });
     }
     if (AIR) {
@@ -1686,9 +1766,16 @@ export async function buildLook(look, { onStatus, place = false } = {}) {
     for (const ch of String(look.name || 'look')) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
     state.storms = new Storms(h >>> 0, kind === 'dome');
     state.storms.onFlash = (x, y, z, peak) => { if (flashListener) flashListener(state, x, y, z, peak); };
+    // (the GPU port's pass 2, wave 5) the step's numbers in a kept record, written in place a frame (`updateLookWith`)
+    state.stormArgs = stormArgs();
+    state.stormArgs.cells = LU.weather.cells;
+    state.stormArgs.sizes = LU.weather.cellInv;
   }
   if (G || look.generated) builtKeys.set(look, materialKeyOf(look));
   syncLook(state);
+  // (the GPU port's pass 2, wave 5) the game's storms recorded ahead, here behind its loading screen, and played back in its
+  // frames (`weather.js`' `STORM_TAPE`, `Storms.record`); the viewer steps its own live
+  if (state.storms && STORM_TAPE.on) state.storms.record(stormDial(L.clouds, 'rate', 1), stormDial(L.clouds, 'spread', 0.07));
   return state;
 }
 
@@ -1743,6 +1830,14 @@ export function syncLook(state) {
   const cyc = look.generated && look.kind === 'sphere' ? cycloneSites(look.generated, state._cyc || (state._cyc = [])) : null;
   syncWeather(LU.weather, look.layers.clouds, cyc);
   if (state.storms) state.storms.setHints(cyc);
+  // (the GPU port's pass 2, wave 5) the storms' dials read here, when a control moves, for the frame to read off a kept record
+  if (state.storms) {
+    const C = look.layers.clouds, sd = (state.stormDials ||= { on: false, rate: 0.5, bright: 0.5, spread: 0.5 });
+    sd.on = !!C.storm?.on;
+    sd.rate = stormDial(C, 'rate', 1);
+    sd.bright = stormDial(C, 'bright', 1.6);
+    sd.spread = stormDial(C, 'spread', 0.07);
+  }
   syncParts(state);
   if (state.vol && look.generated?.volume) syncVolume(state.vol, look.generated);
   syncAir(state);
@@ -1760,42 +1855,105 @@ const _z = new THREE.Vector3(0, 0, 1);
 // under `lightWorld`). Left out, the look's own are used (the preview stage): the camera's turn, the
 // stage's sun for a sphere, a dome's painted light on the dome's own normals.
 const _c = new THREE.Vector3();
+/** The page's frame call (the viewer's): its options made into the kept record `updateLookWith` reads. */
 export function updateLook(state, { camera, clock, sunWorld, face = null, lightWorld = null, tilt: tiltDeg = null, spin = null, sphereRadius = null }) {
-  const { look, LU } = state;
+  const a = lookFrameArgs;
+  a.camera = camera; a.clock = clock; a.sunWorld = sunWorld; a.face = face; a.lightWorld = lightWorld;
+  a.tilt = tiltDeg ?? NaN; a.spin = spin ?? NaN; a.sphereRadius = sphereRadius ?? 0; a.sizer = null;
+  updateLookWith(state, a);
+}
+/**
+ * (the GPU port's pass 2, wave 5) The record `updateLookWith` reads: the camera, the clock (seconds), the stage's sun
+ * (`sunWorld`), the place's own turn (`face`) and light (`lightWorld`), its tilt and spin in degrees (NaN: the look's own), the
+ * radius of the sphere a dome stands for (0: none), and what the parts' rocks measure their pixels by (`sizer`: anything with
+ * `getDrawingBufferSize(v)`, null: the bake's renderer). Numbers begin as fractions, so their fields hold doubles from the
+ * first write.
+ */
+export function lookFrameRecord() {
+  return { camera: null, clock: 0.5, sunWorld: null, face: null, lightWorld: null, tilt: 0.5, spin: 0.5, sphereRadius: 0.5, sizer: null };
+}
+const lookFrameArgs = lookFrameRecord();
+/** The weather's clocks as the page last set them, for a drawer that writes them into the fields itself (a frame's). */
+export const WEATHER_TIME = weatherClock;
+/**
+ * Every frame: face the camera, turn, scroll, and set the light in view space, from a kept record (`lookFrameRecord`) written
+ * in place by the caller, so a frame makes nothing (the game draws a body's look every frame: pass 2, wave 5). The same steps
+ * as the page's `updateLook` always took.
+ */
+export function updateLookWith(state, a) {
+  const look = state.look, LU = state.LU;
   const A = look.adjust;
-  const tilt = ((tiltDeg ?? +A.tilt) || 0) * Math.PI / 180;
-  const spinDeg = (spin ?? +A.spin) || 0;
+  const camera = a.camera, clock = a.clock, lightWorld = a.lightWorld, sunWorld = a.sunWorld;
+  const tilt = ((a.tilt === a.tilt ? a.tilt : +A.tilt) || 0) * Math.PI / 180;
+  const spinDeg = (a.spin === a.spin ? a.spin : +A.spin) || 0;
   // the root is never turned, so the billboard's own turn is the camera's (or the place's), rolled by the tilt
-  _q.setFromAxisAngle(_z, tilt);
-  state.bill.quaternion.copy(face || camera.quaternion).multiply(_q);
-  state.axis.rotation.set(0, 0, tilt);
+  // ((the GPU port's pass 2, wave 5) every turn written into its quaternion's and its Euler's own fields, the same numbers as
+  // three's `setFromAxisAngle`, `multiply` and the Euler's setters: a setter or a method handed a computed number makes a number
+  // where the compiler does not build it in, and each change call turns the other form back from a matrix; the bill's Euler is
+  // left as it was, nothing reading it)
+  const ht = tilt * 0.5, st = Math.sin(ht), ct = Math.cos(ht);
+  const f = a.face || camera.quaternion, bq = state.bill.quaternion;
+  const fx = f._x, fy = f._y, fz = f._z, fw = f._w;
+  bq._x = fx * ct + fy * st;
+  bq._y = fy * ct - fx * st;
+  bq._z = fz * ct + fw * st;
+  bq._w = fw * ct - fz * st;
+  // the axis about z by the tilt
+  const aq = state.axis.quaternion, ae = state.axis.rotation;
+  aq._x = 0; aq._y = 0; aq._z = st; aq._w = ct;
+  ae._x = 0; ae._y = 0; ae._z = tilt;
+  // the body, its clouds and its rings each about y by its own turn
   const turns = (spinDeg * clock) / 360;
-  state.spin.rotation.y = turns * Math.PI * 2;
+  const sa0 = turns * Math.PI;
+  const sq = state.spin.quaternion, se = state.spin.rotation;
+  sq._x = 0; sq._y = Math.sin(sa0); sq._z = 0; sq._w = Math.cos(sa0);
+  se._x = 0; se._y = sa0 * 2; se._z = 0;
   const cloudTurns = turns * (+look.layers.clouds.spin || 0);
-  state.cloudSpin.rotation.y = cloudTurns * Math.PI * 2;
-  state.ringSpin.rotation.y = ((+look.layers.rings.spin || 0) * clock / 360) * Math.PI * 2;
-  LU.scroll.value = turns;
-  LU.cloudScroll.value = cloudTurns;
-  LU.clock.value = clock;
+  const ca0 = cloudTurns * Math.PI;
+  const cq = state.cloudSpin.quaternion, ce = state.cloudSpin.rotation;
+  cq._x = 0; cq._y = Math.sin(ca0); cq._z = 0; cq._w = Math.cos(ca0);
+  ce._x = 0; ce._y = ca0 * 2; ce._z = 0;
+  const ra0 = ((+look.layers.rings.spin || 0) * clock / 360) * Math.PI;
+  const rq = state.ringSpin.quaternion, re = state.ringSpin.rotation;
+  rq._x = 0; rq._y = Math.sin(ra0); rq._z = 0; rq._w = Math.cos(ra0);
+  re._x = 0; re._y = ra0 * 2; re._z = 0;
+  // (pass 2, wave 5) into the vectors' fields, in place
+  const tk = LU.tick.value;
+  tk.x = turns;
+  tk.y = cloudTurns;
+  tk.z = clock;
   // wave 4: the clouds' motion runs on the weather's clock; the lightning on the wall's
-  LU.weather.t.value = weatherClock.motion;
+  LU.weather.tv.value.x = weatherClock.motion;
   if (state.storms) {
-    const C = look.layers.clouds;
-    state.storms.step(weatherClock.wall, !!C.storm?.on, stormDial(C, 'rate', 1), stormDial(C, 'bright', 1.6), stormDial(C, 'spread', 0.07), LU.weather.cells, LU.weather.cellInv);
+    // (pass 2, wave 5) its dials as `syncLook` last read them (a number handed back by `stormDial` is a number made a frame)
+    const sa = state.stormArgs, sd = state.stormDials;
+    sa.now = weatherClock.wall;
+    sa.on = sd.on;
+    sa.rate = sd.rate;
+    sa.bright = sd.bright;
+    sa.spread = sd.spread;
+    state.storms.stepWith(sa);
   }
-  const impostor = !!lightWorld && look.kind === 'dome' && sphereRadius > 0;
+  const impostor = !!lightWorld && look.kind === 'dome' && a.sphereRadius > 0;
   LU.sphereN.value = impostor ? 1 : 0;
   if (impostor) {
     state.root.getWorldPosition(_c).applyMatrix4(camera.matrixWorldInverse);
-    LU.centre.value.copy(_c);
-    LU.sphereR.value = sphereRadius;
+    const c4 = LU.cr.value;
+    c4.x = _c.x;
+    c4.y = _c.y;
+    c4.z = _c.z;
+    c4.w = a.sphereRadius;
   }
-  if (lightWorld) {
-    _v.copy(lightWorld).transformDirection(camera.matrixWorldInverse);
-    LU.light.value.copy(_v);
-  } else if (look.kind === 'sphere') {
-    _v.copy(sunWorld).transformDirection(camera.matrixWorldInverse);
-    LU.light.value.copy(_v);
+  if (lightWorld || look.kind === 'sphere') {
+    // (pass 2, wave 5) three's `transformDirection` written out (it normalises through calls that hand numbers back and forth)
+    const Lw = lightWorld || sunWorld, me = camera.matrixWorldInverse.elements, Lv = LU.light.value;
+    const lx = me[0] * Lw.x + me[4] * Lw.y + me[8] * Lw.z;
+    const ly = me[1] * Lw.x + me[5] * Lw.y + me[9] * Lw.z;
+    const lz = me[2] * Lw.x + me[6] * Lw.y + me[10] * Lw.z;
+    const ll = Math.sqrt(lx * lx + ly * ly + lz * lz) || 1;
+    Lv.x = lx / ll;
+    Lv.y = ly / ll;
+    Lv.z = lz / ll;
   } else {
     const a = ((+A.lightAngle || 0) * Math.PI) / 180 + tilt;
     const e = ((+A.lightElev || 0) * Math.PI) / 180;
@@ -1806,24 +1964,36 @@ export function updateLook(state, { camera, clock, sunWorld, face = null, lightW
     const AU = state.air.U;
     state.root.getWorldPosition(_c).applyMatrix4(camera.matrixWorldInverse);
     AU.centre.value.copy(_c);
-    const rb = state.root.getWorldScale(_ws).x || 1;
-    AU.kmPer.value = AU.bottom.value / rb;
-    AU.bumpH.value = rb * 0.012 * AU.cloudRelief.value;
-    const d = state.cloudSpin.rotation.y - state.spin.rotation.y;
-    AU.cloudRot.value.set(Math.cos(d), Math.sin(d));
+    // (pass 2, wave 5) the root's world scale off its world matrix's first column (what `getWorldScale` reads, whose matrix
+    // decomposition hands numbers across calls: a number made a frame in the game); its world matrix is fresh from just above
+    const we = state.root.matrixWorld.elements;
+    const rb = Math.sqrt(we[0] * we[0] + we[1] * we[1] + we[2] * we[2]) || 1;
+    // (pass 2, wave 5) into the vectors' fields, in place
+    const k4 = AU.k4.value;
+    k4.x = AU.bottom.value / rb;
+    k4.y = rb * 0.012 * AU.cloudRelief.value;
+    const d = (ca0 - sa0) * 2;
+    const cr2 = AU.cloudRot.value;
+    cr2.x = Math.cos(d);
+    cr2.y = Math.sin(d);
   }
   // which of the parts' rocks are near enough to be drawn as rocks
-  if (state.parts) for (const f of state.parts.fields) f.update(camera, bakeRenderer);
+  if (state.parts) {
+    const fields = state.parts.fields;
+    for (let i = 0; i < fields.length; i++) fields[i].update(camera, a.sizer || bakeRenderer);
+  }
   // wave 5: the volume's tier, drift, currents, lightning and the sun in its own frame
   if (state.vol) {
     // (one kept record handed over, so a frame makes nothing)
-    const a = volArgs;
-    a.motion = weatherClock.motion; a.wall = weatherClock.wall; a.lightWorld = lightWorld || sunWorld;
-    a.sunPower = LU.sunPower.value; a.sunColour = LU.sunColour.value; a.gain = LU.gain.value;
-    updateVolume(state.vol, a);
+    const v = volArgs;
+    v.motion = weatherClock.motion; v.wall = weatherClock.wall; v.lightWorld = lightWorld || sunWorld;
+    v.sunPower = LU.sunPower.value; v.sunColour = LU.sunColour.value; v.gain = LU.gain.value;
+    // (pass 2, wave 5) the game leaves a gas's lightning dark (`spaceVolumes.ts`' `FRAME_OPTS` says why); the viewer's flashes
+    v.noStorms = STORM_TAPE.on;
+    updateVolume(state.vol, v);
   }
 }
-const volArgs = { motion: 0, wall: 0, lightWorld: null, sunPower: 1, sunColour: null, gain: 1 };
+const volArgs = { motion: 0, wall: 0, lightWorld: null, sunPower: 1, sunColour: null, gain: 1, noStorms: false };
 const _ws = new THREE.Vector3();
 // (wave A) the air's shell: a finely made sphere (its edge is the air's top, so its facets must not show)
 let airShellGeom = null;

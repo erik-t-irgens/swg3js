@@ -17,6 +17,7 @@ import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, buildDepthTable, bui
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
 import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
 import { registerAirDials } from './airDials.ts';
+import { SKY_MOTION } from '../system/skyMotion.ts';
 
 /** The scene's units, worked once as the module loads (`sceneUnits`: a clear Tatooine noon's sun at today's key light there). */
 AIR_UNITS.scene = sceneUnits();
@@ -295,6 +296,31 @@ export class AirRun {
     } else {
       f.sun2Dir.copy(s);
       tw.sun2Top[0] = tw.sun2Top[1] = tw.sun2Top[2] = 0;
+    }
+    // Pass 2, wave 5 (maker S): under an applied star system (`src/sky/system/skyMotion.ts`) a body in front of a sun takes its
+    // covered share of that sun's light and so of the air's (`sunShare`, `sun2Share`), the second sun stands where the system's
+    // pair rule puts it, and the night light is what the system's moons and giants give (their lit share by their size against SWG's nearly full moon,
+    // `moonShare`, in their colour), aimed from the brightest (`day.moonDir`, the day's). With none, every line above as it was.
+    const mo = SKY_MOTION.now;
+    if (mo !== null) {
+      const ms = mo.moonShare;
+      tw.moonTop[0] *= ms * mo.moonTint[0];
+      tw.moonTop[1] *= ms * mo.moonTint[1];
+      tw.moonTop[2] *= ms * mo.moonTint[2];
+      const ss = mo.sunShare;
+      tw.sunTop[0] *= ss;
+      tw.sunTop[1] *= ss;
+      tw.sunTop[2] *= ss;
+      if (two && mo.secondJ >= 0) {
+        const q = mo.sun2;
+        f.sun2Dir.x = q.x;
+        f.sun2Dir.y = q.y;
+        f.sun2Dir.z = q.z;
+        const s2s = mo.sun2Share;
+        tw.sun2Top[0] *= s2s;
+        tw.sun2Top[1] *= s2s;
+        tw.sun2Top[2] *= s2s;
+      }
     }
     const hKm = this.heightM / 1000;
     const heightKm = hKm > 0.001 ? hKm : 0.001;

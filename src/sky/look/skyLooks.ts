@@ -77,7 +77,7 @@ export interface SkyLooksWorn {
  * sky's own. Answers the cards to hand the bodies (a card wearing a look a copy with its disc picture for its map, the rest
  * as they were) and the textures made, which the caller lets go with the sky.
  */
-export async function wearSkyLooks(sky: string, cards: readonly SkyBodyCard[], looks: GpuLooks): Promise<SkyLooksWorn> {
+export async function wearSkyLooks(sky: string, cards: readonly SkyBodyCard[], looks: GpuLooks, drawnWhole: ReadonlySet<string> | null = null): Promise<SkyLooksWorn> {
   const out: SkyBodyCard[] = [];
   const textures: THREE.Texture[] = [];
   const counts: Record<string, number> = {};
@@ -89,7 +89,8 @@ export async function wearSkyLooks(sky: string, cards: readonly SkyBodyCard[], l
     const nameKey = card.slot === 'celestial' ? skyPlaceId(sky, 'celestial', card.file) : card.slot;
     counts[nameKey] = (counts[nameKey] ?? 0) + 1;
     const place = skyPlaceId(sky, card.slot, card.file, counts[nameKey]);
-    const hit = lookOfPlace(place);
+    // pass 2, wave 5 (maker L): a place its look draws whole (`lookBody.ts`, `drawnWhole`) needs no disc picture
+    const hit = drawnWhole?.has(place) ? null : lookOfPlace(place);
     if (!hit) {
       out.push(card);
       continue;

@@ -453,6 +453,9 @@ import { tuneEye } from './sky/exposure/eyeMath.ts';
 import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
 // Pass 2, wave 4 (maker A): what the last loading screen read of the space body viewer's Save to game (pure).
 import { bodiesReport } from './sky/look/bodiesFile.ts';
+import { motionConsole, motionHourTime, serverDayWord } from './sky/system/motionDials.ts';
+import { SKY_MOTION } from './sky/system/skyMotion.ts';
+import { SERVER_WORLD_DAYS } from './sky/system/worldDays.ts';
 // Pass 2, wave 4b (maker A): the looks the sky's bodies wore at the last loading screen (pure).
 import { LOOKS_WORN } from './sky/look/lookPictures.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
@@ -8162,6 +8165,10 @@ class App {
             o && typeof o === 'object' && 'bodies' in o
             ? // Pass 2, wave 4b (maker A): and what the sky's bodies wore by it, and the looks' bakes (WebGPU's alone).
               { ...bodiesReport(), worn: LOOKS_WORN, looks: GPU.webgpu && GPU.rt ? GPU.rt.looks.report() : null }
+            : // Pass 2, wave 5 (maker S): `sky({ motion: true })` says the applied star system this world follows now (its day, every
+              // body's place, phase and cover, the night light); `sky({ motion: { giantshine, tint, eclipse } })` moves its dials.
+              o && typeof o === 'object' && 'motion' in o
+              ? { ...motionConsole(o.motion, SKY_MOTION.now), dayLengthSeconds: this.world.day.lengthNow, time: Number(this.world.day.time.toFixed(5)), count: Number(this.world.day.count.toFixed(6)), clock: this.world.day.clock(), held: this.world.day.held, storyHour: this.world.planet ? hourOfDay(this.world.day.time) : null, server: serverDayWord(SKY_MOTION.now, SKY_MOTION.now?.world ?? this.world.packId, SERVER_WORLD_DAYS.table, sharedClock.now(), this.world.day.time) }
             : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' || o === 'clouds'
             ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')
             : this.skyConsole(o),
@@ -11648,6 +11655,8 @@ class App {
         w.count = 0;
         w.names = [];
         this.upPending = null;
+        // Pass 2, wave 5 (its fixer): the look kits put off behind the screen asked now it is gone, to land in play off the frame.
+        if (GPU.webgpu && GPU.rt) GPU.rt.looks.askLater();
       }
     };
     // Whether a long frame would be seen just now: a loading screen over the world, or a jump's
@@ -14981,7 +14990,9 @@ class App {
     const maxElevation = (day as unknown as { maxElevation: number }).maxElevation;
     let said: string[] = [];
     if (isSkyHour(o)) {
-      day.time = skyHourTime(o, day.swg, maxElevation);
+      // Pass 2, wave 5 (maker S): under an applied star system's own day the hour is where its sun really stands.
+      const mo = day.motion;
+      day.time = mo !== null && mo.ownsDay ? motionHourTime(mo, o, day.count, SKY_HOURS.lowDeg) : skyHourTime(o, day.swg, maxElevation);
     } else if (o === undefined) day.release();
     else if (o && typeof o === 'object') {
       said = tuneSky(o);
@@ -15001,7 +15012,7 @@ class App {
       held: day.held,
       // The sun at the time just written, from the day's own path (`sunSineAt`): the day takes a written hour up only at its
       // next update, so its `sunDir` is a frame behind here (the review); a fixed light (space) is the day's own.
-      sunUpDeg: Number(((Math.asin(Math.max(-1, Math.min(1, day.fixed ? day.sunDir.y : sunSineAt(day.time, day.swg, maxElevation)))) * 180) / Math.PI).toFixed(2)),
+      sunUpDeg: Number(((Math.asin(Math.max(-1, Math.min(1, day.fixed ? day.sunDir.y : day.motion?.ownsDay ? day.motion.sun.y : sunSineAt(day.time, day.swg, maxElevation)))) * 180) / Math.PI).toFixed(2)),
       ...(isSkyHour(o) ? { note: "the air's numbers below are the last frame's: they follow the hour at the next frame" } : {}),
       air: {
         on: f.on,
@@ -15155,7 +15166,8 @@ class App {
         eye = null;
       }
     }
-    return { ...rec, air, eye };
+    // Pass 2, wave 5 (maker V): the day's unbroken count, so the viewer stands an applied system's bodies where this frame has them.
+    return { ...rec, air, eye, count: this.world.day.count };
   }
 
   /** A match's camera, hour and weather held (the camera by `placeCamera`, every frame, from `MATCH_HOLD`). */

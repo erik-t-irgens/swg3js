@@ -354,6 +354,27 @@ export class SharedClock {
     else out.shared = this.dayAt ? this.dayFrom + (now - this.dayAt) / (len * 1000) + phase : out.wall;
   }
 
+  /**
+   * Pass 2, wave 5 (maker S): the time of day of a world under its applied star system (`src/sky/system/worldDays.ts`), in
+   * [0, 1): its own length and its own place in the shared day (`phase`, unwrapped), never the server's anchor (an admin's
+   * change of the game's day is the day of the worlds no system holds), and with no server the wall clock itself, so its
+   * moons and its hour stand on the one real clock the viewer and every other browser read (`skyMotion.ts`). The very sum
+   * the server's story hour makes (`worldHourAt`).
+   */
+  ownTimeOfDay(day: { readonly lengthSeconds: number; readonly phase: number }): number {
+    const len = day.lengthSeconds > 0 ? day.lengthSeconds : 1;
+    const t = this.nowSeconds() / len + day.phase;
+    return t - Math.floor(t);
+  }
+
+  /** `ownTimeOfDay`'s day counted unfloored into `out` (both fields alike: there is no anchor and no "off" for a system's day). */
+  ownDayCountIn(day: { readonly lengthSeconds: number; readonly phase: number }, out: { shared: number; wall: number }): void {
+    const len = day.lengthSeconds > 0 ? day.lengthSeconds : 1;
+    const c = this.nowSeconds() / len + day.phase;
+    out.shared = c;
+    out.wall = c;
+  }
+
   report(): { where: ClockState; offsetMs: number; aimMs: number; rttMs: number; samples: number; waiting: boolean; weatherLagMs: number; refused: number; dayAt: number; dayFrom: number } {
     return {
       where: this.state,

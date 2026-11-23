@@ -25,6 +25,13 @@ import { landedLocations, mergeLocations, type GameNoBuild } from '../world/plac
 // Pass 2, wave 4b (maker C): the globes in his looks (the game on WebGPU alone).
 import { GPU } from '../core/gpuSwitch.ts';
 import { GLOBE_TUNE, MAP_LOOKS, globePictures, globePlaceOf, globePlanetIndex, globeRim } from './galaxyLooks.ts';
+// Pass 2, wave 5 (maker M): a picked system opens into its sun, worlds and moons (the game on WebGPU alone).
+import { lookRingsOf, systemBodyLook, systemBodyPictures, systemBodyRim } from './galaxyLooks.ts';
+import { OpenedSystem, SYSTEM_VIEW_TUNE, type OpenedBody } from './galaxySystem.ts';
+import type { BodyWear } from './galaxySystemView.ts';
+import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
+import { viewerSkyOf } from '../sky/look/lookPictures.ts';
+import type { SystemsRecord } from '../sky/system/worldDays.ts';
 
 /**
  * What a space zone with no pack says on its card and its panel: the command, and that the game sees it after a reload,
@@ -176,6 +183,12 @@ export class GalaxyMap {
    */
   private readonly globePlaces = new Map<string, { place: string; appearance: string }>();
   private readonly globeWorn = new Map<string, string>();
+  /**
+   * Pass 2, wave 5 (maker M): the bar's way back from an opened system and the panel's line about the body picked in it (both
+   * made on WebGPU alone, null on WebGL, where no system opens).
+   */
+  private readonly backButton: HTMLButtonElement | null = null;
+  private readonly bodyInfo: HTMLElement | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -218,9 +231,107 @@ export class GalaxyMap {
     this.view = new GalaxyView(this.root.querySelector<HTMLElement>('.galaxy-labels')!);
     this.listButton.addEventListener('click', () => this.toggleList());
     this.root.querySelector<HTMLButtonElement>('.reset')!.addEventListener('click', () => this.view.orbit.reset());
+    // Pass 2, wave 5 (maker M): the way back from an opened system, Reset shutting it too, and the body line on the panel.
+    if (GPU.webgpu) {
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'back';
+      back.textContent = 'Back to the galaxy';
+      back.hidden = true;
+      back.addEventListener('click', () => this.closeSystem(true));
+      this.root.querySelector('.galaxy-bar')!.insertBefore(back, this.root.querySelector('.reset'));
+      this.backButton = back;
+      this.root.querySelector<HTMLButtonElement>('.reset')!.addEventListener('click', () => this.closeSystem(false));
+      const info = document.createElement('div');
+      info.className = 'galaxy-body-info';
+      info.hidden = true;
+      this.bodyInfo = info;
+    }
     this.bindMouse();
     this.buildCards();
     this.showSystem(null);
+  }
+
+  // ---- An opened system (pass 2, wave 5, maker M; the game on WebGPU alone) ----
+
+  /**
+   * A system opened in the picture: its applied star system's clockwork from the owner's Save to game (`SKY_BODIES.file.systems`)
+   * seen from the world the player stands on where it is one of them, else its worlds in a ring; each body in its look (the
+   * pictures baked behind a loading screen), its rim and its rings. Never in a frame.
+   */
+  private openSystem(sys: GalaxySystemDef): void {
+    if (!GPU.webgpu) return;
+    const systems = ((SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems ?? null) as SystemsRecord | null;
+    const opened = OpenedSystem.open(sys, systems, this.currentId || null);
+    const wear = opened.bodies.map((b) => this.wearOf(sys, b));
+    if (!this.view.openSystem(opened, wear)) return;
+    this.openedBakes = MAP_LOOKS.at;
+    if (this.backButton) this.backButton.hidden = false;
+    this.showBody(-1);
+  }
+
+  /** The bakes' stamp an opened system was laid from (`MAP_LOOKS.at`): a show after a newer screen lays it again. */
+  private openedBakes = '';
+
+  /** What a body of an opened system wears: its look's pictures, else SWG's picture of the system's main world, its rim, its rings. */
+  private wearOf(sys: GalaxySystemDef, b: OpenedBody): BodyWear | null {
+    if (b.star) return null;
+    const hit = systemBodyLook(b, b.ground);
+    let pics = hit ? systemBodyPictures(hit) : null;
+    const main = worldsOf(sys)[0]?.planet.id ?? null;
+    // The system's main world wears its globe's own pictures where its look was baked for the galaxy and not for a system.
+    if (!pics && b.ground && b.ground === main) {
+      const at = this.globePlaces.get(sys.id);
+      pics = at ? globePictures(at.place) : null;
+    }
+    const swg = !pics && b.ground && b.ground === main ? this.view.globeSwg(sys.id) : null;
+    return { pics, swg, rim: systemBodyRim(b.kind, b.ground, hit?.look ?? null), rings: lookRingsOf(hit?.look ?? null), look: hit?.id ?? null };
+  }
+
+  /** The opened system shut: the galaxy back (`restore`: the view as it stood before it opened). */
+  private closeSystem(restore: boolean): void {
+    this.view.closeSystem(restore);
+    if (this.backButton) this.backButton.hidden = true;
+    if (this.bodyInfo) this.bodyInfo.hidden = true;
+  }
+
+  /**
+   * A body of the opened system picked (or none, -1): its orbit and name lit, and the panel's line saying what it is, how it goes
+   * round, and how lit its world sees it now; a world of the game's is brought into view on the panel, with its Travel and its
+   * Hyperspace.
+   */
+  private showBody(i: number): void {
+    const opened = this.view.systemOpen;
+    const info = this.bodyInfo;
+    if (!opened || !info) return;
+    this.view.setPickedBody(i);
+    if (!info.isConnected) this.infoEl.insertBefore(info, this.infoEl.children[2] ?? null);
+    const b = i >= 0 ? opened.bodies[i] : null;
+    info.replaceChildren();
+    info.hidden = false;
+    const p = document.createElement('p');
+    p.className = 'square';
+    if (!b) {
+      p.textContent = opened.layout === 'clockwork'
+        ? `${opened.name}: every body where its clockwork puts it now, as your Save to game applies it. Click a body.`
+        : 'No star system applied for these worlds: they stand in a ring round their sun. Apply one in the space body viewer and Save to game.';
+      info.appendChild(p);
+      return;
+    }
+    const h = document.createElement('b');
+    h.textContent = b.name;
+    const parent = b.parent >= 0 ? opened.bodies[b.parent].name : '';
+    const round = b.au > 0 && parent ? ` · ${b.au < 0.01 ? `${(b.au * 149.6).toFixed(2)} million km` : `${b.au.toFixed(2)} AU`} round ${parent}${b.periodDays > 0 ? `, once in ${b.periodDays < 2 ? `${(b.periodDays * 24).toFixed(1)} hours` : `${Math.round(b.periodDays)} days`}` : ''}` : '';
+    // Its phase as the world the system is seen from sees it (the player's where he stands on one, else its first ground world).
+    const lit = opened.litSeen[i];
+    const from = opened.bodies.find((x) => x.here) ?? opened.bodies.find((x) => !!x.ground && viewerSkyOf(x.ground) === opened.world);
+    const seen = lit >= 0 && !b.star && from ? ` · from ${from.name}: ${Math.round(lit * 100)}% lit` : '';
+    p.append(h, ` ${b.kind}${round}${seen}`);
+    info.appendChild(p);
+    if (b.ground) {
+      const block = this.infoEl.querySelector<HTMLElement>(`.galaxy-world[data-world="${b.ground}"]`);
+      block?.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   // ---- The cards: the list this tab used to be, kept for reading and for the keyboard ----
@@ -558,11 +669,18 @@ export class GalaxyMap {
       this.dragging = false;
       this.panning = false;
       if (!clicked) return;
+      // Pass 2, wave 5 (maker M): inside an opened system a click picks one of its bodies.
+      if (this.view.systemOpen) {
+        this.showBody(this.view.pickBody(e.offsetX, e.offsetY, this.viewHolder.clientWidth || 1, this.viewHolder.clientHeight || 1));
+        return;
+      }
       const id = this.view.pickAt(e.offsetX, e.offsetY, this.viewHolder.clientWidth || 1, this.viewHolder.clientHeight || 1);
       // Whoever has borrowed the view gets first refusal on the pick: the travel terminal shows this
       // same galaxy and wants a click to mean "buy a ticket there", not "fill in the map's panel".
       if (this.onPick && this.onPick(id)) return;
       this.showSystem(id ? (drawnSystems().find((s) => s.id === id) ?? null) : null);
+      // Pass 2, wave 5 (maker M): and a system picked opens.
+      if (GPU.webgpu && this.picked) this.openSystem(this.picked);
     });
     c.addEventListener('pointercancel', () => {
       this.dragging = false;
@@ -574,6 +692,13 @@ export class GalaxyMap {
       this.view.orbit.zoomToward(e.deltaY > 0 ? 1 : -1, this.scratch.x, this.scratch.y, this.scratch.z);
     }, { passive: false });
     c.addEventListener('dblclick', (e) => {
+      // Pass 2, wave 5 (maker M): inside an opened system a double click centres on a body.
+      if (this.view.systemOpen) {
+        const i = this.view.pickBody(e.offsetX, e.offsetY, this.viewHolder.clientWidth || 1, this.viewHolder.clientHeight || 1);
+        const b = i >= 0 ? this.view.bodyPlace(i) : null;
+        if (b) this.view.orbit.centreOn(b.x, b.y, b.z);
+        return;
+      }
       const id = this.view.pickAt(e.offsetX, e.offsetY, this.viewHolder.clientWidth || 1, this.viewHolder.clientHeight || 1);
       const at = id ? this.view.placeOf(id) : null;
       if (at) this.view.orbit.centreOn(at.x, at.y, at.z);
@@ -629,6 +754,8 @@ export class GalaxyMap {
    * view lent out before the map has ever been opened would otherwise be bare globes and no lines.
    */
   warmUp(): void {
+    // Pass 2, wave 5 (maker M): a borrower (the travel terminal) is lent the galaxy, never an opened system.
+    if (GPU.webgpu) this.closeSystem(false);
     this.askGlobes();
   }
 
@@ -747,6 +874,8 @@ export class GalaxyMap {
   private worldBlock(sys: GalaxySystemDef, noOrbit: string | null, planet: PlanetDef): HTMLElement {
     const box = document.createElement('div');
     box.className = 'galaxy-world';
+    // Pass 2, wave 5 (maker M): found by an opened system's body picked.
+    if (GPU.webgpu) box.dataset.world = planet.id;
     const h = document.createElement('h4');
     h.textContent = planet.name;
     const tag = document.createElement('div');
@@ -857,6 +986,12 @@ export class GalaxyMap {
       this.pickedShown = '';
       this.showSystem(this.picked);
     }
+    // Pass 2, wave 5 (maker M): an opened system opened again from where the player now stands (who is here, what is baked).
+    const open = this.view.systemOpen;
+    if (open) {
+      const sys = drawnSystems().find((s) => s.id === open.galaxyId);
+      if (sys) this.openSystem(sys);
+    }
   }
 
   show(): void {
@@ -864,6 +999,12 @@ export class GalaxyMap {
     this.askGlobes();
     // Pass 2, wave 4b (maker C): the globes whose looks a loading screen has baked since they were last laid.
     if (GPU.webgpu) for (const id of this.globePlaces.keys()) this.lookGlobe(id);
+    // Pass 2, wave 5 (maker M): an opened system laid again where a loading screen has baked since it opened.
+    if (GPU.webgpu && this.view.systemOpen && this.openedBakes !== MAP_LOOKS.at) {
+      const open = this.view.systemOpen;
+      const sys = drawnSystems().find((s) => s.id === open.galaxyId);
+      if (sys) this.openSystem(sys);
+    }
     this.attachDebug();
     this.markUnconverted();
     // The system flown in is the one picked, the first time the tab is opened on it.
@@ -880,7 +1021,40 @@ export class GalaxyMap {
   private attachDebug(): void {
     const w = window as unknown as { __debug?: Record<string, unknown> };
     if (!w.__debug || w.__debug.galaxy) return;
-    w.__debug.galaxy = (tune?: Partial<typeof GALAXY_TUNE> & Partial<typeof GALAXY_VIEW_TUNE> & { focus?: string; distance?: number; globes?: Partial<typeof GLOBE_TUNE> }) => {
+    w.__debug.galaxy = (tune?: Partial<typeof GALAXY_TUNE> & Partial<typeof GALAXY_VIEW_TUNE> & { focus?: string; distance?: number; globes?: Partial<typeof GLOBE_TUNE>; system?: Partial<typeof SYSTEM_VIEW_TUNE>; open?: string | null; body?: string | number }) => {
+      // Pass 2, wave 5 (maker M): the opened system's dials (`SYSTEM_VIEW_TUNE`, laid at the next opening), a system opened by its
+      // id (`{ open: 'naboo' }`, `{ open: null }` shuts it) and a body picked in it by its name or index (`{ body: 'Rori' }`).
+      if (tune && GPU.webgpu) {
+        const st = tune.system;
+        if (st && typeof st === 'object') {
+          for (const k of Object.keys(SYSTEM_VIEW_TUNE) as (keyof typeof SYSTEM_VIEW_TUNE)[]) {
+            const v = st[k];
+            if (typeof v === 'number' && Number.isFinite(v) && v >= 0) SYSTEM_VIEW_TUNE[k] = v;
+          }
+        }
+        if (tune.open === null) this.closeSystem(true);
+        else if (typeof tune.open === 'string') {
+          const sys = drawnSystems().find((s) => s.id === tune.open);
+          if (sys) {
+            this.showSystem(sys);
+            this.openSystem(sys);
+          }
+        }
+        const open = this.view.systemOpen;
+        if (open && tune.body !== undefined) {
+          const i = typeof tune.body === 'number' ? tune.body : open.bodies.findIndex((b) => b.name === tune.body || b.id === tune.body);
+          this.showBody(i);
+          // With a distance, the view centred on the body picked from there (the prover's close look; a double click's).
+          const at = i >= 0 && typeof tune.distance === 'number' && tune.distance > 0 ? this.view.bodyPlace(i) : null;
+          if (at) {
+            this.view.orbit.centreOn(at.x, at.y, at.z);
+            this.view.orbit.orbit.distance = tune.distance!;
+          }
+        }
+        // How far the view looks down on an opened system (radians; 0 along its plane, where the disc behind reads as the band).
+        if (open && typeof (tune as { pitch?: unknown }).pitch === 'number') this.view.orbit.orbit.pitch = (tune as { pitch: number }).pitch;
+        if (tune.open !== undefined || tune.body !== undefined || tune.system) return { ...this.view.describe(), system: { ...SYSTEM_VIEW_TUNE } };
+      }
       if (tune) {
         for (const k of Object.keys(GALAXY_TUNE) as (keyof typeof GALAXY_TUNE)[]) {
           const v = tune[k];
@@ -906,7 +1080,7 @@ export class GalaxyMap {
         }
         if (typeof tune.distance === 'number' && tune.distance > 0) this.view.orbit.orbit.distance = tune.distance;
       }
-      return { ...this.view.describe(), tune: { ...GALAXY_TUNE, ...GALAXY_VIEW_TUNE }, globes: { tune: { ...GLOBE_TUNE }, places: Object.fromEntries(this.globePlaces), worn: Object.fromEntries(this.globeWorn), baked: { ...MAP_LOOKS } } };
+      return { ...this.view.describe(), tune: { ...GALAXY_TUNE, ...GALAXY_VIEW_TUNE }, globes: { tune: { ...GLOBE_TUNE }, places: Object.fromEntries(this.globePlaces), worn: Object.fromEntries(this.globeWorn), baked: { ...MAP_LOOKS } }, ...(GPU.webgpu ? { system: { ...SYSTEM_VIEW_TUNE } } : {}) };
     };
   }
 

@@ -448,16 +448,20 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
 
 {
   const w = readFileSync(join(REPO, 'src', 'world', 'world.ts'), 'utf8');
-  ok(/this\.skyLookSky = basePack;\s*if \(GPU\.webgpu && this\.bodiesRead\) \{\s*await this\.bodiesRead;\s*if \(token !== this\.loadToken\) return;\s*applyFileAir\(\);\s*\}\s*\/\/ The weather's effects/.test(w), "the screen's read is awaited and its saved air applied on WebGPU alone, before the weather and the world's air are made");
+  // Pass 2, wave 5 (maker S): the applied star system the file names for the world followed in the same block, after its air.
+  ok(/this\.skyLookSky = basePack;\s*if \(GPU\.webgpu && this\.bodiesRead\) \{\s*await this\.bodiesRead;\s*if \(token !== this\.loadToken\) return;\s*applyFileAir\(\);\s*(\/\/[^\n]*\n\s*)*this\.followMotion\(sky\.data\.space \? null : skyMotionFor\([^\n]*\);\s*\}\s*\/\/ The weather's effects/.test(w), "the screen's read is awaited and its saved air applied on WebGPU alone, then the star system it applies followed, before the weather and the world's air are made");
   const lb = w.slice(w.indexOf('private async loadBodies(sky: SwgSky)'), w.indexOf('private dropBodies(): void'));
-  ok(/const worn = await wearSkyLooks\(this\.skyLookSky, cards, GPU\.rt!\.looks\);\s*const set = await GPU\.rt!\.skyBodies\.make\(worn\.cards\);/.test(lb) && /dropSkyLooks\(worn\);/.test(lb), 'the looks are worn inside the bodies\' load, before the bodies are made, and let go if the sky went meanwhile');
-  const db = w.slice(w.indexOf('private dropBodies(): void'), w.indexOf('private dropBodies(): void') + 400);
+  // (pass 2, wave 5, maker L: the places drawn whole by their looks, `lookPlaces`, wear no disc picture)
+  ok(/const worn = await wearSkyLooks\(this\.skyLookSky, cards, GPU\.rt!\.looks, lookPlaces\(lookPlans\)\);\s*const set = await GPU\.rt!\.skyBodies\.make\(worn\.cards\);/.test(lb) && /dropSkyLooks\(worn\);/.test(lb), 'the looks are worn inside the bodies\' load, before the bodies are made (but where a look draws the body whole), and let go if the sky went meanwhile');
+  const db = w.slice(w.indexOf('private dropBodies(): void'), w.indexOf('private dropBodies(): void') + 800);
   ok(/dropSkyLooks\(this\.skyLooks\);/.test(db), 'and let go with the bodies');
   ok(/if \(GPU\.webgpu\) this\.bodiesRead = readBodiesFile\(\)\.catch\(\(\) => null\);\s*(\/\/[^\n]*\n\s*)*if \(GPU\.webgpu && this\.bodiesRead\) void this\.bodiesRead\.then\(\(\) => warmZoneLooks\(this\.packId, GPU\.rt!\.looks\)\);/.test(w), "the zone's kits are asked for as soon as the screen's read lands, never awaited, on WebGPU alone");
   const s = readFileSync(join(REPO, 'src', 'core', 'gpu', 'start.ts'), 'utf8');
   ok(/import \{ LookBaker \} from '\.\.\/\.\.\/sky\/look\/lookBake\.ts';/.test(s) && /looks: \(\(\) => \{\s*const baker = new LookBaker\(renderer\);/.test(s), 'the runtime makes one baker a session on the game\'s renderer');
   const bake = readFileSync(join(REPO, 'src', 'sky', 'look', 'lookBake.ts'), 'utf8');
-  ok(/cache\.takeBytes\(key, \(\) => bakeOnCard\(this\.renderer, key, look, size, clouds, BAKE_TUNE\.budgetMs - cache\.stats\.screenMs\)\)/.test(bake) && /\.warm\(renderer, gen, \{ withClouds: clouds, again: !!had \}\)/.test(bake) && /set\.dispose\(\);/.test(bake), "a bake goes through the bake cache's budget, its kit waited on for what the budget has left, its targets freed after the read-back");
+  // (The fixer of wave 5: a bake asked with `mayAsk` false puts off a look whose kit was never asked, its kit asked once the
+  // screen is gone; one that may ask, or whose kit was asked, bakes as before.)
+  ok(/cache\.takeBytes\(key, \(\) => \{\n\s+if \(mayAsk \|\| KITS\.has\(key\)\) return bakeOnCard\(this\.renderer, key, look, size, clouds, BAKE_TUNE\.budgetMs - cache\.stats\.screenMs\);\n\s+askLaterFor\(key, genOf\(look, size\), size, clouds\);\n\s+return Promise\.resolve\(null\);/.test(bake) && /\.warm\(renderer, gen, \{ withClouds: clouds, again: !!had \}\)/.test(bake) && /set\.dispose\(\);/.test(bake), "a bake goes through the bake cache's budget, its kit waited on for what the budget has left, its targets freed after the read-back");
   ok(/if \(!landed\) \{[\s\S]{0,300}return null;/.test(bake) && /if \(!drawn\(surface\)/.test(bake), 'a kit not landed within the budget, or a read-back that came back empty, bakes nothing and keeps nothing');
   ok(/landed = kit\.clean;/.test(bake) && /ask\.clean = took < LOST_AFTER_MS;/.test(bake) && /if \(had && \(!had\.done \|\| had\.clean\)\) return had;/.test(bake), "an ask answered only at the warm-up's own bound is not a landing: the next bake asks again before it draws");
   // The kit's ask: each pass's pipeline asked once and kept until it lands, so a later screen awaits the same asks.

@@ -168,6 +168,10 @@ export function gameBodiesFile(data, opts = {}) {
   // game ignores the key, and a world absent from it keeps what SWG's environment says)
   const held = heldForGame(data.held);
   if (Object.keys(held).length) out.held = held;
+  // (pass 2, wave 5, maker L) the space places he moved or sized (the page's place edits, `places`): numbers only, by place; a
+  // file without any is as before (the game reads none)
+  const places = spacePlacesForGame(data.places);
+  if (Object.keys(places).length) out.places = places;
   for (const name of [...used].sort()) out.pictures[gamePictureName(name)] = { kind: String(pictures[name]?.kind || 'other') };
   const credit = typeof data.credit === 'string' ? data.credit.trim().slice(0, 120) : '';
   const photos = Object.keys(out.pictures).length;
@@ -216,6 +220,23 @@ export function heldForGame(held) {
       if (h) kept[id] = h;
     }
     if (Object.keys(kept).length) out[GAME_WORLD[world] ?? world] = kept;
+  }
+  return out;
+}
+
+/**
+ * (pass 2, wave 5, maker L) The space places he moved or sized, as the game's file carries them: from the page's place edits
+ * (`{ <place>: { yaw, pitch, size, distance, ... } }`), each space place's own yaw, pitch, size across and distance where he set
+ * them (degrees, and the zone file's units), nothing of a ground sky's and nothing else. The game hangs the zone's planet there
+ * (`src/sky/look/bodiesFile.ts`' `spacePlaceOf`).
+ */
+export function spacePlacesForGame(places) {
+  const out = {};
+  for (const [id, e] of Object.entries(isObj(places) ? places : {})) {
+    if (!/^space_[a-z0-9_]{1,40}:[a-z0-9_]{1,60}(?:#\d{1,3})?$/.test(id) || !isObj(e)) continue;
+    const o = {};
+    for (const k of ['yaw', 'pitch', 'size', 'distance']) if (typeof e[k] === 'number' && Number.isFinite(e[k])) o[k] = e[k];
+    if (Object.keys(o).length) out[id] = o;
   }
   return out;
 }

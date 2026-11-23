@@ -60,7 +60,8 @@ function png(w, h, rgb) {
   // 68.3, 55.9, 59.7). Node draws nothing, so the page's proof is the fixer's alternation of matches in one page
   // (`A:\swg3js\port\scratch\p2w4a-fixer\tools\vmatch.mjs`); this holds its one line where it must stand.
   const ga = fs.readFileSync(path.join(ROOT, 'src', 'sky', 'look', 'gameAir.ts'), 'utf8');
-  const frameAt = ga.indexOf('frameAir(a: WorldAir, hours: number): boolean {');
+  // (pass 2, wave 5) the frame takes the day's count too, under a system the file applies
+  const frameAt = ga.indexOf('frameAir(a: WorldAir, hours: number, count = Number.NaN): boolean {');
   const body = ga.slice(frameAt, ga.indexOf('\n  }\n', frameAt));
   ok(frameAt > 0 && /if \(this\.tables && a\.ready\) \{\s*this\.tables\.follow\(run\.twin\.record\);\s*this\.tables\.frame\(this\.S\.camera\);/.test(body), "each frame of a world's air points the session's tables at that world's record before they are drawn");
 }

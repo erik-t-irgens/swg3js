@@ -54,12 +54,16 @@ export const MOTION_DIALS = [
 
 /** The uniforms a look's clouds read for both. */
 export function weatherUniforms() {
+  // (the GPU port's pass 2, wave 5) the numbers written every frame ride in a vector's field, written in place: a number
+  // written into a float uniform's own `value` is a number made (its field holds every kind of value), and the game steps
+  // the storms and the motion every frame. `t` and each `cellInv[i]` are the vectors' `x`, read so by the graphs.
+  const tv = uniform(new THREE.Vector4(0, 0, 0, 0));
   return {
     cells: Array.from({ length: STORM_SLOTS }, () => uniform(new THREE.Vector4(0, 1, 0, 0))),
-    // each flash's own size, as 1 / size^2 (a factor on the spread: some small, some broad)
-    cellInv: Array.from({ length: STORM_SLOTS }, () => uniform(1)),
+    // each flash's own size, as 1 / size^2 in its vector's x (a factor on the spread: some small, some broad)
+    cellInv: Array.from({ length: STORM_SLOTS }, () => uniform(new THREE.Vector4(1, 0, 0, 0))),
     flashColour: uniform(new THREE.Vector3(0.69, 0.75, 1)), invSpread2: uniform(1 / (0.07 * 0.07)), invSpread: uniform(1 / 0.07),
-    t: uniform(0), drift: uniform(0), churn: uniform(0), swirl: uniform(0),
+    tv, t: tv.x, drift: uniform(0), churn: uniform(0), swirl: uniform(0),
     // a generated look's spiral storms: centre, and radius times the side's sign (0: none)
     cyclones: Array.from({ length: 8 }, () => uniform(new THREE.Vector4(0, 1, 0, 0))),
   };
@@ -104,7 +108,7 @@ export function flashAt(W, p, disc = false) {
   for (let i = 0; i < STORM_SLOTS; i++) {
     const c = W.cells[i];
     const d2 = disc ? dot(p.xy.sub(c.xy), p.xy.sub(c.xy)) : float(2).mul(float(1).sub(dot(p, c.xyz)));
-    const e = d2.mul(W.invSpread2).mul(W.cellInv[i]);
+    const e = d2.mul(W.invSpread2).mul(W.cellInv[i].x);
     g = g.add(c.w.mul(exp(e.mul(rag).negate()).add(exp(e.mul(-0.12)).mul(0.14))));
   }
   return g;
@@ -200,6 +204,10 @@ export function movedUV(W, uvNode, a) {
 export class Storms {
   constructor(seed = 1, disc = false) {
     this.a = (seed >>> 0) || 1;
+    // (pass 2, wave 5) the seed it began with and its hints, for a recording of the same storm (`record`)
+    this.seed0 = this.a;
+    this.hintList = null;
+    this.tape = null;
     this.disc = disc;
     this.sites = new Float64Array(SITES * 4); // x, y, z, until
     this.slots = new Float64Array(STORM_SLOTS * SLOT_W);
@@ -231,6 +239,7 @@ export class Storms {
   }
 
   setHints(cyclones) {
+    this.hintList = cyclones || null;
     this.hintCount = 0;
     for (const c of cyclones || []) {
       if (this.hintCount >= 8) break;
@@ -347,6 +356,55 @@ export class Storms {
    * uniforms), `rate` flashes a second over the body, `bright` their strength, `spread` their size.
    */
   step(now, on, rate, bright, spread, cells, sizes = null) {
+    const a = (this.args ||= stormArgs());
+    a.now = now; a.on = on; a.rate = rate; a.bright = bright; a.spread = spread; a.cells = cells; a.sizes = sizes;
+    this.stepWith(a);
+  }
+
+  /**
+   * (the GPU port's pass 2, wave 5) `step` with its numbers read off a kept record (`stormArgs()`: now, on, rate, bright,
+   * spread, cells, sizes), written in place by the caller: a number handed across a call is a number made, and the game
+   * steps the storms every frame. The same steps as `step`, number for number.
+   */
+  stepWith(a) {
+    const now = a.now, on = a.on, rate = a.rate, bright = a.bright, spread = a.spread, cells = a.cells, sizes = a.sizes;
+    // (pass 2, wave 5) a recorded storm played back (`record`), while its dials are the ones it was recorded at
+    if (this.tape && on && rate === this.tapeRate && spread === this.tapeSpread) {
+      const P = this.tapeSeconds, n = this.tapeCount, tape = this.tape;
+      const loop = Math.floor(now / P), local = now - loop * P;
+      if (loop !== this.tapeLoop || local < this.tapeLast) { this.tapeLoop = loop; this.tapeCursor = 0; }
+      this.tapeLast = local;
+      while (this.tapeCursor < n && tape[this.tapeCursor * SLOT_W + 7] <= local) this.tapeCursor++;
+      for (let i = 0; i < STORM_SLOTS; i++) {
+        const v = cells[i].value;
+        let idx = this.tapeCursor - 1 - i, lt = local;
+        // the first flashes of a pass: the slots hold the last of the pass before
+        if (idx < 0) { idx += n; lt = local + P; }
+        if (idx < 0) { v.w = 0; continue; }
+        const o = idx * SLOT_W;
+        let I = 0, lastK = 0;
+        if (lt < tape[o + SLOT_W - 1]) {
+          for (let k = 0; k < STROKES; k++) {
+            const s = tape[o + 7 + k * 2], amp = tape[o + 8 + k * 2];
+            if (!(amp > 0) || lt < s) continue;
+            const dt = lt - s;
+            lastK = k;
+            I += amp * Math.min(1, dt / 0.012) * (Math.exp(-dt / 0.06) + 0.28 * Math.exp(-dt / 0.2));
+          }
+        }
+        if (lastK > 0) {
+          const nx = tape[o] + tape[o + 3] * lastK, ny = tape[o + 1] + tape[o + 4] * lastK, nz = tape[o + 2] + tape[o + 5] * lastK;
+          if (this.disc) { v.x = nx; v.y = ny; v.z = 0; }
+          else {
+            const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+            v.x = nx / l; v.y = ny / l; v.z = nz / l;
+          }
+        } else { v.x = tape[o]; v.y = tape[o + 1]; v.z = tape[o + 2]; }
+        v.w = I * bright;
+        if (sizes) { const sz = tape[o + 6] || 1; sizes[i].value.x = 1 / (sz * sz); }
+      }
+      return;
+    }
     const T = this.slots;
     if (!on || !(rate > 0)) {
       for (let i = 0; i < STORM_SLOTS; i++) if (cells[i].value.w !== 0) cells[i].value.w = 0;
@@ -397,14 +455,58 @@ export class Storms {
         }
       }
       const v = cells[i].value;
-      // each stroke lights the cloud a little further along the flash's own way
+      // each stroke lights the cloud a little further along the flash's own way (`step3` written out: this runs a frame)
       if (lastK > 0) {
-        this.step3(T[o], T[o + 1], T[o + 2], T[o + 3] * lastK, T[o + 4] * lastK, T[o + 5] * lastK, this.tmp, 0);
-        v.x = this.tmp[0]; v.y = this.tmp[1]; v.z = this.tmp[2];
+        const nx = T[o] + T[o + 3] * lastK, ny = T[o + 1] + T[o + 4] * lastK, nz = T[o + 2] + T[o + 5] * lastK;
+        if (this.disc) { v.x = nx; v.y = ny; v.z = 0; }
+        else {
+          const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+          v.x = nx / l; v.y = ny / l; v.z = nz / l;
+        }
       } else { v.x = T[o]; v.y = T[o + 1]; v.z = T[o + 2]; }
       v.w = I * bright;
-      if (sizes) { const sz = T[o + 6] || 1; sizes[i].value = 1 / (sz * sz); }
+      // (pass 2, wave 5) into its vector's field, in place
+      if (sizes) { const sz = T[o + 6] || 1; sizes[i].value.x = 1 / (sz * sz); }
     }
+  }
+
+  /**
+   * (the GPU port's pass 2, wave 5) This storm recorded ahead at its dials (`rate` flashes a second, `spread` their size) for
+   * `seconds` (`STORM_TAPE.seconds`), then played back by `stepWith` round and round while those dials hold: the same seed's
+   * storm, flash for flash, as `stepWith` would draw it live from the start. A flash is drawn rarely, so its own steps run in the
+   * engine's slower tiers, where every number it works is a number made (some 1.3 KB a flash in the game's measure); played
+   * back, a frame reads the recorded flashes alone. The game records every storm it draws behind its loading screen
+   * (`STORM_TAPE.on`); the viewer never does, its dials moving live as ever. Some tens of milliseconds.
+   */
+  record(rate, spread, seconds = STORM_TAPE.seconds) {
+    const s = new Storms(this.seed0, this.disc);
+    s.setHints(this.hintList);
+    const cells = Array.from({ length: STORM_SLOTS }, () => ({ value: { x: 0, y: 1, z: 0, w: 0 } }));
+    const a = stormArgs();
+    a.on = true; a.rate = rate; a.bright = 1; a.spread = spread; a.cells = cells;
+    const recs = [];
+    let seen = 0;
+    const dt = 1 / 30;
+    for (let i = 0; i * dt <= seconds; i++) {
+      a.now = i * dt;
+      s.stepWith(a);
+      for (; seen < s.flashes; seen++) {
+        const o = (seen % STORM_SLOTS) * SLOT_W;
+        recs.push(s.slots.slice(o, o + SLOT_W));
+      }
+    }
+    const tape = new Float64Array(recs.length * SLOT_W);
+    recs.forEach((r, i) => tape.set(r, i * SLOT_W));
+    this.tape = tape;
+    this.tapeCount = recs.length;
+    this.tapeSeconds = seconds;
+    this.tapeRate = rate;
+    this.tapeSpread = spread;
+    // (a fraction to begin: the field then holds a double from the first frame, and is never a whole loop's number)
+    this.tapeLoop = -1.5;
+    this.tapeCursor = 0;
+    this.tapeLast = 0.5;
+    return recs.length;
   }
 
   /** A slot's size factor (1 when none), for a reader that sizes its flashes itself (the ground's sky). */
@@ -418,4 +520,21 @@ export class Storms {
     for (let i = this.logCount - n; i < this.logCount; i++) out.push(this.log[i % this.log.length]);
     return out;
   }
+}
+
+/**
+ * (the GPU port's pass 2, wave 5) Whether the storms built from now on are recorded ahead and played back (`Storms.record`): the
+ * game's, set before it builds a look; the viewer leaves it off and steps its storms live. `seconds` the recording's length, the
+ * storm going round again after it: ten minutes, which no one watching one storm's flashes tells from a storm that never repeats
+ * (its sites wander every 12 to 45 seconds), a few thousand flashes at most (some 200 KB at four a second).
+ */
+export const STORM_TAPE = { on: false, seconds: 600 };
+
+/**
+ * (the GPU port's pass 2, wave 5) The record `Storms.stepWith` reads, made once and written in place each frame: its numbers
+ * begin as fractions so the fields hold doubles from the first write (a field begun as a whole number and written a fraction
+ * later changes its kind).
+ */
+export function stormArgs() {
+  return { now: 0.5, on: false, rate: 0.5, bright: 0.5, spread: 0.5, cells: null, sizes: null };
 }

@@ -20,6 +20,7 @@ import { GeneratedSet } from './generate.js';
 import { bakeCache } from '../bodies/skyBody.ts';
 import { BAKE_TUNE } from '../bodies/bakeCache.ts';
 import { lookBakeSize, lookHasClouds, lookPicturesKey, type LookPictures } from './lookPictures.ts';
+import { LOOK_BODY_TUNE } from '../bodies/lookBodyMath.ts';
 import type { BodyLook } from './bodiesFile.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -90,6 +91,66 @@ function askKit(renderer: Any, key: string, gen: Any, size: number, clouds: bool
     });
   KITS.set(key, ask);
   return ask;
+}
+
+/**
+ * (The fixer of pass 2, wave 5) The kits put off behind a loading screen, by key, asked once it is gone (`askKitsLater`): on a
+ * cold shader cache a kit's five large pipelines took 8 to 30 s here, and asked under a screen they held its own pipelines back
+ * (an applied system's extra bodies and the map's opened systems asked theirs behind every screen, and Yavin 4's first one
+ * waited 25 s on the people's shaders queued behind them). Asked in play they land off the frame, never by a draw, for the
+ * next screen.
+ */
+const LATER = new Map<string, { gen: Any; size: number; clouds: boolean }>();
+
+function askLaterFor(key: string, gen: Any, size: number, clouds: boolean): void {
+  if (!KITS.has(key) && !LATER.has(key)) LATER.set(key, { gen, size, clouds });
+}
+
+/** The kits put off behind the screen just gone asked now, at most `LOOK_BODY_TUNE.kitsAfterScreen` of them. Answers how many. */
+export function askKitsLater(renderer: Any): number {
+  let n = 0;
+  for (const [key, k] of LATER) {
+    if (n >= LOOK_BODY_TUNE.kitsAfterScreen) break;
+    LATER.delete(key);
+    if (KITS.has(key)) continue;
+    askKit(renderer, key, k.gen, k.size, k.clouds);
+    n++;
+  }
+  return n;
+}
+
+/**
+ * (The fixer of pass 2, wave 5) Whether a generated look's kit has landed, waiting for it at most `waitMs`: asked through the
+ * same memo the screen's own warm and bakes ask (`askKit`), so a kit asked at the screen's start is the one waited on, and one
+ * not landed in time keeps landing on its own (asked behind the screen, never by a draw) for the next screen. A look that is
+ * not generated has no kit: true.
+ */
+export async function kitWithin(renderer: Any, look: BodyLook, size: number, waitMs: number): Promise<boolean> {
+  if (!look?.generated) return true;
+  const clouds = lookHasClouds(look);
+  const key = lookPicturesKey(look, size, clouds);
+  // a kit the screen's start did not ask for is not asked under the screen: it is asked once the screen is gone (`askKitsLater`)
+  if (!KITS.has(key)) {
+    askLaterFor(key, genOf(look, size), size, clouds);
+    return false;
+  }
+  const kit = askKit(renderer, key, genOf(look, size), size, clouds);
+  if (kit.done) return kit.clean;
+  let landed = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const tw = performance.now();
+  await Promise.race([
+    kit.p.then(() => {
+      landed = kit.clean;
+    }),
+    new Promise<void>((r) => {
+      timer = setTimeout(r, waitMs > 0 ? waitMs : 0);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  LOOK_BAKE_STATS.warmMs += performance.now() - tw;
+  if (!landed) LOOK_BAKE_STATS.kitWaits++;
+  return landed;
 }
 
 /** Whether a read-back holds a drawn picture (a pass not drawn leaves the target cleared: every texel nought). */
@@ -184,7 +245,7 @@ export class LookBaker {
    * what the budget has left); null where it is put off to the next screen (its reader draws SWG's picture), or the look
    * cannot be baked. Behind a loading screen alone.
    */
-  async bake(id: string, look: BodyLook, most: number): Promise<LookPictures | null> {
+  async bake(id: string, look: BodyLook, most: number, mayAsk = true): Promise<LookPictures | null> {
     if (!look?.generated) return null;
     const size = lookBakeSize(look, most);
     const clouds = lookHasClouds(look);
@@ -195,7 +256,13 @@ export class LookBaker {
       return had.id === id ? had : { ...had, id };
     }
     const cache = bakeCache();
-    const got = await cache.takeBytes(key, () => bakeOnCard(this.renderer, key, look, size, clouds, BAKE_TUNE.budgetMs - cache.stats.screenMs));
+    // (the fixer of pass 2, wave 5) `mayAsk` false: a look whose kit this session has not asked for is put off and its kit asked
+    // once the screen is gone (`askKitsLater`; the map's opened systems' bakes); the browser's storage still answers
+    const got = await cache.takeBytes(key, () => {
+      if (mayAsk || KITS.has(key)) return bakeOnCard(this.renderer, key, look, size, clouds, BAKE_TUNE.budgetMs - cache.stats.screenMs);
+      askLaterFor(key, genOf(look, size), size, clouds);
+      return Promise.resolve(null);
+    });
     if (!got.parts) {
       LOOK_BAKE_STATS.fallback++;
       return null;
@@ -234,6 +301,11 @@ export class LookBaker {
   forget(): void {
     HAD.clear();
     bakeCache().forgetMemo();
+  }
+
+  /** The kits put off behind the screen just gone asked now (`askKitsLater`): the world calls it as each screen goes. */
+  askLater(): number {
+    return askKitsLater(this.renderer);
   }
 
   /** What the bakes have done. */

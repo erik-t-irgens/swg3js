@@ -19,6 +19,64 @@ export function dayFraction(clockMs, phaseMs = 0, dayMs = DAY_MS) {
   return x < 0 ? x + 1 : x;
 }
 
+/**
+ * Pass 2, wave 5 (maker S): the time of day, 0 to 1, of a world under its applied star system (the owner's answer of 21
+ * November: one steady spin per world), its own day `{ lengthSeconds, phase }` (`src/sky/system/worldDays.ts`' `worldDayOf`):
+ * `frac(clock / 1000 / length + phase)`, never the server's anchor (an admin's change of the game's day is the day of the
+ * worlds no system holds). The very sum every browser's day makes of the same clock (`SharedClock.ownTimeOfDay`).
+ */
+export function ownDayFraction(clockMs, day) {
+  if (!Number.isFinite(clockMs) || !day || !(day.lengthSeconds > 0) || !Number.isFinite(day.phase)) return 0;
+  const t = clockMs / 1000 / day.lengthSeconds + day.phase;
+  return t - Math.floor(t);
+}
+
+/**
+ * The worlds that keep a day of their own (pass 2, wave 5): each ground world an applied star system stands on, by its pack,
+ * with its day `{ lengthSeconds, phase, system }`, as the server's reading of the game's bodies file gives them
+ * (`server/relay.mjs` reads `public/sky/bodies.json`, the very file every browser reads behind its loading screens). Pure:
+ * the table is handed in; nothing here reads a file.
+ */
+export class WorldDays {
+  constructor(table = {}) {
+    this.set(table);
+  }
+
+  /** A new table, each entry kept only where its numbers could be a day. */
+  set(table) {
+    const out = {};
+    if (table && typeof table === 'object' && !Array.isArray(table)) {
+      for (const [world, d] of Object.entries(table)) {
+        if (!/^[a-z0-9_]{1,64}$/.test(world) || !d || typeof d !== 'object') continue;
+        const len = Number(d.lengthSeconds);
+        const phase = Number(d.phase);
+        if (!(len * 1000 >= DAY_LIMITS.minMs && len * 1000 <= DAY_LIMITS.maxMs) || !Number.isFinite(phase)) continue;
+        out[world] = { lengthSeconds: len, phase, system: typeof d.system === 'string' ? d.system.slice(0, 40) : '' };
+      }
+    }
+    this.table = out;
+    return this;
+  }
+
+  /** A world's own day, or null: a world no applied system holds keeps the game's. */
+  of(world) {
+    return typeof world === 'string' && Object.prototype.hasOwnProperty.call(this.table, world) ? this.table[world] : null;
+  }
+
+  /** What goes in the hail: each world's length in ms and its phase (none at all while no world keeps its own). */
+  hand() {
+    const out = {};
+    for (const [w, d] of Object.entries(this.table)) out[w] = [Math.round(d.lengthSeconds * 1000), d.phase];
+    return out;
+  }
+
+  /** A line for the log and the status page. */
+  describe() {
+    const n = Object.keys(this.table).length;
+    return n ? `${n} worlds keep their own day (${Object.entries(this.table).map(([w, d]) => `${w} ${(d.lengthSeconds / 3600).toFixed(2)} h`).join(', ')})` : 'every world keeps the game\'s own day';
+  }
+}
+
 /** The shortest and the longest day a server may be told to keep: a second, and a real day. Ours, as the browser's own limits are. */
 export const DAY_LIMITS = { minMs: 1000, maxMs: 24 * 60 * 60 * 1000 };
 

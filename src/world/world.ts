@@ -1,6 +1,8 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import { GPU, type GpuNightSky, type GpuSkyBodySet, type GpuSun } from '../core/gpuSwitch.ts';
+// Pass 2, wave 5 (agent P): what the world takes down for good let go by three's WebGPU renderer too (nothing on WebGL).
+import { keeperLike, letGoDrawn } from './letGo.ts';
 // Pass 2, wave 4b (maker C): a space zone's planets' air and nebula volumes, the runtime's (types alone); the map's globes'
 // looks baked behind the screen (`galaxyLooks.ts`, pure but for the runtime's bake, asked on WebGPU alone).
 import type { GpuSpaceRimSet, GpuSpaceVolumeSet } from '../core/gpuSwitch.ts';
@@ -18,6 +20,13 @@ import { AirRun } from '../sky/air/airRun.ts';
 import { applyFileAir, readBodiesFile } from '../sky/look/bodiesFile.ts';
 // Pass 2, wave 4b (maker A): his looks worn by the sky's bodies (three's core and pure; the bake is the runtime's).
 import { dropSkyLooks, warmZoneLooks, wearSkyLooks, type SkyLooksWorn } from '../sky/look/skyLooks.ts';
+// Pass 2, wave 5 (maker L): bodies wearing his looks drawn whole (`src/sky/bodies/lookBody.ts` through the runtime), which ones
+// (`lookWorld.ts`), and his imported looks in development alone (`privateSky.ts`).
+import { SKY_CARD_REACH, lookPlaces, markLookDrawn, placeSpaceBody, skyLookPlans, spaceBodyRadiusOf, spaceLookPlans } from '../sky/bodies/lookWorld.ts';
+import { spacePlaceOf } from '../sky/look/bodiesFile.ts';
+import { spacePlaceIds } from '../space/spaceAir.ts';
+import { tierIndexOf } from '../sky/night/nightTier.ts';
+import type { GpuLookBodySet } from '../core/gpuSwitch.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
@@ -177,6 +186,7 @@ import { DISTANT_TUNE, DistantSet, installDistantDebug, setDistantCurrent } from
 import { heldPictureOf, heldPlanOf, type HeldPlan } from '../sky/bodies/heldBodies.ts';
 import { PLUME_TUNE, groundDistantOf, installPlumeDebug, plumeReach, setPlumesCurrent } from '../sky/bodies/groundDistant.ts';
 import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
+import { SKY_MOTION, skyMotionFor, type SkyMotion, type SystemsRecord } from '../sky/system/skyMotion.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
@@ -2239,6 +2249,8 @@ export class World {
 
     const s = planet.sky;
     this.day.configure(s.sunAzimuth, s.sunElevation);
+    // Pass 2, wave 5 (maker S): no system's motion until this world's sky says so behind its screen (`followMotion`).
+    this.followMotion(null, null);
     const u = this.sky.material.uniforms;
     u.uTop.value.set(s.top);
     u.uHorizon.value.set(s.horizon);
@@ -2783,6 +2795,8 @@ export class World {
     for (const [key, t] of this.farTiles) {
       this.chunkRoot.remove(t);
       t.geometry.dispose();
+      // Pass 2, wave 5 (agent P): its render objects let go on WebGPU (`letGo.ts`).
+      letGoDrawn(t);
       const [tx, tz] = key.split(',').map(Number);
       this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
     }
@@ -3060,6 +3074,8 @@ export class World {
     for (const t of this.farTiles.values()) {
       this.chunkRoot.remove(t);
       t.geometry.dispose();
+      // Pass 2, wave 5 (agent P): its render objects let go on WebGPU (`letGo.ts`).
+      letGoDrawn(t);
     }
     this.farTiles.clear();
     // The far ground's bake goes with its world; the rings' program and meshes are the session's.
@@ -3351,6 +3367,11 @@ export class World {
   /** Pass 2, wave 4b (maker C): the planets' air let go (its shells leave the sky group before the group is freed). */
   private dropSpaceRims(): void {
     this.spacePlanetsHung = [];
+    // Pass 2, wave 5 (maker L): the planets drawn in their looks let go with their air (their cards leave the group first).
+    if (this.spaceLookBodies) {
+      this.spaceLookBodies.dispose((m) => this.forgetMaterials(m));
+      this.spaceLookBodies = null;
+    }
     const rims = this.spaceRims;
     if (!rims) return;
     this.spaceRims = null;
@@ -3429,6 +3450,25 @@ export class World {
    * the star, the main light and the hemisphere written into the rims' fields (a number handed across a call is a number made),
    * then their frame. Allocates nothing.
    */
+  /**
+   * Pass 2, wave 5 (maker L): once a game frame in space on WebGPU, the planets drawn in their looks: the star and the main light
+   * written into their fields (a number handed across a call is a number made), then their frame. Allocates nothing.
+   */
+  private spaceLookFrame(set: GpuLookBodySet, dt: number): void {
+    const at = GPU.rt!.lookBodies.lookIn;
+    const d = this.day.lightDir;
+    at.sunX = d.x;
+    at.sunY = d.y;
+    at.sunZ = d.z;
+    const k = this.sun.intensity;
+    const c = this.sun.color;
+    at.lightR = c.r * k;
+    at.lightG = c.g * k;
+    at.lightB = c.b * k;
+    at.dt = dt;
+    set.frame(null);
+  }
+
   private spaceRimsFrame(rims: GpuSpaceRimSet, camera: THREE.PerspectiveCamera): void {
     const at = GPU.rt!.spaceRims.rimIn;
     const d = this.day.lightDir;
@@ -3627,11 +3667,17 @@ export class World {
     const standing: { mesh: THREE.Mesh; stand: THREE.Mesh; at: THREE.Vector3; radius: number; material: THREE.ShaderMaterial }[] = [];
     /** Pass 2, wave 4b (maker C): on WebGPU each planet handed to its air below and to the volumes, with its row and distance in the zone's file. */
     const rimBodies: { mesh: THREE.Mesh; radius: number; index: number; distance: number }[] = [];
+    // Pass 2, wave 5 (maker L): the owner's Save to game read first on WebGPU, for a space place he moved or sized (`spacePlaceOf`).
+    if (GPU.webgpu && !(await this.awaitBodiesRead(token))) return;
+    const placeIds = GPU.webgpu ? spacePlaceIds(this.packId, data.planets.map((q) => q.appearance)) : null;
     for (const p of data.planets) {
       // The direction is in the game's own coordinates, mirrored in X like everything converted.
       const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
       if (dir.lengthSq() < 1) continue;
       dir.normalize();
+      // Pass 2, wave 5 (maker L): where and how large he set it in the space body viewer (its yaw, pitch and size across).
+      const moved = placeIds ? spacePlaceOf(placeIds[data.planets.indexOf(p)]) : null;
+      if (moved) placeSpaceBody(moved, dir);
       const tex = p.texture ? await loader.loadAsync(pack.url(p.texture)).catch(() => null) : null;
       // A travel or a jump while the pictures load: this zone's bodies must never land in the next one's sky.
       if (token !== this.loadToken) {
@@ -3643,7 +3689,7 @@ export class World {
       // A body that stands somewhere (a made-up system's) is built at its true size and moved every
       // frame; one hung on the sky is built at the sky's reach and never moves again.
       const stands = p.place === 'world' && Array.isArray(p.at) && typeof p.radius === 'number' && p.radius > 0;
-      const radius = stands ? (p.radius as number) : SPACE_BODY_SIZE * p.size;
+      const radius = stands ? (p.radius as number) : moved?.size !== undefined ? spaceBodyRadiusOf(moved.size, SPACE_BODY_DISTANCE) : SPACE_BODY_SIZE * p.size;
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 48, 32), new THREE.MeshLambertMaterial({ map: tex ?? undefined, color: tex ? 0xffffff : 0x8a97a6, fog: false, depthWrite: false }));
       mesh.position.copy(dir).multiplyScalar(SPACE_BODY_DISTANCE);
       mesh.renderOrder = -4;
@@ -3703,14 +3749,31 @@ export class World {
     // hung beside it in this group before the group is built below; the owner's Save to game read first (a look's own air).
     // Its shells leave the group before the group is freed (the shells' geometry and graphs are the session's).
     let rims: GpuSpaceRimSet | null = null;
+    // Pass 2, wave 5 (maker L): each planet wearing a look drawn whole (`lookBody.ts`), its sphere and its air's shells standing
+    // down for it (no shells made for it); its card hung in this group before the group is built below.
+    let looks: GpuLookBodySet | null = null;
     if (GPU.webgpu && rimBodies.length) {
       if (!(await this.awaitBodiesRead(token))) {
         this.disposeSpaceBodies(group);
         return;
       }
-      rims = await GPU.rt!.spaceRims.make(this.packId, data.planets.map((q) => q.appearance), rimBodies);
+      if (import.meta.env.DEV) await (await import('../sky/look/privateSkyDev.ts')).readPrivateSky();
+      const appearances = data.planets.map((q) => q.appearance);
+      // (the fixer of pass 2, wave 5) only those whose bake kits land within the screen's wait (`LOOK_BODY_TUNE.kitWaitMs`); the
+      // rest keep their spheres and rims on this screen and wear their looks from the next
+      const planned = spaceLookPlans(this.packId, appearances, rimBodies, group, this.camera?.fov ?? 60);
+      const putOff: string[] = [];
+      const lookPlans = planned.length ? await GPU.rt!.lookBodies.ready(planned, putOff) : planned;
+      if (putOff.length) console.info(`sky: ${putOff.join(', ')} put off to the next screen, the kits of their looks not landed yet`);
+      const drawnWhole = new Set(lookPlans.map((p) => p.mesh));
+      if (lookPlans.length) {
+        GPU.rt!.lookBodies.lookIn.screenH = (this.renderer?.domElement as HTMLCanvasElement | undefined)?.height || 1080;
+        looks = await GPU.rt!.lookBodies.make(lookPlans, tierIndexOf(liveSettings()));
+      }
+      rims = await GPU.rt!.spaceRims.make(this.packId, appearances, drawnWhole.size ? rimBodies.filter((b) => !drawnWhole.has(b.mesh)) : rimBodies);
       if (token !== this.loadToken) {
         rims.dispose((m) => this.forgetMaterials(m));
+        looks?.dispose((m) => this.forgetMaterials(m));
         this.disposeSpaceBodies(group);
         return;
       }
@@ -3725,6 +3788,7 @@ export class World {
     if (GPU.webgpu) {
       this.spaceRims = rims;
       this.spacePlanetsHung = rimBodies;
+      this.spaceLookBodies = looks;
     }
     // The standing bodies are this set's, and only now that this set is the one in the sky.
     this.spaceWorldBodies.length = 0;
@@ -3953,6 +4017,10 @@ export class World {
       await this.bodiesRead;
       if (token !== this.loadToken) return;
       applyFileAir();
+      // Pass 2, wave 5 (maker S): the star system the file applies for this world (`src/sky/system/skyMotion.ts`): its own day,
+      // its sun's path, its bodies' places and phases, its eclipses and its night light, moved by the day from here on; none
+      // (null) for a world the file does not apply and in space, which keep today's sky exactly.
+      this.followMotion(sky.data.space ? null : skyMotionFor((SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems, basePack, this.planet.id, sky.data), sky);
     }
     // The weather's effects are made and its arrival area's sky loaded inside the awaited loadPack,
     // so the warm-up that follows compiles them and the first frame shows the area's own sky.
@@ -4068,6 +4136,9 @@ export class World {
     // Pass 2, wave 4b (maker C): the zone's volumes marched at half the scene's size for this camera, before its nudge.
     const v = this.spaceVolumes;
     if (v && v.shown) v.draw(camera, GPU.rt!.taa.sceneSize(this.volumeSize));
+    // Pass 2, wave 5 (maker L): each shown body's look drawn into its own picture where it is due.
+    this.lookBodies?.draw();
+    this.spaceLookBodies?.draw();
   }
 
   /**
@@ -4130,7 +4201,19 @@ export class World {
     // Pass 2, wave 4b (maker A): his looks worn (`src/sky/look/skyLooks.ts`): each card whose place the Save to game gives a
     // generated look baked (or read from storage) within the screen's budget and handed over with its disc picture; the rest,
     // and every card with no file, as the sky made them.
-    const worn = await wearSkyLooks(this.skyLookSky, cards, GPU.rt!.looks);
+    // Pass 2, wave 5 (maker L): the cards (and the applied system's extra bodies) that wear a look are drawn whole by the
+    // viewer's own drawing of it (`lookBody.ts`): his imported looks read first (the dev server's, in development alone), the
+    // disc pictures made for the rest only, their cards standing down for them once made.
+    if (import.meta.env.DEV) await (await import('../sky/look/privateSkyDev.ts')).readPrivateSky();
+    if (this.swgSky !== sky) return;
+    // (the fixer of pass 2, wave 5) only those whose bake kits land within the screen's wait (`LOOK_BODY_TUNE.kitWaitMs`); the
+    // rest keep SWG's cards on this screen and wear their looks from the next
+    const planned = skyLookPlans(this.skyLookSky, cards, sky.group, this.camera?.fov ?? 60, SKY_CARD_REACH, SKY_MOTION.now, (k) => GPU.rt!.lookBodies.presetFor(k));
+    const putOff: string[] = [];
+    const lookPlans = planned.length ? await GPU.rt!.lookBodies.ready(planned, putOff) : planned;
+    if (this.swgSky !== sky) return;
+    if (putOff.length) console.info(`sky: ${putOff.join(', ')} put off to the next screen, the kits of their looks not landed yet`);
+    const worn = await wearSkyLooks(this.skyLookSky, cards, GPU.rt!.looks, lookPlaces(lookPlans));
     const set = await GPU.rt!.skyBodies.make(worn.cards);
     if (this.swgSky !== sky) {
       set.dispose((m) => this.forgetMaterials(m));
@@ -4139,13 +4222,43 @@ export class World {
     }
     this.skyBodies = set;
     this.skyLooks = worn;
+    if (lookPlans.length) {
+      markLookDrawn(lookPlans);
+      GPU.rt!.lookBodies.lookIn.screenH = (this.renderer?.domElement as HTMLCanvasElement | undefined)?.height || 1080;
+      const looks = await GPU.rt!.lookBodies.make(lookPlans, tierIndexOf(liveSettings()));
+      if (this.swgSky !== sky) {
+        looks.dispose((m) => this.forgetMaterials(m));
+        return;
+      }
+      this.lookBodies = looks;
+    }
   }
+  /** Pass 2, wave 5 (maker L): this sky's bodies drawn whole in their looks (WebGPU alone), and a space zone's planets. */
+  lookBodies: GpuLookBodySet | null = null;
+  spaceLookBodies: GpuLookBodySet | null = null;
   /** Pass 2, wave 4b (maker A): the looks this sky's bodies wear (their disc pictures), let go with the bodies; and the sky's id. */
   private skyLooks: SkyLooksWorn | null = null;
   private skyLookSky = '';
 
+  /**
+   * Pass 2, wave 5 (maker S): the applied star system this world's sky follows (`src/sky/system/skyMotion.ts`), or none: the
+   * day told (its own length and place in the shared day, its sun and night body), the drawing's record (`SKY_MOTION.now`,
+   * which the bodies read), and the sky, which places SWG's own cards where the system puts them.
+   */
+  private followMotion(motion: SkyMotion | null, sky: SwgSky | null): void {
+    this.day.follow(motion);
+    SKY_MOTION.now = motion;
+    sky?.useMotion(motion);
+    if (motion) console.info(`sky: ${motion.world} follows ${motion.name} (${motion.ownsDay ? `its own day of ${(motion.lengthSeconds / 3600).toFixed(2)} h` : "the game's day"}, ${motion.items.length} bodies)`);
+  }
+
   /** The bodies let go, with their sky. */
   private dropBodies(): void {
+    // Pass 2, wave 5 (maker L): the bodies drawn in their looks let go with their cards.
+    if (this.lookBodies) {
+      this.lookBodies.dispose((m) => this.forgetMaterials(m));
+      this.lookBodies = null;
+    }
     if (!this.skyBodies) return;
     this.skyBodies.dispose((m) => this.forgetMaterials(m));
     this.skyBodies = null;
@@ -5609,6 +5722,9 @@ export class World {
       if (o instanceof THREE.Mesh && !(o instanceof THREE.InstancedMesh)) o.geometry.dispose();
       if (o instanceof THREE.InstancedMesh) o.dispose();
     });
+    // Pass 2, wave 5 (agent P): and let go by three's WebGPU renderer, whose render objects of the ground mesh (the session's
+    // tile material) and of every caster (the shadow pass's material) otherwise held the whole chunk for the session (`letGo.ts`).
+    letGoDrawn(c.group);
     this.removeChunkPhysics(c);
   }
 
@@ -5908,6 +6024,40 @@ export class World {
     swapGroundMaterial(groups, this.farTiles.values(), other, want);
     this.groundWorn = want;
     this.chunkMaterial = want;
+    for (const c of this.chunks.values()) {
+      this.keepGround(c.ground);
+      break;
+    }
+  }
+
+  /**
+   * On WebGPU, one keeper a ground material (`keeperLike`, the fixer of pass 2, wave 5): made from the first chunk that
+   * wears it, compiled behind every loading screen (`compileEverything`) and drawn into the shadow maps there
+   * (`compileShadowDepth`), never let go, so a teleport that drops every chunk at once leaves the ground's pipelines held
+   * for the chunks made where it lands. A keeper whose material no chunk can wear any more is let go at the next screen.
+   */
+  private readonly groundKeepers = new Map<THREE.Material, THREE.Mesh>();
+
+  private keepGround(mesh: THREE.Mesh): void {
+    if (!GPU.webgpu) return;
+    const m = mesh.material as THREE.Material;
+    if (this.groundKeepers.has(m)) return;
+    const k = keeperLike(mesh);
+    if (k) this.groundKeepers.set(m, k);
+  }
+
+  /** The ground's keepers for a screen's sweep: those of a material a chunk can still wear, the rest let go now. */
+  private groundKeepersNow(): THREE.Mesh[] {
+    const out: THREE.Mesh[] = [];
+    for (const [m, k] of this.groundKeepers) {
+      if (m === this.chunkMaterial || m === this.groundTilesMat || m === this.groundAirMat) out.push(k);
+      else {
+        this.groundKeepers.delete(m);
+        letGoDrawn(k);
+        k.geometry.dispose();
+      }
+    }
+    return out;
   }
 
   /** Whether the ground's meshes wear the air variant now (what the field's ground marks are kept for). */
@@ -9420,6 +9570,10 @@ export class World {
       this.adoptMaterials(this.grassStand);
       objects.push(this.grassStand);
     }
+    // The ground's keepers on WebGPU (the fixer of pass 2, wave 5, `keepGround`): their render objects hold the ground's
+    // pipelines when a teleport drops every chunk at once. None on WebGL.
+    const keepers = this.groundKeepersNow();
+    for (const k of keepers) objects.push(k);
     // The tile ground and its air variant, one stand-in each, with the volumetrics master on (the second wave): so the
     // one the scene is not wearing is built too, and a ground switch or the master's soft off swaps compiled materials.
     let liquidCovered: THREE.Material[] | null = null;
@@ -9587,7 +9741,10 @@ export class World {
       warm.plain = plain.length;
       warm.skinned = skinned.length;
       warm.batched = 1;
-      const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched];
+      // And the ground's keepers that cast (WebGPU alone, `keepGround`): their shadow draw's render objects held as their world's.
+      const keepers: THREE.Object3D[] = [];
+      for (const k of this.groundKeepers.values()) if (k.castShadow) keepers.push(k);
+      const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned, batched, ...keepers];
       for (const s of drawn) {
         s.position.copy(at);
         s.frustumCulled = false;
@@ -11419,6 +11576,8 @@ export class World {
     for (const [key, t] of this.farTiles) {
       this.chunkRoot.remove(t);
       t.geometry.dispose();
+      // Pass 2, wave 5 (agent P): its render objects let go on WebGPU (`letGo.ts`).
+      letGoDrawn(t);
       const [tx, tz] = key.split(',').map(Number);
       this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
     }
@@ -12077,6 +12236,11 @@ export class World {
         this.nightFrame(camPos);
         // Pass 2, wave 4a (maker B): the moons and planets after the sky has placed their cards and the air its sun.
         if (this.skyBodies && this.camera) this.skyBodies.frame(this.camera);
+        // Pass 2, wave 5 (maker L): the bodies drawn in their looks, after the bodies' frame has read their cards.
+        if (this.lookBodies) {
+          GPU.rt!.lookBodies.lookIn.dt = dt;
+          this.lookBodies.frame(SKY_MOTION.now);
+        }
         this.applySwgLighting(L, playerPos);
       } else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
@@ -12088,6 +12252,8 @@ export class World {
     if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);
     // Pass 2, wave 4b (maker C): the planets' air, after the sky group is on the camera and the standing bodies placed.
     if (GPU.webgpu && this.spaceRims && this.camera) this.spaceRimsFrame(this.spaceRims, this.camera);
+    // Pass 2, wave 5 (maker L): the planets drawn in their looks, after the sky group is on the camera.
+    if (GPU.webgpu && this.spaceLookBodies) this.spaceLookFrame(this.spaceLookBodies, dt);
     // Pass 2, wave 3 (maker B): the distant particle systems that ride with the camera moved with it, as the sky is.
     if (GPU.webgpu && this.distant) this.distant.frame(camPos);
     // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
@@ -13761,6 +13927,8 @@ export class World {
       for (const [key, t] of this.farTiles) {
         this.chunkRoot.remove(t);
         t.geometry.dispose();
+        // Pass 2, wave 5 (agent P): its render objects let go on WebGPU (`letGo.ts`).
+        letGoDrawn(t);
         const [tx, tz] = key.split(',').map(Number);
         this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
         this.farCards?.tileGone(tx, tz);
@@ -14103,6 +14271,8 @@ export class World {
       if (Math.max(Math.abs(tx - ptx), Math.abs(tz - ptz)) > this.farRadius + 1) {
         this.chunkRoot.remove(t);
         t.geometry.dispose();
+        // Pass 2, wave 5 (agent P): its render objects let go on WebGPU (`letGo.ts`).
+        letGoDrawn(t);
         this.farTiles.delete(key);
         this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
         this.farCards?.tileGone(tx, tz);
@@ -14123,6 +14293,7 @@ export class World {
     mesh.receiveShadow = true;
     // Off only while the measuring switch `groundShadows` says so (`setShadowSwitches`), so a chunk made then is the same.
     mesh.castShadow = this.groundShadows === 'on';
+    this.keepGround(mesh);
     group.add(mesh);
     const tPlants = markStart();
     const { group: propGroup, colliders, trees, plants, data: floraData, extra, extraColliders } = this.chunkProps(cx, cz);
@@ -14234,6 +14405,8 @@ export class World {
       if (o instanceof THREE.InstancedMesh) o.dispose();
       else if (o instanceof THREE.Mesh) o.geometry.dispose();
     });
+    // Pass 2, wave 5 (agent P): and let go by three's WebGPU renderer (`letGo.ts`), or the old plantings stay held.
+    letGoDrawn(old);
     // A real-elevation world's procedural props beside its painted plantings (the fourth wave), taken down with them.
     if (c.extra) {
       c.group.remove(c.extra);
@@ -14241,6 +14414,7 @@ export class World {
         if (o instanceof THREE.InstancedMesh) o.dispose();
         else if (o instanceof THREE.Mesh) o.geometry.dispose();
       });
+      letGoDrawn(c.extra);
     }
     const built = this.chunkProps(c.cx, c.cz);
     c.group.add(built.group);
