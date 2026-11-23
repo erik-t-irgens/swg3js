@@ -18,13 +18,35 @@ import { SKY_HOURS } from './skyHours.ts';
  *     sun's in the visible, near enough every star of the table.
  *   - `edge`: the share of a disc's radius its rim softens over; 0.15 is about a pixel at 1440 lines for a disc of a third of
  *     a degree, so the rim neither steps nor blurs.
- *   - `gain`: the discs' light over what the air sends (1: the star's own; lower if the bloom round them is too much for the eye).
+ *   - `gain`: the discs' light over what the air sends (1: the star's own), in the world and the reflections' capture alike.
+ *     Console only: a real sun is some 45,000 times a sunlit white wall, and since the sky and light fix round the chain holds
+ *     the stored picture at 8192 times the screen's white before the bloom (`gpuChain.ts`'s sanitize), where a noon disc
+ *     stands about 23,000 (see `stops`), so any gain over about 0.35 looks the same in the world (worked out, not measured).
+ *   - `stops`: the sun you SEE, in stops under the star's own light (each a halving), the world only; the capture keeps
+ *     the star's light under its own cap (`CAPTURE_TUNE.sunCap`). −6 to start (the lead's, 22 November: about where his
+ *     demo's disc stands, and the first value at which the noon sun reads as a disc; 0 is the star's own). The owner's to set.
+ *     What it moves (the sky and light fix round, with that round's bloom and clip; worked out from the numbers, not
+ *     measured): the chain now holds the stored picture at 8192 times the screen's white before the bloom
+ *     (`gpuChain.ts`'s `CHAIN_NUMBERS.sanitize.stored`), and a noon disc at the table's size stands about 23,000 there
+ *     (Tatoo I's 2.4 spread over its 0.32° with its limb, 0.85 of it through the air, the eye's 0.9), so the first stop and a
+ *     half change nothing; down to about −10 the disc's core stays white (the tone curve whitens from about 15) while the
+ *     bloom's glow round it, a share of the disc's light, shrinks with it; past that the disc itself dims. Seen (the round's
+ *     maker E and checker, the noon sun at Mos Eisley, 985 lines, Bloom strength 4%): at 0 the 4.8-pixel disc sits inside a
+ *     white glow some 16 pixels in radius, so it reads as a soft blob, not a disc; at −6 (about where his demo's disc stands,
+ *     some 200 to a unit of light against the physical 14,700) it reads as a crisp disc with a glow, its rim stepping 20
+ *     levels and only 2 pixels round it at white.
+ *   - `size` (the sky and light fix round, maker L; the owner's "I can't really see the sun as a disc at all"): each disc's
+ *     radius as a share of the star table's (`src/sky/stars.ts`: Tatoo I is 0.32° in radius, our own sun's 0.27°), its light
+ *     as a whole kept, so a bigger disc is as bright a sun spread wider and the light it casts is the same. ×1 to start, the
+ *     table's real size; the client drew its sun picture at 2.1° (the investigator's reading of the round's brief), some 6.5
+ *     times Tatoo I's radius read as a radius. The world and the reflections' capture alike; the air's sums and the light the
+ *     scene takes keep the table's size.
  */
-export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1 };
+export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1, stops: -6, size: 1 };
 
 /** The ranges every number of `tuneSky` is held to, the sliders' and the console's alike. */
 export const SKY_TUNE_RANGE = {
-  disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4] },
+  disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4], stops: [-16, 0], size: [0.25, 10] },
   pair: { belowDeg: [0, 12] },
   hours: { lowDeg: [0.5, 15] },
 } as const;
@@ -77,7 +99,8 @@ const GROUPS: DialGroup[] = [
     dials: [
       dial('disc', 'limb', 'Limb darkening', 0.05, '', "How much darker a disc's edge is than its middle: 0.6 is our sun's."),
       dial('disc', 'edge', 'Rim softness', 0.01, '', "The share of a disc's radius its rim softens over: 0.15 is about a pixel at 1440 lines."),
-      dial('disc', 'gain', 'Disc brightness', 0.05, '×', "The discs' light over what the air sends them: 1 is the star's own."),
+      dial('disc', 'stops', 'Disc brightness', 0.25, 'stops', "The sun you see, in stops under the star's own light (each halves it): 0 is the star's own. A real sun is far past what the screen shows: the first stop and a half change nothing (the picture is held at 8192 times white before the bloom); down to about -10 the disc stays white and its glow shrinks; past that the disc dims. At 0 the noon disc is lost in a white glow some 16 px round at 4% bloom; about -6 (where his demo's disc stands) shows a crisp disc with a glow. Reflections keep theirs (reflections: The sun in the capture).", (v) => `${(2 ** v).toPrecision(2)}×`),
+      dial('disc', 'size', 'Disc size', 0.05, '×', "Each disc's radius as a share of the star table's (Tatoo I 0.32° in radius): 1 is its real size; the client drew its sun at 2.1°, some 6.5 of it. Its light as a whole is kept, so a bigger disc is the same sun spread wider and lights the world the same."),
     ],
   },
   {

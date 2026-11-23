@@ -5,16 +5,16 @@
 //   - **adapting** (WebGPU, our sky, a world whose air draws, a chain drawing its eye pass, the Eye adaptation row on): the
 //     card measures and eases (`eyeGpu.ts`); the main thread writes only the frame's time and whether a loading screen stands;
 //   - **following the sun** (the row off, no chain: Effects off, or a chain not drawing its eye pass: an Effects switch being
-//     prepared, the computes not landed): the exposure the sun's height and the moon's give
-//     (`offStops` over the light on a level surface the air's twin works out), written into the card's buffer by the main
-//     thread when it moves, so every reader of the buffer reads the same answer;
+//     prepared, the computes not landed): the exposure the sun's height and the moon's give (`offStops`: the light on a level
+//     surface the air's twin works out, taken as a scene's brightness by `OFF_MEAN`, through the eye's own curve), written
+//     into the card's buffer by the main thread when it moves, so every reader of the buffer reads the same answer;
 //   - **today's** (WebGL, SWG's sky, space, a world with no air): an exposure of 1 and no glow compensation, the picture of
 //     before this wave.
 //
 // The renderer's own exposure (three's tone mapping) is the player's compensation (±2 stops) where a chain draws, since the
 // chain's output multiplies by the eye's buffer itself; with no chain every material tone-maps itself onto the canvas at the
 // renderer's exposure, so it carries the eye's answer too.
-import { EK, EYE_FIXED, EYE_FRAME, EYE_TUNE, OFF_LEVEL_REF, kneeInto } from './eyeMath.ts';
+import { EK, EYE_FIXED, EYE_FRAME, EYE_TUNE, OFF_MEAN, kneeInto } from './eyeMath.ts';
 
 /** What the frame hands the eye (written into the kept record before `eyeFrameRun`, never across the call). */
 export const EYE_IN = {
@@ -79,9 +79,9 @@ export function eyeFrameRun(): void {
   o.mode = mode;
   EYE_FRAME.adapting = mode === 2 ? 1 : 0;
   if (mode === 1) {
-    // "Off" (`offStops`, written out over the kept rule): the sun's height through the dark-night rule.
+    // "Off" (`offStops`, written out over the kept rule): the sun's height as a scene's brightness, through the eye's curve.
     const l = i.level > 1e-12 ? i.level : 1e-12;
-    EK[0] = Math.log2(OFF_LEVEL_REF / l);
+    EK[0] = Math.log2(l * OFF_MEAN);
     kneeInto();
     const s = EK[1];
     o.stops = s;

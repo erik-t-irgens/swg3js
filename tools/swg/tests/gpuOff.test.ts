@@ -221,6 +221,11 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     ['src/main.ts', "if (GPU.webgpu) HORIZON_TUNE.ground = S.farRings && GPU.rt!.look({}).rings === true ? 'rings' : 'tiles';", "else HORIZON_TUNE.ground = S.farRings ? 'rings' : 'tiles';"],
     ['src/main.ts', 'if (GPU.webgpu) perf.attach(null);', 'else perf.attach(this.renderer.getContext() as WebGL2RenderingContext);'],
     ['src/main.ts', 'if (GPU.webgpu) this.frameCalls = GPU.rt!.frameDraws();', 'else this.frameCalls = info.calls;'],
+    // The sky and light fix round (maker L): the torch and the effects' pool carried on WebGPU (`gpu/carriedLights.ts`), and the
+    // player's lit blades holding one pooled slot each there; on WebGL the old spot, the plain pool and the flashes.
+    ['src/main.ts', 'if (GPU.webgpu) this.torch = GPU.rt!.carried.spot(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);', 'else this.torch = new THREE.SpotLight(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);'],
+    ['src/main.ts', 'if (GPU.webgpu) this.effects = new Effects(this.scene, () => GPU.rt!.carried.point());', 'else this.effects = new Effects(this.scene);'],
+    ['src/main.ts', 'if (GPU.webgpu) this.holdBladeLights();', 'else if (!this.bladeGlowOwnsLight()) for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);'],
     // Step 6: the effects chain's scene target takes its depth's type off three's WebGPU renderer, and its spine is the WebGPU side's.
     ['src/core/postfx.ts', 'if (GPU.webgpu) depth = GPU.rt!.chain.sceneDepth(w, h);', 'else depth = new THREE.DepthTexture(w, h, this.renderer.capabilities.reversedDepthBuffer ? THREE.FloatType : THREE.UnsignedInt248Type);'],
     ['src/core/postfx.ts', 'if (GPU.webgpu) GPU.rt!.chain.spine(this, w, h, this.settings);', 'else {'],

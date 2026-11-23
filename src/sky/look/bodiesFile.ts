@@ -18,14 +18,18 @@
 //   - Haze (clear-day visibility), km -> the world's `visibilityKm` (held to the game's 0.2 to 300 km: at 300 the game's haze is
 //     nought, as the viewer's 1000 is);
 //   - Haze colour -> the world's `hazeR`, `hazeG`, `hazeB` (each channel's share of the haze's scattering, its brightest 1:
-//     the viewer's own `hazeTintFromHex`).
+//     the viewer's own `hazeTintFromHex`);
+//   - Haze forward glow (the viewer's `hazeG`, its phase's g) -> the world's `glow` ("Glow round the sun", the sky and light fix
+//     round's dial, held to its 0 to 0.95 as the viewer's is). A record field until the two lines met (22 November); now the dial
+//     is the one number every path lays (the run's rows, the fit's ask, a body's record), so the file and the dial never fight:
+//     the file sets the dial at each loading screen as it sets the visibility, the owner's live move holds until the next.
 // A dial with no twin among the game's dials but naming a field of the game's record that no fit moves sets that field on the
 // world's record (`airParams.ts`'s `AIR_FILE_FIELDS`, laid over by `worldRecord`, so the fitted rows, the twin and the body's
 // record all carry it):
 //   - Planet radius -> the record's bottom; Thickness -> its top (the bottom plus it);
 //   - How fast it thins -> Rayleigh's scale height (the ozone's centre and half width scaled by it, as the viewer's record does);
-//   - Haze height -> the haze's scale height; Haze forward glow -> its phase's g; Haze brightness -> its single-scattering
-//     albedo (its extinction split again by it); Ground bounce -> the ground's albedo in every channel.
+//   - Haze height -> the haze's scale height; Haze brightness -> its single-scattering albedo (its extinction split again by
+//     it); Ground bounce -> the ground's albedo in every channel.
 // The rest stay the viewer's (`VIEWER_ONLY_AIR`, listed for the owner): Sky colour and Sky strength (Rayleigh's colour and
 // amount) and Ozone, which the game fits to SWG's own sky of each hour (`airFit.ts`, with its steer dial), so a saved value would
 // fight the fit; Limb brightness and Twilight brightness, the rim's gains, one pair for every body in the game
@@ -365,6 +369,8 @@ export interface FileAirDials {
   hazeR?: number;
   hazeG?: number;
   hazeB?: number;
+  /** The haze's forward glow (the viewer's `hazeG`, its phase's g) as the game's glow round the sun. */
+  glow?: number;
 }
 
 /** The haze colour as its three shares (the viewer's `hazeTintFromHex`, number for number: linear channels over the brightest). */
@@ -406,13 +412,19 @@ export function gameAirOf(air: Record<string, Plain> | null | undefined): { dial
       dials.hazeB = t[2];
     }
   }
+  // The viewer's `hazeG` is the haze's phase (its forward glow), not the haze colour's green: the game's glow dial, held to its
+  // range (the viewer's own 0 to 0.95).
+  const fg = num('hazeG');
+  if (fg !== null) {
+    const [lo, hi] = AIR_DIAL_RANGE.glow;
+    dials.glow = fg < lo ? lo : fg > hi ? hi : fg;
+  }
   // The viewer's own ranges (airProfile.js's AIR_DIALS), so a file edited by hand stays within what the viewer offers.
   const span: Record<(typeof AIR_FILE_FIELD_NAMES)[number], [number, number]> = {
     radiusKm: [200, 80000],
     thicknessKm: [5, 3000],
     rayleighHeightKm: [0.5, 120],
     hazeHeightKm: [0.1, 60],
-    hazeG: [0, 0.95],
     hazeAlbedo: [0.2, 1],
     groundAlbedo: [0, 1],
   };

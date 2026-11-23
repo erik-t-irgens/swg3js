@@ -90,7 +90,7 @@ import { OUR_WORLDS, editKeyOf, layWorldWeather, mergeOurWorlds, readWithin, sta
 import { readWorldsFile, type WorldRow } from './world/editFiles/worldsFile.ts';
 import { bodiesOf } from './world/skyParts.ts';
 import type { SkyData } from './world/sky';
-import { DEFAULT_SABER_COLOR, Player } from './player/player';
+import { DEFAULT_SABER_COLOR, Player, type BladeSpot } from './player/player';
 import { MARK_WORLD, marks, type MarkPlace } from './world/marks.ts';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
 import { CLASH, clashes } from './combat/clash.ts';
@@ -443,6 +443,7 @@ import { skyAirArgument } from './sky/air/airDials.ts';
 // Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/`: pure, the WebGPU side through the runtime) and the sky's match.
 import { EYE_IN } from './sky/exposure/eyeRun.ts';
 import { eyeDialsFor } from './sky/exposure/eyeDials.ts';
+import { tuneEyeLights } from './sky/eyeLights.ts';
 // Pass 2, wave 3 (maker A): the night sky's console helper and its dials (`src/sky/night/`).
 import { starsConsole } from './sky/night/nightConsole.ts';
 // Pass 2, wave 4a (maker B): the moons and planets' console (`src/sky/bodies/`).
@@ -865,6 +866,12 @@ const liftAt = new THREE.Vector3();
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
+/** The player's lit blades' lights (the sky and light fix round, WebGPU): kept records `Player.lightSpotsInto` fills, at most three. */
+const bladeSpots: BladeSpot[] = [0, 1, 2].map(() => ({ pos: new THREE.Vector3(), intensity: 0.5, distance: 0.5 }));
+/** What the Graphics page's Lightsaber glow row says on WebGPU (the sky and light fix round), where its pass is not ported. */
+const BLADE_GLOW_GPU_WORD = "not on WebGPU yet: there a lit blade lights what is round it by one pooled light a blade, set in the debug menu's exposure dials (Blade light, Carried lights)";
+/** A fighter's lit blade's hold (WebGPU): the 2 out to 5 m the flashes always asked, its place copied in for each. */
+const fighterSpot: BladeSpot = { pos: new THREE.Vector3(), intensity: 2, distance: 5 };
 /** The way the camera looks, written each frame into the world's record of the player's aim. */
 const aimLook = new THREE.Vector3();
 /** A deed's footprint rows when it carries none, so the frame that draws its grid hands over no new list. */
@@ -2287,7 +2294,10 @@ class App {
     // Marked here, once, before anything has been compiled: the spot is then in every room program's
     // key from the first loading screen on, where marking it later (or changing its layers in play)
     // would rebuild every room program on a live frame.
-    this.torch = new THREE.SpotLight(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);
+    // The sky and light fix round (maker L): on WebGPU the torch is a carried light, its direct light drawn times the eye's
+    // compensation (`gpu/carriedLights.ts`, the `exposure` set's Carried lights dial), so its light at night is not white.
+    if (GPU.webgpu) this.torch = GPU.rt!.carried.spot(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);
+    else this.torch = new THREE.SpotLight(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);
     this.scene.add(this.torch, this.torch.target);
     markActor(this.torch);
     this.portals = new PortalRenderer(this.renderer);
@@ -2670,7 +2680,9 @@ class App {
     this.player.grapple.vehicleOf = vehicleOfCollider;
     // And other players' vehicles as the boxes their game keeps, one kept list the peers refill once a frame (wave 3c).
     this.player.grapplePeers = peerBodies().hullBoxes();
-    this.effects = new Effects(this.scene);
+    // The sky and light fix round (maker L): on WebGPU the pool's lights carry the eye's flag (`gpu/carriedLights.ts`).
+    if (GPU.webgpu) this.effects = new Effects(this.scene, () => GPU.rt!.carried.point());
+    else this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
     // What a fighter's blade finds when it sweeps: the lookup the bolts are given, with the player's
@@ -8154,15 +8166,19 @@ class App {
             ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')
             : this.skyConsole(o),
       /**
-       * The eye (pass 2, wave 2, `src/sky/exposure/`): `await exposure()` reads the card's buffer back (never in a frame) and
-       * says the measured scene, the full make-up, the target after the dark-night rule, the eased exposure and the glow
-       * factor, the mode and the dials; `exposure({ tune: { intoLight, intoDark, knee, share, most, centre, floor, glow } })`
-       * moves the dials (the debug menu's `exposure` sliders); `exposure({ check: true })` holds the card's last frame to the
+       * The eye (pass 2, wave 2, `src/sky/exposure/`; his demo's curve in the sky and light fix round): `await exposure()` reads
+       * the card's buffer back (never in a frame) and says the measured scene, the full make-up, the target by the curve, the
+       * eased exposure and the glow factor, the mode and the dials; `exposure({ tune: { key, low, high, knee, share, intoLight,
+       * intoDark, centre, glow } })` moves the dials (the debug menu's `exposure` sliders; the output's dither is the night
+       * sky's, `stars({ dither })`, the one the two lines' merge kept); `exposure({ check: true })` holds the card's last frame to the
        * JavaScript of `eyeMath.ts` over the count it kept; `exposure({ pre: false })` stores the scene as before the wave's
        * fixer (not pre-exposed: a prover's A/B on one screen) and `{ pre: true }` puts it back. WebGPU's alone.
        */
       exposure: async (o?: Record<string, unknown>) => {
         const said = o && typeof o === 'object' && 'tune' in o ? tuneEye(o) : [];
+        // The sky and light fix round (maker L): `exposure({ lights: { carried, top, blade } })`, the Carried lights and the sun's
+        // group of the same set (`src/sky/eyeLights.ts`).
+        if (o && typeof o === 'object' && 'lights' in o) said.push(...tuneEyeLights(o.lights));
         if (!GPU.webgpu) return { ...(said.length ? { said } : {}), eye: "WebGPU's: WebGL's exposure is the Graphics page's Exposure row, as before" };
         if (o && typeof o === 'object' && typeof o.pre === 'boolean') GPU.rt!.eye.preSwitch(o.pre);
         const report = await GPU.rt!.eye.report(!!(o && typeof o === 'object' && o.check === true));
@@ -15171,6 +15187,14 @@ class App {
     if (key === 'hazeResolution') return !GPU.webgpu ? { hide: true } : SKY_AT_LOAD.ours ? null : { off: "SWG's sky draws no haze of the air" };
     // Pass 2, wave 4b (maker C): the nebulae's Off, Sheets and Volumes are WebGPU's; WebGL's nebulae are the sheets.
     if (key === 'nebulaForm' && !GPU.webgpu) return { hide: true };
+    // The sky and light fix round (maker E): under our sky on WebGPU the bloom is the demo's, a share mixed over the picture
+    // (`bloomMix`, `gpuBloomMix.ts`); WebGL and SWG's sky keep three's bloom and its strength row.
+    if (key === 'bloomStrength' && GPU.webgpu && SKY_AT_LOAD.ours) return { hide: true };
+    if (key === 'bloomMix' && !(GPU.webgpu && SKY_AT_LOAD.ours)) return { hide: true };
+    // The sky and light fix round (maker L): the Lightsaber glow's pass is not on WebGPU, so its row says what lights a lit
+    // blade's surroundings there instead of its WebGL hint alone, and its two rows under it, which would move nothing, are left off.
+    if (GPU.webgpu && (key === 'bladeGlowStrength' || key === 'bladeGlowShadows')) return { hide: true };
+    if (GPU.webgpu && key === 'bladeGlow') return { off: BLADE_GLOW_GPU_WORD };
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
     // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
     if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };
@@ -16545,6 +16569,18 @@ class App {
     const toggles = fxPassDef('bladeGlow').toggles;
     for (let i = 0; i < toggles.length; i++) if (this.settings[toggles[i]]) return true;
     return false;
+  }
+
+  /**
+   * The player's lit blades' light on WebGPU (the sky and light fix round, maker L): one pooled slot a blade, written in place
+   * this frame at what the blade asks (`Player.lightSpotsInto`, kept records, nothing made), unless the effects light what is
+   * round the blades. WebGL keeps the flashes it had.
+   */
+  private holdBladeLights(): void {
+    if (this.bladeGlowOwnsLight()) return;
+    const player = this.player;
+    const n = player.lightSpotsInto(bladeSpots);
+    for (let i = 0; i < n; i++) this.effects.hold(bladeSpots[i], player.saberColor);
   }
 
   /**
@@ -36831,7 +36867,10 @@ class App {
         this.stepGrappleFeel();
         // The thrown and orbiting sabers and the hilt glow from the pooled flash lights (so no light comes
         // or goes with them), unless the effects light what is around the blades.
-        if (!this.bladeGlowOwnsLight()) for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
+        // The sky and light fix round (maker L): on WebGPU each lit blade holds one pooled slot, written in place each frame at
+        // the light it asks for, so the light is the same at any frame rate and shots and hits keep the rest (`Effects.hold`).
+        if (GPU.webgpu) this.holdBladeLights();
+        else if (!this.bladeGlowOwnsLight()) for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
         this.scorch(dt);
         this.stepCombat(dt);
       }
@@ -36919,10 +36958,19 @@ class App {
           const glows = this.world.npcs.lightSpots(npcGlow, this.cam.camera.position, FIGHTER_GLOW_RANGE);
           // The catalogue's people's blades, merged into the same two nearest (keepNearestGlow keeps the list sorted).
           const all = this.world.mobiles ? this.world.mobiles.lightSpots(npcGlow, this.cam.camera.position, FIGHTER_GLOW_RANGE, glows) : glows;
-          for (let i = all - 1; i >= 0; i--) this.effects.flash(npcGlow[i].pos, npcGlow[i].color, 2, 5, 0.08);
+          // The sky and light fix round (maker L): on WebGPU each fighter's lit blade holds a slot as the player's do, nearest
+          // first (the pool lends blades at most `HOLD_MOST` of its four).
+          if (GPU.webgpu) {
+            for (let i = 0; i < all; i++) {
+              fighterSpot.pos.copy(npcGlow[i].pos);
+              this.effects.hold(fighterSpot, npcGlow[i].color);
+            }
+          }
+          else for (let i = all - 1; i >= 0; i--) this.effects.flash(npcGlow[i].pos, npcGlow[i].color, 2, 5, 0.08);
         }
         // Aboard, the room's own lights, the nearest few, through the same pool (no new lights, so nothing recompiles).
-        if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
+        // Not carried (the sky and light fix round): they light the room the eye adapts to, so the eye's flag is off for them.
+        if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08, false);
       }
       const tPhys = performance.now();
       perf.begin(SEC.physics);

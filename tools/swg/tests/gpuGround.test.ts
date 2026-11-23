@@ -214,7 +214,9 @@ ok(GROUND_GRAPH_NUMBERS.quad === LEAF / PATCH && GROUND_GRAPH_NUMBERS.patch === 
   const ng = graph(m.normalNode);
   ok(!ng.includes(TSL.normalWorldGeometry) && !ng.includes(TSL.normalFlat) && !ng.some((n) => n.isMathNode && /^dFd[xy]$/.test(n.method)), "the rings' normal builds no derivative and no flat face of its own");
   ok(['gRingFaceW', 'gRingDx', 'gRingDy'].every((p) => ng.some((n) => n.isPropertyNode && n.name === p)), "the rings' normal reads the flat face and the place's derivatives through the colour stage's properties");
-  const src = readFileSync(new URL('../../../src/core/gpu/gpuGround.ts', import.meta.url), 'utf8');
+  // Read with its line ends as git keeps them (a checkout made with `core.autocrlf` has CRLF, and the window below is cut on
+  // a newline).
+  const src = readFileSync(new URL('../../../src/core/gpu/gpuGround.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const top = src.slice(src.indexOf('m.colorNode = Fn(() => {\n    GROUND_GPU_STATS.builds.rings++;'));
   const first = top.slice(0, top.indexOf('const tileDx'));
   ok(['rdx.assign(dFdx(v.raw));', 'rdy.assign(dFdy(v.raw));', 'face.assign(normalWorldGeometry);', 'uvDx.assign(dFdx(v.uv));', 'uvDy.assign(dFdy(v.uv));', 'yd.assign(vec2(dFdx(v.y), dFdy(v.y)));'].every((l) => first.includes(l)), "the rings' colour stage takes every derivative and the face at its very top, before any branch");

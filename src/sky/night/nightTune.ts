@@ -1,7 +1,8 @@
 // The night sky's dials (the GPU port's pass 2, wave 3; the brief's defaults of 22 November, the owner asleep): the stars'
 // light and the eye's reach, the twinkle, the Milky Way's brightness, the towns' glow, the stars a tier draws, each world's
-// tilt of its sky against the galaxy, and the flare's moon and how bright a source must look to flare. On sliders in the
-// debug menu when `stars` is picked (`src/ui/dials.ts`), each set through `tuneNight`, exactly as `__debug.stars({ tune,
+// tilt of its sky against the galaxy, and the flare's moon and how bright a source must look to flare (and, since the two
+// lines' merge of 22 November, wave 4b's screen dither, set through `tuneDither` as `stars({ dither })` sets it). On sliders in
+// the debug menu when `stars` is picked (`src/ui/dials.ts`), each set through `tuneNight`, exactly as `__debug.stars({ tune,
 // counts, tilt, flare })` sets it, so the menu's copied line is that helper's own argument. Feel and look are the owner's:
 // each number starts where the brief says, with its reason beside it, and nobody tunes it by measuring.
 //
@@ -10,6 +11,7 @@ import type { DialGroup, DialSet, NumberDial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
 import { AIR_DIAL_WORLDS } from '../air/airDials.ts';
 import { seedOf } from './starCatalogue.ts';
+import { DITHER_RANGE, DITHER_TUNE, tuneDither } from './ditherTune.ts';
 
 /**
  * The look:
@@ -206,6 +208,26 @@ function groups(): DialGroup[] {
         dial('flare', 'moonWeight', "The moon's flare", 0.05, '×', "The moon's flare against the sun's."),
         dial('flare', 'seenFrom', 'Flares from', 0.05, '×', 'How bright a source must look on the screen to flare at all (1 is white).'),
         dial('flare', 'seenTo', 'Flares fully at', 0.5, '×', 'How bright it must look to flare fully.'),
+      ],
+    },
+    {
+      // Pass 2, wave 4b's dither (`dither.ts`, `ditherTune.ts`), given its slider here when the sky and light fix round met it
+      // (22 November): the picture is dithered once, by this, and `__debug.stars({ dither })` is the same dial.
+      title: "The screen's dither",
+      note: "WebGPU's: a triangular noise added to the picture after the tone curve, as the canvas rounds it to eight bits, so a dark sky's and a haze's smooth ramps show a fine grain instead of steps.",
+      dials: [
+        {
+          kind: 'number',
+          key: 'dither',
+          label: 'Dither',
+          note: 'Levels of 255 either way at the noise\'s widest: 1 the least that takes the rounding\'s steps off any picture, 0 none.',
+          min: DITHER_RANGE[0],
+          max: DITHER_RANGE[1],
+          step: 0.25,
+          unit: 'levels',
+          get: () => DITHER_TUNE.amount,
+          set: (v) => tuneDither(v),
+        },
       ],
     },
   ];

@@ -1,6 +1,7 @@
 // The eye's frame on the main thread makes nothing a frame (the GPU port's pass 2, wave 2, maker A): `eyeAllocOwn.ts` (the eye's
 // mode, three's exposure and the buffer written where the card does not adapt, its inputs moving every frame and its modes
-// crossed) run in twelve processes at once, each the least of three clean windows of 60,000 frames, every process asserted
+// crossed; and, from the sky and light fix round, the chain's eye pass and the demo's bloom drawn over a stand-in) run in twelve
+// processes at once, each the least of three clean windows of 60,000 frames, every process asserted
 // under 0.05 bytes a frame with no collection in its window (`testing.md`).
 //
 // Run: node tools/swg/tests/eyeAlloc.test.ts

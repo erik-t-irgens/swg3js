@@ -3,8 +3,9 @@
 //      every number held, the picture from the world's pack or the shared sky pack;
 //   2. a ground world's distant appearances (`groundDistant.ts`): the file's small frame scaled into the game's about the
 //      layout's centre, turned by the file's yaw;
-//   3. the sky view's and the haze's store (`airTables.ts`' `storeInto`): 1 by day, a power of two at night, so a moonlit
-//      sky's light, under a half float's normals, keeps its ten bits, and a day's keeps its very bits;
+//   3. the sky view's and the haze's store (`airTables.ts`' `storeInto`): since the merge with the sky and light fix round,
+//      its `AIR_STORE` (2^10) by day and on a moonlit night and a larger power of two on a darker one, so a moonlit sky's
+//      light, under a half float's normals, keeps its ten bits, a darker night's too, and a day's keeps its very bits;
 //   4. the screen's dither (`ditherTune.ts`, the numbers' model of `dither.ts`'s graph): triangular, mean nought, a level
 //      either way, and a dark ramp's eight-bit rings broken into grain;
 //   5. the card's coverage, the band after the scenery and the dither on the canvas, as the files hold them (text);
@@ -86,24 +87,29 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
   const airTables = text('src/sky/air/airTables.ts');
   // The store's arithmetic, read out of the file and run (the module itself imports three's WebGPU build).
   const fixed = /export const STORE_FIXED = (\{[^}]+\}) as const;/.exec(airTables)![1];
+  const airStore = Number(/export const AIR_STORE = (\d+);/.exec(airTables)![1]);
+  const most = Number(/export const AIR_STORE_MOST = (\d+);/.exec(airTables)![1]);
   const body = /export function storeInto\(f: \{ level: number \}, out: \{ x: number \}\): void \{([\s\S]*?)\n\}/.exec(airTables)![1];
-  const storeInto = new Function('f', 'out', `const STORE_FIXED = ${fixed};${body}`) as (f: { level: number }, out: { x: number }) => void;
+  const storeInto = new Function('f', 'out', `const STORE_FIXED = ${fixed}; const AIR_STORE = ${airStore};${body}`) as (f: { level: number }, out: { x: number }) => void;
   const o = { x: 0.5 };
   const at = (level: number): number => {
     storeInto({ level }, o);
     return o.x;
   };
-  ok(at(2.4) === 1 && at(0.05) === 1 && at(0.5) === 1, 'by day and into the dusk (the light on a level surface over 0.05) the tables are stored as they always were: times 1');
+  ok(airStore === 1024 && most === 65000, "the fix round's store (2^10) and its ceiling under a half float's 65,504");
+  ok(at(2.4) === airStore && at(0.05) === airStore && at(0.5) === airStore && at(1e-3) === airStore, 'by day, into the dusk and down to a light on a level surface of 1e-3 the tables are stored times `AIR_STORE` (2^10)');
   const night = at(1e-6);
-  ok(Number.isInteger(Math.log2(night)) && night > 1 && night * 1e-6 >= 0.025 && night * 1e-6 <= 0.05 && at(0) === 2 ** 20 && at(NaN) === 2 ** 20, `at night a power of two that brings the level light back to about 0.05 (${night} at 1e-6), at most 2^20`);
+  ok(Number.isInteger(Math.log2(night)) && night > airStore && night * 1e-6 >= 0.025 && night * 1e-6 <= 0.05 && at(0) === 2 ** 20 && at(NaN) === 2 ** 20 && at(0.05 / airStore) === airStore, `on a night darker than 2^10 reaches, a power of two that brings the level light back to about 0.05 (${night} at 1e-6), at most 2^20; never less than 2^10`);
   // A half float's round trip, as the card stores the sky view and reads it back over the factor.
   const half = (v: number): number => THREE.DataUtils.fromHalfFloat(THREE.DataUtils.toHalfFloat(v));
   const moonlit = [1.03e-7, 1.31e-7, 1.77e-7, 2.4e-7];
-  const err = (k: number): number => Math.max(...moonlit.map((v) => Math.abs(half(v * k) / k - v) / v));
-  ok(err(1) > 0.1 && err(night) < 2e-3, `a moonlit sky's radiance (1e-7 in the scene's units) read back within ${(err(1) * 100).toFixed(0)}% stored bare (two bits: the stepped rings) and within ${(err(night) * 100).toFixed(2)}% stored times ${night}`);
-  const day = [0.0031, 0.47, 3.2, 911];
-  ok(day.every((v) => Object.is(half(v * 1) / 1, half(v)) && Object.is(half(v * 4) / 4, half(v))), 'a normal value stored times a power of two reads back to the very bits it would have read bare (so by day nothing moves)');
-  ok(/vec4\(L\.mul\(gain\)\.mul\(storeK\), 1\)/.test(airTables) && /vec4\(L\.mul\(gain\)\.mul\(storeK\), Tr\.x/.test(airTables) && /\.level\(0\)\.rgb\.div\(storeK\);/.test(airTables) && /return vec4\(h\.rgb\.div\(storeK\), h\.a\);/.test(airTables) && /storeInto\(f, this\.uStore\);/.test(airTables), "the sky view and the haze volume store their light times it, every reader divides it back out (the haze's share through as it is), written each frame from the air's level light");
+  const err = (vs: number[], k: number): number => Math.max(...vs.map((v) => Math.abs(half(v * k) / k - v) / v));
+  ok(err(moonlit, 1) > 0.1 && err(moonlit, airStore) < 2e-3 && err(moonlit, night) < 2e-3, `a moonlit sky's radiance (1e-7 in the scene's units) read back within ${(err(moonlit, 1) * 100).toFixed(0)}% stored bare (two bits: the stepped rings), within ${(err(moonlit, airStore) * 100).toFixed(2)}% stored times 2^10 and ${(err(moonlit, night) * 100).toFixed(2)}% times ${night}`);
+  const darker = moonlit.map((v) => v / 300);
+  ok(err(darker, airStore) > 5e-3 && err(darker, at(1e-6 / 300)) < 2e-3, `a night 300 times darker (a level light of 3e-9) read back within ${(err(darker, airStore) * 100).toFixed(2)}% at 2^10 alone and ${(err(darker, at(1e-6 / 300)) * 100).toFixed(2)}% at the night's own power: why the power stays`);
+  const day = [0.0031, 0.47, 3.2, 50];
+  ok(day.every((v) => Object.is(half(v * airStore) / airStore, half(v)) && v * airStore < most), 'a normal value stored times 2^10 reads back to the very bits it would have read bare, under the ceiling (so by day nothing moves)');
+  ok(/vec4\(min\(L\.mul\(gain\)\.mul\(storeK\), AIR_STORE_MOST\), 1\)/.test(airTables) && /vec4\(min\(L\.mul\(gain\)\.mul\(storeK\), AIR_STORE_MOST\), Tr\.x/.test(airTables) && /\.level\(0\)\.rgb\.div\(storeK\);/.test(airTables) && /return vec4\(h\.rgb\.div\(storeK\), h\.a\);/.test(airTables) && /storeInto\(f, this\.uStore\);/.test(airTables) && !/1 \/ AIR_STORE|\.mul\(AIR_STORE\)/.test(airTables), "the sky view and the haze volume store their light times it, held under the ceiling, and every reader divides it back out (the haze's share through as it is), written each frame from the air's level light: one factor, none applied twice");
 }
 
 // ---------------------------------------------------------------- 4. the screen's dither

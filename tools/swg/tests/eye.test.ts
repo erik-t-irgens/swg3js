@@ -21,9 +21,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
-import { EYE_FIXED, EYE_FLOATS, EYE_FRAME, EYE_SLOT, EYE_TUNE, EYE_TUNE_RANGE, OFF_LEVEL_REF, binCentreLog, binOf, compensationOf, easeStops, exposureOf, eyeFrame, fullStops, glowOf, kneeStops, offStops, percentileMean, tuneEye, weightAt } from '../../../src/sky/exposure/eyeMath.ts';
+import { EYE_DEMO, EYE_DEMO_NIGHT, EYE_FIXED, EYE_FLOATS, EYE_FRAME, EYE_SLOT, EYE_TUNE, EYE_TUNE_RANGE, OFF_LEVEL_REF, OFF_MEAN, binCentreLog, binOf, compensationOf, easeStops, exposureOf, eyeFrame, fullStops, glowOf, offStops, percentileMean, targetStops, tuneEye, weightAt } from '../../../src/sky/exposure/eyeMath.ts';
 import { EYE_IN, EYE_OUT, eyeFrameRun } from '../../../src/sky/exposure/eyeRun.ts';
 import { eyeDialSet, eyeDialsFor } from '../../../src/sky/exposure/eyeDials.ts';
+import { EYE_LIGHTS } from '../../../src/sky/eyeLights.ts';
+import { sceneUnits } from '../../../src/sky/air/airTwin.ts';
 import { EYE_ATTR, EYE_GLOW_STATS, eyeGlowPart, writeEyeCpu } from '../../../src/sky/exposure/eyeBuffer.ts';
 import { GpuEyePass, PRE_ROLLS, eyeBegin, eyeFrameGpu, eyeReady } from '../../../src/sky/exposure/eyeGpu.ts';
 import { PRE_ATTR, PRE_FIXED, PRE_SLOT, isSceneTarget, markSceneTarget, preExposedOut, takesPre } from '../../../src/sky/exposure/preExpose.ts';
@@ -66,12 +68,21 @@ const reachesAttr = reaches;
 
 // ---------------------------------------------------------------- 1. the eye's arithmetic
 {
+  // The sky and light fix round: his demo's curve (its EXPOSURE_WGSL and HISTOGRAM_WGSL), its absolute numbers carried into our
+  // units by the two suns at the top of the air.
   const T = { ...EYE_TUNE };
-  ok(T.intoLight === 0.3 && T.intoDark === 0.65 && T.knee === 2 && T.share === 0.7 && T.most === 4 && T.centre === 3 && T.floor === 20 && T.glow === 1, 'the dials start where the design and its proofs say (0.3 s, 0.65 s, a knee of 2 stops, 0.7, 4 stops, a centre of 3, a floor of 20, the glow 1)');
-  ok(EYE_FIXED.bins === 256 && EYE_FIXED.low === 0.4 && EYE_FIXED.high === 0.96, "the count is 256 bins and the mean the 40th to 96th percentiles' (the design's)");
+  const shift = Math.log2(sceneUnits() / 16);
+  ok(near(EYE_DEMO.ours, sceneUnits(), 1e-5) && EYE_DEMO.demo === 16 && near(EYE_DEMO.shift, shift, 1e-5), `the conversion: his demo's sun 16 at the top of the air against ours ${sceneUnits().toFixed(4)} (the air's scene units at load), ${shift.toFixed(4)} stops`);
+  ok(T.key === 0.18 && T.share === 0.85 && T.intoLight === 2.6 && T.intoDark === 1.1 && T.centre === 3 && T.glow === 1, "the dials start at the demo's own key (0.18), rates (2.6 and 1.1 a second) and centre weight (16 against 4), the glow at 1 (the design's), and the lead's night share (0.85)");
+  ok(T.low === -20.5 && near(T.high, 4 + shift, 1e-4) && near(T.knee, -2 + shift, 1e-4), `the demo's top (4) and knee (-2) carried into our units, the lead's darkest scene (-20.5): ${T.low}, ${T.high}, ${T.knee}`);
+  ok(near(EYE_DEMO_NIGHT.low, -14 + shift, 1e-4) && EYE_DEMO_NIGHT.share === 0.7, "and the demo's own night kept for a line that puts it back");
+  ok(EYE_FIXED.bins === 256 && EYE_FIXED.bottom === 0.4 && EYE_LIGHTS.top === 0.96, "the count is 256 bins and the mean the 40th percentile's to maker L's top one, 0.96 (the demo's)");
   ok(binOf(EYE_FIXED.minLog - 5) === 0 && binOf(EYE_FIXED.maxLog + 5) === 255 && binOf(binCentreLog(100)) === 100, 'a luminance off the range falls in an end bin, and a bin\'s middle in its own bin');
-  ok(Math.log2(1e-7) > EYE_FIXED.minLog && Math.log2(256) < EYE_FIXED.maxLog, "the range holds a moonlit sky's 1e-7 and the sanitize's ceiling of 256");
-  ok(weightAt(0, 0) === Math.floor((1 + 3) * EYE_FIXED.unit + 0.5) && weightAt(1, 1) < weightAt(0.3, 0.2) && weightAt(1, 1) >= EYE_FIXED.unit, 'the middle counts four times the edges, falling off outward');
+  ok(Math.log2(1e-7) > EYE_FIXED.minLog && EYE_TUNE_RANGE.low[0] > EYE_FIXED.minLog && EYE_TUNE_RANGE.high[1] < EYE_FIXED.maxLog && EYE_TUNE_RANGE.knee[1] < EYE_FIXED.maxLog, "the count's range holds a moonlit sky's 1e-7 and every dial's range");
+  // The demo's weight: round(mix(4, 16, exp(-1.5 d²))).
+  let weightsDemo = true;
+  for (let x = -1; x <= 1.0001; x += 0.125) for (let y = -1; y <= 1.0001; y += 0.125) if (weightAt(x, y) !== Math.floor(4 + 12 * Math.exp(-1.5 * (x * x + y * y)) + 0.5)) weightsDemo = false;
+  ok(weightsDemo && weightAt(0, 0) === 16 && weightAt(1, 1) === 5, "the centre weight is the demo's own: 16 at the middle, 4 plus at the edges, exp(-1.5 d²) between");
   const h = new Float64Array(256);
   const pm = [0, 0];
   percentileMean(h, pm);
@@ -83,15 +94,36 @@ const reachesAttr = reaches;
   h[160] = 50;
   percentileMean(h, pm);
   ok(near(pm[0], (10 * binCentreLog(120) + 46 * binCentreLog(160)) / 56, 1e-12), 'two halves: the 40th percentile cuts the dark half to 10 of its 50, the 96th the bright to 46 (the sun and the darkest corners never steer it)');
-  ok(near(fullStops(Math.log2(EYE_FIXED.key)), 0, 1e-12), "a scene at the key needs nothing made up");
-  ok(kneeStops(1.5) === 1.5 && kneeStops(-3) === -3, 'up to the knee, and into glare, every stop is made up');
-  ok(near(kneeStops(10), 2 + 0.7 * 8, 1e-12), "past the knee only 0.7 of each stop (10 asked, 7.6 made up)");
-  ok(near(kneeStops(18), 14, 1e-12), 'and never more than 4 stops short: a physical moonlit night, 18 stops under the key, shows 4 under it');
-  ok(kneeStops(40) === 20 && kneeStops(-40) === EYE_FIXED.least, "held by the eye's night floor and by the most it closes");
-  // A physical moonlit night: the moon's 2.3e-6 of the sun.
-  const night = Math.log2(1 / 2.3e-6);
-  ok(near(night - kneeStops(night), 4, 1e-12), `a moonlit night (${night.toFixed(1)} stops of make-up asked) is kept exactly ${(night - kneeStops(night)).toFixed(2)} stops dark, dark but readable`);
-  // The ease: frame-rate independent, settled in the proofs' times.
+  EYE_LIGHTS.top = 1;
+  percentileMean(h, pm);
+  ok(near(pm[0], (10 * binCentreLog(120) + 50 * binCentreLog(160)) / 60, 1e-12), "maker L's top percentile moves it: at 1 the bright half is counted whole");
+  EYE_LIGHTS.top = 0.96;
+  ok(near(fullStops(Math.log2(EYE_TUNE.key)), 0, 1e-12), 'a scene at the key needs nothing made up');
+  // The demo's curve written out from its text (in its own units), against ours at the same scene moved into ours.
+  const demoStops = (meanDemo: number): number => {
+    const clamped = Math.min(Math.max(meanDemo, -14), 4);
+    const perceived = clamped < -2 ? -2 + (clamped - -2) * 0.7 : clamped;
+    return Math.log2(0.18) - perceived;
+  };
+  // Our scene is 2^shift as bright as the demo's of the same look, so our exposure is 2^-shift the demo's and the exposed
+  // picture (luminance times exposure) is the very same.
+  // At the demo's own night (the lead started ours darker-adapting, `EYE_DEMO_NIGHT` keeps the demo's) the curve is the demo's.
+  const started = { low: EYE_TUNE.low, share: EYE_TUNE.share };
+  EYE_TUNE.low = EYE_DEMO_NIGHT.low;
+  EYE_TUNE.share = EYE_DEMO_NIGHT.share;
+  let worst = 0;
+  for (let m = -24; m <= 8; m += 0.37) worst = Math.max(worst, Math.abs(m + EYE_DEMO.shift + targetStops(m + EYE_DEMO.shift) - (m + demoStops(m))));
+  ok(worst < 1e-3, `at the demo's own night, every scene from -24 to 8 in the demo's log2 luminance, moved into ours, is exposed to the very brightness the demo's EXPOSURE_WGSL exposes it to (worst ${worst.toExponential(2)} stops: the dials' four places)`);
+  ok(near(targetStops(EYE_TUNE.knee - 4), Math.log2(0.18) - (EYE_TUNE.knee - 0.7 * 4), 1e-12), 'four stops under the knee only 0.7 of each is made up (2.8 of 4)');
+  EYE_TUNE.low = started.low;
+  EYE_TUNE.share = started.share;
+  ok(near(targetStops(-1), Math.log2(0.18) + 1, 1e-12) && near(targetStops(T.knee), Math.log2(0.18) - T.knee, 1e-12), 'between the knee and the top, every stop is made up, to the key');
+  ok(near(targetStops(T.knee - 4), Math.log2(0.18) - (T.knee - T.share * 4), 1e-12), `at the starts four stops under the knee only ${T.share} of each is made up`);
+  ok(near(targetStops(-40), targetStops(T.low), 1e-12) && near(targetStops(40), targetStops(T.high), 1e-12), 'darker than the darkest scene adapted to, and brighter than the brightest, is left as it is');
+  // The investigator's night (Tatooine at night, saber off, the eye's mean -20.8): the base's eye made up 15.4 stops.
+  const nightStops = targetStops(-20.8);
+  ok(near(nightStops, Math.log2(0.18) - (T.knee + T.share * (T.low - T.knee)), 1e-12) && nightStops < 16.5 && nightStops > 14.5, `a moonlit Tatooine (mean -20.8) is made up ${nightStops.toFixed(2)} stops, near the base's 15.4: dark but readable`);
+  // The ease: frame-rate independent, at the demo's rates.
   const settle = (from: number, to: number, hz: number, seconds: number): number => {
     let s = from;
     const n = Math.round(seconds * hz);
@@ -99,29 +131,31 @@ const reachesAttr = reaches;
     return s;
   };
   ok(near(settle(5, 0, 60, 1), settle(5, 0, 144, 1), 1e-9) && near(settle(5, 0, 30, 1), settle(5, 0, 60, 1), 1e-9), 'the ease is the same at 30, 60 and 144 frames a second');
+  ok(near(easeStops(1, 0, 0.1), 1 - (1 - Math.exp(-0.26)), 1e-12) && near(easeStops(0, 1, 0.1), 1 - Math.exp(-0.11), 1e-12), "a frame's step is the demo's 1 - exp(-dt · rate): 2.6 a second into light, 1.1 into the dark");
   const glare = settle(5, 0, 60, 1);
-  ok(glare < 5 * 0.05, `out of a room 5 stops darker into the street the glare has settled within 1 s (${glare.toFixed(3)} stops left)`);
+  ok(glare < 5 * 0.08, `out of a room 5 stops darker into the street the glare has settled within 1 s (${glare.toFixed(3)} stops left, ${(100 * (1 - glare / 5)).toFixed(1)}%)`);
   const room = settle(0, 5, 60, 2);
-  ok(room > 5 * 0.95, `into a room 5 stops darker it reads within 2 s (${room.toFixed(3)} of 5 stops made up)`);
+  ok(room > 5 * 0.88, `into a room 5 stops darker it reads within 2 s (${room.toFixed(3)} of 5 stops made up, ${(100 * room / 5).toFixed(1)}%)`);
   ok(settle(0, 5, 60, 0.5) < 5 - settle(5, 0, 60, 0.5), 'faster into light than into the dark');
   ok(near(glowOf(4), 1 / 16, 1e-12) && near(exposureOf(4), 16, 1e-12), 'at +4 stops an emissive thing is drawn at a sixteenth, so it shows as it did at an exposure of 1');
   tuneEye({ tune: { glow: 0 } });
   ok(glowOf(4) === 1, 'and with the compensation at nought it glows sixteen times brighter on the screen');
   tuneEye({ tune: { glow: 1 } });
-  ok(near(offStops(OFF_LEVEL_REF), 0, 1e-12) && offStops(OFF_LEVEL_REF * 1.4) < 0 && offStops(OFF_LEVEL_REF * 1e-6) > 10, "\"off\" brings today's clear noon sun on a level surface to an exposure of 1, closes for more and opens for less, by the same rule");
+  ok(near(OFF_MEAN * OFF_LEVEL_REF, 0.39, 1e-12) && near(offStops(OFF_LEVEL_REF), Math.log2(0.18 / 0.39), 1e-12), "\"off\" takes today's clear noon on a level surface as the street's measured 0.39 (wave 2's anchor) and brings it to the key: an exposure of 0.18 / 0.39");
+  ok(offStops(OFF_LEVEL_REF * 1.4) < offStops(OFF_LEVEL_REF) && offStops(OFF_LEVEL_REF * 1e-6) > 10, '"off" closes for more light and opens for less, by the same curve');
   ok(compensationOf(2) === 4 && compensationOf(-2) === 0.25 && compensationOf(3) === 4 && compensationOf(Number.NaN) === 1, "the player's Exposure is ±2 stops, held");
   // The whole frame as the card works it.
   const out = new Float64Array(EYE_FLOATS);
   h.fill(0);
-  const b6 = binOf(Math.log2(EYE_FIXED.key) - 6);
+  const b6 = binOf(Math.log2(EYE_TUNE.key) - 6);
   h[b6] = 1000;
   eyeFrame(h, 0, 1 / 60, true, out);
-  ok(near(out[EYE_SLOT.full], Math.log2(EYE_FIXED.key) - binCentreLog(b6), 1e-12) && near(out[EYE_SLOT.target], kneeStops(out[EYE_SLOT.full]), 1e-12) && near(out[EYE_SLOT.stops], out[EYE_SLOT.target], 1e-12) && near(out[EYE_SLOT.exposure], 2 ** out[EYE_SLOT.stops], 1e-9), `a scene six stops under the key (${out[EYE_SLOT.full].toFixed(2)} asked, ${out[EYE_SLOT.target].toFixed(2)} made up by the rule) snapped stands at its target, its exposure two to its stops`);
+  ok(near(out[EYE_SLOT.full], Math.log2(EYE_TUNE.key) - binCentreLog(b6), 1e-12) && near(out[EYE_SLOT.target], targetStops(binCentreLog(b6)), 1e-12) && near(out[EYE_SLOT.stops], out[EYE_SLOT.target], 1e-12) && near(out[EYE_SLOT.exposure], 2 ** out[EYE_SLOT.stops], 1e-9), `a scene six stops under the key (${out[EYE_SLOT.full].toFixed(2)} asked, ${out[EYE_SLOT.target].toFixed(2)} made up by the curve) snapped stands at its target, its exposure two to its stops`);
   eyeFrame(h, 0, 1 / 60, false, out);
   ok(out[EYE_SLOT.stops] > 0 && out[EYE_SLOT.stops] < out[EYE_SLOT.target], 'an eased one moves a frame\'s share toward it');
   const said = tuneEye({ tune: { knee: 99, nope: 1, share: 'a' } });
   ok(EYE_TUNE.knee === EYE_TUNE_RANGE.knee[1] && said.length === 3, 'a dial is held to its range, and one not there or not a number is said');
-  tuneEye({ tune: { knee: 2 } });
+  tuneEye({ tune: { knee: T.knee } });
 }
 
 // ---------------------------------------------------------------- 2. the main thread's frame
@@ -147,7 +181,7 @@ const reachesAttr = reaches;
   i.eye = false;
   i.level = OFF_LEVEL_REF / 2;
   eyeFrameRun();
-  ok(EYE_OUT.mode === 1 && EYE_FRAME.adapting === 0 && EYE_OUT.write === true && near(EYE_OUT.stops, kneeStops(1), 1e-12) && EYE_OUT.renderer === 1, "a chain not drawing its eye pass: the sun's height written into the buffer, three's exposure the compensation alone");
+  ok(EYE_OUT.mode === 1 && EYE_FRAME.adapting === 0 && EYE_OUT.write === true && near(EYE_OUT.stops, offStops(OFF_LEVEL_REF / 2), 1e-12) && EYE_OUT.renderer === 1, "a chain not drawing its eye pass: the sun's height written into the buffer, three's exposure the compensation alone");
   i.eye = true;
   i.level = OFF_LEVEL_REF;
   eyeFrameRun();
@@ -158,12 +192,12 @@ const reachesAttr = reaches;
   i.adapt = 0;
   i.level = OFF_LEVEL_REF / 8;
   eyeFrameRun();
-  ok(EYE_OUT.mode === 1 && near(EYE_OUT.stops, kneeStops(3), 1e-12) && EYE_OUT.write === true && EYE_OUT.renderer === 2, "the row off: the sun's height (an eighth of noon's light, 3 stops made up), written into the buffer, three's exposure still the compensation where a chain multiplies by the buffer");
+  ok(EYE_OUT.mode === 1 && near(EYE_OUT.stops, offStops(OFF_LEVEL_REF / 8), 1e-12) && near(EYE_OUT.stops, offStops(OFF_LEVEL_REF) + 3, 1e-12) && EYE_OUT.write === true && EYE_OUT.renderer === 2, "the row off: the sun's height (an eighth of noon's light, 3 stops more made up), written into the buffer, three's exposure still the compensation where a chain multiplies by the buffer");
   eyeFrameRun();
   ok(EYE_OUT.write === false, 'and a frame whose answer did not move writes nothing');
   i.chain = false;
   eyeFrameRun();
-  ok(near(EYE_OUT.renderer, 2 * exposureOf(kneeStops(3)), 1e-12), 'with no chain three\'s exposure carries the eye\'s answer too (every material tone-maps itself onto the canvas)');
+  ok(near(EYE_OUT.renderer, 2 * exposureOf(offStops(OFF_LEVEL_REF / 8)), 1e-12), 'with no chain three\'s exposure carries the eye\'s answer too (every material tone-maps itself onto the canvas)');
   i.chain = true;
   i.adapt = 1;
   i.loading = true;
@@ -269,7 +303,7 @@ const reachesAttr = reaches;
   EYE_IN.stops = 0;
   EYE_IN.level = OFF_LEVEL_REF / 4;
   eyeFrameGpu(r);
-  ok(near(r.toneMappingExposure, exposureOf(kneeStops(2)), 1e-12), "with Effects off three's exposure is the eye's answer (the sun's height)");
+  ok(near(r.toneMappingExposure, exposureOf(offStops(OFF_LEVEL_REF / 4)), 1e-12), "with Effects off three's exposure is the eye's answer (the sun's height)");
   EYE_IN.chain = true;
   EYE_IN.air = false;
 }
@@ -280,12 +314,16 @@ const reachesAttr = reaches;
   // The wave's fixer moved these three: the picture is stored times `pre` (`preExpose.ts`), so each reads the eye's exposure
   // over the store's factor (`storedOf()`, the buffer's `pre` held off nought).
   ok(/return vec4\(c\.rgb\.mul\(eyeExposureNode\(\)\.div\(storedOf\(\)\)\), c\.a\);/.test(chain), "the chain's output multiplies the picture by the eye's exposure over the store's before three's tone mapping");
-  ok(/dot\(texel\.xyz, vec3\(lum\[0\], lum\[1\], lum\[2\]\)\)\.mul\(eyeExposureNode\(\)\.div\(storedOf\(\)\)\)/.test(chain), "the bloom's threshold is held against the luminance as the eye exposes it, the store taken back off");
+  ok(/dot\(texel\.xyz, vec3\(lum\[0\], lum\[1\], lum\[2\]\)\)\.mul\(eyeExposureNode\(\)\.div\(storedOf\(\)\)\)/.test(chain), "SWG's sky's bloom (three's): its threshold is held against the luminance as the eye exposes it, the store taken back off");
+  // The sky and light fix round: under our sky the demo's bloom weighs its first level's Karis average by the exposed luminance.
+  ok(/const ex = max\(eyeExposureNode\(\)\.div\(storedOf\(\)\), 1e-4\);/.test(text('src/core/gpu/gpuBloomMix.ts')), "our sky's bloom (the demo's): its Karis weights take the luminance as the eye exposes it, the store taken back off (the demo's max(exposure, 1e-4))");
   ok(/const pivot = pivot0\.mul\(storedOf\(\)\)\.div\(max\(eyeExposureNode\(\), 1e-8\)\);/.test(chain), "the grade turns about display grey at the eye's exposure, in the stored picture's units");
-  ok(/return max\(preNode\(\), PRE_FIXED\.least\);/.test(chain) && /clamp\(c\.rgb, vec3\(0\), vec3\(storedOf\(\)\.mul\(CHAIN_NUMBERS\.sanitize\.ceiling\)\)\)/.test(chain) && /m\.userData\.swgChain = true;/.test(chain), "the sanitize's ceiling is the scene's in the stored units, and a chain pass's own material takes no store");
+  ok(/return max\(preNode\(\), PRE_FIXED\.least\);/.test(chain) && /clamp\(c\.rgb, vec3\(0\), vec3\(storedOf\(\)\.mul\(CHAIN_NUMBERS\.sanitize\.ceiling\)\)\)/.test(chain) && /m\.userData\.swgChain = true;/.test(chain), "under SWG's sky the sanitize's ceiling is the scene's in the stored units, and a chain pass's own material takes no store");
+  // The sky and light fix round: under our sky the ceiling is the stored picture's own, the bloom's six levels' sum inside a half float.
+  ok(/if \(ours\) return vec4\(clamp\(c\.rgb, vec3\(0\), vec3\(CHAIN_NUMBERS\.sanitize\.stored\)\), 1\);/.test(chain) && /sanitizeGraph\(this\.material\.uniforms as never, skyOurs\(\)\)/.test(text('src/core/gpu/gpuChainPasses.ts')), "under our sky the sanitize holds the stored picture to its own ceiling, chosen by the sky read at load");
   ok(/const history = storedNow\(vec4\(p\.history\.sample\(r\.historyUv\)\.level\(0\)\)\)\.toVar\('swgTaaFH'\);/.test(text('src/core/gpu/taa/taaGraphs.ts')) && /const history = storedNow\(vec4\(p\.history\.sample\(r\.historyUv\)\.level\(0\)\)\)\.toVar\('swgTaaUH'\);/.test(text('src/core/gpu/taa/taaGraphs.ts')) && /return vec4\(h\.rgb\.mul\(preRatioNode\(\)\), h\.a\);/.test(text('src/core/gpu/taa/taaGraphs.ts')), "both edge smoothings bring last frame's history to this frame's store (pre over preLast)");
   const haze = text('src/sky/air/airHaze.ts');
-  ok(/const ls = l\.mul\(storedOf\(\)\)\.toVar\('swgHazeLS'\);/.test(haze) && /out\.assign\(c\.rgb\.mul\(t\)\.add\(ls\.mul\(abs\(s\.a\)\)\)\.add\(s\.rgb\)\);/.test(haze) && /clamp\(out, vec3\(0\), vec3\(storedOf\(\)\.mul\(HAZE_NUMBERS\.ceiling\)\)\)/.test(haze), "the haze pass adds the air's light in the stored units, its ceiling the scene's");
+  ok(/const ls = l\.mul\(storedOf\(\)\)\.toVar\('swgHazeLS'\);/.test(haze) && /out\.assign\(c\.rgb\.mul\(t\)\.add\(ls\.mul\(abs\(s\.a\)\)\)\.add\(s\.rgb\)\);/.test(haze) && /clamp\(out, vec3\(0\), vec3\(CHAIN_NUMBERS\.sanitize\.stored\)\)/.test(haze), "the haze pass adds the air's light in the stored units, its ceiling the sanitize's own under our sky (the sky and light fix round)");
   const ssao = text('src/core/gpu/gpuSsao.ts');
   ok(/\.mul\(stored\)\.toVar\(\);/.test(ssao) && /fogColor\.mul\(stored\)/.test(ssao) && /max\(ceiling, stored\.mul\(N\.ceilingFloor\)\)/.test(ssao), "the occlusion's lit ceiling, its floor and the fog's colour are stood in the stored units");
   ok(/\.div\(max\(preNode\(\), PRE_FIXED\.least\)\);\r?\n    return vec4\(log2\(max\(l, Math\.pow\(2, -30\)\)\), 0, 0, 1\);/.test(text('src/sky/exposure/eyeGpu.ts')), "the eye's copy counts the scene's own luminance, the store taken back off");
@@ -310,20 +348,26 @@ const reachesAttr = reaches;
   const set = eyeDialSet();
   ok(set.helper === 'exposure' && eyeDialsFor('exposure') === set && eyeDialsFor('sky') === null, "the eye's dials are the `exposure` helper's");
   let n = 0;
+  const keys: string[] = [];
   for (const g of set.groups) {
     for (const d of g.dials) {
       if (d.kind !== 'number') continue;
-      n++;
+      keys.push(d.key);
+      if (d.key.startsWith('tune.')) n++;
       const was = d.get();
       d.set(d.max + 100);
       const top = d.get();
       d.set(d.min - 100);
       const bottom = d.get();
       d.set(was);
-      ok(near(top, d.max, 1e-12) && near(bottom, d.min, 1e-12) && near(d.get(), was, 1e-12) && d.key.startsWith('tune.'), `the dial ${d.key} sets through tuneEye and is held to ${d.min} to ${d.max}`);
+      ok(near(top, d.max, 1e-12) && near(bottom, d.min, 1e-12) && near(d.get(), was, 1e-12) && /^(tune\.|lights\.)/.test(d.key), `the dial ${d.key} sets through its helper's own path (exposure's tune or lights) and is held to ${d.min} to ${d.max}`);
     }
   }
   ok(n === Object.keys(EYE_TUNE).length, 'every one of the eye\'s numbers of feel is a dial');
+  // The sky and light fix round: maker L's Carried lights and top percentile join the same set. Its output dither did too
+  // until the two lines were merged (22 November), which kept wave 4b's alone (the `stars` set's): none here, so the picture
+  // is dithered once.
+  ok(keys.includes('lights.carried') && keys.includes('lights.top') && !keys.some((k) => /dither/i.test(k)), "the `exposure` set holds maker L's Carried lights and the eye's top percentile, and no dither (the picture's one dither is the night sky's)");
 }
 
 // ---------------------------------------------------------------- 6. the sky's match record

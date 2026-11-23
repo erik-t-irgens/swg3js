@@ -15,7 +15,7 @@
 // are made here too, for the twin.
 //
 // Pure: plain numbers, so the worker and the node tests run this very code.
-import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setAirFileFields, setHazeTint, setVisibility, worldRecord, type AirFileFields, type AirRecord } from './airParams.ts';
+import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setAirFileFields, setHazeGlow, setHazeTint, setVisibility, worldRecord, type AirFileFields, type AirRecord } from './airParams.ts';
 
 /** A grey haze (pass 2, wave 4a): the haze colour every world's dial starts at, the record as it was. */
 const GREY_HAZE: readonly [number, number, number] = [1, 1, 1];
@@ -402,7 +402,7 @@ export function fitOzone(rec: AirRecord, target: Float64Array, least: number = O
  * Every row of a world fitted (the worker's one job, and the node tests'): `visibilityKm` the owner's clear-day dial for
  * this world. Rows whose records come out the same share their tables.
  */
-export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX, hazeTint: readonly [number, number, number] = GREY_HAZE): FitResult {
+export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX, hazeTint: readonly [number, number, number] = GREY_HAZE, glow: number | null = null): FitResult {
   const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
   const rows = sky.blocks;
   const shares = visibilityShares(rows);
@@ -453,6 +453,9 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
     // Pass 2, wave 4a: the haze's colour is the world's dial's (grey to start), never fitted: the hue and the ozone above are
     // fitted on a grey haze, so the dial moves only the light the haze adds and its multiple scattering below.
     setHazeTint(rec, hazeTint[0], hazeTint[1], hazeTint[2]);
+    // The sky and light fix round: the glow round the sun (the haze's g, the world's dial; null its own) likewise, never fitted:
+    // the hue and the ozone above are fitted at the world's own g, so the dial moves only the light the haze throws forward.
+    if (glow !== null) setHazeGlow(rec, glow);
     // Rows alike to two figures share one multiple-scattering table (it turns slowly with the numbers; each row keeps its
     // own record, so its transmittance is exact).
     let key = '';
@@ -489,6 +492,11 @@ export interface FitAsk {
    * copy before the fit, so its base record is the page's; null for none; absent, the worker's copy is left as it is.
    */
   fileFields?: AirFileFields | null;
+  /**
+   * The sky and light fix round: the world's glow round the sun (its dial, `airParams.ts`'s `glow`, the haze's g); absent, its
+   * own. Laid after the fields, though none of them is the haze's g: a saved air's forward glow sets this dial (`bodiesFile.ts`).
+   */
+  glow?: number;
 }
 
 /** What the worker answers: the rows' records and tables as transferable arrays, in row order. */
@@ -510,7 +518,7 @@ export interface FitReply {
 export function fitReply(ask: FitAsk, gradient: GradientSampler | null = null): FitReply {
   try {
     if (ask.fileFields !== undefined) setAirFileFields(ask.sky.planet, ask.fileFields);
-    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE);
+    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE, typeof ask.glow === 'number' && Number.isFinite(ask.glow) ? ask.glow : null);
     return {
       id: ask.id,
       planet: r.planet,

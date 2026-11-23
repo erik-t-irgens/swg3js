@@ -243,23 +243,25 @@ export function worldRecord(planetId: string, out: AirRecord = newAirRecord()): 
 /**
  * The record fields a world's saved air names (the space body viewer's Save to game, `src/sky/look/bodiesFile.ts`'s
  * `gameAirOf`) that no dial of the game's twins and no fit moves: the planet's radius and the air's thickness, how fast the
- * clear air thins (and the ozone's layer with it, as the viewer's record lays it), the haze's height, its forward glow and
- * its brightness, the ground's bounce. Laid over the world's own numbers by `worldRecord`, so the world's fitted rows (the
- * fit's worker is handed them, `FitAsk.fileFields`), its twin and its body's record seen from another world (`bodyAir.ts`)
- * carry them alike. **Empty with no file**, or a file that names no world: every record exactly as before.
+ * clear air thins (and the ozone's layer with it, as the viewer's record lays it), the haze's height and its brightness, the
+ * ground's bounce. Laid over the world's own numbers by `worldRecord`, so the world's fitted rows (the fit's worker is handed
+ * them, `FitAsk.fileFields`), its twin and its body's record seen from another world (`bodyAir.ts`) carry them alike. **Empty
+ * with no file**, or a file that names no world: every record exactly as before. The haze's forward glow (its phase's g) was
+ * one of them until the two lines met (22 November): the fix round gave it a dial of the game's own (`glow`, "Glow round the
+ * sun"), so a saved glow now sets that dial as the visibility and the haze colour set theirs, and one number, the dial, is
+ * what every path lays (`applyHazeDials`, the run's rows, the fit's ask): the file and the dial cannot disagree.
  */
 export interface AirFileFields {
   radiusKm?: number;
   thicknessKm?: number;
   rayleighHeightKm?: number;
   hazeHeightKm?: number;
-  hazeG?: number;
   hazeAlbedo?: number;
   groundAlbedo?: number;
 }
 
 /** The names `AirFileFields` holds (the worker's message and the tests read them). */
-export const AIR_FILE_FIELD_NAMES = ['radiusKm', 'thicknessKm', 'rayleighHeightKm', 'hazeHeightKm', 'hazeG', 'hazeAlbedo', 'groundAlbedo'] as const;
+export const AIR_FILE_FIELD_NAMES = ['radiusKm', 'thicknessKm', 'rayleighHeightKm', 'hazeHeightKm', 'hazeAlbedo', 'groundAlbedo'] as const;
 
 /** Each world's file fields in force, by world id (set behind a loading screen, `setAirFileFields`). */
 export const AIR_FILE_FIELDS: Record<string, AirFileFields> = {};
@@ -273,8 +275,8 @@ export function setAirFileFields(planetId: string, fields: AirFileFields | null 
 /**
  * File fields into a record, as the viewer's `recordOf` (airProfile.js) sets the same numbers: the radius the bottom and the
  * thickness above it the top, the clear air's scale height (the ozone's centre and half width scaled by it from Earth's), the
- * haze's scale height and phase, its single-scattering albedo (the haze's extinction re-split by it), the ground's albedo in
- * every channel. A field absent keeps the world's own number.
+ * haze's scale height, its single-scattering albedo (the haze's extinction re-split by it), the ground's albedo in every
+ * channel. A field absent keeps the world's own number. (The haze's phase is the glow dial's: `setHazeGlow`.)
  */
 export function applyAirFileFields(r: AirRecord, f: AirFileFields): void {
   const thick = r[F.top] - r[F.bottom];
@@ -288,7 +290,6 @@ export function applyAirFileFields(r: AirRecord, f: AirFileFields): void {
     r[F.ozW] = EARTH.ozoneHalfWidth * thin;
   }
   if (Number.isFinite(f.hazeHeightKm)) r[F.mieH] = f.hazeHeightKm as number;
-  if (Number.isFinite(f.hazeG)) r[F.mieG] = f.hazeG as number;
   if (Number.isFinite(f.hazeAlbedo)) {
     const ext = r[F.mieS] + r[F.mieA];
     const a = f.hazeAlbedo as number;
@@ -328,9 +329,24 @@ export interface AirDialRow {
   hazeR: number;
   hazeG: number;
   hazeB: number;
+  /**
+   * The sky and light fix round (maker L; the owner's "if I want haze it makes the sun huge"): the glow round the sun, the
+   * haze's phase g (how strongly it throws light forward, `F.mieG`). **Each world's own to start** (`AIR_WORLDS`' `mieG`: 0.7
+   * for Tatooine's dust and Mustafar's ash, 0.75 for Dathomir and Lok, 0.8 for the wetter worlds), so every sky is drawn as
+   * before until the owner moves one. Lower spreads the aureole round the sun and the moon wider and dimmer; higher draws it
+   * tighter and brighter at the disc. It shapes only the air's own light (the sun's and the moon's in-scatter): the flashlight
+   * and the blades light no haze. Feel is his.
+   */
+  glow: number;
 }
 
-export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0, hazeR: 1, hazeG: 1, hazeB: 1 };
+/** Every row's start but the glow, whose start is each world's own (`glowStartOf`). */
+export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0, hazeR: 1, hazeG: 1, hazeB: 1, glow: EARTH.mieG };
+
+/** A world's glow round the sun to start (the sky and light fix round): its own haze's g (`AIR_WORLDS`, else the default world's). */
+export function glowStartOf(planetId: string): number {
+  return airWorldOf(planetId).mieG;
+}
 
 /**
  * The fit's ozone limits for every world (the owner's dials since pass 2, wave 2), as shares of Earth's: they start where
@@ -362,22 +378,29 @@ export function airDialsOf(planetId: string): AirDialRow {
   let d = AIR_DIALS[planetId];
   if (!d) {
     const s = AIR_DIAL_START;
-    d = { visibilityKm: s.visibilityKm, steer: s.steer, ozoneMin: s.ozoneMin, ozoneMax: s.ozoneMax, hazeR: s.hazeR, hazeG: s.hazeG, hazeB: s.hazeB };
+    d = { visibilityKm: s.visibilityKm, steer: s.steer, ozoneMin: s.ozoneMin, ozoneMax: s.ozoneMax, hazeR: s.hazeR, hazeG: s.hazeG, hazeB: s.hazeB, glow: glowStartOf(planetId) };
     AIR_DIALS[planetId] = d;
   }
   return d;
 }
 
 /** The dials' ranges (the sliders'), and what a value outside is held to. */
-export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const, hazeR: [0, 1] as const, hazeG: [0, 1] as const, hazeB: [0, 1] as const };
+export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const, hazeR: [0, 1] as const, hazeG: [0, 1] as const, hazeB: [0, 1] as const, glow: [0, 0.95] as const };
 
 /** The dials a world's row holds, as `tuneAirDials` takes them. */
-const ROW_DIALS = ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax', 'hazeR', 'hazeG', 'hazeB'] as const;
+const ROW_DIALS = ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax', 'hazeR', 'hazeG', 'hazeB', 'glow'] as const;
 
-/** A world's haze colour in force (its dials), into a record (pass 2, wave 4a). */
+/** The haze's phase g written into a record (the sky and light fix round's glow round the sun), held to the dial's range. */
+export function setHazeGlow(r: AirRecord, g: number): void {
+  const [lo, hi] = AIR_DIAL_RANGE.glow;
+  r[F.mieG] = g > lo ? (g < hi ? g : hi) : lo;
+}
+
+/** A world's haze colour in force (its dials), into a record (pass 2, wave 4a); and its glow round the sun (the fix round). */
 export function applyHazeDials(planetId: string, r: AirRecord): void {
   const d = airDialsOf(planetId);
   setHazeTint(r, d.hazeR, d.hazeG, d.hazeB);
+  setHazeGlow(r, d.glow);
 }
 
 /** A count the dials move by, so a reader can tell the numbers moved without comparing them (the tables' rebuild). */
@@ -389,7 +412,7 @@ export const AIR_DIAL_STATE = { version: 0 };
  */
 export function tuneAirDials(o: Record<string, unknown>): string[] {
   const words: string[] = [];
-  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB } } and { all: { ozoneMin, ozoneMax } }'];
+  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB, glow } } and { all: { ozoneMin, ozoneMax } }'];
   for (const [id, v] of Object.entries(o)) {
     if (!v || typeof v !== 'object') {
       words.push(`${id}: not a row`);

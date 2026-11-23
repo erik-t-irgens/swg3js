@@ -362,7 +362,8 @@ function makeSky() {
   reset();
   const sky = text('src/sky/air/airSky.ts');
   ok(/return top\.mul\(min\(shade\.div\(max\(area, 1e-12\)\), cap\)\.mul\(inside\)\);/.test(sky), "a disc's light a steradian is its own, at most the cap");
-  ok(/disc\(d, n\.sunDir, max\(n\.sunRadius, capLeast\), n\.sunTop, limb, edge, capMost\)/.test(sky) && /disc\(d, n\.sun2Dir, max\(n\.sunRadius\.mul\(ratio\), capLeast\), n\.sun2Top, limb, edge, capMost\)/.test(sky), 'both suns are spread and capped alike');
+  // The sky and light fix round: each disc's radius times the Disc size dial (`DISC_TUNE.size`) before the capture's spread.
+  ok(/disc\(d, n\.sunDir, max\(n\.sunRadius\.mul\(size\), capLeast\), n\.sunTop, limb, edge, capMost\)/.test(sky) && /disc\(d, n\.sun2Dir, max\(n\.sunRadius\.mul\(ratio\)\.mul\(size\), capLeast\), n\.sun2Top, limb, edge, capMost\)/.test(sky), 'both suns are sized by the Disc size dial, then spread and capped alike');
   ok(/onRenderUpdate\(discLeastRadius\)/.test(sky) && /onRenderUpdate\(discMostLight\)/.test(sky) && /setGroup\(renderGroup\)\.onRenderUpdate\(discLeastRadius\)/.test(sky), 'read once a render, in the shared render group, off the scene three draws');
   ok(!/\.mul\(drawn\)/.test(sky), 'and the discs are no longer left out of the capture');
 }

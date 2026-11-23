@@ -36,11 +36,25 @@ export const TABLE_STEPS = {
 } as const;
 
 /**
- * Pass 2, wave 4b (maker B): the factor the sky view and the haze volume store their light at, from the light on a level
- * surface (`AIR.frame.level`, the scene's units): 1 while it is over `STORE_FIXED.top` (by day and into the dusk, so the
- * tables are the base's to the bit), else the power of two that brings it back up to `top`, at most 2^`most`. A power of
- * two, so a value in a half float's normal range keeps its very bits stored and read back; only the night's, which sat in its
- * subnormals, gains. Not a dial: precision, not look. Allocates nothing.
+ * The sky and light fix round (maker L; the owner's "at night I can see steps to the haze"): the sky view's and the haze
+ * volume's light are stored times this in their half floats and read back times its inverse. A moonlit sky is about 1e-7 in
+ * the scene's units, under a half float's smallest normal (6.1e-5), where only its subnormals' steps of 2^-24 remain: read back
+ * at Tatooine's night the sky view held eight values in all (nought and seven steps of 6e-8), and the eye's 2^16 made each a
+ * band several levels apart on the screen. Times 2^10 the same night stands at 6e-5 to 4e-4 with ten bits of its own; the
+ * brightest the day reaches (the sky by a dusk sun through a 5 km haze at the glow's highest dial, about 50 in the twin) stands
+ * at 51,200, under the half float's 65,504, and every store is held to `AIR_STORE_MOST` besides. Not a dial: a store's
+ * precision, which nothing of the picture asks to move. The least the store ever is (`storeInto`).
+ */
+export const AIR_STORE = 1024;
+export const AIR_STORE_MOST = 65000;
+
+/**
+ * Pass 2, wave 4b (maker B), the same mend made beside the fix round's and merged with it: on a night so dark that the light
+ * on a level surface (`AIR.frame.level`, the scene's units) times `AIR_STORE` stays under `STORE_FIXED.top`, the store rises
+ * to the power of two that brings that light back up to `top`, at most 2^`most`; by day, into the dusk and on a moonlit night
+ * it is `AIR_STORE` (`storeInto`). A power of two either way, so a value in a half float's normal range keeps its very bits
+ * stored and read back (by day nothing moves by a bit under `AIR_STORE_MOST`); only the night's, which sat in its subnormals,
+ * gains. Not a dial: precision, not look. Allocates nothing.
  */
 export const STORE_FIXED = { top: 0.05, most: 20 } as const;
 /** RGBA texels read back as stored (`x · store` in rgb) put back in the scene's units, in place; the alpha (a share) as it is. */
@@ -56,7 +70,8 @@ export function storeInto(f: { level: number }, out: { x: number }): void {
   // Read off the frame's record and written into the uniform's own field: no number crosses a call (a frame makes none).
   const lv = f.level > 1e-30 ? f.level : 1e-30;
   const k = lv >= STORE_FIXED.top ? 0 : Math.floor(Math.log2(STORE_FIXED.top / lv));
-  out.x = 2 ** (k > STORE_FIXED.most ? STORE_FIXED.most : k);
+  const p = 2 ** (k > STORE_FIXED.most ? STORE_FIXED.most : k);
+  out.x = p > AIR_STORE ? p : AIR_STORE;
 }
 
 /** The record's changes smaller than this share of a number draw nothing again (the slow tables). */
@@ -103,12 +118,13 @@ class Tables implements AirTables {
   private readonly uGain = new THREE.Vector3(1, 1, 1);
   private readonly uSunRadius = new THREE.Vector2(0.0047, 0);
   /**
-   * Pass 2, wave 4b (maker B): the factor the sky view and the haze's light are stored at (x; y spare), a power of two, 1 by
-   * day (`storeInto`): a moonlit night's sky in the scene's units is about 1e-7, under a half float's smallest normal
-   * (6e-5), so the night's sky view held two bits and the sky round the moon drew as stepped rings (the measure of pass 2,
-   * wave 3); stored times 2^k it keeps its ten, and every reader divides it back out, so by day nothing moves by a bit.
+   * Pass 2, wave 4b (maker B) and the fix round, merged: the factor the sky view and the haze's light are stored at (x; y
+   * spare), a power of two, `AIR_STORE` by day and on a moonlit night, more on a darker one (`storeInto`): a moonlit night's
+   * sky in the scene's units is about 1e-7, under a half float's smallest normal (6e-5), so the night's sky view held two bits
+   * and the sky round the moon drew as stepped rings (the measure of pass 2, wave 3); stored times 2^k it keeps its ten, and
+   * every reader divides it back out, so by day nothing moves by a bit.
    */
-  private readonly uStore = new THREE.Vector2(1, 0);
+  private readonly uStore = new THREE.Vector2(AIR_STORE, 0);
   /** The frame camera's turn alone (no place: nothing measured from the world's middle reaches the card), and its projection's inverse. */
   private readonly camTurn = new THREE.Matrix4();
   private readonly projInv = new THREE.Matrix4();
@@ -304,7 +320,7 @@ class Tables implements AirTables {
       gain: this.uGain.toArray(),
       transmittance: await read(this.tTarget),
       multiScatter: await read(this.msTarget),
-      // Pass 2, wave 4b: the sky view is stored times the night's factor; read back in the scene's units, as the readers read it.
+      // The sky view is stored times the frame's store (`AIR_STORE`, or the dark night's power of two); read back in the scene's units, as the readers read it.
       skyView: unstore(await read(this.svTarget), this.uStore.x),
       store: this.uStore.x,
     };
@@ -374,7 +390,7 @@ class Tables implements AirTables {
     const volume = new Float32Array(W * H * D * 4);
     const half = raw instanceof Uint16Array;
     for (let i = 0; i < volume.length; i++) volume[i] = half ? THREE.DataUtils.fromHalfFloat(raw[i]) : raw[i];
-    // Pass 2, wave 4b: the haze's light (its texels' rgb, not their transmittance) read back in the scene's units.
+    // The haze's light (its texels' rgb) read back in the scene's units; what gets through (a share) is stored as it is.
     unstore(volume, this.uStore.x);
     return { ...words, store: this.uStore.x, width: W, height: H, depth: D, volume };
   }
@@ -698,7 +714,9 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     const L = vec3(0).toVar('airSvL');
     const Tr = vec3(1).toVar('airSvT');
     march(r, d, float(1e9), TABLE_STEPS.skyView, L, Tr);
-    return vec4(L.mul(gain).mul(storeK), 1);
+    // Stored times the frame's store (`AIR_STORE`, or a dark night's power of two: a night's light has bits of its own
+    // there), held under `AIR_STORE_MOST`, read back divided by it.
+    return vec4(min(L.mul(gain).mul(storeK), AIR_STORE_MOST), 1);
   })();
 
   // ---------------------------------------------------------------- the haze volume (on compute)
@@ -739,7 +757,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         Tr.mulAssign(exp(sigma.negate().mul(dt)));
         prev.assign(e1);
       });
-      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(L.mul(gain).mul(storeK), Tr.x.add(Tr.y).add(Tr.z).div(3)));
+      // The light stored times the frame's store as the sky view's is; what gets through, a share, as it is.
+      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(min(L.mul(gain).mul(storeK), AIR_STORE_MOST), Tr.x.add(Tr.y).add(Tr.z).div(3)));
       store.toWriteOnly();
       store.toStack();
     });

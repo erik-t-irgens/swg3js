@@ -421,6 +421,15 @@ export interface GpuSpaceRimIn {
 
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
+  /**
+   * The lights the player carries (the sky and light fix round, maker L: `gpu/carriedLights.ts`): the effects' pool light and
+   * the flashlight, each drawing its direct light times the eye's compensation while its `carried` flag is 1.
+   */
+  readonly carried: {
+    point(): THREE.PointLight;
+    spot(color: number, intensity: number, distance: number, angle: number, penumbra: number, decay: number): THREE.SpotLight;
+    report(): Record<string, unknown>;
+  };
   /** The moons and planets under our sky (pass 2, wave 4a, maker B). */
   readonly skyBodies: GpuSkyBodies;
   /** His looks' bakes (pass 2, wave 4b, maker A). */

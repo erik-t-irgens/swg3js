@@ -8,7 +8,7 @@
 // Pure: no three, no DOM.
 import type { DialGroup, NumberDial } from '../../ui/dials.ts';
 import { SKY_DIAL_GROUPS } from '../skyDials.ts';
-import { AIR_DIAL_RANGE, AIR_OZONE, AIR_OZONE_RANGE, airDialsOf, tuneAirDials } from './airParams.ts';
+import { AIR_DIAL_RANGE, AIR_OZONE, AIR_OZONE_RANGE, airDialsOf, glowStartOf, tuneAirDials } from './airParams.ts';
 
 /** The worlds whose air has dials (the converted worlds, Hoth's heroic among them as `adventure2`). */
 export const AIR_DIAL_WORLDS: readonly [string, string][] = [
@@ -27,7 +27,7 @@ export const AIR_DIAL_WORLDS: readonly [string, string][] = [
   ['adventure2', 'Hoth (Echo Base)'],
 ];
 
-function dial(id: string, key: 'visibilityKm' | 'steer' | 'hazeR' | 'hazeG' | 'hazeB', label: string, step: number, unit: string, note: string): NumberDial {
+function dial(id: string, key: 'visibilityKm' | 'steer' | 'hazeR' | 'hazeG' | 'hazeB' | 'glow', label: string, step: number, unit: string, note: string): NumberDial {
   const [min, max] = AIR_DIAL_RANGE[key];
   return {
     kind: 'number',
@@ -65,7 +65,7 @@ function ozoneDial(id: string, key: 'ozoneMin' | 'ozoneMax', label: string, note
 export function airDialGroup(id: string, name: string): DialGroup {
   return {
     title: `The air of ${name}`,
-    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone), its own limits on the fit's ozone (nought: the all-worlds limits), and its haze's colour (1, 1, 1: grey, the sky as it was).",
+    note: "Its clear-day visibility, from which every weather row's haze is scaled (a storm with ten times the clear row's fog sees a tenth as far), how far its light and sky are bent toward SWG's own colours of the hour (0: the physical air alone), its own limits on the fit's ozone (nought: the all-worlds limits), its haze's colour (1, 1, 1: grey, the sky as it was), and the glow round the sun its haze throws (the world's own to start).",
     dials: [
       dial(id, 'visibilityKm', 'Clear-day visibility', 0.5, 'km', "How far a dark thing stays seen on a clear day (2% contrast): 40 km is a very clear day. Weather scales from here, so nearer than 2 km in storms is in reach."),
       dial(id, 'steer', 'Steer to SWG', 0.05, '', "0 draws the physical air alone (realism first); 1 bends the sky's light and the lights' colours to SWG's of the hour, channel by channel."),
@@ -75,6 +75,8 @@ export function airDialGroup(id: string, name: string): DialGroup {
       dial(id, 'hazeR', 'Haze colour: red', 0.01, '', "The share of the haze's scattering in the red: 1 with green and blue at 1 is a grey haze (the start, the sky as it was). What a channel scatters less it absorbs, so the sun through the haze is dimmed, never tinted. A desert's warm dust is about 1, 0.9, 0.7."),
       dial(id, 'hazeG', 'Haze colour: green', 0.01, '', "The share of the haze's scattering in the green (1 to start: grey). Moved, the world's rows are fitted again for their multiple scattering (a second or so) and its sky and haze follow; nothing is built."),
       dial(id, 'hazeB', 'Haze colour: blue', 0.01, '', "The share of the haze's scattering in the blue (1 to start: grey). Lower than the green and red for a warm dust or a brown ash."),
+      // The sky and light fix round (maker L): the haze's phase g, each world's own to start.
+      dial(id, 'glow', 'Glow round the sun', 0.01, '', `How strongly the haze throws light forward (its phase's g), which shapes the glow round the sun and the moon: ${glowStartOf(id)} to start (this world's own haze). Lower spreads it wider and dimmer, so a thick haze (a low Clear-day visibility) shows a smaller, softer sun; higher draws it tighter and brighter round the disc. Moved, the world's rows are fitted again (a second or so); nothing is built.`),
     ],
   };
 }
@@ -108,6 +110,6 @@ export function registerAirDials(): void {
 /** The console's `air` part of `__debug.sky({ air })`: the dials moved, words for anything held or refused. */
 export function skyAirArgument(o: unknown): string[] {
   if (o === undefined) return [];
-  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB }, all: { ozoneMin, ozoneMax } }'];
+  if (!o || typeof o !== 'object') return ['air: { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB, glow }, all: { ozoneMin, ozoneMax } }'];
   return tuneAirDials(o as Record<string, unknown>);
 }

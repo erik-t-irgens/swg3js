@@ -144,7 +144,8 @@ function sameAsBase(what: string): void {
     ] };
     const d = NP.airDialsOf(id);
     const askO = { id: 1, sky, visibilityKm: d.visibilityKm, gradients: {}, hazeTint: [d.hazeR, d.hazeG, d.hazeB] };
-    const askN = { ...askO, fileFields: NP.AIR_FILE_FIELDS[id] ?? null };
+    // The page's ask since the merge with the sky and light fix round carries the world's glow dial too (`airRun.ts`).
+    const askN = { ...askO, fileFields: NP.AIR_FILE_FIELDS[id] ?? null, glow: d.glow };
     const a = OF.fitReply(askO);
     const b = NF.fitReply(askN);
     if (a.records.length !== b.records.length || !sameBits(a.depth, b.depth)) fit = false;
@@ -185,16 +186,17 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
   }
   const air = { mode: 'scattered', radiusKm: 7000, thicknessKm: 120, rayleighHeightKm: 10, skyColour: '#6a9fff', skyStrength: 1.2, visibilityKm: 30, hazeHeightKm: 2, hazeG: 0.75, hazeAlbedo: 0.8, hazeColour: '#fff3db', ozone: 1.5, groundAlbedo: 0.3, limbBright: 1.4, twilightBright: 0.9, limbDark: 0.1, nightFill: 0.2 };
   const g = B.gameAirOf(air);
-  ok(g.dials.visibilityKm === 30 && sameBits([g.dials.hazeR, g.dials.hazeG, g.dials.hazeB], V.hazeTintFromHex('#fff3db', [0, 0, 0])), "the twins: the haze's visibility and colour become the game's own dials");
-  ok(JSON.stringify(g.fields) === JSON.stringify({ radiusKm: 7000, thicknessKm: 120, rayleighHeightKm: 10, hazeHeightKm: 2, hazeG: 0.75, hazeAlbedo: 0.8, groundAlbedo: 0.3 }), 'the record fields it names, each as given');
+  ok(g.dials.visibilityKm === 30 && sameBits([g.dials.hazeR, g.dials.hazeG, g.dials.hazeB], V.hazeTintFromHex('#fff3db', [0, 0, 0])) && g.dials.glow === 0.75, "the twins: the haze's visibility, its colour and its forward glow (the fix round's Glow round the sun) become the game's own dials");
+  ok(JSON.stringify(g.fields) === JSON.stringify({ radiusKm: 7000, thicknessKm: 120, rayleighHeightKm: 10, hazeHeightKm: 2, hazeAlbedo: 0.8, groundAlbedo: 0.3 }), 'the record fields it names, each as given (the forward glow no longer one: its dial is)');
   ok(['skyColour', 'skyStrength', 'ozone', 'limbBright', 'twilightBright', 'limbDark', 'nightFill', 'mode'].every((k) => g.viewerOnly.includes(k)), `the rest are listed as the viewer's: ${g.viewerOnly.join(', ')}`);
   ok(B.gameAirOf({ visibilityKm: 1000 }).dials.visibilityKm === 300 && B.gameAirOf({ visibilityKm: 0.01 }).dials.visibilityKm === 0.2, "the visibility held to the game's range (the viewer's 1000, no haze, is the game's 300, whose haze is nought)");
-  ok(B.gameAirOf({ thicknessKm: 1e9, hazeG: -3 }).fields.thicknessKm === 3000 && B.gameAirOf({ hazeG: -3 }).fields.hazeG === 0, "a field held to the viewer's own range");
-  // The fields on the record as the viewer's recordOf lays them.
+  ok(B.gameAirOf({ thicknessKm: 1e9 }).fields.thicknessKm === 3000 && B.gameAirOf({ hazeG: -3 }).dials.glow === 0 && B.gameAirOf({ hazeG: 3 }).dials.glow === 0.95 && !('hazeG' in B.gameAirOf({ hazeG: 0.6 }).fields), "a field held to the viewer's own range, and the glow to its dial's (the viewer's own, 0 to 0.95)");
+  // The fields on the record as the viewer's recordOf lays them, the glow through its dial's own writer.
   const id = 'naboo';
   NP.setAirFileFields(id, g.fields);
   const n = NP.worldRecord(id);
   NP.setVisibility(n, g.dials.visibilityKm);
+  NP.setHazeGlow(n, g.dials.glow);
   const v = V.recordOf(air);
   const F = NP.F;
   ok(n[F.bottom] === v[F.bottom] && n[F.top] === v[F.top] && n[F.rayH] === v[F.rayH] && n[F.ozC] === v[F.ozC] && n[F.ozW] === v[F.ozW], "the radius, the thickness, how fast it thins and the ozone's layer with it are the viewer's record's numbers to the bit");
@@ -208,12 +210,28 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
 // ---------------------------------------------------------------- 3. the saved air made a world's air, and put back
 
 {
-  const file = B.cleanBodiesFile({ version: 1, looks: {}, uses: {}, air: { naboo: { mode: 'scattered', visibilityKm: 12, hazeColour: '#ffd8a8', hazeHeightKm: 3, groundAlbedo: 0.25 } } }).file;
+  const file = B.cleanBodiesFile({ version: 1, looks: {}, uses: {}, air: { naboo: { mode: 'scattered', visibilityKm: 12, hazeColour: '#ffd8a8', hazeHeightKm: 3, groundAlbedo: 0.25, hazeG: 0.6 } } }).file;
   const v0 = NP.AIR_DIAL_STATE.version;
+  const glowOwn = NP.glowStartOf('naboo');
   B.SKY_BODIES.file = file;
   const r = B.applyFileAir();
   const d = NP.airDialsOf('naboo');
   ok(d.visibilityKm === 12 && sameBits([d.hazeR, d.hazeG, d.hazeB], V.hazeTintFromHex('#ffd8a8', [0, 0, 0])) && NP.AIR_DIAL_STATE.version > v0, "a file naming Naboo sets Naboo's visibility and haze colour as the live dials set them (their count stepped, so a run in being follows)");
+  // The two lines met here: the saved forward glow and the fix round's Glow round the sun are one number, the dial.
+  ok(glowOwn === 0.8 && d.glow === 0.6 && NP.AIR_FILE_FIELDS.naboo?.hazeG === undefined, "and its forward glow sets Naboo's Glow round the sun dial (0.8, its own, to 0.6), no record field beside it");
+  {
+    const body = NP.worldRecord('naboo');
+    NP.setVisibility(body, d.visibilityKm);
+    NP.applyHazeDials('naboo', body);
+    const skyAsk = NF.fitReply({ id: 9, sky: { planet: 'naboo', sunElevationDegrees: 67.5, blocks: [{ name: 'global', weatherIndex: 0, ramp: null, fog: { enabled: false, min: 0, max: 0 } }] }, visibilityKm: d.visibilityKm, gradients: {}, hazeTint: [d.hazeR, d.hazeG, d.hazeB], fileFields: { ...NP.AIR_FILE_FIELDS.naboo }, glow: d.glow });
+    ok(body[NP.F.mieG] === 0.6 && skyAsk.records[0][NP.F.mieG] === 0.6, "Naboo's body seen from another world (its record at its dials) and its ground sky's fitted rows (the page's ask) take the same glow: they cannot disagree");
+    NP.tuneAirDials({ naboo: { glow: 0.7 } });
+    const moved = NP.worldRecord('naboo');
+    NP.applyHazeDials('naboo', moved);
+    ok(moved[NP.F.mieG] === 0.7, 'the owner moving the dial live moves every path with it until the next screen');
+    B.applyFileAir();
+    ok(NP.airDialsOf('naboo').glow === 0.6, "and the next screen lays the file's glow again, as it lays its visibility");
+  }
   ok(NP.AIR_FILE_FIELDS.naboo?.hazeHeightKm === 3 && NP.AIR_FILE_FIELDS.naboo?.groundAlbedo === 0.25 && r.naboo, "and lays the fields it names on Naboo's record");
   const rec = NP.worldRecord('naboo');
   ok(rec[NP.F.mieH] === 3 && rec[NP.F.groundG] === 0.25, "Naboo's record (its ground sky's base and its body's seen from Rori) carries them");
@@ -231,8 +249,8 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
   B.SKY_BODIES.file = NOWORLD;
   B.applyFileAir();
   const back = NP.airDialsOf('naboo');
-  ok(back.visibilityKm === 25 && back.hazeR === 1 && back.hazeG === 1 && back.hazeB === 1 && !NP.AIR_FILE_FIELDS.naboo, 'a later file that no longer names Naboo puts back what it set (the haze colour to grey, the fields off) and keeps what he moved since (the visibility)');
-  NP.tuneAirDials({ naboo: { visibilityKm: 40 } });
+  ok(back.visibilityKm === 25 && back.hazeR === 1 && back.hazeG === 1 && back.hazeB === 1 && back.glow === 0.7 && !NP.AIR_FILE_FIELDS.naboo, 'a later file that no longer names Naboo puts back what it set (the haze colour to grey, the glow to where he had moved it before that screen, the fields off) and keeps what he moved since (the visibility)');
+  NP.tuneAirDials({ naboo: { visibilityKm: 40, glow: glowOwn } });
   sameAsBase('after a file named Naboo and the next did not');
 }
 
