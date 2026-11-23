@@ -48,6 +48,11 @@ export function discMostLight(f: Any): number {
   return inCapture(f) ? CAPTURE_TUNE.sunCap : WORLD_CAP;
 }
 
+/** The share of a disc's light the world shows (`DISC_TUNE.stops`, each a halving); the capture keeps it whole. */
+export function discSeen(f: Any): number {
+  return inCapture(f) ? 1 : 2 ** DISC_TUNE.stops;
+}
+
 /** A dial read once a render, in the shared render group (an object uniform is written only at a full refresh). */
 const dial = (read: () => number): Any => uniform(read()).setGroup(renderGroup).onRenderUpdate(read);
 
@@ -105,6 +110,7 @@ export function airSkyMaterial(planet: string, horizon: THREE.Color, zenith: THR
   // world neither (the least radius nought, the cap one no disc reaches).
   const capLeast = uniform(0.5).setGroup(renderGroup).onRenderUpdate(discLeastRadius);
   const capMost = uniform(0.5).setGroup(renderGroup).onRenderUpdate(discMostLight);
+  const seen = uniform(1).setGroup(renderGroup).onRenderUpdate(discSeen);
   m.colorNode = Fn(() => {
     const d = dir.toVar('swgSkyDir');
     // Every table read at the top, before anything else.
@@ -112,7 +118,7 @@ export function airSkyMaterial(planet: string, horizon: THREE.Color, zenith: THR
     const t = vec3(tables.transmittanceToSpace(d)).toVar('swgSkyT');
     const sun1 = disc(d, n.sunDir, max(n.sunRadius, capLeast), n.sunTop, limb, edge, capMost);
     const sun2 = disc(d, n.sun2Dir, max(n.sunRadius.mul(ratio), capLeast), n.sun2Top, limb, edge, capMost);
-    const discs = sun1.add(sun2).mul(t).mul(float(1).sub(clamp(n.overcast, 0, 1))).mul(gain);
+    const discs = sun1.add(sun2).mul(t).mul(float(1).sub(clamp(n.overcast, 0, 1))).mul(gain).mul(seen);
     return vec4(sky.add(discs), 1);
   })();
   return markMotion(m, 'sky');

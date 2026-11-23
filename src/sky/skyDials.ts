@@ -18,13 +18,18 @@ import { SKY_HOURS } from './skyHours.ts';
  *     sun's in the visible, near enough every star of the table.
  *   - `edge`: the share of a disc's radius its rim softens over; 0.15 is about a pixel at 1440 lines for a disc of a third of
  *     a degree, so the rim neither steps nor blurs.
- *   - `gain`: the discs' light over what the air sends (1: the star's own; lower if the bloom round them is too much for the eye).
+ *   - `gain`: the discs' light over what the air sends (1: the star's own), in the world and the reflections' capture alike.
+ *     Console only: a real sun is some 45,000 times a sunlit white wall and the chain clips the scene at 256 times one
+ *     before the bloom (`gpuChain.ts`'s sanitize), so any gain over about 0.006 looks the same in the world.
+ *   - `stops`: the sun you SEE, in stops under the star's own light (each a halving), the world only; the capture keeps
+ *     the star's light under its own cap (`CAPTURE_TUNE.sunCap`). 0 to start (the star's own, as before); nothing changes
+ *     until about −8, where the disc comes under the clip, and −10 to −14 tames its glow. The owner's to set.
  */
-export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1 };
+export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1, stops: 0 };
 
 /** The ranges every number of `tuneSky` is held to, the sliders' and the console's alike. */
 export const SKY_TUNE_RANGE = {
-  disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4] },
+  disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4], stops: [-16, 0] },
   pair: { belowDeg: [0, 12] },
   hours: { lowDeg: [0.5, 15] },
 } as const;
@@ -77,7 +82,7 @@ const GROUPS: DialGroup[] = [
     dials: [
       dial('disc', 'limb', 'Limb darkening', 0.05, '', "How much darker a disc's edge is than its middle: 0.6 is our sun's."),
       dial('disc', 'edge', 'Rim softness', 0.01, '', "The share of a disc's radius its rim softens over: 0.15 is about a pixel at 1440 lines."),
-      dial('disc', 'gain', 'Disc brightness', 0.05, '×', "The discs' light over what the air sends them: 1 is the star's own."),
+      dial('disc', 'stops', 'Disc brightness', 0.25, 'stops', "The sun you see, in stops under the star's own light (each halves it): 0 is the star's own. A real sun is far past what the screen shows, so nothing changes until about -8; -10 to -14 tames its glow. Reflections keep theirs (reflections: The sun in the capture).", (v) => `${(2 ** v).toPrecision(2)}×`),
     ],
   },
   {
