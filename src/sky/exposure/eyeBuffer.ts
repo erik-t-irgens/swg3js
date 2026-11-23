@@ -3,8 +3,8 @@
 // never read back in a frame. Everything that must follow the eye reads it on the card:
 //   - the chain's output (`gpuChain.ts`'s `outputGraph`): the picture times the eye's exposure, before three's tone mapping
 //     at the player's own compensation;
-//   - the bloom's bright pass: its threshold compared with the exposed luminance, so what blooms is what is bright on the
-//     screen, at noon and at night alike;
+//   - the bloom's first level under our sky (`gpuBloomMix.ts`, the sky and light fix round): its Karis average weighted by
+//     the exposed luminance, as his demo weights it; under SWG's sky the old bright pass's threshold against it;
 //   - the colour grade: its pivot (display mid-grey, `0.18` over the renderer's exposure) over the eye's exposure too, so a
 //     grade dial means the same at noon and at night;
 //   - the emissive things (`eyeGlowPart` on every classic material's node copy, and step 5's programs through `finish`):
@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { StorageBufferAttribute } from 'three/webgpu';
 import * as TSL from 'three/tsl';
-import { EYE_FIXED, EYE_FLOATS, EYE_SLOT } from './eyeMath.ts';
+import { EYE_FLOATS, EYE_SLOT, EYE_TUNE } from './eyeMath.ts';
 import { EYE_OUT } from './eyeRun.ts';
 import { toCanvasNode } from '../../core/gpu/inlineOutput.ts';
 import type { LookPart } from '../../core/gpu/looks.ts';
@@ -33,7 +33,7 @@ export const EYE_ATTR: Any = (() => {
   const a = new Float32Array(EYE_BUFFER_FLOATS);
   a[EYE_SLOT.exposure] = 1;
   a[EYE_SLOT.glow] = 1;
-  a[EYE_SLOT.mean] = Math.log2(EYE_FIXED.key);
+  a[EYE_SLOT.mean] = Math.log2(EYE_TUNE.key);
   return new StorageBufferAttribute(a, 1);
 })();
 

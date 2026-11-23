@@ -53,6 +53,12 @@ export interface FxSettings {
   motionBlurObjects: boolean;
   bloom: boolean;
   bloomStrength: number;
+  /**
+   * The sky and light fix round: WebGPU's Bloom strength under our sky (`src/core/gpu/gpuBloomMix.ts`), the share of the
+   * picture's light laid over it from its blurred levels (`mix(picture, bloom, share)`, the owner's demo's), 0 to 0.12. WebGL
+   * and SWG's sky keep `bloomStrength`.
+   */
+  bloomMix: number;
   lensFlare: boolean;
   lensFlareStrength: number;
   colorGrade: boolean;
@@ -247,6 +253,10 @@ export const FX_DEFAULTS: FxSettings = {
   motionBlurObjects: true,
   bloom: true,
   bloomStrength: 0.35,
+  // His demo's 0.04 (its slider 0 to 0.12; the row's hint says "4% to start", the demo being the team's reference, not the
+  // player's): a twenty-fifth of the picture's light spread round it, so the sun and a lamp's
+  // core glow and a sunlit wall barely does. A number of look: the owner's, on the Graphics page's Bloom strength.
+  bloomMix: 0.04,
   lensFlare: true,
   lensFlareStrength: 0.5,
   colorGrade: true,
@@ -321,6 +331,8 @@ export const FX_KNOBS: readonly FxKnobDef[] = [
   { key: 'motionBlurObjects', pass: 'motionBlur', product: 'velocity', label: 'Motion blur on moving things', kind: 'toggle', requires: ['effects', 'motionBlur'], hint: 'Ships, speeders, creatures and people smear by their own movement, not only the camera’s. Off: only the camera blurs the picture. What you ride, fly or stand in stays sharp either way.' },
   { key: 'bloom', pass: 'bloom', label: 'Bloom', kind: 'toggle', requires: ['effects'], hint: 'The bright parts spill over: engine glows, bolts, the suns.' },
   { key: 'bloomStrength', pass: 'bloom', label: 'Bloom strength', kind: 'range', min: 0.05, max: 1.5, step: 0.05, format: two, requires: ['effects', 'bloom'], hint: '0.1 a touch, 0.5 a glow, 1 a haze.' },
+  // The sky and light fix round: WebGPU's under our sky, in place of the row above (shown by the page's own rule in `main.ts`).
+  { key: 'bloomMix', pass: 'bloom', label: 'Bloom strength', kind: 'range', min: 0, max: 0.12, step: 0.005, format: (v) => (v === 0 ? 'Off' : `${(v * 100).toFixed(1)}%`), requires: ['effects', 'bloom'], hint: "The share of the picture's light spread round it as a soft glow, with no threshold: every bright thing glows by how bright it is, the sun and lamps most, a sunlit wall hardly at all. 4% to start; 12% a hazy, dreamy glow; Off none." },
   { key: 'lensFlare', pass: 'lensFlare', label: 'Lens flare', kind: 'toggle', requires: ['effects'], hint: 'A glare and the lens’s reflections when you look towards the sun (in space, the brightest star). They fade as anything passes in front of it, and in cloud.' },
   { key: 'lensFlareStrength', pass: 'lensFlare', label: 'Lens flare strength', kind: 'range', min: 0, max: 1.5, step: 0.05, format: two, requires: ['effects', 'lensFlare'], hint: '0.25 a trace, 0.5 a camera, 1 a film’s. It never brightens what is already near white, so by day it shows mostly as a streak and ghosts.' },
   { key: 'colorGrade', pass: 'colorGrade', label: 'Colour grade', kind: 'toggle', requires: ['effects'], hint: 'A look for each planet over the light of its own sky at this hour: Tatooine’s sun warmer and richer, Mustafar hot, Dathomir bleak and cold, nights moonlit. Rooms and ship interiors take a third of it.' },

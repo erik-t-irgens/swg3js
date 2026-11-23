@@ -72,6 +72,9 @@ import { SEE_STATS } from '../../sky/air/airSee.ts';
 import { NIGHT_IN, NightSky } from '../../sky/night/nightGpu.ts';
 // Pass 2, wave 4a (maker B): the moons and planets as lit spheres through the air (`src/sky/bodies/skyBody.ts`).
 import { SkyBodies, bakeCache } from '../../sky/bodies/skyBody.ts';
+// The sky and light fix round (maker L): the lights the player carries, their nodes registered with three as this module
+// loads, before any material is built (`carriedLights.ts`).
+import { CARRIED_LIGHTS } from './carriedLights.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -349,6 +352,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
       make: (planet: string, key: string, placeOf: () => { x: number; y: number; z: number }) => new NightSky(renderer, { planet, key, placeOf }),
       nightIn: NIGHT_IN,
     },
+    // The sky and light fix round (maker L): the effects' pool light and the flashlight, drawn times the eye's compensation.
+    carried: CARRIED_LIGHTS,
     // Pass 2, wave 4a (maker B): the moons and planets (`src/sky/bodies/skyBody.ts`), one set a sky, made behind its screen.
     skyBodies: {
       make: (cards) => SkyBodies.make(cards),
@@ -530,6 +535,8 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         ground: { tiles: LOOKS_AT_LOAD.ground ? 'the tile program, a node graph over the very uniforms the WebGL program reads (gpuGround.ts)' : "step 3's plain ground: the part is left out at load (localStorage['swg.gpu.ground'] = '0')", rings: LOOKS_AT_LOAD.rings ? 'the far rings, a node graph over the session ring uniforms and the tile program uniforms (gpuGround.ts); __debug.horizon({ ground }) and the Graphics page move them' : "left out at load (localStorage['swg.gpu.rings'] = '0'): the far ground is drawn as far tiles", graphs: { ...GROUND_GPU_STATS, builds: { ...GROUND_GPU_STATS.builds } }, live: "__debug.gpu({ look: { ground: false } }) draws step 3's plain look through the same graph (a uniform; nothing built)", diffuseBack: GPU_LOOK.groundDiffuseBack, selfTests: '__debug.groundSelfTest() and __debug.horizon({ selfTest: true }) run on WebGPU' },
         // Step 5's own programs (lava, the marks, the blades, the client's particles, the tunnel), and what is left for the remakes.
         programs: programsReport(),
+        // The sky and light fix round (maker L): the lights the player carries, drawn times the eye's compensation.
+        carried: CARRIED_LIGHTS.report(),
         // Step 6's effects chain: what is ported, whether it was taken in at load, what each graph binds, and what draws now.
         chain: chain.report(),
         // Step 6, item 5: the Effects-off picture drawn the way WebGL draws it (every material tone-mapped onto the canvas).

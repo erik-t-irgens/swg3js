@@ -2,13 +2,18 @@
 // three's exposure, and the buffer written where the card does not adapt) over a stand-in renderer, its inputs written field
 // by field as the game's frame writes them, the light on the level ground moving every frame (the sun's height followed, so the
 // buffer is written often), the modes crossed (adapting, following the sun, today's, and the wave's fixer's chain drawing on
-// without its eye pass), and the drawn frame's roll of the pre-exposure (`eyeBegin`, the fixer's), over a window with no
+// without its eye pass), and the drawn frame's roll of the pre-exposure (`eyeBegin`, the fixer's); and (the sky and light fix
+// round) the chain's own frame of the eye pass and the demo's bloom over the same stand-in (`GpuEyePass.render`,
+// `GpuMixBloomPass.prepare` and `render`, the row's strength moving and the picture's size crossing), over a window with no
 // collection, the least of three clean windows kept. Not a test itself: `eyeAlloc.test.ts` runs it in twelve processes at once
 // (`node --expose-gc --allow-natives-syntax`).
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
+import * as THREE from 'three';
 import { EYE_IN } from '../../../src/sky/exposure/eyeRun.ts';
 import { GpuEyePass, eyeBegin, eyeFrameGpu, eyeReady } from '../../../src/sky/exposure/eyeGpu.ts';
+import { GpuMixBloomPass } from '../../../src/core/gpu/gpuBloomMix.ts';
+import { FX_DEFAULTS } from '../../../src/core/fxRegistry.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -22,12 +27,18 @@ const tick = () => new Promise((r) => setImmediate(r));
 
 // The renderer's exposure begun as a fraction, as the game's is once the eye has written it; its compute stands in for three's
 // dispatch (the wave's fixer: the pre-exposure's roll, once a drawn frame).
-const r: Any = { toneMappingExposure: 0.5, compute() {} };
+const r: Any = { toneMappingExposure: 0.5, compute() {}, setRenderTarget() {}, render() {} };
 // The eye's kit made and landed (the stand-in has no asynchronous compile), so the roll is dispatched as in the game.
 new GpuEyePass(r).dispose();
 if (!eyeReady()) throw new Error("the eye's computes did not land over the stand-in");
 const st = new Float64Array(2);
 const e = EYE_IN;
+// The sky and light fix round: the chain's eye pass and the demo's bloom, drawn over the stand-in on the chain's two buffers
+// in turn, the Bloom strength row's share kept as a fraction as the game's is.
+const eyePass = new GpuEyePass(r);
+const bloom = new GpuMixBloomPass(1600, 900, 0.04);
+const pictures: Any[] = [new THREE.RenderTarget(1600, 900), new THREE.RenderTarget(1600, 900)];
+const ctx: Any = { renderer: r, settings: { ...FX_DEFAULTS, bloomMix: 0.04 } };
 
 /**
  * One frame: the inputs as the game writes them (a frame's seconds, the air, the chain, whether it draws its eye pass, the row,
@@ -47,7 +58,18 @@ function frame(): void {
   // The light on the level ground, from noon's to a moonlit night's and back over the window.
   e.level = 1.758 * Math.exp(-6 * (1 + Math.sin(a)));
   eyeFrameGpu(r);
-  if (e.chain) eyeBegin(r);
+  if (e.chain) {
+    eyeBegin(r);
+    // The chain's frame: the eye pass (drawing only while the card adapts) and the bloom, the row moved now and then.
+    // The chain's two buffers taken in turn (the picture's own size: a resize is no steady frame).
+    const pic = pictures[n & 1];
+    eyePass.render(ctx, pic, null);
+    ctx.settings.bloomMix = (n & 1023) < 512 ? 0.04 : 0.065;
+    if (bloom.enabled(ctx)) {
+      bloom.prepare(ctx);
+      bloom.render(ctx, pic, null);
+    }
+  }
 }
 function frames(k: number): void {
   for (let i = 0; i < k; i++) frame();

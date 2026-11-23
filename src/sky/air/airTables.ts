@@ -38,6 +38,19 @@ export const TABLE_STEPS = {
 /** The record's changes smaller than this share of a number draw nothing again (the slow tables). */
 export const REBUILD_SHARE = 1e-4;
 
+/**
+ * The sky and light fix round (maker L; the owner's "at night I can see steps to the haze"): the sky view's and the haze
+ * volume's light are stored times this in their half floats and read back times its inverse. A moonlit sky is about 1e-7 in
+ * the scene's units, under a half float's smallest normal (6.1e-5), where only its subnormals' steps of 2^-24 remain: read back
+ * at Tatooine's night the sky view held eight values in all (nought and seven steps of 6e-8), and the eye's 2^16 made each a
+ * band several levels apart on the screen. Times 2^10 the same night stands at 6e-5 to 4e-4 with ten bits of its own; the
+ * brightest the day reaches (the sky by a dusk sun through a 5 km haze at the glow's highest dial, about 50 in the twin) stands
+ * at 51,200, under the half float's 65,504, and every store is held to `AIR_STORE_MOST` besides. Not a dial: a store's
+ * precision, which nothing of the picture asks to move.
+ */
+export const AIR_STORE = 1024;
+export const AIR_STORE_MOST = 65000;
+
 const PI = Math.PI;
 const GOLDEN = PI * (3 - Math.sqrt(5));
 
@@ -272,7 +285,8 @@ class Tables implements AirTables {
       gain: this.uGain.toArray(),
       transmittance: await read(this.tTarget),
       multiScatter: await read(this.msTarget),
-      skyView: await read(this.svTarget),
+      // The light back in the scene's units (the fix round's `AIR_STORE`).
+      skyView: (await read(this.svTarget)).map((v, i) => ((i & 3) === 3 ? v : v / AIR_STORE)),
     };
   }
 
@@ -340,6 +354,12 @@ class Tables implements AirTables {
     const volume = new Float32Array(W * H * D * 4);
     const half = raw instanceof Uint16Array;
     for (let i = 0; i < volume.length; i++) volume[i] = half ? THREE.DataUtils.fromHalfFloat(raw[i]) : raw[i];
+    // The light back in the scene's units (the fix round's `AIR_STORE`); what gets through is stored as it is.
+    for (let i = 0; i < volume.length; i += 4) {
+      volume[i] /= AIR_STORE;
+      volume[i + 1] /= AIR_STORE;
+      volume[i + 2] /= AIR_STORE;
+    }
     return { ...words, width: W, height: H, depth: D, volume };
   }
 
@@ -660,7 +680,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     const L = vec3(0).toVar('airSvL');
     const Tr = vec3(1).toVar('airSvT');
     march(r, d, float(1e9), TABLE_STEPS.skyView, L, Tr);
-    return vec4(L.mul(gain), 1);
+    // Stored times `AIR_STORE` (the fix round: a night's light has bits of its own there), read back times its inverse.
+    return vec4(min(L.mul(gain).mul(AIR_STORE), AIR_STORE_MOST), 1);
   })();
 
   // ---------------------------------------------------------------- the haze volume (on compute)
@@ -701,7 +722,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         Tr.mulAssign(exp(sigma.negate().mul(dt)));
         prev.assign(e1);
       });
-      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(L.mul(gain), Tr.x.add(Tr.y).add(Tr.z).div(3)));
+      // The light stored times `AIR_STORE` as the sky view's is; what gets through, a share, as it is.
+      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(min(L.mul(gain).mul(AIR_STORE), AIR_STORE_MOST), Tr.x.add(Tr.y).add(Tr.z).div(3)));
       store.toWriteOnly();
       store.toStack();
     });
@@ -725,7 +747,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const yb = float(0.5).add(sqrt(clamp(fromH.negate().div(max(float(PI / 2).sub(dip), 1e-6)), 0, 1)).mul(0.5));
       const y = select(fromH.greaterThanEqual(0), ya, yb);
       const x = sqrt(clamp(az.div(PI), 0, 1));
-      return texture(T.sv, vec2(unitToTexel(x, SW), unitToTexel(y, SH))).level(0).rgb;
+      return texture(T.sv, vec2(unitToTexel(x, SW), unitToTexel(y, SH))).level(0).rgb.mul(1 / AIR_STORE);
     },
     transmittanceToSpace(dir: Any): Any {
       const d = normalize(dir);
@@ -733,7 +755,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     },
     hazeAt(ndc: Any, distanceM: Any): Any {
       const w = sqrt(clamp(distanceM.div(HAZE_REACH_M), 0, 1));
-      return texture3D(U.volume, vec3(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5), w)).level(0);
+      const h = texture3D(U.volume, vec3(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5), w)).level(0);
+      return vec4(h.rgb.mul(1 / AIR_STORE), h.a);
     },
   };
 

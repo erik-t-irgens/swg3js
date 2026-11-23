@@ -105,6 +105,8 @@ export function airSkyMaterial(planet: string, horizon: THREE.Color, zenith: THR
   const limb = dial(() => DISC_TUNE.limb);
   const edge = dial(() => DISC_TUNE.edge);
   const gain = dial(() => DISC_TUNE.gain);
+  // The sky and light fix round (maker L): each disc's radius times the Disc size dial (its light as a whole kept, `disc`).
+  const size = dial(() => DISC_TUNE.size);
   // Pass 2, wave 2 (maker B): in the reflections' capture (the scene three draws, read once a render) each disc spread to at
   // least `CAPTURE_TUNE.sunDeg` of radius and capped at `sunCap` of its light a steradian (`captureTune.ts` says why); in the
   // world neither (the least radius nought, the cap one no disc reaches).
@@ -116,8 +118,8 @@ export function airSkyMaterial(planet: string, horizon: THREE.Color, zenith: THR
     // Every table read at the top, before anything else.
     const sky = vec3(tables.skyRadiance(d)).toVar('swgSkyL');
     const t = vec3(tables.transmittanceToSpace(d)).toVar('swgSkyT');
-    const sun1 = disc(d, n.sunDir, max(n.sunRadius, capLeast), n.sunTop, limb, edge, capMost);
-    const sun2 = disc(d, n.sun2Dir, max(n.sunRadius.mul(ratio), capLeast), n.sun2Top, limb, edge, capMost);
+    const sun1 = disc(d, n.sunDir, max(n.sunRadius.mul(size), capLeast), n.sunTop, limb, edge, capMost);
+    const sun2 = disc(d, n.sun2Dir, max(n.sunRadius.mul(ratio).mul(size), capLeast), n.sun2Top, limb, edge, capMost);
     const discs = sun1.add(sun2).mul(t).mul(float(1).sub(clamp(n.overcast, 0, 1))).mul(gain).mul(seen);
     return vec4(sky.add(discs), 1);
   })();

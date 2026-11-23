@@ -47,6 +47,8 @@ import { GpuHazePass } from '../../sky/air/airHaze.ts';
 import { GpuEyePass } from '../../sky/exposure/eyeGpu.ts';
 import { markSceneTarget } from '../../sky/exposure/preExpose.ts';
 import { GpuLensFlarePass } from '../../sky/night/gpuFlare.ts';
+import { GpuMixBloomPass } from './gpuBloomMix.ts';
+import { withOutputDither } from './outputDither.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -64,7 +66,8 @@ const LIVE: PostFX[] = [];
 // ---------------------------------------------------------------- the passes
 
 export class GpuSanitizePass extends SanitizePass {
-  private readonly g = sanitizeGraph(this.material.uniforms as never);
+  // The sky and light fix round: under our sky the ceiling is the stored picture's own (`CHAIN_NUMBERS.sanitize.stored`).
+  private readonly g = sanitizeGraph(this.material.uniforms as never, skyOurs());
   fx: PostFX | null = null;
 
   render(ctx: FxFrameContext, _input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
@@ -321,6 +324,8 @@ export class GpuOutputPass extends OutputFxPass {
     // The one chain graph WebGL tone-maps (its OutputPass): under the inline output (item 5) it is drawn straight onto the
     // canvas and takes the ACES fit and the sRGB curve in its own output; without it three's output pass does, after it.
     this.g.material.toneMapped = true;
+    // The sky and light fix round: under our sky one 8-bit step of dither after those curves (`outputDither.ts`, the demo's).
+    if (skyOurs()) withOutputDither(this.g.material);
     this.mv = motionViewGraph(this.mvU);
   }
 
@@ -411,7 +416,7 @@ function flareHere(pass: FxPassId): boolean {
 /** What each graph binds (rule 4), for the console. */
 export const CHAIN_BINDS = {
   sanitize: '1 texture (the scene target) and its sampler',
-  bloom: 'the bright pass 1, each of the ten blurs 1 (one binding however many taps: 11 to 43), the composite 5, the blend 1: each texture with its sampler',
+  bloom: "under our sky the demo's bloom (gpuBloomMix.ts): each of the six downs 1 (thirteen taps), each of the five ups 1 (nine taps), the mix 1 (nine taps), each texture with its sampler; under SWG's sky three's: the bright pass 1, each of the ten blurs 1 (one binding however many taps: 11 to 43), the composite 5, the blend 1: each texture with its sampler",
   ssao: "as the WGSL declares them (read off `renderer.debug.getShaderAsync` at 1600 by 900, step 6's fixer), at half resolution (the default) and at full: the GTAO 6 textures at half (the half distance, the half normals, the region, the three cascades' maps) and 5 at full (the scene's depth, the region, the three cascades' maps), with 3 samplers declared beside the cascades' maps in both and never sampled (the maps are fetched and compared by hand: three 0.187 declares no comparison sampler for a node texture's compare); the blur 2 at either (the occlusion and the half distance at half, the occlusion and the depth at full), no sampler; the apply 6 textures at half (the picture, the depth, the occlusion, the half distance, the half normals, the region's green for the water) and 4 at full (the picture, the depth, the occlusion, the region), 1 sampler (the picture's); the region read 0 (a stencil test), the water's coverage 0, the probe 2 (the depth, the occlusion), the debug view 3 and 2 samplers; the products: the half distance 1 (the depth), the half normals 1 (the half distance); every graph under 16 of each",
   colorGrade: '1 texture (the chain buffer) and its sampler',
   taa: "each resolve 5 textures (this frame's picture, the history's colour and its distance, the scene's depth, the motion buffer), the history's two with a sampler (read at level 0), the others loaded; then the colour copied into the chain buffer",
@@ -461,7 +466,9 @@ export function chainRuntime(renderer: Any): GpuChain {
       // Pass 2, wave 2: the eye, after everything that adds light and before the bloom (the registry's place); SWG's sky
       // registers none, and its chain is the one it was.
       if (skyOurs()) fx.registerPass(new GpuEyePass(renderer));
-      if (CHAIN_PORTED.has('bloom')) fx.registerPass(new GpuBloomPass(width, height, settings.bloomStrength));
+      // The sky and light fix round: under our sky the owner's demo's bloom (`gpuBloomMix.ts`: no threshold, mixed over the
+      // picture at the Bloom strength row's share); SWG's sky keeps three's Unreal bloom, its chain the one it was.
+      if (CHAIN_PORTED.has('bloom')) fx.registerPass(skyOurs() ? new GpuMixBloomPass(width, height, settings.bloomMix) : new GpuBloomPass(width, height, settings.bloomStrength));
       fx.registerPass(new GpuOutputPass());
     },
     install(fx: PostFX, deps: FxInstallDeps): void {

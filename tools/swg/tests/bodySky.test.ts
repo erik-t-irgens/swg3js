@@ -87,7 +87,9 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
     }
   };
   walk(join(ROOT, 'src'));
-  const ALLOWED = new Set(['src/world/sky.ts', 'src/world/world.ts', 'src/core/gpu/start.ts', 'src/core/gpuSwitch.ts', 'src/main.ts']);
+  // The debug menu's model names the console helper `skyBodies` under its "Sky and light" heading (the sky and light fix round):
+  // a helper's name in a list, no read of the bodies' setting.
+  const ALLOWED = new Set(['src/world/sky.ts', 'src/world/world.ts', 'src/core/gpu/start.ts', 'src/core/gpuSwitch.ts', 'src/main.ts', 'src/ui/debugModel.ts']);
   const readers: string[] = [];
   for (const f of files) {
     const r = relative(ROOT, f).replace(/\\/g, '/');

@@ -26,7 +26,7 @@ import * as TSL from 'three/tsl';
 import type { FxFrameContext } from '../../core/fx/context.ts';
 import { FX_CAMERA, type FxPass, type FxWarmItem } from '../../core/fx/pass.ts';
 import type { FxPassId, FxProductId, FxSettings } from '../../core/fxRegistry.ts';
-import { chainMaterial, graph, storedOf, type ChainGraph } from '../../core/gpu/gpuChain.ts';
+import { CHAIN_NUMBERS, chainMaterial, graph, storedOf, type ChainGraph } from '../../core/gpu/gpuChain.ts';
 import { liveTexture } from '../../core/gpu/gpuGround.ts';
 import { AIR, HAZE_REACH_M } from './airApi.ts';
 import { buildsLayer, seeTextureOf } from './airSee.ts';
@@ -38,10 +38,11 @@ type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 const { Fn, If, abs, cameraProjectionMatrix, clamp, float, floatBitsToUint, floor, ivec2, length, max, min, normalize, output, outputStruct, positionView, pow, renderGroup, select, sqrt, struct, texture, uint, uniform, uv, vec2, vec3, vec4 } = TSL as Any;
 
 /**
- * The haze's numbers that are no dial: the exponent field a value that is not a number fills and the brightest a pixel is
- * held to (the sanitize's own, which stands before this pass: `gpuChain.ts`'s `CHAIN_NUMBERS.sanitize`), and a floor.
+ * The haze's numbers that are no dial: the exponent field a value that is not a number fills, and a floor. The brightest a
+ * pixel is held to is the sanitize's own under our sky, which stands before this pass (`gpuChain.ts`'s
+ * `CHAIN_NUMBERS.sanitize.stored`, the sky and light fix round).
  */
-export const HAZE_NUMBERS = { exponent: 0x7f800000, ceiling: 256.0, tFloor: 1e-6 } as const;
+export const HAZE_NUMBERS = { exponent: 0x7f800000, tFloor: 1e-6 } as const;
 
 /** What the haze has done, for `__debug.sky()` and the tests. */
 export const HAZE_STATS = { drawn: 0, plain: 0, built: 0, fogBuilt: { solid: 0, seeThrough: 0, none: 0 } };
@@ -193,8 +194,9 @@ export function hazeGraph(u: HazeInputs, air: boolean, terms: HazeTerms | null =
         out.assign(c.rgb.add(s.rgb));
       });
     }
-    // The ceiling is the scene's (the sanitize's), stood in the picture's units (the wave's fixer).
-    return vec4(clamp(out, vec3(0), vec3(storedOf().mul(HAZE_NUMBERS.ceiling))), 1);
+    // The ceiling is the sanitize's under our sky (the sky and light fix round: `CHAIN_NUMBERS.sanitize.stored`, in the stored
+    // picture's own units), so the sun's disc and a hazy aureole keep their shape past this pass into the bloom.
+    return vec4(clamp(out, vec3(0), vec3(CHAIN_NUMBERS.sanitize.stored)), 1);
   })();
   HAZE_STATS.built++;
   const textures: Record<string, Any> = { input, depth, see };

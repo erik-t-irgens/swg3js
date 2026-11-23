@@ -39,13 +39,19 @@ const { Fn, If, clamp, dot, float, floatBitsToUint, log2, max, min, mix, positio
  * Every number the graphs are built from that is not a uniform, each its WebGL text's own (`gpuChain.test.ts` reads the
  * GLSL out of `passes.ts`, `bloomHold.ts`, three's own shaders and `grade.ts` and holds these to its literals):
  *   - the sanitize's ceiling (`clamp(c.rgb, 0.0, 256.0)`) and the exponent field a value that is not a number fills
- *     (WGSL has no `isnan` or `isinf`, and a compiler may assume neither happens: the bits are read instead);
+ *     (WGSL has no `isnan` or `isinf`, and a compiler may assume neither happens: the bits are read instead); and under our
+ *     sky (the sky and light fix round) the ceiling in the stored picture's own units, `stored` 8192: the scene is stored a
+ *     frame behind the eye's exposure (`preExpose.ts`), so a stored value is about what the eye shows before the tone curve,
+ *     where 15 is already white; 8192 is some 540 times that, so a sun disc and the brightest hazy aureole keep their shape
+ *     into the bloom (the old 256 in the scene's units made both flat white blobs), and it is the largest power of two whose
+ *     six times stays under a half float's 65,504, the most the demo's bloom (`gpuBloomMix.ts`) sums into its first level as
+ *     it adds its six levels back up (every filter of it a weighted mean, so no level holds more than the picture's most);
  *   - the bloom composite's `3.0`, the radius's mirror at `1.2` and the bright pass's luminance weights (three's
  *     `luminance()` written as `WebGLProgram` writes it, the working space's coefficients to four places);
  *   - the grade's floors and its zone's numbers.
  */
 export const CHAIN_NUMBERS = {
-  sanitize: { ceiling: 256.0, exponent: 0x7f800000 },
+  sanitize: { ceiling: 256.0, exponent: 0x7f800000, stored: 8192.0 },
   bloom: { composite: 3.0, mirror: 1.2 },
   grade: { luma: LUMA, lumaFloor: 1e-7, logFloor: 1e-5, zoneShift: 2.0, zoneSpan: 4.0, smoothA: 3.0, smoothB: 2.0, shadowFrom: 32.0, shadowTo: 4.0, highFrom: 8.0, highTo: 32.0, satFloor: 1e-7 },
 } as const;
@@ -153,7 +159,11 @@ export const graph = (material: NodeMaterial, textures: number, parts: ChainPart
 /** A value that is not a number or is infinite: its exponent field filled (f32, read off the bits). */
 const notFinite = (x: Any): Any => floatBitsToUint(x).bitAnd(uint(CHAIN_NUMBERS.sanitize.exponent)).equal(uint(CHAIN_NUMBERS.sanitize.exponent));
 
-export function sanitizeGraph(u: { tScene: { value: THREE.Texture | null } }): ChainGraph {
+/**
+ * The sanitize: values that are not numbers zeroed, the brightest held. `ours` (our sky, read at load: the sky and light fix
+ * round) holds them to `stored` in the stored picture's own units; SWG's sky to the WebGL text's 256 in the scene's, as it was.
+ */
+export function sanitizeGraph(u: { tScene: { value: THREE.Texture | null } }, ours = false): ChainGraph {
   const m = chainMaterial('fx.gpu.sanitize');
   const scene = tex(u.tScene);
   m.fragmentNode = Fn(() => {
@@ -161,6 +171,7 @@ export function sanitizeGraph(u: { tScene: { value: THREE.Texture | null } }): C
     If(notFinite(c.x).or(notFinite(c.y)).or(notFinite(c.z)).or(notFinite(c.w)), () => {
       c.assign(vec4(0, 0, 0, 1));
     });
+    if (ours) return vec4(clamp(c.rgb, vec3(0), vec3(CHAIN_NUMBERS.sanitize.stored)), 1);
     // Pass 2, wave 2's fixer: the ceiling is the scene's, stood in the picture's units (`storedOf`, 1 where nothing is pre-exposed).
     return vec4(clamp(c.rgb, vec3(0), vec3(storedOf().mul(CHAIN_NUMBERS.sanitize.ceiling))), 1);
   })();

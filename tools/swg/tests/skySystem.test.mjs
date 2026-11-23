@@ -321,7 +321,8 @@ section('the first round\'s drafts and every draft of version 2, as recorded fro
   // Recorded on 22 November from the moved modules and from the live viewer's own copy (`sysdigests.mjs` in the wave's
   // scratch), which agreed: every version 1 draft cleaned and drawn at fifty moments, and every version 2 draft.
   const RECORDED = { drafts1File: 'f19aaf65f179923b', v1Worlds: 14, v1: '1b6279c877787844', v2Systems: 12, v2: '8186d664ae0a1f14' };
-  ok(hash(readFileSync(new URL('drafts1.js', SYS))) === RECORDED.drafts1File, 'drafts1.js is the first round\'s drafts.js unchanged (its hash as recorded)');
+  // Hashed with its line ends as git keeps them (LF): a checkout made with `core.autocrlf` has CRLF on disk.
+  ok(hash(readFileSync(new URL('drafts1.js', SYS), 'utf8').replace(/\r\n/g, '\n')) === RECORDED.drafts1File, 'drafts1.js is the first round\'s drafts.js unchanged (its hash as recorded)');
   const v1 = createHash('sha256');
   for (const w of D1.DRAFT_WORLDS) {
     const sys = S.cleanSystem(JSON.parse(JSON.stringify(D1.draftFor(w))));

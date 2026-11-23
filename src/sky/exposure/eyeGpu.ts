@@ -8,8 +8,10 @@
 //   2. **the count**: a compute pass, one invocation a texel, adds its weight (`weightAt`: more toward the middle) to its
 //      bin of `EYE_FIXED.bins` in an atomic histogram;
 //   3. **the eye**: a compute pass of one invocation walks the bins (`eyeMath.ts`'s `eyeFrame`, line for line): the mean
-//      between the 40th and the 96th percentiles, the full make-up, the dark-night rule, the ease by the frame's time, and
-//      writes the eye's buffer (`eyeBuffer.ts`), keeping the count it read for the console's check and emptying it.
+//      between the 40th and the top percentile (maker L's `EYE_LIGHTS.top`, 0.96), his demo's curve (the mean held to the
+//      darkest and brightest scenes adapted to, a share of each stop under the knee, the stops to the key), the ease by the
+//      frame's time at the demo's rates, and writes the eye's buffer (`eyeBuffer.ts`), keeping the count it read for the
+//      console's check and emptying it.
 //
 // The pass draws only while the main thread says the card adapts (`EYE_FRAME.adapting`: our sky, a world whose air draws, a
 // chain whose eye pass is wanted and ready, the Eye adaptation row on); otherwise the buffer holds the main thread's answer
@@ -26,14 +28,15 @@ import type { FxFrameContext } from '../../core/fx/context.ts';
 import type { FxPassId, FxProductId, FxSettings } from '../../core/fxRegistry.ts';
 import { LUMA } from '../../core/fx/gradeMath.ts';
 import { chainMaterial, graph, tex, type ChainGraph } from '../../core/gpu/gpuChain.ts';
-import { EYE_FIXED, EYE_FRAME, EYE_SLOT, EYE_STATE, EYE_TUNE, binCentreLog, eyeFrame, kneeStops, tuneEye } from './eyeMath.ts';
+import { EYE_DEMO, EYE_FIXED, EYE_FRAME, EYE_SLOT, EYE_STATE, EYE_TUNE, binCentreLog, eyeFrame, targetStops, tuneEye } from './eyeMath.ts';
+import { EYE_LIGHTS } from '../eyeLights.ts';
 import { EYE_ATTR, EYE_BUFFER_FLOATS, EYE_GLOW_STATS, EYE_SLOT_MORE, readEyeBuffer, writeEyeCpu } from './eyeBuffer.ts';
 import { EYE_IN, EYE_OUT, eyeFrameRun, eyeRange } from './eyeRun.ts';
 import { PRE_ATTR, PRE_FIXED, PRE_SLOT, PRE_STATS, preNode } from './preExpose.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Fn, If, Loop, atomicAdd, atomicLoad, atomicStore, clamp, dot, exp, exp2, float, floatBitsToUint, floor, instanceIndex, int, ivec2, log2, max, renderGroup, select, storage, uint, uniform, uv, vec2, vec3, vec4 } = TSL as Any;
+const { Fn, If, Loop, atomicAdd, atomicLoad, atomicStore, clamp, dot, exp, exp2, float, floatBitsToUint, floor, instanceIndex, int, ivec2, log2, max, min, renderGroup, select, storage, uint, uniform, uv, vec2, vec3, vec4 } = TSL as Any;
 
 const NO_NEEDS: readonly FxProductId[] = [];
 
@@ -89,7 +92,6 @@ function kit(): EyeKit {
   const qhF = uniform(1).setGroup(renderGroup);
   const quarter = tex(QUARTER);
   const centre = dial(() => EYE_TUNE.centre);
-  const s2 = 2 * F.spread * F.spread;
   const count = Fn(() => {
     const i = instanceIndex;
     const x = i.mod(qw);
@@ -99,28 +101,31 @@ function kit(): EyeKit {
     const bin = uint(t.mul(BINS)).toVar('eyeBin');
     const px = float(x).add(0.5).div(qwF).mul(2).sub(1);
     const py = float(y).add(0.5).div(qhF).mul(2).sub(1);
-    const r2 = px.mul(px).add(py.mul(py)).mul(0.5);
-    const w = float(1).add(centre.mul(exp(r2.negate().div(s2))));
-    atomicAdd(hist.element(bin), uint(floor(w.mul(F.unit).add(0.5))));
+    // The demo's centre weight: `mix(4, 16, exp(-1.5 d²))` at `centre` 3 (`weightAt`).
+    const d2 = px.mul(px).add(py.mul(py));
+    const w = float(F.unit).mul(float(1).add(centre.mul(exp(d2.mul(-F.fall)))));
+    atomicAdd(hist.element(bin), uint(floor(w.add(0.5))));
   })().compute(1, [64]);
   const dtUs = dial(() => EYE_FRAME.dtUs);
   const snap = dial(() => EYE_FRAME.snap);
-  const logKey = dial(() => Math.log2(EYE_FIXED.key));
+  const logKey = dial(() => Math.log2(EYE_TUNE.key));
+  const low = dial(() => EYE_TUNE.low);
+  const high = dial(() => EYE_TUNE.high);
   const knee = dial(() => EYE_TUNE.knee);
   const share = dial(() => EYE_TUNE.share);
-  const most = dial(() => EYE_TUNE.most);
-  const floorStops = dial(() => EYE_TUNE.floor);
   const intoLight = dial(() => EYE_TUNE.intoLight);
   const intoDark = dial(() => EYE_TUNE.intoDark);
   const glow = dial(() => EYE_TUNE.glow);
+  // Maker L's dial (`src/sky/eyeLights.ts`): the percentile the mean is taken up to, never under the bottom one.
+  const top = dial(() => EYE_LIGHTS.top);
   const stepLog = (F.maxLog - F.minLog) / BINS;
   const adapt = Fn(() => {
     const total = float(0).toVar('eyeTotal');
     Loop(BINS, ({ i }: Any) => {
       total.addAssign(float(atomicLoad(hist.element(i))));
     });
-    const lo = total.mul(F.low).toVar('eyeLo');
-    const hi = total.mul(F.high).toVar('eyeHi');
+    const lo = total.mul(F.bottom).toVar('eyeLo');
+    const hi = total.mul(max(top, F.bottom)).toVar('eyeHi');
     const cum = float(0).toVar('eyeCum');
     const sum = float(0).toVar('eyeSum');
     const w = float(0).toVar('eyeW');
@@ -142,15 +147,14 @@ function kit(): EyeKit {
       mean.assign(sum.div(w));
     });
     const m = logKey.sub(mean).toVar('eyeFull');
-    const s = m.toVar('eyeTarget');
-    If(m.greaterThan(knee), () => {
-      s.assign(max(knee.add(share.mul(m.sub(knee))), m.sub(most)));
-    });
-    s.assign(clamp(s, F.least, floorStops));
+    // His demo's curve (`kneeInto`): the mean held to [low, high], below the knee a share of each further stop, to the key.
+    const c = clamp(mean, low, high).toVar('eyeHeld');
+    const p = max(c, knee).add(share.mul(min(c.sub(knee), 0))).toVar('eyePerceived');
+    const s = clamp(logKey.sub(p), F.least, F.most).toVar('eyeTarget');
     const prev = float(eye.element(EYE_SLOT.stops)).toVar('eyePrev');
     const dt = float(dtUs).mul(1e-6).toVar('eyeDt');
-    const tau = max(select(s.lessThan(prev), intoLight, intoDark), 1e-3);
-    const k = float(1).sub(exp(dt.negate().div(tau)));
+    const rate = select(s.lessThan(prev), intoLight, intoDark);
+    const k = float(1).sub(exp(dt.mul(rate).negate()));
     const eased = select(snap.greaterThan(0.5), s, prev.add(s.sub(prev).mul(k))).toVar('eyeEased');
     eye.element(EYE_SLOT_MORE.prev).assign(prev);
     eye.element(EYE_SLOT_MORE.dt).assign(dt);
@@ -385,8 +389,10 @@ export async function eyeReport(renderer: Any, check: boolean): Promise<Record<s
     mode: modeWord,
     compensationStops: EYE_IN.stops,
     rendererExposure: n4(EYE_OUT.renderer),
-    count: { range: eyeRange(), percentiles: [EYE_FIXED.low, EYE_FIXED.high], quarter: EYE_GPU_STATS.size, key: EYE_FIXED.key },
+    count: { range: eyeRange(), percentiles: [EYE_FIXED.bottom, EYE_LIGHTS.top], quarter: EYE_GPU_STATS.size },
     tune: { ...EYE_TUNE },
+    lights: { ...EYE_LIGHTS },
+    units: `his demo's sun ${EYE_DEMO.demo} at the top of the air against ours ${EYE_DEMO.ours}: its log2 luminances moved by ${EYE_DEMO.shift.toFixed(4)} stops (its clamp -14 to 4 is ${(-14 + EYE_DEMO.shift).toFixed(2)} to ${(4 + EYE_DEMO.shift).toFixed(2)} here, its knee -2 is ${(-2 + EYE_DEMO.shift).toFixed(2)})`,
     glowParts: { ...EYE_GLOW_STATS },
     passes: { drawn: EYE_GPU_STATS.drawn, skipped: EYE_GPU_STATS.skipped, ready: KIT?.ready ?? false, ...(EYE_GPU_STATS.why ? { why: EYE_GPU_STATS.why } : {}) },
     preExposure: { installed: PRE_STATS.installed, on: PRE_ROLLS.on, graphsTaken: PRE_STATS.graphs, graphsLeft: PRE_STATS.left, rolls: PRE_ROLLS.n, ...(PRE_STATS.why ? { why: PRE_STATS.why } : {}), does: `the scene stored times last frame's eye exposure (pre), held to ${PRE_FIXED.cap}, every reader of the scene's units dividing it back out` },
@@ -409,7 +415,7 @@ export async function eyeReport(renderer: Any, check: boolean): Promise<Record<s
     frames: b[EYE_SLOT.frames],
     lastDt: n4(b[EYE_SLOT_MORE.dt]),
   };
-  const out: Record<string, unknown> = { ...base, card, kneeRule: `full ${card.fullMakeUpStops} stops, made up ${n4(kneeStops(b[EYE_SLOT.full]))} by the rule at the dials now` };
+  const out: Record<string, unknown> = { ...base, card, curve: `a scene at log2 ${card.sceneMeanLog2} wants ${card.fullMakeUpStops} stops to the key; the curve at the dials now makes up ${n4(targetStops(b[EYE_SLOT.mean]))}` };
   if (check) out.check = await eyeCheck(renderer);
   return out;
 }

@@ -226,6 +226,18 @@ interface Parts {
 /** The placeholder torso's look per class, made once (a material made per swap compiled its shader per swap). */
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const hiltGlow = new THREE.Vector3();
+/** A lit blade's wish for pooled light this frame (`lightSpotsInto`): where, how strong, how far. */
+export interface BladeSpot {
+  readonly pos: THREE.Vector3;
+  intensity: number;
+  distance: number;
+}
+/**
+ * What each blade out of the hand asks of the pool, the numbers `lightSpots` has always asked (the sky and light fix round put
+ * them here so WebGPU's held slots and WebGL's flashes ask alike): the thrown one 2.5 out to 6 m, the hilt's 2.2 out to 6 m, each
+ * orbiting one 2 out to 5 m.
+ */
+const BLADE_LIGHT = { thrown: 2.5, thrownReach: 6, hilt: 2.2, hiltReach: 6, orbit: 2, orbitReach: 5 };
 /** The placeholder blade meshes are frames for the blade renderer, never drawn themselves. */
 const BLADE_FRAME = new THREE.MeshBasicMaterial({ visible: false });
 /** Where the placeholder hilt ends and its blade begins, along the saber's Y. */
@@ -815,6 +827,40 @@ export class Player {
   saberColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
   /** The blade's own colour, as the glow draws it. */
   bladeColor = new THREE.Color(DEFAULT_SABER_COLOR).getHex();
+
+  /**
+   * `lightSpots` into kept records (the sky and light fix round, WebGPU's blades holding their pooled slots): each record's
+   * place copied, its light and reach written, nothing made; the count back. `out` holds three (the thrown one, the hilt, or the
+   * orbiting two).
+   */
+  lightSpotsInto(out: BladeSpot[]): number {
+    if (!this.saberInHand) return 0;
+    let n = 0;
+    if (this.thrown.inFlight) {
+      const o = out[n++];
+      o.pos.copy(this.flying.position);
+      o.intensity = BLADE_LIGHT.thrown;
+      o.distance = BLADE_LIGHT.thrownReach;
+    }
+    if (this.saberOn && !this.thrown.inFlight && !this.orbiting && this.classId === 'jedi' && !this.mounted) {
+      this.parts.saber.getWorldPosition(hiltGlow);
+      const o = out[n++];
+      o.pos.copy(hiltGlow);
+      o.pos.y += 0.6;
+      o.intensity = BLADE_LIGHT.hilt;
+      o.distance = BLADE_LIGHT.hiltReach;
+    }
+    if (this.orbiting) {
+      const orbit = this.orbit;
+      for (let i = 0; i < orbit.length && n < out.length; i++) {
+        const o = out[n++];
+        o.pos.copy(orbit[i].position);
+        o.intensity = BLADE_LIGHT.orbit;
+        o.distance = BLADE_LIGHT.orbitReach;
+      }
+    }
+    return n;
+  }
 
   /** Where the sabers out of the hand want light this frame: the thrown one, the orbiting two. */
   lightSpots(): { pos: THREE.Vector3; intensity: number; distance: number }[] {
