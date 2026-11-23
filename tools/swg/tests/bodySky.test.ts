@@ -8,7 +8,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import * as TSL from 'three/tsl';
-import { BODY_TIERS, BODY_TUNE, BODY_TUNE_RANGE, bodyFormOf, screenShareOf, tierRule, tuneBodies } from '../../../src/sky/bodies/bodyTier.ts';
+import { BODY_LAY, BODY_TIERS, BODY_TUNE, BODY_TUNE_RANGE, bodyFormOf, screenShareOf, tierRule, tuneBodies } from '../../../src/sky/bodies/bodyTier.ts';
 import { bodyOfPicture, bodyRecord, bodyTablesKey, hasAir } from '../../../src/sky/bodies/bodyAir.ts';
 import { BAKE_TUNE, BakeCache, idbStore, lookHash, type BakeStore } from '../../../src/sky/bodies/bakeCache.ts';
 import { bodyCardMaterial, type SkyBodyCard } from '../../../src/sky/bodies/bodyCard.ts';
@@ -93,14 +93,19 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
     const r = relative(ROOT, f).replace(/\\/g, '/');
     if (r.startsWith('src/sky/bodies/')) continue;
     const t = readFileSync(f, 'utf8');
+    // Wave 4b: the looks the bodies wear (`src/sky/look/`, maker A), the space planets' rims and the map's globes (`src/space/`,
+    // `src/ui/galaxyLooks.ts`, maker C) are the
+    // bodies' own drawing, not the ground path, and may read them; the condition is the ground's.
+    if (r.startsWith('src/sky/look/') || r.startsWith('src/space/') || r === 'src/ui/galaxyLooks.ts') continue;
     if (/(from|import\()\s*['"][^'"]*sky\/bodies\/|\b(BODY_TUNE|BODY_TIERS|bodyFormOf|tuneBodies)\b|\bskyBodies\b(?!\.ts)/.test(t) && !ALLOWED.has(r)) readers.push(r);
   }
   // The world's own reads are its hand-over alone: the runtime's set, made, framed and let go.
   const worldLines = text('src/world/world.ts').split('\n').filter((l) => /skyBodies|sky\/bodies/.test(l) && !/^\s*(\/\/|\*|\/\*\*)/.test(l));
-  ok(worldLines.length > 0 && worldLines.every((l) => /skyBodies(: GpuSkyBodySet \| null = null;| = set;| = null;|\.dispose\(|\.frame\(this\.camera\)| && this\.camera)|this\.skyBodies\)|GPU\.rt!\.skyBodies\.make\(cards\)/.test(l)), `the world's lines that name the bodies are its hand-over alone (${worldLines.length} lines: the set made, framed and let go)`);
+  ok(worldLines.length > 0 && worldLines.every((l) => /skyBodies(: GpuSkyBodySet \| null = null;| = set;| = null;|\.dispose\(|\.frame\(this\.camera\)| && this\.camera)|this\.skyBodies\)|GPU\.rt!\.skyBodies\.make\((worn\.)?cards\)/.test(l) || /^import .* from '\.\.\/sky\/bodies\/(heldBodies|groundDistant)\.ts';$/.test(l)), `the world's lines that name the bodies are its hand-over alone (${worldLines.length} lines: the set made (with the looks it wears, wave 4b's maker A), framed and let go; and wave 4b's held bodies' and ground plumes' plans, which read none of the bodies' setting)`);
   ok(readers.length === 0 && files.length > 500, `no file of the ground path (or anywhere else) reads the bodies' setting: ${readers.join(', ') || `none of ${files.length}`}`);
   const air = ['airTables.ts', 'airHaze.ts', 'airSee.ts', 'airSky.ts', 'airTwin.ts', 'airRun.ts', 'airFit.ts', 'airParams.ts'].map((n) => text(`src/sky/air/${n}`)).join('\n');
-  ok(!/bodies|BODY_/.test(air), "the air's own files (its tables, haze, sky, twin, run, fit and record) never name the bodies");
+  // (Wave 4b: the record may name the Save to game's reader, `bodiesFile.ts`, whose saved air is a world's own air: maker A's.)
+  ok(!/\bbodies\b|BODY_/.test(air), "the air's own files (its tables, haze, sky, twin, run, fit and record) never name the bodies");
 }
 
 // ---------------------------------------------------------------- 3. the 3% limb test: the ground path and the body path
@@ -109,10 +114,11 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
   // steps) and the body path (`airProfile.js`'s march over its tables, `marchAir`, the CPU half of the one file whose
   // `airShader` the card's graph is) along the same rays, tangent heights from the ground to the top every 0.25 km, the sun
   // from the side, behind, ahead and above; the limb as a pixel of it shows it is that light over its profile.
-  // What this holds, plainly (the fixer of pass 2, wave 4a): the brief's 3% is met at Ultra's 16 steps and summed over the
-  // limb's profile; High's 12 steps (where a new player starts) and Medium's 8 are held to 4% and 8%, and a single ray at 16
-  // steps to 6%. Node runs no graph, so `airShader` itself is held to `marchAir` only by being written beside it in the one
-  // file; the pictures of Naboo from Rori are its check on the card.
+  // What this holds, plainly (the fixer of pass 2, wave 4a; pass 2, wave 4b, maker B): the game's march lays its steps by
+  // the power 1.5 (`BODY_LAY`; the viewer's own calls keep the square, held below to be as they were), and with it the brief's
+  // 3% is met over the limb's profile at High's 12 steps (where a new player starts) and Ultra's 16, Medium's 8 held to 5%, a
+  // single ray to 7% at 12 and 5% at 16. Node runs no graph, so `airShader` itself is held to `marchAir` only by being
+  // written beside it in the one file; the pictures of Naboo from Rori are its check on the card.
   const worlds: [string, number, [number, number, number]][] = [
     ['naboo', 40, [1, 1, 1]],
     ['tatooine', 25, [1, 0.9, 0.7]],
@@ -120,6 +126,10 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
     ['corellia', 40, [1, 1, 1]],
   ];
   const worst: Record<number, { w: number; at: string }> = { 8: { w: 0, at: '' }, 12: { w: 0, at: '' }, 16: { w: 0, at: '' } };
+  // The square's (the viewer's lay, no argument) at High's 12, which must read as it did before the game's lay was added.
+  const square = { w: 0 };
+  const sqSame = { same: true };
+  let rayWorst12 = 0;
   let rayWorst16 = 0;
   let rayAt = '';
   let tWorst = 0;
@@ -147,15 +157,22 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
       L.dir.set(s);
       const sumG = [0, 0, 0];
       const sums: Record<number, number[]> = { 8: [0, 0, 0], 12: [0, 0, 0], 16: [0, 0, 0] };
+      const sumSq = [0, 0, 0];
+      const b2 = new Float64Array(6);
       for (let h = 0.125; h < top - bottom; h += 0.25) {
         const r = top - 1e-6;
         const dx = (bottom + h) / r;
         const dy = -Math.sqrt(1 - dx * dx);
         viewRadiance(rec, depth, psi, r, dx, dy, 0, L, 600, Infinity, g, 0, tr);
         for (let c = 0; c < 3; c++) sumG[c] += g[c];
+        V.marchAir(rec, tabs, 0, r, 0, dx, dy, 0, s[0], s[1], s[2], 12, NaN, null, b);
+        V.marchAir(rec, tabs, 0, r, 0, dx, dy, 0, s[0], s[1], s[2], 12, NaN, null, b2, 2);
+        for (let c = 0; c < 6; c++) if (!Object.is(b[c], b2[c])) sqSame.same = false;
+        for (let c = 0; c < 3; c++) sumSq[c] += b[c];
         for (const steps of [8, 12, 16]) {
-          V.marchAir(rec, tabs, 0, r, 0, dx, dy, 0, s[0], s[1], s[2], steps, NaN, null, b);
+          V.marchAir(rec, tabs, 0, r, 0, dx, dy, 0, s[0], s[1], s[2], steps, NaN, null, b, BODY_LAY);
           for (let c = 0; c < 3; c++) sums[steps][c] += b[c];
+          if (steps === 12) for (let c = 0; c < 3; c++) rayWorst12 = Math.max(rayWorst12, Math.abs(b[c] - g[c]) / Math.max(g[c], 1e-12));
           if (steps === 16) {
             for (let c = 0; c < 3; c++) {
               const w = Math.abs(b[c] - g[c]) / Math.max(g[c], 1e-12);
@@ -168,6 +185,7 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
           }
         }
       }
+      for (let c = 0; c < 3; c++) square.w = Math.max(square.w, Math.abs(sumSq[c] - sumG[c]) / sumG[c]);
       for (const steps of [8, 12, 16]) {
         for (let c = 0; c < 3; c++) {
           const w = Math.abs(sums[steps][c] - sumG[c]) / sumG[c];
@@ -176,9 +194,11 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
       }
     }
   }
-  ok(worst[16].w < 0.03, `the limb's light over its profile, the body path at Ultra's 16 steps against the ground path: within 3% in every channel on four worlds (grey, warm, ash and clear hazes) and four suns (worst ${(worst[16].w * 100).toFixed(2)}%, ${worst[16].at})`);
-  ok(worst[12].w < 0.04 && worst[8].w < 0.08, `and at High's 12 steps within ${(worst[12].w * 100).toFixed(2)}%, at Medium's 8 within ${(worst[8].w * 100).toFixed(2)}% (held under 4% and 8%: the 3% is Ultra's alone)`);
-  ok(rayWorst16 < 0.06 && tWorst < 0.02, `ray by ray at 16 steps every channel within ${(rayWorst16 * 100).toFixed(2)}% (${rayAt}: a ray grazing a few km up through the haze, where 16 squared steps cross its layer in three; held under 6%) and the light through within ${tWorst.toFixed(4)}`);
+  ok(BODY_LAY === 1.5, 'the game lays its steps by the power 1.5');
+  ok(worst[12].w < 0.03 && worst[16].w < 0.03, `the limb's light over its profile, the body path at High's 12 steps against the ground path: within 3% in every channel on four worlds (grey, warm, ash and clear hazes) and four suns (worst ${(worst[12].w * 100).toFixed(2)}%, ${worst[12].at}), and at Ultra's 16 within ${(worst[16].w * 100).toFixed(2)}%`);
+  ok(worst[8].w < 0.05, `and at Medium's 8 within ${(worst[8].w * 100).toFixed(2)}% (held under 5%)`);
+  ok(rayWorst12 < 0.07 && rayWorst16 < 0.05 && tWorst < 0.02, `ray by ray every channel within ${(rayWorst12 * 100).toFixed(2)}% at 12 steps and ${(rayWorst16 * 100).toFixed(2)}% at 16 (${rayAt}: a ray grazing a few km up through the haze; held under 7% and 5%) and the light through within ${tWorst.toFixed(4)}`);
+  ok(sqSame.same && square.w > 0.03 && square.w < 0.04, `the viewer's lay (no argument: the square) reads to the bit as a lay of 2, and its 12 steps as before (${(square.w * 100).toFixed(2)}%, wave 4a's 3.45%): the viewer's own pictures do not move`);
 }
 
 // ---------------------------------------------------------------- 4. which air a body has
@@ -342,6 +362,28 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
   const r2 = set2.report() as Any;
   ok(r2.bodies[0].form === 'painted' && /not baked \(fallback\)/.test(r2.bodies[0].tables), `a body whose tables were put off draws Painted until the next loading screen (${r2.bodies[0].tables})`);
   BODY_TUNE.sphere = 0;
+  // The fixer of pass 2, wave 4b: a body with air keeps its own cover, light and reflectance when its record is written (the
+  // record once set all three to a half: every air body's light halved, half its cover read off its picture's alpha).
+  ok(st.a5.y === 0 && st.a5.z === 1 && st.a5.x === BODY_TUNE.twilight, `a body with air covers by its sphere's disc and shines at its full light (a5 ${st.a5.toArray().join(', ')})`);
+  // A body wearing a look (`skyLooks.ts`' hook, set before the bodies are made) is lit as a sphere at the look's reflectance
+  // and takes its tier's form, while SWG's picture beside it keeps the dials' rule (sphere 0 at the start: Painted).
+  const { SKY_LOOK_CARDS } = await import('../../../src/sky/look/skyLooks.ts');
+  const worn = card('sky/cels_naboo.png', 2333, true);
+  const plain = card('sky/cels_naboo.png', 2333, true);
+  SKY_LOOK_CARDS.set(worn.disc, { place: 'rori:celestial:cels_naboo', id: 'naboo', name: 'Naboo', map: new THREE.DataTexture(), how: 'baked', albedo: 1, faceLonDeg: 0, tiltDeg: 0 });
+  const set3 = await SkyBodies.make([worn, plain]);
+  place(worn, sun);
+  place(plain, sun);
+  set3.frame(cam);
+  const r3 = set3.report() as Any;
+  const ws = worn.disc.userData.swgBodyCard;
+  const ps = plain.disc.userData.swgBodyCard;
+  ok(r3.bodies[0].form === 'scattered' && ws.card.z === 1 && ws.a5.w === 1 && /wearing a look/.test(r3.bodies[0].lit), `under High a body wearing a look draws Scattered, lit as a sphere at the look's reflectance (${r3.bodies[0].form}, sphere ${ws.card.z}, reflectance ${ws.a5.w})`);
+  ok(r3.bodies[1].form === 'painted' && ps.card.z === 0 && ps.a5.w === BODY_TUNE.sphereAlbedo, `and SWG's picture beside it keeps its painted shading, Painted (${r3.bodies[1].form}, sphere ${ps.card.z})`);
+  set3.dispose(() => {});
+  SKY_LOOK_CARDS.delete(worn.disc);
+  const graphText = text('src/sky/bodies/skyBody.ts');
+  ok(/const sphAlb = a5\.w;/.test(graphText) && (graphText.match(/sph\.rgb\.mul\(sphAlb\)/g) ?? []).length === 2 && /max\(tune\.x, sphAlb\)/.test(graphText) && !/tune\.y/.test(graphText), "both forms light the sphere at the card's own reflectance, and the hold reads it");
   // Let go: the twins out of the sky's group, their materials forgotten.
   const forgot: THREE.Material[] = [];
   set.dispose((m) => forgot.push(...m));
@@ -353,7 +395,8 @@ const text = (p: string): string => readFileSync(join(ROOT, p), 'utf8').replace(
 // ---------------------------------------------------------------- 7. the world, the sky and the runtime hand it over (as text)
 {
   const world = text('src/world/world.ts');
-  ok(/await this\.loadNight\(sky, token\);[\s\S]{0,400}?await this\.loadBodies\(sky\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the bodies are made ready behind the loading screen, after the air's tables and the night, before the sky is built (both forms with it)");
+  // (Wave 4b: the held bodies are hung between, so they are made and built with the rest.)
+  ok(/await this\.loadNight\(sky, token\);[\s\S]{0,400}?await this\.loadHeld\(sky, pack, token\);\s*if \(token !== this\.loadToken\) return;[\s\S]{0,400}?await this\.loadBodies\(sky\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the bodies are made ready behind the loading screen, after the air's tables, the night and the held bodies' hanging, before the sky is built (both forms with it)");
   ok(/this\.nightFrame\(camPos\);\s*\/\/[^\n]*\n\s*if \(this\.skyBodies && this\.camera\) this\.skyBodies\.frame\(this\.camera\);/.test(world), "their frame follows the sky's placing and the air's, on WebGPU under our sky alone");
   ok(/if \(GPU\.webgpu\) this\.dropNight\(\);\s*\/\/[^\n]*\n\s*if \(GPU\.webgpu\) this\.dropBodies\(\);/.test(world), 'they go with their sky');
   const sky = text('src/world/sky.ts');

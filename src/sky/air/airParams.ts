@@ -232,7 +232,71 @@ export function worldRecord(planetId: string, out: AirRecord = newAirRecord()): 
   out[F.mieAlbedo] = w.mieAlbedo;
   out[F.mieG] = w.mieG;
   setStar(out, casterOf(planetId));
+  // Pass 2, wave 4b (maker A): the fields his saved air names for this world (none with no file: the record as before).
+  const ff = AIR_FILE_FIELDS[planetId];
+  if (ff) applyAirFileFields(out, ff);
   return out;
+}
+
+// ---------------------------------------------------------------- his saved air's own fields (pass 2, wave 4b)
+
+/**
+ * The record fields a world's saved air names (the space body viewer's Save to game, `src/sky/look/bodiesFile.ts`'s
+ * `gameAirOf`) that no dial of the game's twins and no fit moves: the planet's radius and the air's thickness, how fast the
+ * clear air thins (and the ozone's layer with it, as the viewer's record lays it), the haze's height, its forward glow and
+ * its brightness, the ground's bounce. Laid over the world's own numbers by `worldRecord`, so the world's fitted rows (the
+ * fit's worker is handed them, `FitAsk.fileFields`), its twin and its body's record seen from another world (`bodyAir.ts`)
+ * carry them alike. **Empty with no file**, or a file that names no world: every record exactly as before.
+ */
+export interface AirFileFields {
+  radiusKm?: number;
+  thicknessKm?: number;
+  rayleighHeightKm?: number;
+  hazeHeightKm?: number;
+  hazeG?: number;
+  hazeAlbedo?: number;
+  groundAlbedo?: number;
+}
+
+/** The names `AirFileFields` holds (the worker's message and the tests read them). */
+export const AIR_FILE_FIELD_NAMES = ['radiusKm', 'thicknessKm', 'rayleighHeightKm', 'hazeHeightKm', 'hazeG', 'hazeAlbedo', 'groundAlbedo'] as const;
+
+/** Each world's file fields in force, by world id (set behind a loading screen, `setAirFileFields`). */
+export const AIR_FILE_FIELDS: Record<string, AirFileFields> = {};
+
+/** A world's file fields set (null or empty: none, its record as before). */
+export function setAirFileFields(planetId: string, fields: AirFileFields | null | undefined): void {
+  if (!fields || !Object.keys(fields).length) delete AIR_FILE_FIELDS[planetId];
+  else AIR_FILE_FIELDS[planetId] = { ...fields };
+}
+
+/**
+ * File fields into a record, as the viewer's `recordOf` (airProfile.js) sets the same numbers: the radius the bottom and the
+ * thickness above it the top, the clear air's scale height (the ozone's centre and half width scaled by it from Earth's), the
+ * haze's scale height and phase, its single-scattering albedo (the haze's extinction re-split by it), the ground's albedo in
+ * every channel. A field absent keeps the world's own number.
+ */
+export function applyAirFileFields(r: AirRecord, f: AirFileFields): void {
+  const thick = r[F.top] - r[F.bottom];
+  if (Number.isFinite(f.radiusKm)) r[F.bottom] = f.radiusKm as number;
+  r[F.top] = r[F.bottom] + (Number.isFinite(f.thicknessKm) ? (f.thicknessKm as number) : thick);
+  if (Number.isFinite(f.rayleighHeightKm)) {
+    const h = f.rayleighHeightKm as number;
+    r[F.rayH] = h;
+    const thin = h / EARTH.rayleighHeight;
+    r[F.ozC] = EARTH.ozoneCentre * thin;
+    r[F.ozW] = EARTH.ozoneHalfWidth * thin;
+  }
+  if (Number.isFinite(f.hazeHeightKm)) r[F.mieH] = f.hazeHeightKm as number;
+  if (Number.isFinite(f.hazeG)) r[F.mieG] = f.hazeG as number;
+  if (Number.isFinite(f.hazeAlbedo)) {
+    const ext = r[F.mieS] + r[F.mieA];
+    const a = f.hazeAlbedo as number;
+    r[F.mieAlbedo] = a;
+    r[F.mieS] = ext * a;
+    r[F.mieA] = ext * (1 - a);
+  }
+  if (Number.isFinite(f.groundAlbedo)) r[F.groundR] = r[F.groundG] = r[F.groundB] = f.groundAlbedo as number;
 }
 
 // ---------------------------------------------------------------- the owner's dials per world

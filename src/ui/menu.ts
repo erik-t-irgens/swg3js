@@ -285,6 +285,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     knobs: [
       { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula drains the shield on the side of the ship it passes, never the armour or the hull, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
       { key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, hint: 'How solid the nebulae are: their glowing and misty sheets seen from outside and the haze around you inside one, together, and how much a nebula you are in dims the sun\'s flare and rays. 100% is as they are drawn and 0% hides them; it starts at 10%. Their lightning still strikes.' },
+      // Pass 2, wave 4b (`src/space/nebulaForm.ts`): WebGPU's alone, left off the page on WebGL (its nebulae are the sheets).
+      { key: 'nebulaForm', label: 'Nebulae', kind: 'select', options: [{ value: -1, label: 'By quality (Sheets below High)' }, { value: 0, label: 'Off' }, { value: 1, label: 'Sheets' }, { value: 2, label: 'Volumes' }], hint: "Sheets: the game's own glowing and misty sheets. Volumes: the sheets, and a zone's great clouds of gas drawn as true volumes, lit from within and by the sun, at half the screen's resolution (Kessel's Maelstrom round the Maw); the dearest, so only High and Ultra start on them. Off: none drawn, though their lightning still strikes. Every way is prepared behind the loading screen, so moving this builds nothing." },
     ],
   },
   {

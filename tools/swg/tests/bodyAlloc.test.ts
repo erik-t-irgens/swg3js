@@ -49,7 +49,8 @@ const PROCESSES = 12;
 const AT_ONCE = Math.max(1, Math.min(6, Number(process.env.SWG_ALLOC_AT_ONCE) || 3));
 const all: Answer[] = [];
 while (all.length < PROCESSES) all.push(...(await Promise.all(Array.from({ length: Math.min(AT_ONCE, PROCESSES - all.length) }, () => run()))));
-ok(all.every((a) => a.bodies === 3 && a.air === 1 && a.baked === 1), 'each child stood three bodies, one of them a world with air whose tables were baked');
+// (Pass 2, wave 4b: and a fourth, a body held still with its roll, as `SwgSky.hangHeld` hangs one.)
+ok(all.every((a) => a.bodies === 4 && a.air === 1 && a.baked === 1), 'each child stood four bodies, one of them a world with air whose tables were baked and one held still with its roll');
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   const per = Math.max(0, a.made) / a.frames;

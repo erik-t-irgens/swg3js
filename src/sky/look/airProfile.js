@@ -608,8 +608,11 @@ const msS = [0, 0, 0];
  * approach to the centre, the shader's own measure: a surface's or a cloud's point; NaN for none). The steps are laid
  * by the square of their distance from the ray's lowest point, from both sides, so the thin dense air there has most
  * of them; each is integrated exactly over its own extinction. `gains` the limb and twilight dials (null: 1 and 1).
+ * `lay` (the GPU port's pass 2, wave 4b) is the power the steps are laid by: 2, the square, the viewer's own and the start;
+ * 1.5, the game's bodies' (`BODY_LAY`), which holds the game's ground path within 1.5% on the limb at 12 steps where the
+ * square reads 3.45% (the square crowds the steps so near the lowest point that the haze's layer a few km up gets few).
  */
-export function marchAir(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps, sEnd, gains, out) {
+export function marchAir(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps, sEnd, gains, out, lay = 2) {
   const bottom = rec[F.bottom], top = rec[F.top];
   const tc = -(ox * dx + oy * dy + oz * dz);
   const px = ox + dx * tc, py = oy + dy * tc, pz = oz + dz * tc;
@@ -628,7 +631,9 @@ export function marchAir(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps, s
   const sStar = Math.min(Math.max(0, s0), s1);
   const La = sStar - s0, Lb = s1 - sStar;
   const a = La / len;
-  const map = (u) => (u < a ? sStar - La * ((a - u) / a) ** 2 : sStar + Lb * (a < 1 ? ((u - a) / (1 - a)) ** 2 : 0));
+  const map = lay === 2
+    ? (u) => (u < a ? sStar - La * ((a - u) / a) ** 2 : sStar + Lb * (a < 1 ? ((u - a) / (1 - a)) ** 2 : 0))
+    : (u) => (u < a ? sStar - La * ((a - u) / a) ** lay : sStar + Lb * (a < 1 ? ((u - a) / (1 - a)) ** lay : 0));
   const mieS = rec[F.mieS], mieT = mieS + rec[F.mieA], g = rec[F.mieG];
   // (wave B) the haze's scattering by channel; its extinction (mieT) grey
   hazeTintOf(rec, tintS);
@@ -744,9 +749,10 @@ export function lightAt(rec, tabs, r, muS, out) {
  * look's air uniforms (`airUniforms`'s shape, three's uniform nodes), `tex` the three tables as texture objects
  * ({ T, MS, E }), `steps` the march's count (8, 12 or 16). Every table read is `textureSampleLevel` (never the implicit
  * kind, so the loop and its selects are allowed to read them). The march must be called inside a `Fn` (it makes its
- * own variables and loop): it returns `{ L, Tv }`.
+ * own variables and loop): it returns `{ L, Tv }`. `lay` the power the steps are laid by (`marchAir`'s): 2, the square
+ * (the viewer's, and the start: its graph as it always was), or 1.5 (the game's bodies', u times its square root).
  */
-export function airShader(T, U, tex, steps) {
+export function airShader(T, U, tex, steps, lay = 2) {
   const { float, vec2, vec3, dot, sqrt, max, min, clamp, exp, abs, mix, select, smoothstep, texture, Loop } = T;
   const TW = TABLES.transmittance.width, TH = TABLES.transmittance.height;
   const MW = TABLES.multiScatter.width, MH = TABLES.multiScatter.height;
@@ -800,7 +806,10 @@ export function airShader(T, U, tex, steps) {
     const map = (u) => {
       const ua = a.sub(u).div(max(a, 1e-6));
       const ub = u.sub(a).div(max(float(1).sub(a), 1e-6));
-      return select(u.lessThan(a), sStar.sub(La.mul(ua.mul(ua))), sStar.add(Lb.mul(ub.mul(ub))));
+      // 1.5: u times its root (never a pow of nought); 2: the square, the graph as it always was.
+      const pa = lay === 1.5 ? ua.mul(sqrt(max(ua, 0.0))) : ua.mul(ua);
+      const pb = lay === 1.5 ? ub.mul(sqrt(max(ub, 0.0))) : ub.mul(ub);
+      return select(u.lessThan(a), sStar.sub(La.mul(pa)), sStar.add(Lb.mul(pb)));
     };
     const c = dot(rd, Ls);
     const pR = c.mul(c).add(1.0).mul(RK);

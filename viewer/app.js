@@ -55,6 +55,8 @@ import { VOLUME_QUALITIES, VOLUME_TIERS, setVolumeQuality, volumeFrame, volumeQu
 import { volumeInfo, volumeHash } from '../src/sky/look/build.js';
 // the placeholders (21 November): a look for every lore body that has none of its own
 import { placeholderLooks, placeholderFor, placeholderOfPlace } from '../src/sky/look/placeholders.js';
+// (the GPU port's pass 2, wave 4b) the bodies held still in a ground sky: the game's file's own rule for them
+import { heldBody, HELD_PICTURES, HELD_START } from './gameBodies.mjs';
 // (looks run 2) a placeholder he never touched stays a default: not written on Save, and an unchanged copy in his file is read as untouched
 import { isUntouchedPlaceholder } from '../src/sky/look/placeholders.js';
 // (looks run 2) a look of his pictures that are not in the imported folder (a player without his imports) falls back to its generated twin
@@ -105,6 +107,9 @@ const state = {
   // wave 4: the viewer's own switches (each a step of the history, kept in the file only when not at its start),
   // the weather's motion clock, and each world's colour ramp as the server hands it (null: none)
   viewer: null, weatherT: 0, ramps: new Map(),
+  // (the GPU port's pass 2, wave 4b) the bodies he holds still in a ground sky, by its zone and each body's own id
+  // ({ endor: { deathstar: { picture, yawDeg, pitchDeg, size, rollDeg, light } } }): a zone not named keeps SWG's own
+  held: {},
 };
 // (wave 5: `volumes`, the space volumes' quality: auto by frame time, or a tier chosen)
 // (the atmosphere brief's wave A: `airQuality`, the air's march by quality; `airAll`, its form for every look at once
@@ -218,10 +223,10 @@ function snapshot() {
   // `at`: the look on show, to go back to when an undo takes away the one on show (a copy, say)
   // (the owner's own zones and places are in each step too: left out, an undo back to the saved step
   // called the page saved while a place added since was not, and undid its look or sun without it)
-  return { looks, uses: JSON.stringify(state.uses), places: JSON.stringify(state.placeEdits), zones: JSON.stringify(state.zoneEdits), added: JSON.stringify(state.added || null), systems: JSON.stringify(state.systems), starSystems: JSON.stringify(state.starSystems), viewer: JSON.stringify(state.viewer), at: state.currentId };
+  return { looks, uses: JSON.stringify(state.uses), places: JSON.stringify(state.placeEdits), zones: JSON.stringify(state.zoneEdits), added: JSON.stringify(state.added || null), systems: JSON.stringify(state.systems), starSystems: JSON.stringify(state.starSystems), viewer: JSON.stringify(state.viewer), held: JSON.stringify(state.held || {}), at: state.currentId };
 }
 function sameSnap(a, b) {
-  if (a.uses !== b.uses || a.places !== b.places || a.zones !== b.zones || a.added !== b.added || a.systems !== b.systems || a.starSystems !== b.starSystems || a.viewer !== b.viewer || a.looks.size !== b.looks.size) return false;
+  if (a.uses !== b.uses || a.places !== b.places || a.zones !== b.zones || a.added !== b.added || a.systems !== b.systems || a.starSystems !== b.starSystems || a.viewer !== b.viewer || a.held !== b.held || a.looks.size !== b.looks.size) return false;
   for (const [id, s] of a.looks) if (b.looks.get(id) !== s) return false;
   return true;
 }
@@ -335,6 +340,8 @@ async function applySnap(to) {
     if (from.systems !== to.systems) { state.systems = JSON.parse(to.systems) || {}; systemsChanged = true; }
     if (from.starSystems !== to.starSystems) { state.starSystems = JSON.parse(to.starSystems || '{}') || {}; systemsChanged = true; }
     if (from.viewer !== to.viewer && to.viewer) { state.viewer = cleanViewer(JSON.parse(to.viewer)); applyViewer(); }
+    // (the GPU port's pass 2, wave 4b) the bodies held still in a ground sky
+    if (from.held !== to.held) { state.held = cleanHeldChoices(JSON.parse(to.held || '{}')); heldChanged(); }
     state.sysRev++;
     hist.cur = to;
     setDirty(to !== hist.savedCur);
@@ -590,6 +597,7 @@ async function loadSaved() {
   state.added = { zones: {}, places: [] };
   state.systems = {};
   state.starSystems = {};
+  state.held = {};
   state.viewer = cleanViewer(null);
   state.preview = null;
   state.savedAt = null;
@@ -623,6 +631,8 @@ async function loadSaved() {
       state.systems = cleanSystems(saved.systems);
       state.starSystems = cleanStarSystems(saved.starSystems);
       state.viewer = cleanViewer(saved.viewer);
+      // (the GPU port's pass 2, wave 4b) the bodies he held still in a ground sky (a file without them holds none)
+      state.held = cleanHeldChoices(saved.held);
       state.loadedVersion = version;
       state.savedAt = saved.savedAt || 'earlier';
       console.log(`[viewer] loaded space-bodies.json version ${version}: ${Object.keys(saved.looks || {}).length} looks, ${Object.keys(saved.uses || {}).length} uses, ${Object.keys(state.placeEdits).length} places changed, ${Object.keys(state.zoneEdits).length} zone suns changed, ${Object.keys(state.pictures).length} added pictures`);
@@ -699,6 +709,10 @@ async function save() {
   // (wave B) the day wash's settings likewise, each only off its start
   for (const k of ['wash', ...WASH_DIALS.map(([key]) => key)]) if (vw[k] === VIEWER_DEFAULTS[k]) delete vw[k];
   if (Object.keys(vw).some((k) => vw[k] !== VIEWER_DEFAULTS[k])) out.viewer = vw;
+  // (the GPU port's pass 2, wave 4b) the bodies he held still in a ground sky, only when there are any (a file without them
+  // is as it was)
+  const held = cleanHeldChoices(state.held);
+  if (Object.keys(held).length) out.held = held;
   try {
     const r = await fetch('/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out) });
     if (!r.ok) throw new Error(await r.text());
@@ -2456,11 +2470,15 @@ function applyViewer() {
   if (airShownKey && ak !== airShownKey) rebuildAll();
   airShownKey = ak;
   if (gameLook) {
+    // (the GPU port's pass 2, wave 4b) drawn as the game does, a ground sky shows what the game draws (SWG's bodies at SWG's
+    // places): the sky on show is built again when the switch moves
+    const was = gameLook.on;
     gameLook.setOn(v.gameLook);
     if (v.gameLook && state.mode === 'place') {
       const p = state.placesById.get(state.placeId);
       if (p && !p.space && !state.ramps.has(p.zone)) worldAir(p.zone);
     }
+    if (was !== gameLook.on && state.mode === 'place' && placeView?.active && !placeView.space) rebuildAll();
   }
   // sound can start only from a click; on load a saved "on" waits for the first one
   if (v.thunder && thunderArmed) thunder.setEnabled(true);
@@ -2599,7 +2617,12 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
     worldLook: () => { const lid = worldPlace ? state.uses[worldPlace] : null; return lid ? state.looks[lid] || null : null; },
   };
   const worldPlace = p.space ? null : worldPlaceOf(p.zone);
-  const places = [...state.places.filter((q) => q.zone === p.zone), ...(p.space ? [] : systemPlaces(p.zone))];
+  // (the GPU port's pass 2, wave 4b) drawn as the game does from the ground, the game's bodies alone: SWG's own places (none
+  // of the places of ours, the night sheets and the bodies a system adds) at SWG's positions, until the game applies systems
+  // (wave 5); the place chosen stays, so its panel and aim still work
+  const asGame = !p.space && !!state.viewer.gameLook;
+  if (asGame) ctx.sky = () => null;
+  const places = asGame ? state.places.filter((q) => q.zone === p.zone && (!q.invented || q.id === p.id)) : [...state.places.filter((q) => q.zone === p.zone), ...(p.space ? [] : systemPlaces(p.zone))];
   state.skyItemsKey = p.space ? '' : skyItemsKey(p.zone);
   const lookOfPlace = ctx.lookOf;
   ctx.lookOf = (pid) => { const sp = places.find((q) => q.id === pid && q.systemBody); if (!sp) return lookOfPlace(pid); return sp.lookId && state.looks[sp.lookId] ? { id: sp.lookId, look: state.looks[sp.lookId] } : null; };
@@ -2615,6 +2638,8 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
     return;
   }
   if (!ok || token !== state.build) return;
+  // (the GPU port's pass 2, wave 4b) the bodies held still in this ground sky, before the first frame of it
+  placeView.setHeld(p.space ? [] : heldOfZone(p.zone));
   placeView.frame(state.clock);
   try { await S.renderer.compileAsync(S.scene, S.camera); } catch (e) { console.warn('[viewer] compile:', e); }
   if (token !== state.build) return;
@@ -2860,7 +2885,118 @@ function renderPlacePanel() {
     }));
     zrow('brightness', 'Sun: brightness', 0, 3, 0.01, '', 'How strongly it lights the zone\'s bodies');
   }
+  // (the GPU port's pass 2, wave 4b) the bodies held still in this ground sky
+  if (!p.space) panel.append(heldBox(p.zone));
   panel.scrollTop = scroll;
+}
+
+// ---- the bodies held still in a ground sky (the GPU port's pass 2, wave 4b) ----
+
+/** The words each held picture goes by on the page. */
+const HELD_WORDS = {
+  moon_deathstar1: 'Death Star, stage 1 (half-built, about 1 ABY)',
+  moon_deathstar2: 'Death Star, stage 2',
+  moon_deathstar3: 'Death Star, stage 3',
+  moon_deathstar: 'Death Star, nearly complete',
+  cels_moncal_cruiser: 'Mon Calamari cruiser (SWG\'s unused sprite)',
+  cels_star_destroyer: 'Star Destroyer (SWG\'s sprite)',
+};
+
+/** The page's held bodies made safe, by zone (the game's file's rule, `gameBodies.mjs`'s `heldBody`). */
+function cleanHeldChoices(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [zone, bodies] of Object.entries(raw)) {
+    if (!/^[a-z0-9_]{1,40}$/.test(zone) || !bodies || typeof bodies !== 'object') continue;
+    const kept = {};
+    for (const [id, b] of Object.entries(bodies)) {
+      if (!/^[a-z0-9_]{1,40}$/.test(id)) continue;
+      const h = heldBody(b);
+      if (h) kept[id] = h;
+    }
+    if (Object.keys(kept).length) out[zone] = kept;
+  }
+  return out;
+}
+
+/** SWG's own held bodies of a zone, as its environment hangs them (Endor's Death Star at stage 1), until he edits them. */
+const heldSwgOf = (zone) => (zone === 'endor' ? { deathstar: { ...HELD_START } } : {});
+
+/** A zone's held bodies as the sky shows them: his where he has any, else SWG's own; each with its id and whose it is. */
+function heldOfZone(zone) {
+  const his = state.held[zone];
+  const src = his || heldSwgOf(zone);
+  return Object.entries(src).map(([id, b]) => ({ id, ...b, his: !!his }));
+}
+
+/** A held body changed: the sky on show again, and the panel (not while a slider of it is moving). */
+function heldChanged(panel = true) {
+  if (state.mode === 'place' && placeView?.active && !placeView.space) placeView.setHeld(heldOfZone(placeView.zone));
+  if (panel) renderPlacePanel();
+}
+
+/** Every body of a zone made his (SWG's own copied in first), then `fn` run on them: a step of the history. */
+function editHeld(zone, fn, panel = true) {
+  const first = !state.held[zone];
+  const bodies = first ? (state.held[zone] = JSON.parse(JSON.stringify(heldSwgOf(zone)))) : state.held[zone];
+  fn(bodies);
+  for (const [id, b] of Object.entries(bodies)) {
+    const h = heldBody(b);
+    if (h) bodies[id] = h;
+    else delete bodies[id];
+  }
+  setDirty(true);
+  // (the first edit makes SWG's own his: the panel's words and buttons change with it)
+  heldChanged(panel || first);
+}
+
+/** The panel's box: each held body's picture, yaw, pitch, size, roll and light; add one, take one away, back to SWG's. */
+function heldBox(zone) {
+  const box = el('div', { class: 'held' });
+  box.append(el('h3', { text: 'Held still in this sky' }));
+  const list = heldOfZone(zone);
+  const his = !!state.held[zone];
+  box.append(el('p', { class: 'note', text: list.length
+    ? `${his ? 'Yours' : 'SWG\'s own, as its environment hangs it'}: ${list.length === 1 ? 'a body' : list.length + ' bodies'} that stand still in this sky, drawn from SWG's picture in the sky pack (a grey disc until the sky is converted with it). Yaw, pitch and size are SWG's celestial numbers; light scales its brightness. "Save to game" sends them as the game's held bodies; a sky you leave as SWG's keeps SWG's.`
+    : 'Nothing stands still in this sky. Add one of SWG\'s sky sprites below (the Death Star\'s stages, the Mon Calamari cruiser, a Star Destroyer); "Save to game" sends it.' }));
+  for (const h of list) {
+    const row = el('div', { class: 'held-body' });
+    const sel = el('select', { title: 'Which of SWG\'s sky pictures it wears' });
+    for (const pic of HELD_PICTURES) sel.append(el('option', { value: pic, text: HELD_WORDS[pic] || pic }));
+    sel.value = h.picture;
+    sel.addEventListener('change', () => editHeld(zone, (b) => { b[h.id].picture = sel.value; }));
+    const remove = el('button', { type: 'button', class: 'small', title: 'Take it out of this sky' }, 'Remove');
+    remove.addEventListener('click', () => editHeld(zone, (b) => { delete b[h.id]; }));
+    row.append(el('div', { class: 'ctl' }, el('span', { text: h.id }), sel, el('span'), remove));
+    const start = heldSwgOf(zone)[h.id] || HELD_START;
+    for (const [key, label, min, max, step, unit, title] of [
+      ['yawDeg', 'Yaw', -360, 360, 0.5, '°', 'Round the horizon, in the sky\'s own convention (SWG\'s celestial yaw)'],
+      ['pitchDeg', 'Pitch', -90, 90, 0.5, '°', 'Up from the horizon (SWG\'s celestial pitch)'],
+      ['size', 'Size', 0.01, 20, 0.01, '', 'SWG\'s celestial size: its square fills 2 atan(size / 3) of the sky'],
+      ['rollDeg', 'Roll', -360, 360, 0.5, '°', 'Its turn about the line of sight'],
+      ['light', 'Light', 0, 8, 0.01, '×', 'Its brightness against the picture as converted (1)'],
+    ]) {
+      row.append(settingRow({
+        label, value: h[key], swgValue: start[key], savedValue: undefined, min, max, step, unit, title, changed: his && h[key] !== start[key],
+        onSet: (v) => editHeld(zone, (b) => { if (b[h.id]) b[h.id][key] = v; }, false), onReset: () => editHeld(zone, (b) => { if (b[h.id]) b[h.id][key] = start[key]; }),
+      }));
+    }
+    box.append(row);
+  }
+  const add = el('select', { title: 'A sky picture to hold still in this sky' });
+  for (const pic of HELD_PICTURES) add.append(el('option', { value: pic, text: HELD_WORDS[pic] || pic }));
+  const addBtn = el('button', { type: 'button', class: 'small', title: 'Hang it at SWG\'s Death Star placement; then move it' }, 'Add');
+  addBtn.addEventListener('click', () => editHeld(zone, (b) => {
+    const base = add.value.startsWith('moon_deathstar') ? 'deathstar' : add.value.replace(/^cels_/, '');
+    let id = base;
+    for (let n = 2; b[id]; n++) id = `${base}${n}`;
+    b[id] = { ...HELD_START, picture: add.value };
+  }));
+  const back = el('button', { type: 'button', class: 'small swg' + (his ? ' changed' : ''), title: 'Back to SWG\'s own (Endor: the Death Star at stage 1 where its environment hangs it; elsewhere none)' }, 'SWG\'s');
+  back.disabled = !his;
+  back.addEventListener('click', () => { delete state.held[zone]; setDirty(true); heldChanged(); });
+  box.append(el('div', { class: 'ctl' }, el('span', { text: 'Add' }), add, addBtn, back));
+  return box;
 }
 
 // ---- the words ----
@@ -3293,7 +3429,7 @@ async function saveToGame() {
     const lid = state.uses[p.id];
     if (lid && state.looks[lid]) uses[p.id] = lid;
   }
-  const body = { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins };
+  const body = { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins, held: cleanHeldChoices(state.held) };
   try {
     const r = await fetch('/save-game', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error(await r.text());

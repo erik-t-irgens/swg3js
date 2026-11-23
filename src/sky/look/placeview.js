@@ -22,6 +22,8 @@ import { sunGlowAt, SUN_DISC_STOPS, SUN_GLOW_STOPS } from './skywash.js';
 // (the atmosphere brief's wave A) the ground world's own air for a Scattered body's wash
 import { airWash } from './skywash.js';
 import { airTablesOf, airOf } from './build.js';
+// (the GPU port's pass 2, wave 4b) drawn as the game does, a body is held as the game holds it (`seenMost`)
+import { BODY_TUNE } from '../bodies/bodyTier.ts';
 
 /**
  * Wave 4, the ground's own storm: when the world we stand on has storm cells in its clouds (its planet
@@ -116,6 +118,25 @@ function faceTurn(d, out) {
   _by.crossVectors(_bz, _bx);
   _m.makeBasis(_bx, _by, _bz);
   return out.setFromRotationMatrix(_m);
+}
+
+// (the GPU port's pass 2, wave 4b) A held body's picture from its zone's sky pack (read only), kept by name; one not there (a
+// pack converted before the Death Star's pictures were) a grey disc of our own in its place.
+const heldTextures = new Map();
+function heldTexture(zone, picture) {
+  const key = `${zone}/${picture}`;
+  if (heldTextures.has(key)) return heldTextures.get(key);
+  const grey = radialTexture('heldstandin', [[0, 0.85], [0.44, 0.8], [0.46, 0.0], [1, 0]]);
+  const tex = new THREE.Texture();
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.image = grey.image;
+  tex.needsUpdate = true;
+  tex.userData.standIn = true;
+  const img = new Image();
+  img.onload = () => { tex.image = img; tex.userData.standIn = false; tex.needsUpdate = true; };
+  img.src = `/assets-private/${encodeURIComponent(zone)}/sky/${encodeURIComponent(picture)}.png`;
+  heldTextures.set(key, tex);
+  return tex;
 }
 
 const lerpColour = (a, b, t, out) => out.copy(a).lerp(b, Math.min(1, Math.max(0, t)));
@@ -421,6 +442,45 @@ export class PlaceView {
     return { group, glow, disc };
   }
 
+  /**
+   * (the GPU port's pass 2, wave 4b) The bodies held still in this ground sky (the Death Star over Endor, any of SWG's sky
+   * sprites he places: the page's `held`, else SWG's own placement): each a card of SWG's picture from the zone's sky pack
+   * (`/assets-private/<zone>/sky/<picture>.png`, read only), facing the eye upright to the horizon at its yaw and pitch (the
+   * sky's own convention, `skyDirection`), SWG's square of its size across, turned by its roll, its brightness by its light; a
+   * picture not converted yet stands as a grey disc with the same size. `list` is `[{ id, picture, yawDeg, pitchDeg, size,
+   * rollDeg, light }]`; called again whenever it changes. Drawn in front of the dome and behind the looks.
+   */
+  setHeld(list) {
+    if (!this.heldGroup) {
+      this.heldGroup = new THREE.Group();
+      this.group.add(this.heldGroup);
+      this.heldQuads = [];
+    }
+    for (const q of this.heldQuads) { q.removeFromParent(); q.material.dispose(); }
+    this.heldQuads = [];
+    this.heldGroup.visible = !this.space;
+    if (this.space) return;
+    const D = GROUND_BODY_D * 1.25;
+    for (const h of list || []) {
+      const dir = skyDirection(+h.yawDeg || 0, +h.pitchDeg || 0);
+      const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending });
+      m.color.setScalar(Math.max(0, +h.light || 0));
+      m.map = heldTexture(this.zone, h.picture);
+      const q = new THREE.Mesh(quadGeom, m);
+      q.name = `held ${h.id}`;
+      q.renderOrder = -6;
+      q.frustumCulled = false;
+      q.position.set(dir.x * D, dir.y * D, dir.z * D);
+      faceTurn(dir, q.quaternion);
+      q.rotateZ((+h.rollDeg || 0) * DEG);
+      const w = (2 * D * Math.max(0.01, +h.size || 0)) / 3;
+      q.scale.set(w, w, 1);
+      q.userData.held = h;
+      this.heldGroup.add(q);
+      this.heldQuads.push(q);
+    }
+  }
+
   disposeBody(b) {
     if (b.built) disposeLook(b.built);
     if (b.glow) { b.glow.group.removeFromParent(); b.glow.glow.material.dispose(); b.glow.disc.material.dispose(); }
@@ -595,6 +655,9 @@ export class PlaceView {
         // (read again only when it changes: a colour made or parsed each frame is garbage each frame)
         if (b._lc !== L.colour) { b._lc = L.colour; const c = new THREE.Color(L.colour); b.built.LU.sunColour.value.set(c.r, c.g, c.b); }
         b.built.LU.gain.value = (e.brightness ?? 1) * (at.alpha ?? 1);
+        // (the GPU port's pass 2, wave 4b) drawn as the game does from the ground: the body held as the game holds it, its
+        // white held to `seenMost` of the screen's white (below, once the air in front of it is known)
+        const heldAsGame = !this.space && G && G.on && this.airDrawn;
         // the air in front of it, from the ground (none in orbit, or with the wash off)
         if (!this.space && this.wash) {
           // (wave A) a body whose air is Scattered takes the ground world's own air for what comes through
@@ -608,6 +671,15 @@ export class PlaceView {
         } else {
           b.built.LU.airLight.value.set(0, 0, 0);
           b.built.LU.airTrans.value.set(1, 1, 1);
+        }
+        if (heldAsGame) {
+          // The game's rule (`skyBody.ts`, `BODY_TUNE.seenMost`): the light a white pixel of the body would send through the air,
+          // times the eye's exposure, held to `seenMost` of the screen's white by one factor for the whole disc, so a moon at
+          // dusk under an opening eye does not wash the frame white with its bloom and its features still read.
+          const tr = b.built.LU.airTrans.value;
+          const white = L.power * (0.2126 * tr.x + 0.7152 * tr.y + 0.0722 * tr.z) * (b.built.LU.gain.value || 0) * G.U.exposure.value;
+          const most = BODY_TUNE.seenMost;
+          if (white > most) b.built.LU.gain.value *= most / white;
         }
         const face = faceTurn(d, b.built._face || (b.built._face = new THREE.Quaternion()));
         const lw = L.dir ? (b.built._light || (b.built._light = new THREE.Vector3())).set(L.dir.x, L.dir.y, L.dir.z) : null;

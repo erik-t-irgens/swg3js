@@ -1277,6 +1277,12 @@ export class Nebulae {
 
   private shown = true;
 
+  /**
+   * The Nebulae row's form last applied to these nebulae (pass 2, wave 4b, maker C: `World.spaceNebulaFrame`, WebGPU's alone):
+   * '' until the first frame, so a zone's new nebulae take the row at once and the row is written only when it moves.
+   */
+  formApplied = '';
+
   /** Where the camera was on the last frame that ran: the console's stand-in for "here". */
   readonly lastEye = new THREE.Vector3();
 

@@ -4,7 +4,8 @@
 // Tatooine, Endor and its giant, Yavin 4 and Yavin Prime, Kashyyyk, Hoth, Kessel, Rori, Nur, Trandosha);
 // else a generated look of recipe version 2 (calmer colours) made to the lore's description, its colours
 // matched by measurement where a picture of that body exists (his stills, SWG's own pictures of it);
-// else SWG's picture (which this viewer does not draw: no body needs it). A star is the viewer's own
+// else SWG's picture (which this viewer does not draw: no body needs it; since the GPU port's pass 2, wave 4b the bodies the sky
+// sweep found SWG pictures for name them, `SWG_FALLBACKS`). A star is the viewer's own
 // drawn sun, its colour from its system. A body or place with a look of its own (his choice for that
 // place, or a look set in a system) keeps it: these are only read where there is none.
 //
@@ -770,6 +771,28 @@ export function bodyKeyOf(system, body) {
 export function placeholderFor(system, body) {
   const key = bodyKeyOf(system, body);
   return key ? PLACEHOLDERS[key]?.look || null : null;
+}
+/**
+ * (the GPU port's pass 2, wave 4b; the sky sweep's "Fallbacks", `A:\swg3js\imported\swg-sky-sweep\sweep.md`) SWG's own
+ * pictures every player has that stand for a body of the lore where nothing else does: the third choice of this table ("else
+ * SWG's picture"), by the names the converter writes into the sky pack (`tools/swg/sky.mjs`: the picture's SWG name, no
+ * folder, no extension). Selonia and Drall a pale blue cloudy world, Taanab's ice-ringed moon its own `moon_taan`, Hoth's
+ * three moons and Yavin 8 an icy white surface; and Lok's two layers its space picture leaves unused, for Lok's own look.
+ */
+export const SWG_FALLBACKS = {
+  'corell/selonia': ['cels_earth_01'],
+  'corell/drall': ['cels_earth_01'],
+  'tive/icemoon': ['moon_taan'],
+  'hoth/m1': ['pln_ice_planetoid_main'],
+  'hoth/m2': ['pln_ice_planetoid_main'],
+  'hoth/m3': ['pln_ice_planetoid_main'],
+  'yavin/y8': ['pln_ice_planetoid_main'],
+  'karthakk/lok': ['pln_lok_mask', 'pln_lok_detail_02'],
+};
+/** SWG's pictures a body falls back to (its fallbacks above), or none. */
+export function swgFallbackOf(system, body) {
+  const key = bodyKeyOf(system, body);
+  return key ? SWG_FALLBACKS[key] || [] : (typeof system === 'string' && typeof body === 'string' && SWG_FALLBACKS[`${system}/${body}`]) || [];
 }
 /** The generated twin of the picture of his a body wears (null where it has none yet): what a player without his imported pictures sees. */
 export function twinOf(system, body) {

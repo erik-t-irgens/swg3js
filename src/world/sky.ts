@@ -13,6 +13,7 @@ import { skyOurs } from '../sky/skyMode.ts';
 // Pass 2, wave 4a (maker B): under our sky on WebGPU the moons and planets are cards of our own (`src/sky/bodies/`).
 import { bodyCardMaterial, type SkyBodyCard } from '../sky/bodies/bodyCard.ts';
 import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';
+import type { HeldPlan, SkyHeldEntry } from '../sky/bodies/heldBodies.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -79,6 +80,17 @@ export interface SkyData {
   moon: Celestial | null;
   supplementalMoon: (Celestial & { yaw: number; pitch: number }) | null;
   celestials: Celestial[];
+  /**
+   * Pass 2, wave 4b (maker B): bodies a state of the server chose among (`GSCL`: Endor's Death Star in three stages), each its
+   * picture as a celestial's with its stage; absent in packs converted before, empty where the environment has none. Drawn
+   * on WebGPU under our sky at stage 1, or as the owner's saved file says (`heldBodies.ts`, `hangHeld`).
+   */
+  held?: SkyHeldEntry[];
+  /**
+   * The environment's distant appearances (Mustafar's four volcano plumes), as the converter reads them: each effect's path,
+   * its place and turn in the file's own small frame, and since pass 2, wave 4b its converted effect (`file`).
+   */
+  distant?: { appearance: string; direction: number[]; orientation: number[]; infinite: boolean; flag: number; planet: boolean; file?: string | null }[];
   stars: { count: number; colors: { width: number; height: number; rgba: string } | null } | null;
   nightSky: { shader: string; image: CelestialImage | null } | null;
   skybox: { cube?: CubeFaces | null; sides?: Record<string, string | null> } | null;
@@ -928,6 +940,39 @@ export class SwgSky {
   /** Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (empty on WebGL and under SWG's sky). */
   bodyCards(): readonly SkyBodyCard[] {
     return this.cards;
+  }
+
+  /**
+   * Pass 2, wave 4b (maker B): the bodies that hang still in this sky (`heldBodies.ts`'s plan: Endor's Death Star at stage 1 or
+   * as the owner saved it), each a card of ours placed once where SWG's celestial numbers put it (its yaw and pitch, as the
+   * extra celestials are, never turned by the clock), its size as theirs, its roll about the line to it, drawn Painted from
+   * SWG's picture through the air (`skyBody.ts`, `held`). Called by the world behind the loading screen, before the bodies are
+   * made and the sky is built, with each plan's picture loaded (`textures`, kept and let go with the sky). On WebGPU under our
+   * sky over a planet alone; elsewhere nothing is hung. Answers what it hung.
+   */
+  hangHeld(plans: readonly HeldPlan[], textures: ReadonlyMap<string, THREE.Texture>): number {
+    if (!GPU.webgpu || !skyOurs() || this.data.space || this.disposed) return 0;
+    let hung = 0;
+    for (const p of plans) {
+      const map = textures.get(p.picture);
+      if (!map || !(p.size > 0)) continue;
+      this.textures.set(`held:${p.name}:${p.picture}`, map);
+      const body = makeSkyBody(map, (2 * p.size * SKY_RADIUS) / CELESTIAL_DISTANCE, false);
+      body.renderOrder = -5;
+      body.name = `held body: ${p.name}`;
+      const flat = body.material;
+      (body as THREE.Mesh).material = bodyCardMaterial(map, 'painted');
+      flat.dispose();
+      const dir = SwgSky.direction(p.yawDeg, THREE.MathUtils.degToRad(p.pitchDeg), new THREE.Vector3());
+      const quaternion = turnSkyBody(dir, new THREE.Quaternion()).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(p.rollDeg)));
+      body.position.copy(dir).multiplyScalar(SKY_RADIUS);
+      body.quaternion.copy(quaternion);
+      body.visible = false;
+      this.group.add(body);
+      this.cards.push({ disc: body, glow: null, file: p.picture, map, air: { kind: 'airless' }, slot: 'celestial', held: { name: p.name, picture: p.picture, light: p.light, rollRad: THREE.MathUtils.degToRad(p.rollDeg), dir, quaternion } });
+      hung++;
+    }
+    return hung;
   }
 
   /** The dome's material and its draw order (pass 2, wave 2, maker B): the capture draws its own mesh of the dome first, as the sky does. */

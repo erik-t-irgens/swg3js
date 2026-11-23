@@ -22,6 +22,9 @@ import { fetchPublic, packJson } from '../world/packFiles.ts';
 import { editFilePath } from '../story/placementPath.ts';
 import { readLocationsFile, type LocationRow, type LocationShape } from '../world/editFiles/locationsFile.ts';
 import { landedLocations, mergeLocations, type GameNoBuild } from '../world/places.ts';
+// Pass 2, wave 4b (maker C): the globes in his looks (the game on WebGPU alone).
+import { GPU } from '../core/gpuSwitch.ts';
+import { GLOBE_TUNE, MAP_LOOKS, globePictures, globePlaceOf, globePlanetIndex, globeRim } from './galaxyLooks.ts';
 
 /**
  * What a space zone with no pack says on its card and its panel: the command, and that the game sees it after a reload,
@@ -166,6 +169,13 @@ export class GalaxyMap {
   private globesAsked = false;
   private readonly scratch = new THREE.Vector3();
   private readonly textures = new THREE.TextureLoader();
+  /**
+   * Pass 2, wave 4b (maker C, `galaxyLooks.ts`): each system's globe's place (its zone's main planet, the viewer's id) and its
+   * appearance, learnt as its zone's pack arrives; and what its globe wears now (its look's id and whether its pictures were had),
+   * so a show asks again only what a loading screen's bakes have changed. WebGPU's alone.
+   */
+  private readonly globePlaces = new Map<string, { place: string; appearance: string }>();
+  private readonly globeWorn = new Map<string, string>();
 
   constructor(
     parent: HTMLElement,
@@ -655,7 +665,17 @@ export class GalaxyMap {
       const zone = zoneFor(sys, first.planet);
       if (!zone) continue;
       void loadSpacePack(this.deps.baseUrl, zone).then((pack) => {
-        const path = planetTextureOf(pack, [first.planet.id, sys.id, zone.replace(/^space_/, '')]);
+        const keys = [first.planet.id, sys.id, zone.replace(/^space_/, '')];
+        // Pass 2, wave 4b (maker C): the globe's place in the viewer, and its look and rim where the game is on WebGPU.
+        if (GPU.webgpu && pack?.planets?.length) {
+          const place = globePlaceOf(zone, pack.planets, keys);
+          const i = globePlanetIndex(pack.planets, keys);
+          if (place && i >= 0) {
+            this.globePlaces.set(sys.id, { place, appearance: pack.planets[i].appearance });
+            this.lookGlobe(sys.id);
+          }
+        }
+        const path = planetTextureOf(pack, keys);
         if (!path) return;
         this.textures.load(
           `${this.deps.baseUrl}assets-private/${zone}/${path}`,
@@ -675,6 +695,20 @@ export class GalaxyMap {
         ? `${routes.length} shuttle routes, from the game's own fares`
         : 'No shuttle routes yet: npm run swg -- maps @SWG assets-private --retail-only';
     });
+  }
+
+  /**
+   * Pass 2, wave 4b (maker C): a system's globe in its main world's look as this session's bakes hold it (`globePictures`, never
+   * a bake) with its painted rim (`globeRim`), or SWG's picture with the rim; laid only when what it would wear has changed.
+   */
+  private lookGlobe(systemId: string): void {
+    const at = this.globePlaces.get(systemId);
+    if (!at) return;
+    const pics = globePictures(at.place);
+    const key = pics ? `${pics.look}:${pics.width}` : 'swg';
+    if (this.globeWorn.get(systemId) === key) return;
+    this.globeWorn.set(systemId, key);
+    this.view.setGlobeLook(systemId, pics, globeRim(at.place, at.appearance));
   }
 
   // ---- The panel beside the map ----
@@ -828,6 +862,8 @@ export class GalaxyMap {
   show(): void {
     this.root.classList.remove('hidden');
     this.askGlobes();
+    // Pass 2, wave 4b (maker C): the globes whose looks a loading screen has baked since they were last laid.
+    if (GPU.webgpu) for (const id of this.globePlaces.keys()) this.lookGlobe(id);
     this.attachDebug();
     this.markUnconverted();
     // The system flown in is the one picked, the first time the tab is opened on it.
@@ -844,7 +880,7 @@ export class GalaxyMap {
   private attachDebug(): void {
     const w = window as unknown as { __debug?: Record<string, unknown> };
     if (!w.__debug || w.__debug.galaxy) return;
-    w.__debug.galaxy = (tune?: Partial<typeof GALAXY_TUNE> & Partial<typeof GALAXY_VIEW_TUNE>) => {
+    w.__debug.galaxy = (tune?: Partial<typeof GALAXY_TUNE> & Partial<typeof GALAXY_VIEW_TUNE> & { focus?: string; distance?: number; globes?: Partial<typeof GLOBE_TUNE> }) => {
       if (tune) {
         for (const k of Object.keys(GALAXY_TUNE) as (keyof typeof GALAXY_TUNE)[]) {
           const v = tune[k];
@@ -854,9 +890,23 @@ export class GalaxyMap {
           const v = tune[k];
           if (typeof v === 'number' && Number.isFinite(v)) GALAXY_VIEW_TUNE[k] = v;
         }
+        // Pass 2, wave 4b (maker C): the globes' own dials (`GLOBE_TUNE`): the spin and the rim's strength live, the sizes at
+        // the next layout; and a system centred at a distance (the prover's: `{ focus: 'naboo', distance: 60 }`).
+        const gt = tune.globes;
+        if (gt && typeof gt === 'object') {
+          for (const k of Object.keys(GLOBE_TUNE) as (keyof typeof GLOBE_TUNE)[]) {
+            const v = gt[k];
+            if (typeof v === 'number' && Number.isFinite(v) && v >= 0) GLOBE_TUNE[k] = v;
+          }
+        }
         this.view.retune();
+        if (typeof tune.focus === 'string') {
+          const at = this.view.placeOf(tune.focus);
+          if (at) this.view.orbit.centreOn(at.x, at.y, at.z);
+        }
+        if (typeof tune.distance === 'number' && tune.distance > 0) this.view.orbit.orbit.distance = tune.distance;
       }
-      return { ...this.view.describe(), tune: { ...GALAXY_TUNE, ...GALAXY_VIEW_TUNE } };
+      return { ...this.view.describe(), tune: { ...GALAXY_TUNE, ...GALAXY_VIEW_TUNE }, globes: { tune: { ...GLOBE_TUNE }, places: Object.fromEntries(this.globePlaces), worn: Object.fromEntries(this.globeWorn), baked: { ...MAP_LOOKS } } };
     };
   }
 

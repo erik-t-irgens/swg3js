@@ -103,11 +103,27 @@ export function cubeFaces(bytes, max) {
   return { faces: out, size: Math.min(max, faces[0].width), source: faces[0].width };
 }
 
-/** The client environment file (FORM ENVM 0000) as plain data, or null when the planet has none. */
+/**
+ * The stage a `GSCL` chunk's flag names (pass 2, wave 4b): Endor's late environment file carries three, flags 2, 4 and 8, one
+ * a construction stage of the same body (`moon_deathstar1` to `3`), which the server's state chose; the game picks stage 1 by
+ * default. A flag that is not one bit of those three is stage 0 (unknown), kept with its number.
+ */
+export function heldStageOf(flag) {
+  return flag === 2 ? 1 : flag === 4 ? 2 : flag === 8 ? 3 : 0;
+}
+
+/**
+ * The client environment file (FORM ENVM 0000) as plain data, or null when the planet has none.
+ *
+ * `GSCL` (pass 2, wave 4b; only Endor's late file has any) is a celestial body exactly as `CELS` is (its shader, size, glow
+ * and glow size, yaw, pitch, the pitch's direction and the cycle's seconds) with one int32 more, a flag of one bit that a
+ * state of the server chose among them: read raw over Endor's file, each of its three chunks is 56 bytes, the name and 29
+ * more (`heldStageOf`). Kept apart as `held`, since it is not shown by the clock as the celestials are.
+ */
 export function parseEnvironmentFile(root) {
   if (!isForm(root) || root.type !== 'ENVM') return null;
   const v = root.children.find(isForm);
-  const out = { sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [] };
+  const out = { sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], held: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [] };
   const celestial = (c) => ({ shader: c.string(), size: c.f32(), glowShader: c.string(), glowSize: c.f32() });
   const distant = (form, planet) => {
     const chunk = form.children.find((x) => !isForm(x));
@@ -151,6 +167,12 @@ export function parseEnvironmentFile(root) {
       case 'CELS':
         out.celestials.push({ ...celestial(c), yaw: c.f32(), pitch: c.f32(), pitchDirection: c.f32(), cycleTime: c.f32() });
         break;
+      case 'GSCL': {
+        const h = { ...celestial(c), yaw: c.f32(), pitch: c.f32(), pitchDirection: c.f32(), cycleTime: c.f32() };
+        const flag = c.left >= 4 ? c.i32() : 0;
+        out.held.push({ ...h, flag, stage: heldStageOf(flag) });
+        break;
+      }
       case 'TLOK':
         out.timeLock = { locked: c.u8() !== 0, time: c.f32() };
         break;
@@ -163,6 +185,65 @@ export function parseEnvironmentFile(root) {
   }
   out.distant = out.distant.filter(Boolean);
   return out;
+}
+
+/** A picture's SWG name, no folder and no extension (`shader/moon_deathstar1.sht` is `moon_deathstar1`). */
+export function pictureName(path) {
+  const p = String(path ?? '').replace(/\\/g, '/');
+  return p.slice(p.lastIndexOf('/') + 1).replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+}
+
+/**
+ * SWG's own sky pictures every player's archives hold that no environment of theirs names (pass 2, wave 4b; the sky sweep of
+ * 21 November, `A:\swg3js\imported\swg-sky-sweep\sweep.md`), converted once into the shared sky pack (`<out>/sky/`, beside
+ * the worlds' packs, with `pictures.json` listing them) by the `sky` command, so a body any world holds (`held`) and the space
+ * body viewer's placeholders can name them. `use` says what each is for; every one is SOE's (retail or late), none Legends'.
+ */
+export const SKY_PICTURES = [
+  { name: 'moon_deathstar1', use: 'held', what: "Endor's Death Star, stage 1: half built, its skeleton showing (GSCL flag 2)" },
+  { name: 'moon_deathstar2', use: 'held', what: "Endor's Death Star, stage 2: a whole grey sphere (GSCL flag 4)" },
+  { name: 'moon_deathstar3', use: 'held', what: "Endor's Death Star, stage 3: breaking up in fire and cloud (GSCL flag 8)" },
+  { name: 'moon_deathstar', use: 'held', what: 'the Death Star near complete (named by its own shader alone)' },
+  { name: 'cels_moncal_cruiser', use: 'held', what: 'a Mon Cal cruiser seen from above (named by no environment)' },
+  { name: 'cels_star_destroyer', use: 'held', what: 'a Star Destroyer from below (three heroic skies hang it)' },
+  { name: 'moon_taan', use: 'fallback', what: "Taanab's moon, by its name" },
+  { name: 'cels_earth_01', use: 'fallback', what: 'a pale blue cloudy world, crescent-lit (Selonia, Drall)' },
+  { name: 'pln_ice_planetoid_main', use: 'fallback', what: "an icy white surface (Hoth's moons, Yavin 8)" },
+  { name: 'pln_lok_mask', use: 'fallback', what: "Lok's mask layer, unused by its space picture" },
+  { name: 'pln_lok_detail_02', use: 'fallback', what: "Lok's second detail layer, unused by its space picture" },
+];
+
+/** The shared sky pack's list's version (`pictures.json`). */
+export const SKY_PICTURES_VERSION = 1;
+
+/**
+ * The shared sky pack: every picture of `SKY_PICTURES` the archives hold, as a PNG under `<root>/sky/` (alpha kept, held to
+ * 1024 wide), and `<root>/sky/pictures.json` naming each with its size and use. Answers what was written and what was not.
+ */
+export function exportSkyPictures(vfs, root, { log = console.error, late = null } = {}) {
+  const dir = join(root, 'sky');
+  mkdirSync(dir, { recursive: true });
+  const pictures = {};
+  const missing = [];
+  for (const p of SKY_PICTURES) {
+    const path = `texture/${p.name}.dds`;
+    if (!vfs.has(path)) {
+      missing.push(p.name);
+      continue;
+    }
+    try {
+      let img = decodeDds(vfs.read(path));
+      while (img.width > 1024 || img.height > 1024) img = halve(img);
+      const file = `${p.name}.png`;
+      writeFileSync(join(dir, file), encodePng(img.width, img.height, img.rgba));
+      pictures[p.name] = { file, width: img.width, height: img.height, use: p.use, what: p.what };
+    } catch (err) {
+      missing.push(`${p.name} (${err.message})`);
+    }
+  }
+  writeFileSync(join(dir, 'pictures.json'), JSON.stringify({ version: SKY_PICTURES_VERSION, pictures, ...(late ? { late } : {}) }));
+  log(`sky pictures: ${Object.keys(pictures).length} of ${SKY_PICTURES.length} -> ${join(dir, 'pictures.json')}${missing.length ? `; not in the archives: ${missing.join(', ')}` : ''}`);
+  return { written: Object.keys(pictures), missing };
 }
 
 /**
@@ -301,6 +382,17 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
     }
   };
 
+  /** A ground distant appearance's effect converted into the pack (its file there), or null. */
+  const distantEffect = (path) => {
+    if (!path || !particleFor || !/\.prt$/i.test(path)) return null;
+    const r = particleFor(clean(path));
+    if (r?.failed) {
+      notes.push(`${clean(path)}: ${r.failed}`);
+      return null;
+    }
+    return r?.file ?? null;
+  };
+
   /** A row's camera particle effect, converted into the pack when the caller can convert one. */
   const effect = (path) => {
     if (!path) return null;
@@ -314,7 +406,9 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
     return { source, file, kind: cameraEffectKind(source), strength: cameraEffectStrength(source) };
   };
 
-  const sky = { planet, ...(lent ? { lent } : {}), cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, weather: null, blocks: [] };
+  // `held` (pass 2, wave 4b) is always written, empty where the file has no `GSCL`: a sky.json without it was converted before
+  // the converter read them, which `status` asks again for (`skyHeldMissing`).
+  const sky = { planet, ...(lent ? { lent } : {}), cycleSeconds: 86400, dayNightSplit: 0.7, sunElevationDegrees: 67.5, sun: null, supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], held: [], stars: null, nightSky: null, timeLock: null, skybox: null, distant: [], space: null, weather: null, blocks: [] };
   const celestial = (c) => (c ? { ...c, image: shaderImage(c.shader), glowImage: shaderImage(c.glowShader) } : null);
   if (vfs.has(envPath)) {
     const env = parseEnvironmentFile(parseIff(vfs.read(envPath)));
@@ -324,8 +418,13 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
       sky.moon = celestial(env.moon);
       sky.supplementalMoon = celestial(env.supplementalMoon);
       sky.celestials = env.celestials.map(celestial);
+      // Bodies a state of the server chose among (Endor's Death Star in three stages): each its picture, as a celestial's,
+      // named by the picture's SWG name with no extension (what the game's `held` key names it by), with its stage.
+      sky.held = env.held.map((h) => ({ ...celestial(h), picture: pictureName(h.shader) }));
       sky.timeLock = env.timeLock;
-      sky.distant = env.distant;
+      // A ground world's distant appearances (Mustafar's four volcano plumes): each effect converted into the pack where the
+      // caller converts effects (`file`, the pack's own path; null where it could not be), so the game can stand them.
+      sky.distant = env.distant.map((d) => (d.planet ? d : { ...d, file: distantEffect(d.appearance) }));
       sky.nightSky = env.nightSky ? { shader: env.nightSky, image: shaderImage(env.nightSky) } : null;
       if (env.stars) {
         let colors = null;
@@ -413,7 +512,7 @@ export function exportSky(vfs, planet, outDir, { textureFor, particleFor = null,
   writeFileSync(join(outDir, 'sky.json'), JSON.stringify(sky));
   const cameraEffects = new Set(sky.blocks.map((b) => b.cameraEffect?.source).filter(Boolean));
   const effectKinds = [...new Set(sky.blocks.map((b) => b.cameraEffect?.kind).filter(Boolean))];
-  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars', ...(sky.space ? [`${sky.space.lights.length} space lights`, `${sky.space.celestials.length} star sprites`] : []), ...(sky.blocks.length ? [`${cameraEffects.size} camera effect${cameraEffects.size === 1 ? '' : 's'}${effectKinds.length ? ` (${effectKinds.join(', ')})` : ''}`] : [])];
+  const parts = [`${sky.blocks.length} environment blocks`, sky.sun ? 'sun' : 'no sun', sky.moon ? 'moon' : 'no moon', ...(sky.held.length ? [`${sky.held.length} held bodies (${sky.held.map((h) => `${h.picture} stage ${h.stage}`).join(', ')})`] : []), ...(sky.distant.some((d) => d.file) ? [`${sky.distant.filter((d) => d.file).length} distant effects`] : []), sky.skybox ? 'skybox' : 'gradient sky', sky.stars ? `${sky.stars.count} stars` : 'no stars', ...(sky.space ? [`${sky.space.lights.length} space lights`, `${sky.space.celestials.length} star sprites`] : []), ...(sky.blocks.length ? [`${cameraEffects.size} camera effect${cameraEffects.size === 1 ? '' : 's'}${effectKinds.length ? ` (${effectKinds.join(', ')})` : ''}`] : [])];
   log(`  sky: ${parts.join(', ')} -> sky.json${notes.length ? `; ${notes.length} problems: ${[...new Set(notes)].slice(0, 6).join('; ')}` : ''}`);
   return 'sky.json';
 }

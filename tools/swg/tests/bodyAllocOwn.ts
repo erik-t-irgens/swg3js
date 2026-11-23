@@ -44,7 +44,15 @@ const card = (file: string, width: number, slot: SkyBodyCard['slot'], glow: bool
   }
   return { disc, glow: g, file, map, air: bodyOfPicture(file), slot };
 };
-const cards = [card('sky/cels_naboo.png', 2333, 'celestial', true), card('sky/moon_yellow.png', 1166, 'moon', false), card('sky/cels_moon_tiel.png', 600, 'moon2', true)];
+// Pass 2, wave 4b: and a body held still (a station, turned by its roll), as `SwgSky.hangHeld` makes one.
+const heldDir = new THREE.Vector3(0.55, 0.5, 0.66).normalize();
+const heldCard = (): SkyBodyCard => {
+  const c = card('moon_deathstar1', 1400, 'celestial', false);
+  const quaternion = turnSkyBody(heldDir, new THREE.Quaternion()).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0.35));
+  c.disc.position.copy(heldDir).multiplyScalar(3500);
+  return { ...c, air: { kind: 'airless' }, held: { name: 'deathstar', picture: 'moon_deathstar1', light: 1.5, rollRad: 0.35, dir: heldDir, quaternion } };
+};
+const cards = [card('sky/cels_naboo.png', 2333, 'celestial', true), card('sky/moon_yellow.png', 1166, 'moon', false), card('sky/cels_moon_tiel.png', 600, 'moon2', true), heldCard()];
 const set = await SkyBodies.make(cards);
 const camera = new THREE.PerspectiveCamera(60, 16 / 9, 0.1, 10000);
 const f = AIR.frame;

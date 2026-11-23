@@ -285,7 +285,7 @@ import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundT
 import { radialStatusOf } from './radial.mjs';
 import { HORIZON_STATUS_ASKS, horizonStatusOf } from './horizon.mjs';
 import { snapshotCategories, strayCategories } from './worldManifest.mjs';
-import { exportSky } from './sky.mjs';
+import { exportSky, exportSkyPictures, SKY_PICTURES_VERSION } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
 import { convertSoundPlaces, placesStatus } from './soundplaces.mjs';
@@ -2798,6 +2798,21 @@ const COPY_MAP_ZONES = ['kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kas
  * would fill each gap, so a fresh checkout or a second machine knows what to run.
  */
 /**
+ * Pass 2, wave 4b: whether a world's sky.json was written before the converter read its held bodies (`held`, written always
+ * since, empty where the environment has no `GSCL`) and gave each ground distant appearance its converted effect (`file`).
+ */
+function skyHeldMissing(sky) {
+  if (!sky || typeof sky !== 'object') return false;
+  if (!Array.isArray(sky.held)) return true;
+  return (sky.distant ?? []).some((d) => d && !d.planet && !('file' in d));
+}
+
+/** Pass 2, wave 4b: whether the shared sky pack's list (`<dir>/sky/pictures.json`, read) is missing or of another version. */
+function skyPicturesMissing(file) {
+  return !file || file.version !== SKY_PICTURES_VERSION || !file.pictures || Object.keys(file.pictures).length === 0;
+}
+
+/**
  * How many of a sky's effects (its weather and its blocks' camera effects) carry an effect the pack
  * has nothing to play for: an attachment with neither a converted `file` nor a reason it `failed`,
  * and no converted effect of that name in the pack. That is a sky converted before the converter
@@ -3212,6 +3227,8 @@ function packStatus(dir) {
     else if (!sky) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} has no sky`);
     else if (!sky.weather) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky has no weather effects`);
     else if (skyEffectsUncarried(packDir, sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky's effects were converted before the effects their particles carry`);
+    // Pass 2, wave 4b: a sky converted before the held bodies (`GSCL`) and the ground's distant effects were read.
+    else if (skyHeldMissing(sky)) need(`sky <swg-dir> all ${dir} --retail-only`, `${planet} sky was converted before its held bodies and distant effects were read`);
     if (withCells.length && floored < withCells.length) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s buildings have no walkable floors (${withCells.length - floored} of ${withCells.length})`);
     // A graph with no mesh under it looks complete and cannot funnel a body through a doorway, so
     // it is asked for again rather than counted as done. Drop --floors-graph-only to mend it.
@@ -3859,6 +3876,8 @@ function packStatus(dir) {
     // are the same, but the calibration that went with it gave a world asking for a quarter of the
     // sky about a twentieth, so it is asked for again rather than read.
     const volumes = files && noise.format === 2 && Array.isArray(noise.cover) && noise.cover.length > 1;
+    // Pass 2, wave 4b: the shared sky pack (SWG's sky pictures no environment names), written by the same command as the worlds' skies.
+    if (skyWorlds.length && skyPicturesMissing(readQuiet(join(dir, 'sky', 'pictures.json')))) need(`sky <swg-dir> all ${dir} --retail-only`, 'the shared sky pack (sky/pictures.json: the Death Star, the sky ships and the viewer\'s fallbacks) is not written');
     if (!skyWorlds.length) console.log('  clouds: none yet, and none asked for until a world has a sky');
     else if (!volumes) need(`clouds ${dir}`, files ? `the noise the volumetric clouds march through was calibrated before the coverage was measured (format ${noise.format})` : 'the volumetric clouds have no noise to march through (clouds/)');
     else if (measured.length < skyWorlds.length) need(`clouds ${dir}`, `worlds whose sky has not been measured (${skyWorlds.filter((p) => !measured.includes(p)).join(', ')})`);
@@ -7313,6 +7332,9 @@ switch (cmd) {
       console.log(`${planet}:`);
       exportSky(vfs, planet, outDir, { textureFor: (p) => textureFor(vfs, p), particleFor: (p) => convertParticle(vfs, p, outDir), log: console.log, late: lateStampOf(vfs, 'sky'), lent: SKY_LENT[planet] ?? null });
     }
+    // Pass 2, wave 4b: the shared sky pack beside the worlds' (`<out>/sky/`): SWG's sky pictures no environment names (the
+    // Death Star's four, the Mon Cal cruiser and the Star Destroyer a world may hold, and the space body viewer's fallbacks).
+    exportSkyPictures(vfs, pos[2] === 'all' ? pos[3] : dirname(resolve(pos[3])), { log: console.log, late: lateStampOf(vfs, 'sky') });
     printEffectSummary();
     break;
   }

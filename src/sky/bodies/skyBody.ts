@@ -32,7 +32,7 @@ import { AIR } from '../air/airApi.ts';
 import { F } from '../air/airParams.ts';
 import { TABLES, airShader, type AirProfileTables } from '../look/airProfile.js';
 import { markMotion } from '../../core/gpu/motion.ts';
-import { BODY_TUNE, bodyFormOf, tierRule } from './bodyTier.ts';
+import { BODY_LAY, BODY_TUNE, bodyFormOf, tierRule } from './bodyTier.ts';
 import { bodyRecord, bodyTablesKey, hasAir, makeBodyTables } from './bodyAir.ts';
 import { BakeCache, idbStore, type BakeHow } from './bakeCache.ts';
 import { bodyCardMaterial, type SkyBodyCard } from './bodyCard.ts';
@@ -40,10 +40,11 @@ import { tierIndexOf } from '../night/nightTier.ts';
 import { liveSettings } from '../../core/settings.ts';
 import { eyeExposureNode } from '../exposure/eyeBuffer.ts';
 import { turnSkyBody } from '../../world/skyBodies.ts';
+import { skyLookOf } from '../look/skyLooks.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Fn, dFdx, dFdy, dot, float, fwidth, int, max, min, mix, normalize, renderGroup, smoothstep, sqrt, texture, uniform, uv, vec2, vec3, vec4 } = TSL as Any;
+const { Fn, clamp, dFdx, dFdy, dot, float, fwidth, int, max, min, mix, normalize, renderGroup, smoothstep, sqrt, texture, uniform, uv, vec2, vec3, vec4 } = TSL as Any;
 
 /** How often the frame reads the tier (a read walks the tier table; frames). */
 const TIER_EVERY = 30;
@@ -70,8 +71,13 @@ export class BodyCardState {
   readonly a3 = new THREE.Vector4(25, 15, 0.8, 1e5);
   /** The haze's colour; the limb's brightness. */
   readonly a4 = new THREE.Vector4(1, 1, 1, 1);
-  /** The twilight's brightness; spare. */
-  readonly a5 = new THREE.Vector4(1, 0.5, 0.5, 0.5);
+  /**
+   * The twilight's brightness; what covers what stands behind (pass 2, wave 4b: 0 the sphere's disc, 1 the picture's own
+   * alpha, a held body's: a station's or a ship's outline); its light (a held body's `light`, 1 as converted); and (the
+   * fixer of pass 2, wave 4b) its sphere's reflectance, written by the frame: `BODY_TUNE.sphereAlbedo` for SWG's picture,
+   * the worn look's own (`skyLooks.ts`) for a body wearing one.
+   */
+  readonly a5 = new THREE.Vector4(1, 0, 1, 0.3);
   /** Its picture and its air's three tables (half floats), or the fallbacks. */
   map: THREE.Texture;
   tT: THREE.Texture;
@@ -194,6 +200,10 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
   const m = new MeshBasicNodeMaterial();
   m.name = `gpu: sky body (${form})`;
   m.fog = false;
+  // Pass 2, wave 4b: the alpha is the graph's own. Three multiplies a stand-in's alpha by the drawn material's opacity, and
+  // the sky writes SWG's fade by the hour into the card's opacity (its `place`): with `swgFade` 0 that was nought by day and
+  // the coverage below read as none, which is what wave 4a saw as "twice the sky" (the dome kept whole under the sky put back).
+  m.opacityNode = float(1);
   everyDraw(m);
   const f = fallbacks();
   const card = cardVec('card', new THREE.Vector4(0.5, 0.5, 0.5, 0.5));
@@ -216,6 +226,10 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
     const dC = normalize(vec3(tx, ty, -1)).toVar('bodyDC');
     // The world's air in front, read at the top (every table and derivative before any select).
     const Tw = (tables ? vec3(tables.transmittanceToSpace(dW)) : vec3(1)).toVar('bodyTw');
+    // Pass 2, wave 4b: the sky's own light along the ray, the dome's very light there (`airSky.ts`: the air's sky view), put
+    // back over what the body covers: the body is past the air, so the air's light is in front of it and stays, while the
+    // stars, the band and the sun's disc behind it are covered.
+    const skyBack = (tables ? vec3(tables.skyRadiance(dW)) : vec3(0)).toVar('bodySkyBack');
     // The sphere at a unit distance: its angular radius's sine, the ray's nearest approach, where it meets the surface.
     const tanD = card.y;
     const sinD = tanD.div(sqrt(tanD.mul(tanD).add(1))).toVar('bodySinD');
@@ -233,22 +247,31 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
     const mu = dot(nrm, sunC).toVar('bodyMu');
     const sphere = card.z;
     const opacity = card.w;
+    // The card's last four numbers: its twilight (`x`), how much it covers by its picture's own alpha (`y`, a held body's),
+    // its light dial (`z`) and (the fixer of pass 2, wave 4b) its sphere's reflectance (`w`: SWG's picture's
+    // `BODY_TUNE.sphereAlbedo`, a worn look's own albedo, 1, since a look's colours are its albedo).
+    const a5 = cardVec('a5', new THREE.Vector4(1, 0, 1, 0.3));
+    const sphAlb = a5.w;
     // The flat picture's light (its painted shading in its alpha), and the sphere's lit by the star.
     const flatRad = flat.rgb.mul(flat.a).mul(tune.x).mul(sunTop).mul(1 / PI);
     // The body's own light held, as a whole, to `seenMost` times the screen's white: the light a white pixel of its picture
     // would send through the air (the larger of its two reflectances), times the eye's exposure, sets one factor for the whole
     // disc, so its painted features still read when it is held (a pixel-by-pixel cap would flatten them to one white).
-    const whiteLum = dot(Tw.mul(sunTop), vec3(0.2126, 0.7152, 0.0722)).mul(max(tune.x, tune.y)).mul(1 / PI).mul(eye);
+    const whiteLum = dot(Tw.mul(sunTop), vec3(0.2126, 0.7152, 0.0722)).mul(max(tune.x, sphAlb)).mul(1 / PI).mul(eye);
     const hold = min(float(1), tune.w.div(max(whiteLum, 1e-30))).toVar('bodyHold');
     const seen = (own: Any): Any => own.mul(hold);
-    // The body's light is added to the sky behind it (its alpha nought): the sky's own light in front of a body is the very
-    // light the dome already drew along that ray, so a body's dark side shows the sky and its lit side the sky and its light.
-    // (Laid over with its coverage, the sky's light put back from the table, the first cut doubled the sky over the disc in
-    // the browser: the dome stayed whole under it. What stands behind a dark side, a star or the sun's disc, shows through.)
+    // Pass 2, wave 4b: the body covers what stands behind it. Its card blends one and one less its alpha (premultiplied over,
+    // `bodyCard.ts`), so its alpha is how much of what is behind it the body hides: its sphere's disc (a moon, a planet), or
+    // the picture's own alpha (a held station or ship, `a5.y`); faded with the body by the storms (its opacity). Under our
+    // sky that alpha takes the dome as well as the stars, the band and the sun's disc behind the body, so the sky's own light
+    // along the ray (`skyBack`, the air in front of the body) is put back times it. Its own light is added on top, through the
+    // air in front (`Tw`), and times its `light` (`a5.z`, a held body's dial; 1 for the rest).
+    const covered = mix(cover, flat.a, clamp(a5.y, 0, 1)).toVar('bodyCovered');
     if (form === 'painted') {
-      const sphRad = sph.rgb.mul(tune.y).mul(sunTop).mul(max(mu, 0)).mul(1 / PI);
-      const own = seen(mix(Tw.mul(flatRad), cover.mul(Tw.mul(sphRad)), sphere));
-      return vec4(own.mul(opacity), float(0));
+      const sphRad = sph.rgb.mul(sphAlb).mul(sunTop).mul(max(mu, 0)).mul(1 / PI);
+      const own = seen(mix(Tw.mul(flatRad), cover.mul(Tw.mul(sphRad)), sphere)).mul(a5.z);
+      const alpha = covered.mul(opacity);
+      return vec4(own.mul(opacity).add(skyBack.mul(alpha)), alpha);
     }
     // Scattered: the body's own air, the viewer's march (16, 12 or 8 steps, the tier's, a number the loop runs to).
     const a0 = cardVec('a0', new THREE.Vector4(6360, 6460, 8, 1.2));
@@ -256,21 +279,24 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
     const a2 = cardVec('a2', new THREE.Vector4(0.5, 0.5, 0.5, 0.5));
     const a3 = cardVec('a3', new THREE.Vector4(25, 15, 0.8, 1e5));
     const a4 = cardVec('a4', new THREE.Vector4(1, 1, 1, 1));
-    const a5 = cardVec('a5', new THREE.Vector4(1, 0.5, 0.5, 0.5));
     const steps = uniform(STEPS_U).setGroup(renderGroup);
     const U = { bottom: a0.x, top: a0.y, rayH: a0.z, mieH: a0.w, ray: a1.xyz, mieS: a1.w, oz: a2.xyz, mieA: a2.w, ozC: a3.x, ozW: a3.y, mieG: a3.z, mieTint: a4.xyz, limb: a4.w, twilight: a5.x };
-    // The viewer's shader half handed three's namespace with its loop running to the tier's count (one graph for every tier).
+    // The viewer's shader half handed three's namespace with its loop running to the tier's count (one graph for every tier),
+    // its steps laid by the game's power (`BODY_LAY`: the limb within 3% of the ground path at High's 12).
     const NS = { ...(TSL as Any), Loop: (_n: unknown, body: Any) => TSL.Loop({ start: int(0), end: int(steps.x), type: 'int', condition: '<' }, body) };
-    const air = airShader(NS, U, { T: cardTexture('tT', f.t), MS: cardTexture('tMS', f.ms), E: cardTexture('tE', f.e) }, steps.x);
+    const air = airShader(NS, U, { T: cardTexture('tT', f.t), MS: cardTexture('tMS', f.ms), E: cardTexture('tE', f.e) }, steps.x, BODY_LAY);
     const C = vec3(0, 0, -1);
     const marched = air.march(dC, C, a3.w, sunC);
     const L = vec3(marched.L).toVar('bodyAirL');
     const Tv = vec3(marched.Tv).toVar('bodyAirTv');
     const lit = air.lightAt(a0.x, mu);
-    const sphRad = sph.rgb.mul(tune.y).mul(sunTop).mul(vec3(lit.sun).mul(max(mu, 0)).add(vec3(lit.sky))).mul(1 / PI);
+    const sphRad = sph.rgb.mul(sphAlb).mul(sunTop).mul(vec3(lit.sun).mul(max(mu, 0)).add(vec3(lit.sky))).mul(1 / PI);
     const surface = mix(flatRad, sphRad.mul(cover), sphere);
-    const own = seen(Tw.mul(surface.mul(Tv).add(L.mul(sunTop))));
-    return vec4(own.mul(opacity), float(0));
+    const own = seen(Tw.mul(surface.mul(Tv).add(L.mul(sunTop)))).mul(a5.z);
+    // Its air hides what is behind it as much as it dims it: the disc whole, the shell by what gets through it.
+    const shell = float(1).sub(clamp(Tv.x.add(Tv.y).add(Tv.z).div(3), 0, 1));
+    const alpha = covered.add(float(1).sub(covered).mul(shell)).mul(opacity);
+    return vec4(own.mul(opacity).add(skyBack.mul(alpha)), alpha);
   })();
   return markMotion(m, 'sky');
 }
@@ -303,6 +329,11 @@ interface Body {
   share: number;
   up: boolean;
   tables: THREE.DataTexture[];
+  /**
+   * The fixer of pass 2, wave 4b: the reflectance of the look it wears (`skyLooks.ts`' `skyLookOf`), or -1 for SWG's picture. A
+   * body wearing a look is lit as a sphere whatever `BODY_TUNE.sphere` says for SWG's pictures, and takes its tier's form.
+   */
+  look: number;
 }
 
 /** What a sky's bodies say, for `__debug.skyBodies()`. */
@@ -335,7 +366,13 @@ export class SkyBodies {
       card.disc.userData.swgBodyCard = state;
       (card.disc.material as THREE.Material).userData.gpuStandIn = () => graphOf('painted');
       const air = hasAir(card.air);
-      const b: Body = { card, state, twin: null, air, ready: false, how: 'none', form: 'none', share: 0.5, up: false, tables: [] };
+      const worn = skyLookOf(card.disc);
+      const b: Body = { card, state, twin: null, air, ready: false, how: 'none', form: 'none', share: 0.5, up: false, tables: [], look: worn ? worn.albedo : -1 };
+      // Pass 2, wave 4b: a held body (a station, a ship) covers by its picture's own outline and shines by its own light dial.
+      if (card.held) {
+        state.a5.y = 1;
+        state.a5.z = card.held.light;
+      }
       if (air) {
         const rec = bodyRecord(card.air);
         if (rec) {
@@ -430,12 +467,34 @@ export class SkyBodies {
         u.x = -dir.y * right.z + dir.z * right.y;
         u.y = -dir.z * right.x + dir.x * right.z;
         u.z = -dir.x * right.y + dir.y * right.x;
+        // Pass 2, wave 4b: a held body hangs still at its own turn, its roll about the line to it included (the quad's +X is
+        // right · cos + up · sin, its +Y the rest), so its card's frame turns with it.
+        const hd = b.card.held;
+        if (hd) {
+          disc.quaternion.copy(hd.quaternion);
+          if (hd.rollRad !== 0) {
+            const cr = Math.cos(hd.rollRad);
+            const sr = Math.sin(hd.rollRad);
+            const rx = right.x;
+            const ry = right.y;
+            const rz = right.z;
+            right.x = rx * cr + u.x * sr;
+            right.y = ry * cr + u.y * sr;
+            right.z = rz * cr + u.z * sr;
+            u.x = u.x * cr - rx * sr;
+            u.y = u.y * cr - ry * sr;
+            u.z = u.z * cr - rz * sr;
+          }
+        }
         const w = disc.scale.x / R;
         const tanD = 0.5 * w * BODY_TUNE.discFill;
         const c = st.card;
         c.x = w;
         c.y = tanD;
-        c.z = BODY_TUNE.sphere;
+        // A body wearing a look is a sphere lit by the star at the look's own reflectance (the fixer of pass 2, wave 4b);
+        // SWG's picture keeps the dials' rule (its painted shading, `BODY_TUNE.sphere` 0 at the start).
+        c.z = b.look >= 0 ? 1 : BODY_TUNE.sphere;
+        st.a5.w = b.look >= 0 ? b.look : BODY_TUNE.sphereAlbedo;
         c.w = presence;
         // The star in the card's frame (x right, y up, z back toward the eye).
         const sun = st.sun;
@@ -457,7 +516,7 @@ export class SkyBodies {
       let form: 'scattered' | 'painted' | 'none' = 'none';
       if (b.air) {
         const want = BODY_TUNE.form;
-        form = bodyFormOf(this.tierAt, b.share, want === 'tier' ? null : want, true, BODY_TUNE.sphere < 0.5);
+        form = bodyFormOf(this.tierAt, b.share, want === 'tier' ? null : want, true, b.look < 0 && BODY_TUNE.sphere < 0.5);
         if (form === 'scattered' && !b.ready) form = 'painted';
       }
       b.form = form;
@@ -497,6 +556,8 @@ export class SkyBodies {
         dir: [b.state.dir.x, b.state.dir.y, b.state.dir.z].map((v) => Number(v.toFixed(4))),
         sunInCard: [b.state.sun.x, b.state.sun.y, b.state.sun.z].map((v) => Number(v.toFixed(3))),
         km: b.air ? { bottom: b.state.a0.x, top: b.state.a0.y } : null,
+        lit: b.look >= 0 ? `as a sphere, wearing a look (reflectance ${b.look})` : BODY_TUNE.sphere >= 0.5 ? 'as a sphere (the dial)' : "SWG's painted picture",
+        ...(b.card.held ? { held: { name: b.card.held.name, picture: b.card.held.picture, light: b.card.held.light, rollDeg: Number(((b.card.held.rollRad * 180) / Math.PI).toFixed(2)) } } : {}),
       })),
       bake: { ...bakeCache().stats },
     };
@@ -530,7 +591,9 @@ function writeRecord(st: BodyCardState, rec: Float64Array): void {
   st.a2.set(rec[F.ozR], rec[F.ozG], rec[F.ozB], rec[F.mieA]);
   st.a3.set(rec[F.ozC], rec[F.ozW], rec[F.mieG], rec[F.bottom] * 40);
   st.a4.set(rec[F.mieTintR], rec[F.mieTintG], rec[F.mieTintB], BODY_TUNE.limb);
-  st.a5.set(BODY_TUNE.twilight, 0.5, 0.5, 0.5);
+  // The twilight alone (the fixer of pass 2, wave 4b): `a5`'s other three are the card's own (its cover, its light, its
+  // reflectance), and setting them here halved every body with air's light and took half its cover from its picture's alpha.
+  st.a5.x = BODY_TUNE.twilight;
 }
 
 /** The bodies' graphs let go (a session's end; the tests'). */

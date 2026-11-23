@@ -134,12 +134,133 @@ export class BakeCache {
 
   /** Whether a look's bake is in this session's memo (so it draws in full). */
   has(key: string): boolean {
-    return this.memo.has(key);
+    return this.memo.has(key) || this.bytes.has(key);
   }
 
   /** The session's memo let go (the console's: the next screen reads the store, or bakes again). */
   forgetMemo(): void {
     this.memo.clear();
+    this.bytes.clear();
+  }
+
+  // ---------------------------------------------------------------- pictures (pass 2, wave 4b, maker A)
+
+  /** The pictures' memo: a generated look's baked texels (bytes), by the same kind of key. */
+  private readonly bytes = new Map<string, Uint8Array[]>();
+
+  /**
+   * A look's pictures (pass 2, wave 4b): `take`'s rule for a bake made on the card, which answers its parts as bytes and
+   * takes some milliseconds of awaiting (the bake's passes and its read-back). From this session's memo, else the store, else
+   * made now where the screen's budget has room (its awaited time counted against the budget, so a slow card's first bake
+   * puts the next look off), kept in the memo and the store; else nothing, and the look waits for the next screen (its caller
+   * draws SWG's picture). `make` is never called once the budget is spent; a `make` that answers null (no card, a bake
+   * refused) leaves nothing kept and the look not waiting.
+   */
+  async takeBytes(key: string, make: () => Promise<Uint8Array[] | null>): Promise<{ parts: Uint8Array[] | null; how: BakeHow }> {
+    const m = this.bytes.get(key);
+    if (m) {
+      // (read from the storage ahead by `holds`: it is the storage's)
+      if (this.readAhead.delete(key)) {
+        this.stats.stored++;
+        return { parts: m, how: 'stored' };
+      }
+      this.stats.memo++;
+      return { parts: m, how: 'memo' };
+    }
+    if (this.store) {
+      let got: ArrayBuffer[] | null = null;
+      try {
+        got = await this.store.get(key);
+      } catch {
+        got = null;
+      }
+      if (got && got.length) {
+        const parts = got.map((b) => new Uint8Array(b));
+        this.bytes.set(key, parts);
+        this.inStore.add(key);
+        this.waiting.delete(key);
+        this.stats.stored++;
+        this.stats.waiting = [...this.waiting];
+        return { parts, how: 'stored' };
+      }
+    }
+    if (this.stats.screenMs >= BAKE_TUNE.budgetMs) {
+      this.waiting.add(key);
+      this.stats.fallback++;
+      this.stats.waiting = [...this.waiting];
+      return { parts: null, how: 'fallback' };
+    }
+    const t0 = this.now();
+    let parts: Uint8Array[] | null = null;
+    try {
+      parts = await make();
+    } catch {
+      parts = null;
+    }
+    const ms = this.now() - t0;
+    this.stats.screenMs += ms;
+    this.stats.bakedMs += ms;
+    if (!parts) return { parts: null, how: 'fallback' };
+    this.stats.baked++;
+    this.bytes.set(key, parts);
+    this.waiting.delete(key);
+    this.stats.waiting = [...this.waiting];
+    if (this.store) {
+      try {
+        await this.store.put(
+          key,
+          parts.map((p) => p.slice().buffer as ArrayBuffer),
+        );
+        this.inStore.add(key);
+      } catch {
+        /* kept for this session only */
+      }
+    }
+    return { parts, how: 'baked' };
+  }
+
+  /** A look's pictures where this session's memo has them (never a bake, never the store): for a reader in play. */
+  bytesIfHad(key: string): Uint8Array[] | null {
+    return this.bytes.get(key) ?? null;
+  }
+
+  /** Keys this session put into the store or read out of it: pictures the next screen can read again. */
+  private readonly inStore = new Set<string>();
+
+  /**
+   * A look's pictures let go from the session's memo once their reader has made what it draws (the fixer of pass 2, wave 4b: the
+   * memo kept every bake at every size for the session, 16 MB a space planet), where the store holds them, so the next screen
+   * reads them back (some tens of milliseconds); kept where the store refused them, so the session never loses a look.
+   * Answers whether they were let go.
+   */
+  dropBytes(key: string): boolean {
+    if (!this.inStore.has(key) || !this.bytes.has(key)) return false;
+    this.bytes.delete(key);
+    this.readAhead.delete(key);
+    return true;
+  }
+
+  /** Keys read from the storage ahead by `holds`, answered as the storage's by the next `takeBytes`. */
+  private readonly readAhead = new Set<string>();
+
+  /**
+   * Whether a look's pictures are had without a bake (this session's memo, or the storage, read into the memo here): what a
+   * screen's start asks before it asks for a kit's pipelines, so a stored look compiles nothing.
+   */
+  async holds(key: string): Promise<boolean> {
+    if (this.bytes.has(key)) return true;
+    if (!this.store) return false;
+    let got: ArrayBuffer[] | null = null;
+    try {
+      got = await this.store.get(key);
+    } catch {
+      got = null;
+    }
+    if (!got || !got.length) return false;
+    this.bytes.set(key, got.map((b) => new Uint8Array(b)));
+    this.inStore.add(key);
+    this.readAhead.add(key);
+    return true;
   }
 }
 

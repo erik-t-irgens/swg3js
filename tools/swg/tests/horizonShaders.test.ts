@@ -732,7 +732,12 @@ else {
     [slice('// Pass 2, wave 4a (maker B): under our sky on WebGPU the moons and planets are cards of our own', "import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';\n") + "import { bodyOfPicture } from '../sky/bodies/bodyAir.ts';\n", ''],
     [slice('  /**\n   * Pass 2, wave 4a (maker B): the moons and planets whose discs are cards', '  /** What the lens flare follows'), ''],
     [slice('      // Pass 2, wave 4a (maker B): under our sky on WebGPU over a planet each moon', "    }\n\n    // The lens flare's sources over a planet"), ''],
-    [slice('  /** Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (empty', "  /** The dome's material and its draw order"), ''],
+    [slice('  /** Pass 2, wave 4a (maker B): the moons and planets whose discs are cards of our own (empty', '  /**\n   * Pass 2, wave 4b (maker B): the bodies that hang still in this sky'), ''],
+    // Pass 2, wave 4b (maker B): the bodies that hang still (Endor's Death Star) and the distant plumes: the plan's type import,
+    // `SkyData`'s two fields with their words, and `hangHeld`; no program's text.
+    ["import type { HeldPlan, SkyHeldEntry } from '../sky/bodies/heldBodies.ts';\n", ''],
+    [slice('  /**\n   * Pass 2, wave 4b (maker B): bodies a state of the server chose among', '  stars: { count: number;'), ''],
+    [slice('  /**\n   * Pass 2, wave 4b (maker B): the bodies that hang still in this sky', "  /** The dome's material and its draw order"), ''],
     // Pass 2, wave 4 (maker A): the console's toggle of SWG's cloud sheets (`sky('clouds')`, the space body viewer's "same
     // sky" proof): its name in the toggle's type, its line of words and its line; no program's text.
     ["  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites' | 'clouds'): Record<string, unknown> {", "  describe(toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites'): Record<string, unknown> {"],

@@ -47,6 +47,21 @@ export interface SkyBodyCard {
   readonly map: THREE.Texture;
   /** What it shows (`bodyOfPicture`): a ground world, a giant, a temperate world or a moon. */
   readonly air: BodyAir;
-  /** The sky's slot it rides in: the moon's, the second moon's, or an extra body fixed in the sky. */
+  /** The sky's slot it rides in: the moon's, the second moon's, or an extra body fixed in the sky (a held body's too). */
   readonly slot: 'moon' | 'moon2' | 'celestial';
+  /** A held body's own numbers (pass 2, wave 4b: `heldBodies.ts`): its roll, its light, and the turn it hangs at, worked once. */
+  readonly held?: HeldCardInfo;
+}
+
+/** What a held body's card carries beyond a moon's (it stands still in the sky, so its turn is worked once). */
+export interface HeldCardInfo {
+  /** Its name in the world's `held` list (`deathstar`), and the picture's SWG name. */
+  readonly name: string;
+  readonly picture: string;
+  /** Its light (1 as converted) and its roll about the line to it, radians. */
+  readonly light: number;
+  readonly rollRad: number;
+  /** Where it hangs (unit, the sky's frame) and the card's turn there, roll included. */
+  readonly dir: THREE.Vector3;
+  readonly quaternion: THREE.Quaternion;
 }

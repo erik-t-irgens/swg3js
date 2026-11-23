@@ -311,10 +311,124 @@ export interface GpuSkyBodies {
   bake(forget: boolean): Record<string, unknown>;
 }
 
+/**
+ * His looks baked on the game's card (pass 2, wave 4b, maker A: `src/sky/look/lookBake.ts`; the API note
+ * `A:\swg3js\port\scratch\p2w4b-makerA\API.md`): a generated look of the Save to game baked behind a loading screen within
+ * the screen's budget, read back and kept by its hash in the browser's storage, the pictures shared by the sky's bodies, the
+ * space planets and the galaxy map's globes. Pictures are `LookPictures` (`src/sky/look/lookPictures.ts`): RGBA8, row 0 the
+ * south pole, `surface` sRGB colour with the shine in alpha, `clouds` brightness with the cover in alpha or null.
+ */
+export interface GpuLooks {
+  /**
+   * A look's pictures at most `most` wide (`LOOK_BAKE_TUNE.skySize` 1024 or `.spaceSize` 2048, never over the look's own size):
+   * from the session's memo, the browser's storage, or baked now on the card where the screen's budget has room; null where
+   * it is put off to the next screen (draw SWG's picture) or the look is not a generated one. **Behind a loading screen alone.**
+   */
+  bake(id: string, look: import('../sky/look/bodiesFile.ts').BodyLook, most: number): Promise<import('../sky/look/lookPictures.ts').LookPictures | null>;
+  /**
+   * A look's bake kit asked for ahead at a loading screen's start (never awaited: its pipelines land while the world loads),
+   * nothing where its pictures are stored already. The world asks it for every look its zone's places wear (`warmZoneLooks`).
+   */
+  warm(look: import('../sky/look/bodiesFile.ts').BodyLook, most: number): Promise<void>;
+  /** A loading screen's looks begin: the bake cache's budget whole again for them (the bodies' air tables begin it again after). */
+  beginScreen(): void;
+  /** The same pictures where this session already has them, else null: never bakes, never reads the storage; safe anywhere. */
+  baked(look: import('../sky/look/bodiesFile.ts').BodyLook, most: number): import('../sky/look/lookPictures.ts').LookPictures | null;
+  /**
+   * A look's pictures at a size let go from the session's memo once the reader has made what it draws from them, where the
+   * browser's storage holds them (the next screen reads them back); kept where it refused them. Behind a loading screen alone.
+   */
+  release(look: import('../sky/look/bodiesFile.ts').BodyLook, most: number): void;
+  /** The session's pictures and the bake cache's memo let go (the prover's: the next screen reads the storage). */
+  forget(): void;
+  /** What the bakes have done (counts, milliseconds, the bake cache's words). */
+  report(): Record<string, unknown>;
+}
+
+/**
+ * A space zone's planets' air (pass 2, wave 4b, maker C: `src/space/spaceRims.ts`): each planet with air a Painted and a
+ * Scattered shell hung beside it in the zone's sky group behind the loading screen, one shown a frame by the tier's rule.
+ */
+export interface GpuSpaceRimSet {
+  /** Once a game frame after the sky group is on the camera (`rimIn`'s fields written first). */
+  frame(camera: THREE.PerspectiveCamera): void;
+  report(): Record<string, unknown>;
+  dispose(forget: (materials: Iterable<THREE.Material>) => void): void;
+}
+
+/** The space planets' air's runtime (pass 2, wave 4b, maker C). */
+export interface GpuSpaceRims {
+  /**
+   * A zone's planets made ready (each one's tables had within the bake cache's budget, its shells hung beside it): `appearances`
+   * the zone's file's planets in order, each body's `index` its row there, the radius its sphere was built at.
+   */
+  make(zone: string, appearances: readonly string[], bodies: readonly { mesh: THREE.Mesh; radius: number; index: number }[]): Promise<GpuSpaceRimSet>;
+  /** The frame's star and ambient (`SPACE_RIM_IN`): written into its fields by the world before `frame`. */
+  readonly rimIn: GpuSpaceRimIn;
+}
+
+/**
+ * A space zone's gas drawn as true volumes (pass 2, wave 4b, maker C: `src/space/spaceVolumes.ts`): marched at half the scene's
+ * size into a picture of its own before the scene's passes and laid over the scene by spheres hung in `group`.
+ */
+export interface GpuSpaceVolumeSet {
+  /** The lay-overs: the world hangs it in its scene and builds it behind the screen. */
+  readonly group: THREE.Object3D;
+  /** How many volumes the zone has. */
+  readonly count: number;
+  /** Whether they are drawn (the Nebulae row's Volumes). */
+  shown: boolean;
+  /** Once a game frame in space (`volumeIn`'s fields written first). */
+  frame(camPos: THREE.Vector3, tierIndex: number): void;
+  /** Before the scene's passes: the march into its half-size picture, the scene's own size handed in (a kept vector). */
+  draw(camera: THREE.PerspectiveCamera, sceneSize: THREE.Vector2): void;
+  report(): Record<string, unknown>;
+  dispose(forget: (materials: Iterable<THREE.Material>) => void): void;
+}
+
+/** The space volumes' runtime (pass 2, wave 4b, maker C). */
+export interface GpuSpaceVolumes {
+  /** A zone's volumes made ready behind its screen: the zone's file's planets, and its planets as the world hung them. */
+  make(zone: string, zonePlanets: readonly { appearance: string; direction: readonly number[]; size: number }[], planets: readonly { mesh: THREE.Mesh; radius: number; distance: number }[]): Promise<GpuSpaceVolumeSet>;
+  /** The Nebulae row's form as it stands ('off', 'sheets' or 'volumes'), and the tier it was read at (`tierNow`). */
+  form(): 'off' | 'sheets' | 'volumes';
+  readonly now: { readonly tier: number };
+  /** The frame's star and clock (`SPACE_VOLUME_IN`), written into its fields before `frame`. */
+  readonly volumeIn: { sunX: number; sunY: number; sunZ: number; sunR: number; sunG: number; sunB: number; dt: number };
+}
+
+/** The star's direction, the main light (colour times intensity) and the hemisphere's two colours (times its intensity). */
+export interface GpuSpaceRimIn {
+  sunX: number;
+  sunY: number;
+  sunZ: number;
+  lightR: number;
+  lightG: number;
+  lightB: number;
+  skyR: number;
+  skyG: number;
+  skyB: number;
+  groundR: number;
+  groundG: number;
+  groundB: number;
+  fillX: number;
+  fillY: number;
+  fillZ: number;
+  fillR: number;
+  fillG: number;
+  fillB: number;
+}
+
 /** What the WebGPU side hands the game (`src/core/gpu/start.ts`). Only ever set with the switch at WebGPU. */
 export interface GpuRuntime {
   /** The moons and planets under our sky (pass 2, wave 4a, maker B). */
   readonly skyBodies: GpuSkyBodies;
+  /** His looks' bakes (pass 2, wave 4b, maker A). */
+  readonly looks: GpuLooks;
+  /** A space zone's planets' air (pass 2, wave 4b, maker C). */
+  readonly spaceRims: GpuSpaceRims;
+  /** A space zone's gas as true volumes, and the Nebulae row (pass 2, wave 4b, maker C). */
+  readonly spaceVolumes: GpuSpaceVolumes;
   /** What draws from the air under our sky (pass 2, wave 1). */
   readonly airDraw: GpuAirDraw;
   /** The eye (pass 2, wave 2). */

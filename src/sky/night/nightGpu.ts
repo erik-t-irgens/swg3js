@@ -41,7 +41,7 @@ import type { CityRow } from '../../story/cities.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Fn, Loop, If, asin, atan, attribute, cameraProjectionMatrix, cameraViewMatrix, clamp, cos, exp, float, floor, int, log2, max, min, mix, normalize, positionGeometry, positionLocal, pow, renderGroup, screenSize, select, sin, smoothstep, sqrt, texture, time, transpose, uint, uniform, uv, varying, vec2, vec3, vec4 } = TSL as Any;
+const { Fn, Loop, If, asin, atan, attribute, cameraProjectionMatrix, cameraViewMatrix, clamp, cos, exp, float, floor, int, log2, max, min, mix, modelViewMatrix, normalize, positionGeometry, positionLocal, pow, renderGroup, screenSize, select, sin, smoothstep, sqrt, texture, time, transpose, uint, uniform, uv, varying, vec2, vec3, vec4 } = TSL as Any;
 
 /**
  * What is not a dial:
@@ -56,6 +56,25 @@ export const NIGHT_FIXED = { hideAbove: 0.05, cool: 9000, warm: 4200, spread: 2.
 
 /** Where the world's sky's group stands its sphere: inside the dome (`SKY_RADIUS` 3500 × 1.6) and well inside any far plane. */
 const BAND_SPHERE = 4800;
+
+/**
+ * Pass 2, wave 4b (maker B; wave 4a's small question, its default): the band is drawn after the opaque world and tested against
+ * its depth, so a pixel a roof, a ridge or the far ground covers costs it nothing (wave 3's measure: 0.09 ms of the card's
+ * world pass, nearly all the night's, a whole sphere drawn first under every solid). Its draw order puts it after every solid
+ * of the opaque list and before everything see-through (the bodies, which cover it, among them); its vertices stand on the
+ * far plane (`bandClip`), so the depth test passes only where nothing solid was drawn.
+ */
+export const BAND_ORDER = 900;
+
+/**
+ * A clip-space place on the far plane (pass 2, wave 4b): the sphere's vertex through three's own model-view and projection,
+ * its depth then stood on the far plane (z = w, or nought under the reversed depth the game draws with on WebGPU), so the
+ * depth test lets it through only where the scene drew nothing solid. Clipping keeps the far plane itself.
+ */
+export function bandClip(reversed: boolean): Any {
+  const clip = cameraProjectionMatrix.mul(modelViewMatrix.mul(vec4(positionLocal, 1))).toVar('swgBandClip');
+  return vec4(clip.xy, reversed ? float(0) : clip.w, clip.w);
+}
 
 /** What the night sky has done, for `__debug.stars()`. */
 export const NIGHT_STATS = { made: 0, bakes: 0, lastBakeMs: 0, lastBakeAt: '', graphBuilds: 0, rebakesInPlay: 0 };
@@ -242,10 +261,13 @@ function nightMaterial(name: string): MeshBasicNodeMaterial {
  * The band and the towns' glow on a sphere about the camera: each pixel's direction turned into the galaxy's frame, the
  * band's picture there coloured by its warm share and times the air's transmittance to space, the towns' glow added.
  */
-function bandMaterial(tables: AirTables, band: THREE.Texture, u: NightUniforms, cool: THREE.Color, warm: THREE.Color): MeshBasicNodeMaterial {
+function bandMaterial(tables: AirTables, band: THREE.Texture, u: NightUniforms, cool: THREE.Color, warm: THREE.Color, reversed = true): MeshBasicNodeMaterial {
   NIGHT_STATS.graphBuilds++;
   const m = nightMaterial('gpu: milky way');
   m.side = THREE.BackSide;
+  // Pass 2, wave 4b: after the solids, against their depth, on the far plane (`BAND_ORDER`, `bandClip`).
+  m.depthTest = true;
+  m.vertexNode = bandClip(reversed);
   const F = uniform(u.frame).setGroup(renderGroup);
   const U = uniform(u.units).setGroup(renderGroup);
   const G = uniform(u.glow).setGroup(renderGroup);
@@ -418,10 +440,10 @@ export class NightSky {
     this.target = new THREE.RenderTarget(BAND_SIZE.width, BAND_SIZE.height, { type: THREE.HalfFloatType, format: THREE.RGFormat, depthBuffer: false, stencilBuffer: false, samples: 0, generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, wrapS: THREE.RepeatWrapping, wrapT: THREE.ClampToEdgeWrapping });
     this.target.texture.name = 'gpu: milky way';
     this.bake = bandGraph(this.bakeU);
-    this.band = new THREE.Mesh(new THREE.SphereGeometry(BAND_SPHERE, 48, 24), bandMaterial(tables, this.target.texture, this.u, kelvinColour(NIGHT_FIXED.cool), kelvinColour(NIGHT_FIXED.warm)));
+    this.band = new THREE.Mesh(new THREE.SphereGeometry(BAND_SPHERE, 48, 24), bandMaterial(tables, this.target.texture, this.u, kelvinColour(NIGHT_FIXED.cool), kelvinColour(NIGHT_FIXED.warm), renderer?.reversedDepthBuffer === true));
     this.band.name = 'night: milky way';
     this.band.frustumCulled = false;
-    this.band.renderOrder = -8;
+    this.band.renderOrder = BAND_ORDER;
     this.cat = catalogueOf(this.key, this.place);
     this.stars = new THREE.Mesh(starsGeometry(this.cat), starsMaterial(tables, this.u));
     this.stars.name = 'night: stars';

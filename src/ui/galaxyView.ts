@@ -13,6 +13,10 @@ import { colourHex, onPaletteChange } from '../core/palette.ts';
 import * as THREE from 'three';
 import { drawnSystems, GALAXY_TUNE, systemPlace, type GalaxySystemDef, type GalaxyRoute } from '../data/galaxy.ts';
 import { sampleDisc } from '../sky/night/galaxyDensity.ts';
+// Pass 2, wave 4b (maker C): the globes in his looks, with cloud shells and painted rims, the game on WebGPU alone.
+import { GPU } from '../core/gpuSwitch.ts';
+import { GLOBE_TUNE, type GlobePictures } from './galaxyLooks.ts';
+import { RIM_LIT, RIM_PROFILE_SIZE } from '../space/spaceAir.ts';
 
 /**
  * Invented: how the galaxy view looks and how its mouse feels. Every number here is ours, and every
@@ -115,6 +119,84 @@ export class GalaxyOrbit {
   }
 }
 
+// ---------------------------------------------------------------- the painted rim (pass 2, wave 4b, maker C)
+
+/** The map's light as the rims read it: its way in the view's frame and its colour times its intensity (shared uniforms). */
+interface RimLight {
+  dir: { value: THREE.Vector3 };
+  colour: { value: THREE.Color };
+}
+
+/** A rim's table (`rimProfile`: RGBA, the limb's light by height) as a half-float picture the map's renderer filters. */
+function rimTexture(profile: Float32Array): THREE.DataTexture {
+  const out = new Uint16Array(profile.length);
+  for (let i = 0; i < profile.length; i++) out[i] = THREE.DataUtils.toHalfFloat(profile[i]);
+  const t = new THREE.DataTexture(out, profile.length / 4, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+  t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.needsUpdate = true;
+  return t;
+}
+
+/** No rim: a table of noughts. */
+function blankRimTexture(): THREE.DataTexture {
+  return rimTexture(new Float32Array(4));
+}
+
+/**
+ * A globe's painted rim on the map's WebGL renderer: `spaceAir.ts`' `paintedRimAt` (the Painted form of a space planet's air) in
+ * the map's frame, the limb's own light by height laid over `GLOBE_TUNE.rimHeight` of the globe, lit by the map's light. Its
+ * mesh stands at the rim's reach, so the ground is its radius over that reach. Added over what is behind it.
+ */
+function globeRimMaterial(profile: THREE.Texture, light: RimLight): THREE.ShaderMaterial {
+  const n = RIM_PROFILE_SIZE;
+  return new THREE.ShaderMaterial({
+    name: 'galaxy globe rim',
+    uniforms: { uProfile: { value: profile }, uLightDir: light.dir, uLight: light.colour, uShell: { value: GLOBE_TUNE.rimHeight }, uStrength: { value: GLOBE_TUNE.rimStrength } },
+    vertexShader: /* glsl */ `
+      varying vec3 vView;
+      varying vec3 vCentre;
+      varying float vRadius;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vView = mv.xyz;
+        vCentre = (modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        vRadius = length((modelViewMatrix * vec4(1.0, 0.0, 0.0, 0.0)).xyz);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D uProfile;
+      uniform vec3 uLightDir;
+      uniform vec3 uLight;
+      uniform float uShell;
+      uniform float uStrength;
+      varying vec3 vView;
+      varying vec3 vCentre;
+      varying float vRadius;
+      void main() {
+        vec3 rd = normalize(vView);
+        vec3 P = rd * dot(vCentre, rd) - vCentre;
+        float ground = vRadius / uShell;
+        float b = length(P);
+        float rho = b / ground;
+        float u = clamp((rho - 1.0) / max(uShell - 1.0, 1e-6), 0.0, 1.0);
+        vec3 prof = texture2D(uProfile, vec2(sqrt(u) * ${((n - 1) / n).toFixed(6)} + ${(0.5 / n).toFixed(6)}, 0.5)).rgb;
+        float graze = sqrt(max(uShell - 1.0, 0.0) * 0.5);
+        float inside = rho < 1.0 ? min(1.0, graze / sqrt(max(1.0 - rho * rho, 1e-6))) : 1.0;
+        float outside = 1.0 - smoothstep(uShell * 0.999, uShell, rho);
+        float lit = smoothstep(${RIM_LIT.from.toFixed(3)}, ${RIM_LIT.to.toFixed(3)}, dot(P / max(b, 1e-6), uLightDir));
+        gl_FragColor = vec4(prof * uLight * (inside * outside * lit * uStrength), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
 /** A label from the pool, with the pixels it was last placed at: one that has not moved writes nothing. */
 type LabelEl = HTMLElement & { placedX?: number; placedY?: number };
 
@@ -125,6 +207,16 @@ interface Globe {
   sys: GalaxySystemDef;
   mesh: THREE.Mesh;
   material: THREE.MeshLambertMaterial;
+  /**
+   * Pass 2, wave 4b (maker C, `galaxyLooks.ts`): with the game on WebGPU, its cloud shell and its painted rim, made with the
+   * view (so the first frame's compile links their two programs) and shown once its look's pictures are on it; null on WebGL.
+   */
+  clouds: THREE.Mesh | null;
+  rim: THREE.Mesh | null;
+  /** The pictures its look laid on it (its own, freed when another comes), or null while SWG's picture stands. */
+  lookTextures: THREE.DataTexture[];
+  /** SWG's picture (or the blank) kept while a look is worn, put back when the look goes. */
+  swgMap?: THREE.Texture | null;
   label: LabelEl;
   at: THREE.Vector3;
   /** The three class names this label can wear, built once, so a frame never joins a string. */
@@ -158,6 +250,10 @@ export class GalaxyView {
   private routes: GalaxyRoute[] = [];
   private frames = 0;
   private compiled = false;
+  /** Pass 2, wave 4b (maker C): the rims' blank table, the map's light as the rims read it (its view-space way, its colour). */
+  private readonly blankRim = blankRimTexture();
+  private readonly sunDir = new THREE.Vector3(0.4, 1, 0.6).normalize();
+  private readonly rimLight: RimLight = { dir: { value: new THREE.Vector3(0, 1, 0) }, colour: { value: new THREE.Color(0xfff0dc).multiplyScalar(2.2) } };
 
   private readonly labelLayer: HTMLElement;
 
@@ -176,11 +272,26 @@ export class GalaxyView {
     this.disc.frustumCulled = false;
     this.scene.add(this.disc);
     const sphere = new THREE.SphereGeometry(1, 24, 16);
+    // Pass 2, wave 4b (maker C): the looks' cloud shells and painted rims, only with the game on WebGPU (where looks are baked).
+    const withLooks = GPU.webgpu;
+    const rimSphere = withLooks ? new THREE.SphereGeometry(1, 32, 20) : null;
     for (const sys of drawnSystems()) {
       const material = new THREE.MeshLambertMaterial({ color: 0xb9c6d8, map: this.blank });
       const mesh = new THREE.Mesh(sphere, material);
       mesh.userData.system = sys.id;
       this.scene.add(mesh);
+      let clouds: THREE.Mesh | null = null;
+      let rim: THREE.Mesh | null = null;
+      if (withLooks && rimSphere) {
+        clouds = new THREE.Mesh(sphere, new THREE.MeshLambertMaterial({ map: this.blank, transparent: true, depthWrite: false }));
+        clouds.visible = false;
+        clouds.renderOrder = 1;
+        this.scene.add(clouds);
+        rim = new THREE.Mesh(rimSphere, globeRimMaterial(this.blankRim, this.rimLight));
+        rim.visible = false;
+        rim.renderOrder = 1;
+        this.scene.add(rim);
+      }
       const label = document.createElement('div') as LabelEl;
       label.innerHTML = '<i></i><b></b>';
       (label.lastElementChild as HTMLElement).textContent = sys.name.replace(/ system$/, '');
@@ -188,7 +299,7 @@ export class GalaxyView {
       const looks = [`galaxy-label${ours}`, `galaxy-label on${ours}`, `galaxy-label here${ours}`] as const;
       label.className = looks[LabelLook.Plain];
       this.labelLayer.appendChild(label);
-      this.globes.push({ sys, mesh, material, label, at: new THREE.Vector3(), looks, look: LabelLook.Plain });
+      this.globes.push({ sys, mesh, material, clouds, rim, lookTextures: [], label, at: new THREE.Vector3(), looks, look: LabelLook.Plain });
     }
     // The routes: one set of segments whose buffer is made when the file arrives (once a session).
     const routeGeometry = new THREE.BufferGeometry();
@@ -259,6 +370,15 @@ export class GalaxyView {
       g.at.set(p.x, p.y, p.z);
       g.mesh.position.copy(g.at);
       g.mesh.scale.setScalar(GALAXY_VIEW_TUNE.systemSize);
+      // Pass 2, wave 4b (maker C): its cloud shell and its painted rim about it.
+      if (g.clouds) {
+        g.clouds.position.copy(g.at);
+        g.clouds.scale.setScalar(GALAXY_VIEW_TUNE.systemSize * GLOBE_TUNE.cloudHeight);
+      }
+      if (g.rim) {
+        g.rim.position.copy(g.at);
+        g.rim.scale.setScalar(GALAXY_VIEW_TUNE.systemSize * GLOBE_TUNE.rimHeight);
+      }
     }
     const ring = GALAXY_VIEW_TUNE.systemSize * GALAXY_VIEW_TUNE.ringScale;
     this.here.scale.setScalar(ring);
@@ -360,7 +480,59 @@ export class GalaxyView {
     // written straight onto the material, a dimmed globe that later got its picture would keep the
     // dimming for ever.
     g.colour = colour;
-    g.material.map = texture ?? this.blank;
+    // Pass 2, wave 4b (maker C): under a look worn (`setGlobeLook`) SWG's picture is kept for when the look goes.
+    if (g.swgMap !== undefined && g.lookTextures.length) g.swgMap = texture ?? this.blank;
+    else g.material.map = texture ?? this.blank;
+    this.lightGlobe(g);
+  }
+
+  /**
+   * Pass 2, wave 4b (maker C, `galaxyLooks.ts`): a system's globe in its main world's baked look (its pictures, halved, laid on
+   * this renderer as pictures of its own) with its turning cloud shell, or back in SWG's picture (`null`); and its painted rim
+   * from its world's air (`rim`, the limb's table; null for none). Only with the game on WebGPU (the globes made their shells);
+   * never in a frame: when the map asks its globes.
+   */
+  setGlobeLook(systemId: string, pics: GlobePictures | null, rim: Float32Array | null): void {
+    const g = this.globes.find((x) => x.sys.id === systemId);
+    if (!g || !g.clouds || !g.rim) return;
+    for (const t of g.lookTextures) t.dispose();
+    g.lookTextures.length = 0;
+    const cloudMat = g.clouds.material as THREE.MeshLambertMaterial;
+    if (pics) {
+      const surface = new THREE.DataTexture(pics.surface, pics.width, pics.height, THREE.RGBAFormat);
+      surface.colorSpace = THREE.SRGBColorSpace;
+      surface.wrapS = THREE.RepeatWrapping;
+      surface.generateMipmaps = true;
+      surface.minFilter = THREE.LinearMipmapLinearFilter;
+      surface.magFilter = THREE.LinearFilter;
+      surface.needsUpdate = true;
+      g.lookTextures.push(surface);
+      if (g.swgMap === undefined) g.swgMap = g.material.map;
+      g.material.map = surface;
+      if (pics.clouds) {
+        const c = new THREE.DataTexture(pics.clouds, pics.width, pics.height, THREE.RGBAFormat);
+        c.colorSpace = THREE.SRGBColorSpace;
+        c.wrapS = THREE.RepeatWrapping;
+        c.generateMipmaps = true;
+        c.minFilter = THREE.LinearMipmapLinearFilter;
+        c.magFilter = THREE.LinearFilter;
+        c.needsUpdate = true;
+        g.lookTextures.push(c);
+        cloudMat.map = c;
+      } else cloudMat.map = this.blank;
+      g.clouds.visible = !!pics.clouds;
+    } else {
+      if (g.swgMap !== undefined) g.material.map = g.swgMap;
+      cloudMat.map = this.blank;
+      g.clouds.visible = false;
+    }
+    const rimMat = g.rim.material as THREE.ShaderMaterial;
+    if (rim) {
+      const t = rimTexture(rim);
+      g.lookTextures.push(t);
+      rimMat.uniforms.uProfile.value = t;
+    } else rimMat.uniforms.uProfile.value = this.blankRim;
+    g.rim.visible = !!rim;
     this.lightGlobe(g);
   }
 
@@ -452,6 +624,12 @@ export class GalaxyView {
       this.picked.quaternion.copy(this.camera.quaternion);
     }
     this.placeLabels(width, height);
+    // Pass 2, wave 4b (maker C): the cloud shells turn on the clock, and the rims read the map's light in the view's frame.
+    if (this.globes.length && this.globes[0].clouds) {
+      const turn = ((performance.now() / 1000) * GLOBE_TUNE.cloudSpin) % (Math.PI * 2);
+      for (const g of this.globes) if (g.clouds && g.clouds.visible) g.clouds.rotation.y = turn;
+      this.rimLight.dir.value.copy(this.sunDir).transformDirection(this.camera.matrixWorldInverse);
+    }
     // The first frame is the only one that may make programs, and it makes them all: after it, every
     // material this view has is linked, and a texture arriving later only swaps a picture. `compile`
     // walks what is visible, so the two rings and the route lines are shown for that one call even
@@ -467,7 +645,15 @@ export class GalaxyView {
       this.picked.visible = true;
       this.routeLines.visible = true;
       this.mutedLines.visible = true;
+      // Pass 2, wave 4b (maker C): one cloud shell and one rim shown for the call, so their two programs are linked with the map's own.
+      const first = this.globes[0];
+      const wasClouds = first?.clouds?.visible ?? false;
+      const wasRim = first?.rim?.visible ?? false;
+      if (first?.clouds) first.clouds.visible = true;
+      if (first?.rim) first.rim.visible = true;
       renderer.compile(this.scene, this.camera);
+      if (first?.clouds) first.clouds.visible = wasClouds;
+      if (first?.rim) first.rim.visible = wasRim;
       this.here.visible = wasHere;
       this.picked.visible = wasPicked;
       this.routeLines.visible = wasRoutes;

@@ -185,6 +185,12 @@ export interface Settings extends FxSettings {
    * they dim the lens flare and the god rays with them. 1 is as they are drawn; 0 is none at all.
    */
   nebulaOpacity: number;
+  /**
+   * How a space zone's nebulae are drawn on WebGPU (the GPU port's pass 2, wave 4b, `src/space/nebulaForm.ts`): -1 by the
+   * quality tier (Sheets below High, Volumes from High), 0 Off, 1 Sheets (SWG's own), 2 Volumes (the sheets, and the zone's
+   * gas drawn as a true volume where it has one: Kessel's Maelstrom). WebGL never reads it: its nebulae are the sheets.
+   */
+  nebulaForm: number;
   // The screen's own display. Every number here is ours -- the game's own interface is not read for
   // any of it -- and every one of them is invented; they are kept together so they can be judged
   // together, and `__debug.hud({ ... })` moves the first two live without opening the menu.
@@ -486,6 +492,8 @@ export const DEFAULT_SETTINGS: Settings = {
   soundSabers: 'jka',
   nebulaLightningDamage: true,
   nebulaOpacity: 0.1,
+  // By the quality tier (the design's 2.9: only High starts on the volumes, Sheets below it).
+  nebulaForm: -1,
   hudScale: 1,
   hudDpr: 1,
   hudShipCondition: true,

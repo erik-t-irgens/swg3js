@@ -15,7 +15,7 @@
 // are made here too, for the twin.
 //
 // Pure: plain numbers, so the worker and the node tests run this very code.
-import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setAirFileFields, setHazeTint, setVisibility, worldRecord, type AirFileFields, type AirRecord } from './airParams.ts';
 
 /** A grey haze (pass 2, wave 4a): the haze colour every world's dial starts at, the record as it was. */
 const GREY_HAZE: readonly [number, number, number] = [1, 1, 1];
@@ -484,6 +484,11 @@ export interface FitAsk {
   ozoneMax?: number;
   /** Pass 2, wave 4a: the world's haze colour (its dials, `airParams.ts`'s `hazeR..B`); absent, a grey haze. */
   hazeTint?: [number, number, number];
+  /**
+   * Pass 2, wave 4b: the record fields the world's saved air names (`airParams.ts`'s `AIR_FILE_FIELDS`), set in the worker's own
+   * copy before the fit, so its base record is the page's; null for none; absent, the worker's copy is left as it is.
+   */
+  fileFields?: AirFileFields | null;
 }
 
 /** What the worker answers: the rows' records and tables as transferable arrays, in row order. */
@@ -504,6 +509,7 @@ export interface FitReply {
 /** A fit worked into the reply the worker posts (the tables of rows sharing one are copied so each can be transferred). */
 export function fitReply(ask: FitAsk, gradient: GradientSampler | null = null): FitReply {
   try {
+    if (ask.fileFields !== undefined) setAirFileFields(ask.sky.planet, ask.fileFields);
     const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE);
     return {
       id: ask.id,

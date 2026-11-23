@@ -57,7 +57,7 @@ export function recordKey(rec: ArrayLike<number>): string;
 export function airless(rec: ArrayLike<number>): boolean;
 export function hazeTintOf(rec: ArrayLike<number>, out: number[] | Float64Array): number[] | Float64Array;
 export function makeTables(rec: ArrayLike<number>, sizes?: typeof TABLES): AirProfileTables;
-export function marchAir(rec: ArrayLike<number>, tabs: AirProfileTables, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, lx: number, ly: number, lz: number, steps: number, sEnd: number, gains: { limb: number; twilight: number } | null, out: Float64Array | number[]): Float64Array | number[];
+export function marchAir(rec: ArrayLike<number>, tabs: AirProfileTables, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, lx: number, ly: number, lz: number, steps: number, sEnd: number, gains: { limb: number; twilight: number } | null, out: Float64Array | number[], lay?: number): Float64Array | number[];
 export function lightAt(rec: ArrayLike<number>, tabs: AirProfileTables, r: number, muS: number, out: Float64Array | number[]): Float64Array | number[];
 export function transmittanceAt(rec: ArrayLike<number>, tabs: AirProfileTables, r: number, mu: number, out: Float64Array | number[]): Float64Array | number[];
 export function multiScatterAt(rec: ArrayLike<number>, tabs: AirProfileTables, r: number, muS: number, out: Float64Array | number[]): Float64Array | number[];
@@ -68,7 +68,7 @@ export const SHADOW_SOFT: number;
 
 /** The march and the light as nodes of three's shading language (the viewer's shader half). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function airShader(T: any, U: any, tex: { T: any; MS: any; E: any }, steps: any): {
+export function airShader(T: any, U: any, tex: { T: any; MS: any; E: any }, steps: any, lay?: number): {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   march: (rd: any, C: any, kmPer: any, Ls: any, sEnd?: any) => { L: any; Tv: any; b: any; P: any; s0: any; s1: any };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

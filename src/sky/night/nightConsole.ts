@@ -16,6 +16,7 @@ import { BAND_SIZE, MILKY_SHAPE, bandDirOf, bandRay, bandUnit, numberParams, tun
 import { CITY_GLOW, FLARE_AIR, NIGHT_TUNE, STAR_COUNTS, nightDialSet, tiltOf, tuneNight } from './nightTune.ts';
 import { AIR_UNITS } from '../air/airApi.ts';
 import { nightPlaceOf } from './nightPlace.ts';
+import { DITHER_TUNE, ditherReport, tuneDither } from './ditherTune.ts';
 
 /** What the console's helper reads of the game. */
 export interface StarsHost {
@@ -73,6 +74,8 @@ export function starsConsole(host: StarsHost, o?: Record<string, unknown>): Reco
     if (o.shape !== undefined) said.push(...(o.shape && typeof o.shape === 'object' ? tuneShape(o.shape as Record<string, unknown>) : ['shape: not a record']));
     // The prover's switch: the night not drawn, for an A/B on one screen (a picture, a timing).
     if (typeof o.off === 'boolean' && host.night) host.night.off = o.off;
+    // Pass 2, wave 4b (maker B): the screen's dither (`ditherTune.ts`), levels of 255 either way; 0 none.
+    if (o.dither !== undefined) said.push(...tuneDither(o.dither));
   }
   const dials = {
     tune: { ...NIGHT_TUNE },
@@ -82,6 +85,7 @@ export function starsConsole(host: StarsHost, o?: Record<string, unknown>): Reco
     shape: { ...MILKY_SHAPE },
     townGlow: { ...CITY_GLOW },
     keep: movedLine(nightDialSet()) || 'nothing moved',
+    dither: { ...ditherReport(), keep: DITHER_TUNE.amount === 1 ? 'at its start' : `__debug.stars({ dither: ${DITHER_TUNE.amount} })` },
   };
   const why = !host.webgpu
     ? "WebGPU's: WebGL keeps SWG's star field"

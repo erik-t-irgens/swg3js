@@ -38,6 +38,15 @@ export const BODY_TIERS: readonly BodyTierRule[] = [
   { form: 'scattered', steps: 16, shareMost: Infinity },
 ];
 
+/**
+ * The power the march lays its steps by (pass 2, wave 4b; `airProfile.js`'s `marchAir` and `airShader` take it, the viewer's
+ * own calls keep the square): 1.5. Not a dial: accuracy, not look. Laid by the square of their distance from the ray's lowest
+ * point, the steps crowd so near it that the haze's layer a few km up gets few, and High's 12 steps read the limb's light
+ * 3.45% off the ground path's (wave 4a); laid by the power 1.5 they read it within 1.5% at 12, 0.8% at 16 and 3.8% at 8, a
+ * single grazing ray within 6% at 12 and 4.3% at 16 (`bodySky.test.ts`), for nothing more on the card.
+ */
+export const BODY_LAY = 1.5;
+
 /** The tier index `tierIndexOf` answers (0 Low to 3 Ultra, −1 a custom set) made a rule. */
 export function tierRule(tierIndex: number): BodyTierRule {
   return BODY_TIERS[tierIndex >= 0 && tierIndex < BODY_TIERS.length ? tierIndex : 2];

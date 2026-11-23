@@ -1,6 +1,10 @@
 import { followCameraDepth } from './csmDepth.ts';
 import { REVERSED_DEPTH } from '../core/depthMode.ts';
 import { GPU, type GpuNightSky, type GpuSkyBodySet, type GpuSun } from '../core/gpuSwitch.ts';
+// Pass 2, wave 4b (maker C): a space zone's planets' air and nebula volumes, the runtime's (types alone); the map's globes'
+// looks baked behind the screen (`galaxyLooks.ts`, pure but for the runtime's bake, asked on WebGPU alone).
+import type { GpuSpaceRimSet, GpuSpaceVolumeSet } from '../core/gpuSwitch.ts';
+import { bakeMapLooks } from '../ui/galaxyLooks.ts';
 // Pass 2, wave 1, what draws from the air (maker B): the Sky row read at load, and the air's frame record (pure; no WebGPU build).
 import { skyOurs } from '../sky/skyMode.ts';
 import { AIR } from '../sky/air/airApi.ts';
@@ -11,7 +15,9 @@ import type { CityRow } from '../story/cities.ts';
 // Pass 2, wave 1, the air itself (maker A): the world's rows, its twin and its tables (pure; the tables' WebGPU module is a dynamic import inside).
 import { AirRun } from '../sky/air/airRun.ts';
 // Pass 2, wave 4 (maker A): the space body viewer's Save to game, read again behind every loading screen (pure; no WebGPU build).
-import { readBodiesFile } from '../sky/look/bodiesFile.ts';
+import { applyFileAir, readBodiesFile } from '../sky/look/bodiesFile.ts';
+// Pass 2, wave 4b (maker A): his looks worn by the sky's bodies (three's core and pure; the bake is the runtime's).
+import { dropSkyLooks, warmZoneLooks, wearSkyLooks, type SkyLooksWorn } from '../sky/look/skyLooks.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
 import * as THREE from 'three';
@@ -129,7 +135,7 @@ import { laterRows, standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, statesInForce, takeWorldStates } from './worldState.ts';
 import { POST_CLEAR_TUNE, furnishLayout, type InteriorsFile } from './interiors.ts';
-import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, importPackFor, importsAsks, knownAbsent, packBytes, packJson, shippedAsk } from './packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, importPackFor, importsAsks, knownAbsent, packBytes, packJson, sharedJson, shippedAsk } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -166,7 +172,11 @@ import { FOOT_TUNE, type FootGround } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
 import { loadSpacePack, type Nebula, type SpacePack } from '../space/spaceData.ts';
 import { Nebulae, installNebulaDebug, type NebulaShip } from '../space/nebulae.ts';
-import { DistantSet, installDistantDebug, setDistantCurrent } from '../space/distant.ts';
+import { DISTANT_TUNE, DistantSet, installDistantDebug, setDistantCurrent } from '../space/distant.ts';
+// Pass 2, wave 4b (maker B): the sky's held bodies and a ground world's distant appearances (pure; nothing of WebGPU's build).
+import { heldPictureOf, heldPlanOf, type HeldPlan } from '../sky/bodies/heldBodies.ts';
+import { PLUME_TUNE, groundDistantOf, installPlumeDebug, plumeReach, setPlumesCurrent } from '../sky/bodies/groundDistant.ts';
+import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
@@ -2281,6 +2291,9 @@ export class World {
     // loading screen while the pack loads, and waited on before the screen lifts (below), so a Save shows at the next one.
     // WebGPU's alone: what reads it (the bodies' looks, the air) draws there alone, and WebGL asks for nothing new.
     if (GPU.webgpu) this.bodiesRead = readBodiesFile().catch(() => null);
+    // Pass 2, wave 4b (maker A): once it is read, the bake kits of the looks this zone's places wear asked for ahead (never
+    // awaited), so their pipelines land while the world loads and the bodies' bake behind this screen finds them made.
+    if (GPU.webgpu && this.bodiesRead) void this.bodiesRead.then(() => warmZoneLooks(this.packId, GPU.rt!.looks));
     // Where this arrival stands, before anything is awaited: what a world with no pack's rings first stand their windows round (h6b).
     this.madeHorizonEye = spawn;
     const pack = await AssetPack.load(this.packId);
@@ -2601,6 +2614,9 @@ export class World {
     if (GPU.webgpu && this.skyAir && !(await this.awaitAirFit(token))) return null;
     // Pass 2, wave 4 (maker A): the Save to game read before the screen lifts (a few KB, long landed by now); WebGPU's alone.
     if (GPU.webgpu && !(await this.awaitBodiesRead(token))) return null;
+    // Pass 2, wave 4b (maker C): the galaxy map's globes' looks baked behind the screen, after the sky's and the planets' own
+    // bakes (what the screen's budget leaves; a look put off bakes at the next screen), so the map wears them at its next show.
+    if (GPU.webgpu && !(await bakeMapLooks(() => token !== this.loadToken))) return null;
     if (planet.id === 'gallery' && layout) {
       this.gallery?.dispose();
       this.gallery = new Gallery(this.scene, pack.url(''), layout.center, (x, z) => this.terrain.heightAt(x, z));
@@ -2651,6 +2667,8 @@ export class World {
       this.dropLandmarks();
       this.rowAttach.clear();
       this.layoutStream?.dispose();
+      // Pass 2, wave 4b (maker B): the ground's distant appearances leave with the particles that play them.
+      this.dropGroundDistant();
       this.particles?.dispose();
       this.particles = new ParticleEffects(this.scene, pack.url(''));
       this.particlesRoot = pack.root;
@@ -2720,6 +2738,16 @@ export class World {
         if (token !== this.loadToken) return null;
         // Pass 2, wave 3 (maker B): the terrain's distant particle systems (Kessel's Maw), prepared and placed behind the screen.
         if (GPU.webgpu) await this.loadDistant(token, spawn);
+        if (token !== this.loadToken) return null;
+        // Pass 2, wave 4b (maker C): the zone's gas as true volumes (Kessel's Maelstrom), built behind the screen whatever the
+        // Nebulae row says, so moving the row builds nothing.
+        if (GPU.webgpu) await this.loadVolumes(token);
+        if (token !== this.loadToken) return null;
+      }
+      // Pass 2, wave 4b (maker B): a ground world's distant appearances (Mustafar's four volcano plumes), prepared and stood
+      // behind the screen once the particles exist, on WebGPU alone (`src/sky/bodies/groundDistant.ts`).
+      else if (GPU.webgpu) {
+        await this.loadGroundDistant(token, spawn);
         if (token !== this.loadToken) return null;
       }
       // The rivers' steep stretches' fall effects (Map-maker II's sixth wave), made ready and stood now that the particles
@@ -3081,11 +3109,15 @@ export class World {
     if (this.spaceBodies) {
       // Pass 2, wave 2 (maker B): the reflections' capture lets its copies of them go first (their materials are freed below).
       if (GPU.webgpu) GPU.rt!.environment.sky?.placePlanets(null);
+      // Pass 2, wave 4b (maker C): the planets' air let go with them.
+      if (GPU.webgpu) this.dropSpaceRims();
       this.scene.remove(this.spaceBodies);
       this.disposeSpaceBodies(this.spaceBodies);
       this.spaceBodies = null;
     }
     this.dropNebulae();
+    // Pass 2, wave 4b (maker C): the zone's volumes with its nebulae.
+    if (GPU.webgpu) this.dropVolumes();
     dropForceLightning(this);
     // The loose props go with the world they were stood in: their bodies out of the one Rapier
     // world (which outlives a planet and would otherwise keep two dozen of them for ever), their
@@ -3311,6 +3343,132 @@ export class World {
   distant: DistantSet | null = null;
 
   /**
+   * Pass 2, wave 4b (maker C): the air round the zone's planets on WebGPU (`src/space/spaceRims.ts`), null on WebGL, over a
+   * planet and between worlds.
+   */
+  spaceRims: GpuSpaceRimSet | null = null;
+
+  /** Pass 2, wave 4b (maker C): the planets' air let go (its shells leave the sky group before the group is freed). */
+  private dropSpaceRims(): void {
+    this.spacePlanetsHung = [];
+    const rims = this.spaceRims;
+    if (!rims) return;
+    this.spaceRims = null;
+    rims.dispose((m) => this.forgetMaterials(m));
+  }
+
+  /** Pass 2, wave 4b (maker C): the zone's planets as hung (WebGPU alone), for its volumes' gas to end at. */
+  private spacePlanetsHung: { mesh: THREE.Mesh; radius: number; index: number; distance: number }[] = [];
+
+  /**
+   * Pass 2, wave 4b (maker C): the zone's gas drawn as true volumes on WebGPU (`src/space/spaceVolumes.ts`), null on WebGL,
+   * over a planet and between worlds; built whatever the Nebulae row says.
+   */
+  spaceVolumes: GpuSpaceVolumeSet | null = null;
+  /** The scene's size the volumes' half-size picture follows (kept: a frame makes no vector). */
+  private readonly volumeSize = new THREE.Vector2();
+
+  /** Pass 2, wave 4b (maker C): the zone's volumes made behind its screen, their lay-overs hung and built there. */
+  private async loadVolumes(token: number): Promise<void> {
+    this.dropVolumes();
+    const data = this.spaceData;
+    if (!data) return;
+    const set = await GPU.rt!.spaceVolumes.make(this.packId, data.planets, this.spacePlanetsHung);
+    if (token !== this.loadToken) {
+      set.dispose((m) => this.forgetMaterials(m));
+      return;
+    }
+    this.spaceVolumes = set;
+    if (!set.count) return;
+    this.adoptMaterials(set.group);
+    this.scene.add(set.group);
+    // Built as they hang, as the nebulae are (a jump's swap hangs them with no screen over them); on WebGPU alone.
+    if (GPU.webgpu) this.gpuMadeNow([set.group]);
+    console.info(`space: ${set.count} volume${set.count === 1 ? '' : 's'} of gas`);
+  }
+
+  /** Pass 2, wave 4b (maker C): the zone's volumes let go with its nebulae. */
+  private dropVolumes(): void {
+    const set = this.spaceVolumes;
+    if (!set) return;
+    this.spaceVolumes = null;
+    this.scene.remove(set.group);
+    set.dispose((m) => this.forgetMaterials(m));
+  }
+
+  /**
+   * Pass 2, wave 4b (maker C): once a game frame in space on WebGPU: the Nebulae row's form shown (the sheets and the haze for
+   * Sheets and Volumes, the volumes for Volumes alone; written only when it changes), and the volumes' frame. Allocates nothing.
+   */
+  private spaceNebulaFrame(camPos: THREE.Vector3, dt: number): void {
+    const rt = GPU.rt!.spaceVolumes;
+    const form = rt.form();
+    const n = this.nebulae;
+    if (n && n.formApplied !== form) {
+      n.setShown(form !== 'off');
+      n.formApplied = form;
+    }
+    const v = this.spaceVolumes;
+    if (!v || !v.count) return;
+    v.shown = form === 'volumes';
+    const at = rt.volumeIn;
+    const d = this.day.lightDir;
+    at.sunX = d.x;
+    at.sunY = d.y;
+    at.sunZ = d.z;
+    const c = this.sun.color;
+    at.sunR = c.r;
+    at.sunG = c.g;
+    at.sunB = c.b;
+    at.dt = dt;
+    v.frame(camPos, rt.now.tier);
+  }
+
+  /**
+   * Pass 2, wave 4b (maker C): once a game frame on WebGPU after the sky group is on the camera and the standing bodies placed:
+   * the star, the main light and the hemisphere written into the rims' fields (a number handed across a call is a number made),
+   * then their frame. Allocates nothing.
+   */
+  private spaceRimsFrame(rims: GpuSpaceRimSet, camera: THREE.PerspectiveCamera): void {
+    const at = GPU.rt!.spaceRims.rimIn;
+    const d = this.day.lightDir;
+    at.sunX = d.x;
+    at.sunY = d.y;
+    at.sunZ = d.z;
+    const k = this.sun.intensity;
+    const c = this.sun.color;
+    at.lightR = c.r * k;
+    at.lightG = c.g * k;
+    at.lightB = c.b * k;
+    const h = this.hemi.intensity;
+    const s = this.hemi.color;
+    const g = this.hemi.groundColor;
+    at.skyR = s.r * h;
+    at.skyG = s.g * h;
+    at.skyB = s.b * h;
+    at.groundR = g.r * h;
+    at.groundG = g.g * h;
+    at.groundB = g.b * h;
+    // The fill light as it shines: from its place toward its target, its colour times its intensity.
+    const fp = this.fill.position;
+    const ft = this.fill.target.position;
+    const fx = fp.x - ft.x;
+    const fy = fp.y - ft.y;
+    const fz = fp.z - ft.z;
+    const fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    const fk = fl > 1e-6 ? 1 / fl : 0;
+    at.fillX = fx * fk;
+    at.fillY = fy * fk;
+    at.fillZ = fz * fk;
+    const fi = this.fill.intensity;
+    const fc = this.fill.color;
+    at.fillR = fc.r * fi;
+    at.fillG = fc.g * fi;
+    at.fillB = fc.b * fi;
+    rims.frame(camera);
+  }
+
+  /**
    * Hold the placed-object streamer where it is: no tier loaded, none dropped. Set while something
    * moves the player faster than the streamer can usefully follow, and cleared by whatever set it.
    */
@@ -3467,6 +3625,8 @@ export class World {
     let standAt = 0;
     /** The bodies that stand somewhere, kept here until this set of bodies is the one in the sky. */
     const standing: { mesh: THREE.Mesh; stand: THREE.Mesh; at: THREE.Vector3; radius: number; material: THREE.ShaderMaterial }[] = [];
+    /** Pass 2, wave 4b (maker C): on WebGPU each planet handed to its air below and to the volumes, with its row and distance in the zone's file. */
+    const rimBodies: { mesh: THREE.Mesh; radius: number; index: number; distance: number }[] = [];
     for (const p of data.planets) {
       // The direction is in the game's own coordinates, mirrored in X like everything converted.
       const dir = new THREE.Vector3(-p.direction[0], p.direction[1], p.direction[2]);
@@ -3489,6 +3649,7 @@ export class World {
       mesh.renderOrder = -4;
       mesh.frustumCulled = false;
       group.add(mesh);
+      if (GPU.webgpu) rimBodies.push({ mesh, radius, index: data.planets.indexOf(p), distance: Math.sqrt(p.direction[0] ** 2 + p.direction[1] ** 2 + p.direction[2] ** 2) });
       if (stands) {
         const at = p.at as [number, number, number];
         const material = this.makeWorldBodyStandIn();
@@ -3538,12 +3699,33 @@ export class World {
       const sin = Math.min(1, radius / SPACE_BODY_DISTANCE);
       discs.push({ dir: dir.clone(), cos: Math.sqrt(1 - sin * sin) });
     }
+    // Pass 2, wave 4b (maker C): on WebGPU each planet with air gains it round it (`src/space/spaceRims.ts`), its two shells
+    // hung beside it in this group before the group is built below; the owner's Save to game read first (a look's own air).
+    // Its shells leave the group before the group is freed (the shells' geometry and graphs are the session's).
+    let rims: GpuSpaceRimSet | null = null;
+    if (GPU.webgpu && rimBodies.length) {
+      if (!(await this.awaitBodiesRead(token))) {
+        this.disposeSpaceBodies(group);
+        return;
+      }
+      rims = await GPU.rt!.spaceRims.make(this.packId, data.planets.map((q) => q.appearance), rimBodies);
+      if (token !== this.loadToken) {
+        rims.dispose((m) => this.forgetMaterials(m));
+        this.disposeSpaceBodies(group);
+        return;
+      }
+    }
     // Only one set of bodies is ever in the sky: one left from an earlier load of this zone goes first.
     if (this.spaceBodies) {
+      if (GPU.webgpu) this.dropSpaceRims();
       this.scene.remove(this.spaceBodies);
       this.disposeSpaceBodies(this.spaceBodies);
     }
     this.spaceBodies = group;
+    if (GPU.webgpu) {
+      this.spaceRims = rims;
+      this.spacePlanetsHung = rimBodies;
+    }
     // The standing bodies are this set's, and only now that this set is the one in the sky.
     this.spaceWorldBodies.length = 0;
     for (const b of standing) this.spaceWorldBodies.push(b);
@@ -3762,6 +3944,16 @@ export class World {
     this.fogScale = this.planet.swgFogScale ?? DEFAULT_SWG_FOG_SCALE;
     this.envTimer = 99;
     this.envWant = null;
+    // Pass 2, wave 4b (maker A): this screen's Save to game read before the world's air is made, and its saved air made the
+    // named worlds' air (`applyFileAir`: their dials as the live dials set them, their record's own fields), so the ground sky
+    // and every body that shows such a world follow it; the sky's own id kept for the looks its bodies wear (`loadBodies`).
+    // WebGPU's alone; with no file, or one naming no world, nothing is touched.
+    this.skyLookSky = basePack;
+    if (GPU.webgpu && this.bodiesRead) {
+      await this.bodiesRead;
+      if (token !== this.loadToken) return;
+      applyFileAir();
+    }
     // The weather's effects are made and its arrival area's sky loaded inside the awaited loadPack,
     // so the warm-up that follows compiles them and the first frame shows the area's own sky.
     await this.weather.attach({ pack, sky, terrain: this.terrain, planet: this.planet, packId: this.packId, renderer: this.renderer, at: spawn });
@@ -3778,6 +3970,10 @@ export class World {
       // Pass 2, wave 3 (maker A): the night sky (the Milky Way baked, the stars, the towns' glow) hung in the sky's group
       // before it is built, so `gpuSkyReady` builds it with the dome (`src/sky/night/`).
       await this.loadNight(sky, token);
+      if (token !== this.loadToken) return;
+      // Pass 2, wave 4b (maker B): the bodies that hang still (Endor's Death Star at stage 1, or as the Save to game holds it),
+      // hung as cards before the bodies are made, so they are made and built with them (`src/sky/bodies/heldBodies.ts`).
+      await this.loadHeld(sky, pack, token);
       if (token !== this.loadToken) return;
       // Pass 2, wave 4a (maker B): the moons and planets made ready (their air's tables baked or read from storage, their
       // Scattered cards beside them) before the sky is built, so `gpuSkyReady` builds both forms (`src/sky/bodies/`).
@@ -3869,6 +4065,9 @@ export class World {
   /** Once a game frame on WebGPU, after the camera is placed and before the scene's passes: the air's sky view and haze drawn for it. */
   airFrame(camera: THREE.PerspectiveCamera): void {
     this.skyAir?.drawTables(camera);
+    // Pass 2, wave 4b (maker C): the zone's volumes marched at half the scene's size for this camera, before its nudge.
+    const v = this.spaceVolumes;
+    if (v && v.shown) v.draw(camera, GPU.rt!.taa.sceneSize(this.volumeSize));
   }
 
   /**
@@ -3928,19 +4127,128 @@ export class World {
     this.dropBodies();
     const cards = sky.bodyCards();
     if (!cards.length || !AIR.tables) return;
-    const set = await GPU.rt!.skyBodies.make(cards);
+    // Pass 2, wave 4b (maker A): his looks worn (`src/sky/look/skyLooks.ts`): each card whose place the Save to game gives a
+    // generated look baked (or read from storage) within the screen's budget and handed over with its disc picture; the rest,
+    // and every card with no file, as the sky made them.
+    const worn = await wearSkyLooks(this.skyLookSky, cards, GPU.rt!.looks);
+    const set = await GPU.rt!.skyBodies.make(worn.cards);
     if (this.swgSky !== sky) {
       set.dispose((m) => this.forgetMaterials(m));
+      dropSkyLooks(worn);
       return;
     }
     this.skyBodies = set;
+    this.skyLooks = worn;
   }
+  /** Pass 2, wave 4b (maker A): the looks this sky's bodies wear (their disc pictures), let go with the bodies; and the sky's id. */
+  private skyLooks: SkyLooksWorn | null = null;
+  private skyLookSky = '';
 
   /** The bodies let go, with their sky. */
   private dropBodies(): void {
     if (!this.skyBodies) return;
     this.skyBodies.dispose((m) => this.forgetMaterials(m));
     this.skyBodies = null;
+    dropSkyLooks(this.skyLooks);
+    this.skyLooks = null;
+  }
+
+  /** Pass 2, wave 4b (maker B): what this sky holds still (`heldBodies.ts`'s plans as hung), for the console. */
+  heldPlans: HeldPlan[] = [];
+
+  /**
+   * Pass 2, wave 4b (maker B): the bodies this sky holds still, hung behind its loading screen on WebGPU under our sky: the
+   * owner's saved `held` for this world where his file names it (read behind this very screen), else SWG's own at stage 1
+   * (Endor's Death Star), each picture from the world's pack where its sky carries it, else the shared sky pack's (asked only
+   * where a plan needs it). A picture that is not there is said once, and that body is not hung.
+   */
+  private async loadHeld(sky: SwgSky, pack: AssetPack, token: number): Promise<void> {
+    this.heldPlans = [];
+    if (this.bodiesRead) await this.bodiesRead;
+    if (token !== this.loadToken) return;
+    const plans = heldPlanOf(this.planet.id, sky.data.held, (SKY_BODIES.file as { held?: unknown } | null)?.held);
+    if (!plans.length) return;
+    const base = import.meta.env.BASE_URL;
+    let shared: Record<string, { file?: unknown }> | null = null;
+    if (plans.some((p) => !heldPictureOf(p.picture, sky.data.held, null))) {
+      // The shared sky pack is no world's: its list read by its address, once a session for every reader (`sharedJson`).
+      shared = (await sharedJson<{ pictures?: Record<string, { file?: unknown }> }>(`${base}assets-private/sky/pictures.json`).catch(() => null))?.pictures ?? null;
+      if (token !== this.loadToken) return;
+    }
+    const loader = new THREE.TextureLoader();
+    const textures = new Map<string, THREE.Texture>();
+    const hung: HeldPlan[] = [];
+    for (const p of plans) {
+      const where = heldPictureOf(p.picture, sky.data.held, shared);
+      if (!where) {
+        console.warn(`sky: the held body ${p.name}'s picture ${p.picture} is in neither this world's sky nor the shared sky pack (npm run swg -- sky <swg-dir> all <out> --retail-only)`);
+        continue;
+      }
+      try {
+        const t = textures.get(p.picture) ?? (await loader.loadAsync(where.where === 'world' ? pack.url(where.file) : `${base}assets-private/sky/${where.file}`));
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.anisotropy = 4;
+        textures.set(p.picture, t);
+        hung.push(p);
+      } catch {
+        console.warn(`sky: the held body ${p.name}'s picture ${p.picture} failed to load`);
+      }
+      if (token !== this.loadToken || this.swgSky !== sky) {
+        for (const t of textures.values()) t.dispose();
+        return;
+      }
+    }
+    const n = sky.hangHeld(hung, textures);
+    markActor(sky.group);
+    this.heldPlans = hung;
+    if (n) console.info(`sky: ${n} held bod${n === 1 ? 'y' : 'ies'} (${hung.map((p) => `${p.name}: ${p.picture}, ${p.from === 'file' ? 'as saved' : `SWG's stage ${p.stage}`}`).join('; ')})`);
+  }
+
+  /** Pass 2, wave 4b (maker B): a ground world's distant appearances placed (Mustafar's plumes), on WebGPU alone. */
+  groundDistant: DistantSet | null = null;
+
+  /**
+   * Pass 2, wave 4b (maker B): a ground world's distant appearances (`groundDistant.ts`), on WebGPU alone: each effect's batches
+   * made and its textures uploaded behind the loading screen (wave 3's way for the Maw), so the warm-up builds them, then stood
+   * where the plan puts them, sized by `PLUME_TUNE.scale`. A sky converted before them has no effect files and stands none.
+   */
+  private async loadGroundDistant(token: number, spawn: THREE.Vector3): Promise<void> {
+    this.dropGroundDistant();
+    installPlumeDebug();
+    const fx = this.particles;
+    const list = groundDistantOf(this.swgSky?.data.distant, this.layoutCenter);
+    if (!fx || !list.length) return;
+    const reach = plumeReach();
+    const size = PLUME_TUNE.scale;
+    const set = await DistantSet.build(
+      {
+        prepare: (file) => fx.prepare(file, this.renderer),
+        place: (file, matrix) => fx.place(file, matrix, false, false, null, false, { sound: false, reach, size }),
+        move: (handle, matrix) => fx.move(handle as EffectHandle, matrix),
+        resize: (handle, s) => fx.resize(handle as EffectHandle, s),
+        remove: (handle) => fx.remove(handle as EffectHandle),
+      },
+      { distant: list },
+      spawn,
+      () => token === this.loadToken && fx === this.particles,
+    );
+    if (!set) return;
+    if (token !== this.loadToken) {
+      set.dispose();
+      return;
+    }
+    this.groundDistant = set;
+    setPlumesCurrent(set, DISTANT_TUNE);
+    console.info(`sky: ${set.placed.length} distant appearance${set.placed.length === 1 ? '' : 's'} (${set.placed.map((p) => p.entry.appearance.replace(/^.*\//, '')).join(', ')}) at ${size} m a unit`);
+  }
+
+  /** Pass 2, wave 4b (maker B): the ground's distant appearances taken out with their world. */
+  private dropGroundDistant(): void {
+    const set = this.groundDistant;
+    if (!set) return;
+    this.groundDistant = null;
+    setPlumesCurrent(null, null);
+    set.dispose();
   }
 
   /** The night let go, with its sky. */
@@ -11778,10 +12086,14 @@ export class World {
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
     if (this.spaceWorldBodies.length) this.placeStandingBodies(camPos);
+    // Pass 2, wave 4b (maker C): the planets' air, after the sky group is on the camera and the standing bodies placed.
+    if (GPU.webgpu && this.spaceRims && this.camera) this.spaceRimsFrame(this.spaceRims, this.camera);
     // Pass 2, wave 3 (maker B): the distant particle systems that ride with the camera moved with it, as the sky is.
     if (GPU.webgpu && this.distant) this.distant.frame(camPos);
     // The nebulae: where the camera is inside them, the haze, the sheets' order and the strikes.
     if (this.nebulae && this.camera) this.nebulae.update(dt, this.camera);
+    // Pass 2, wave 4b (maker C): the Nebulae row (Off, Sheets, Volumes) shown, and the volumes' frame, in space on WebGPU.
+    if (GPU.webgpu && this.spaceData) this.spaceNebulaFrame(camPos, dt);
     // The Force's beams: the flicker, the flip-book and the fade of any one nothing is holding.
     stepForceLightning(dt);
     // The loose props: the pose of any that is awake onto its mesh, the sleep rule, and any thrown

@@ -452,6 +452,8 @@ import { tuneEye } from './sky/exposure/eyeMath.ts';
 import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
 // Pass 2, wave 4 (maker A): what the last loading screen read of the space body viewer's Save to game (pure).
 import { bodiesReport } from './sky/look/bodiesFile.ts';
+// Pass 2, wave 4b (maker A): the looks the sky's bodies wore at the last loading screen (pure).
+import { LOOKS_WORN } from './sky/look/lookPictures.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
 import { AIR } from './sky/air/airApi.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -8146,7 +8148,8 @@ class App {
           ? this.skyMatch(o)
           : // Pass 2, wave 4 (maker A): `sky({ bodies: true })`, what the last loading screen read of the viewer's Save to game.
             o && typeof o === 'object' && 'bodies' in o
-            ? bodiesReport()
+            ? // Pass 2, wave 4b (maker A): and what the sky's bodies wore by it, and the looks' bakes (WebGPU's alone).
+              { ...bodiesReport(), worn: LOOKS_WORN, looks: GPU.webgpu && GPU.rt ? GPU.rt.looks.report() : null }
             : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' || o === 'clouds'
             ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')
             : this.skyConsole(o),
@@ -15166,6 +15169,8 @@ class App {
     if ((key === 'exposureStops' || key === 'eyeAdapt') && !GPU.webgpu) return { hide: true };
     if (key === 'eyeAdapt' && !SKY_AT_LOAD.ours) return { off: "SWG's sky keeps today's exposure" };
     if (key === 'hazeResolution') return !GPU.webgpu ? { hide: true } : SKY_AT_LOAD.ours ? null : { off: "SWG's sky draws no haze of the air" };
+    // Pass 2, wave 4b (maker C): the nebulae's Off, Sheets and Volumes are WebGPU's; WebGL's nebulae are the sheets.
+    if (key === 'nebulaForm' && !GPU.webgpu) return { hide: true };
     // On WebGPU (the GPU port's step 3) the effects, the volumetrics and the far rings are not drawn yet: their rows say so.
     // From step 6 the Effects setting and the rows of the passes ported move as on WebGL (`GPU.rt.chain.knobPorted`).
     if (GPU.webgpu && ((isFxSettingKey(key) && !GPU.rt!.chain.knobPorted(key)) || key.startsWith('vol') || key === 'farCardsHorizon')) return { off: GPU.rt!.chain.knobWhy(key) ?? 'not on WebGPU yet' };

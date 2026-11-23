@@ -12,7 +12,7 @@
 import * as THREE from 'three';
 import { GPU } from '../../core/gpuSwitch.ts';
 import { AIR, AIR_UNITS, type AirTables } from './airApi.ts';
-import { AIR_DIAL_STATE, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
+import { AIR_DIAL_STATE, AIR_FILE_FIELDS, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
 import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, buildDepthTable, buildPsiTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
 import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
@@ -145,7 +145,7 @@ export class AirRun {
     this.hazeAsked[0] = this.hazeSet[0];
     this.hazeAsked[1] = this.hazeSet[1];
     this.hazeAsked[2] = this.hazeSet[2];
-    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1], hazeTint: [this.hazeSet[0], this.hazeSet[1], this.hazeSet[2]] };
+    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1], hazeTint: [this.hazeSet[0], this.hazeSet[1], this.hazeSet[2]], fileFields: AIR_FILE_FIELDS[this.planet] ?? null };
     this.worker.postMessage(ask);
   }
 

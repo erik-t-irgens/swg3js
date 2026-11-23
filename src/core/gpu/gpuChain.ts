@@ -30,6 +30,8 @@ import { LUMA } from '../fx/gradeMath.ts';
 import { liveTexture } from './gpuGround.ts';
 import { eyeExposureNode } from '../../sky/exposure/eyeBuffer.ts';
 import { PRE_FIXED, preNode } from '../../sky/exposure/preExpose.ts';
+import { ditheredOut } from '../../sky/night/dither.ts';
+import { toCanvasNode } from './inlineOutput.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -402,5 +404,12 @@ export function outputGraph(u: { tDiffuse: { value: THREE.Texture | null } }): C
     // The wave's fixer: the picture is stored times `pre` (`storedOf`), so the eye's exposure over it.
     return vec4(c.rgb.mul(eyeExposureNode().div(storedOf())), c.a);
   })();
+  // Pass 2, wave 4b (maker B): the picture dithered as the canvas rounds it (`src/sky/night/dither.ts`), after three's own
+  // output arithmetic (the ACES fit and the sRGB curve, the inline output's) and only onto the canvas: a dark sky's eight-bit
+  // rings spread into grain. With the inline output off, three's own output pass follows and nothing is dithered.
+  const own = m as unknown as { setupOutput(builder: unknown, out: unknown): unknown };
+  own.setupOutput = function (this: unknown, builder: unknown, out: unknown): unknown {
+    return ditheredOut((NodeMaterial.prototype as unknown as { setupOutput(b: unknown, o: unknown): unknown }).setupOutput.call(this, builder, out), toCanvasNode());
+  };
   return graph(m, 1, { uniforms: {}, textures: { tDiffuse: input } });
 }

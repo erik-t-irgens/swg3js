@@ -603,7 +603,8 @@ const SCENE = sceneUnits();
 {
   const world = text('src/world/world.ts');
   // (pass 2, wave 4a: the sky's moons and planets are made ready between the night and the sky's build, so both are built with it)
-  ok(/await this\.loadNight\(sky, token\);\s*if \(token !== this\.loadToken\) return;\s*(\/\/[^\n]*\n\s*)*await this\.loadBodies\(sky\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the night is hung before the sky is built, behind the loading screen (gpuSkyReady builds it with the dome)");
+  // (Pass 2, wave 4b: the held bodies are hung between the night and the bodies, with the sky still unbuilt.)
+  ok(/await this\.loadNight\(sky, token\);\s*if \(token !== this\.loadToken\) return;\s*(\/\/[^\n]*\n\s*)*await this\.loadHeld\(sky, pack, token\);\s*if \(token !== this\.loadToken\) return;\s*(\/\/[^\n]*\n\s*)*await this\.loadBodies\(sky\);\s*if \(token !== this\.loadToken\) return;\s*this\.gpuSkyReady\(sky\);/.test(world), "the night is hung before the sky is built, behind the loading screen (gpuSkyReady builds it with the dome)");
   ok(/sky\.group\.add\(night\.group\);\s*markActor\(night\.group\);/.test(world) && /await night\.warm\(\);/.test(world) && /night\.drawBake\(\);/.test(world), "it hangs in the sky's group, marked as the group was, its bake compiled and drawn");
   ok(/this\.skyAir\.frame\(this\.day, this\.swgSky, L\);\s*\/\/[^\n]*\n\s*this\.nightFrame\(camPos\);/.test(world) && /private nightFrame\(camPos: THREE\.Vector3\): void \{[\s\S]{0,200}at\.camX = camPos\.x;\s*at\.camZ = camPos\.z;\s*night\.frame\(\);/.test(world), "its frame follows the air's, the camera's place written into its fields");
   // (pass 2, wave 4a: the bodies' Scattered cards go after it, before the sky too)

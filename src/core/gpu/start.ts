@@ -72,6 +72,11 @@ import { SEE_STATS } from '../../sky/air/airSee.ts';
 import { NIGHT_IN, NightSky } from '../../sky/night/nightGpu.ts';
 // Pass 2, wave 4a (maker B): the moons and planets as lit spheres through the air (`src/sky/bodies/skyBody.ts`).
 import { SkyBodies, bakeCache } from '../../sky/bodies/skyBody.ts';
+// Pass 2, wave 4b (maker A): his looks baked on the card (`src/sky/look/lookBake.ts`), for the bodies, space and the map.
+import { LookBaker } from '../../sky/look/lookBake.ts';
+// Pass 2, wave 4b (maker C): a space zone's planets' air (`src/space/spaceRims.ts`) and its gas as volumes (`spaceVolumes.ts`).
+import { SPACE_RIM_IN, SpaceRims } from '../../space/spaceRims.ts';
+import { NEBULA_NOW, SPACE_VOLUME_IN, SpaceVolumes, nebulaFormNow } from '../../space/spaceVolumes.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -357,6 +362,31 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
         if (forget) c.forgetMemo();
         return { ...c.stats, forgotMemo: forget };
       },
+    },
+    // Pass 2, wave 4b (maker A): his looks' bakes, one baker a session on the game's renderer.
+    looks: (() => {
+      const baker = new LookBaker(renderer);
+      return {
+        bake: (id, look, most) => baker.bake(id, look, most),
+        warm: (look, most) => baker.warm(look, most),
+        beginScreen: () => bakeCache().beginScreen(),
+        baked: (look, most) => baker.baked(look, most),
+        release: (look, most) => baker.release(look, most),
+        forget: () => baker.forget(),
+        report: () => baker.report(),
+      };
+    })(),
+    // Pass 2, wave 4b (maker C): a space zone's planets' air (`src/space/spaceRims.ts`), one set a zone, made behind its screen.
+    spaceRims: {
+      make: (zone, appearances, bodies) => SpaceRims.make(zone, appearances, bodies, renderer),
+      rimIn: SPACE_RIM_IN,
+    },
+    // Pass 2, wave 4b (maker C): a space zone's gas as true volumes (`src/space/spaceVolumes.ts`), one set a zone; the Nebulae row.
+    spaceVolumes: {
+      make: (zone, zonePlanets, planets) => SpaceVolumes.make(renderer, zone, zonePlanets, planets),
+      form: () => nebulaFormNow(),
+      now: NEBULA_NOW,
+      volumeIn: SPACE_VOLUME_IN,
     },
     renderer: renderer as THREE.WebGLRenderer,
     environment,

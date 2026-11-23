@@ -28,6 +28,22 @@ const N = 128, TX = 16, TY = 8; // the baked noise volume: N slices of N x N, TX
 const CUBE = 1.1; // the noise volume reaches this far each way (room for the currents to push)
 const OCC = 4; // bodies in the way, at most
 const MAX_STEPS = 96;
+/**
+ * (the GPU port's pass 2, wave 4b) The gas faded in from the eye, in radii of its ball: nought at `from`, whole at `to`. The
+ * viewer's own were 0.04 and 0.32 (the gas the eye stands in, alone); 0.15 and 0.7 also thin the near side of a ball wider than
+ * about 72 degrees (the eye then within 0.7 radii of it: the eye stands 1 / sin(half the angle) radii from the middle), whose gas,
+ * magnified, streaked over a planet behind it. A ball under 72 degrees across stands wholly past 0.7 radii of the eye, so the
+ * Maelstrom (35 degrees) and every narrower gas draw as before.
+ */
+export const NEAR_FADE = { from: 0.15, to: 0.7 };
+/**
+ * (the GPU port's pass 2, wave 4b) The soft shoulder's whitening: the grey added for each unit the brightest channel is over its
+ * roll-off, and the most of it. The viewer's own added 0.22 of every unit with no most, so the Maelstrom's heart ring (its rim
+ * colour times nearly four) came out near white; 0.08 of at most half a unit keeps the ring and the hot disc their rim colour.
+ */
+export const SHOULDER = { white: 0.08, most: 0.5 };
+/** (the GPU port's pass 2, wave 4b) The hot disc's inner edge: the colour it warms toward and how far (the viewer's own: a near white, 0.55). */
+export const HOT_EDGE = { colour: [1.0, 0.82, 0.6], share: 0.35 };
 
 /** The tiers: live noise or the baked volume, and the steps a ray takes. */
 export const VOLUME_TIERS = {
@@ -43,7 +59,10 @@ const ORDER = ['high', 'medium', 'low'];
 
 const Q = { mode: 'auto', auto: 'high', slow: 0, fast: 0, ceiling: 0, sinceUp: 1e9, ema: 16.7, shown: false, changed: 0 };
 export function setVolumeQuality(mode) {
-  Q.mode = VOLUME_QUALITIES.some(([k]) => k === mode) ? mode : 'auto';
+  // (pass 2, wave 4b: a plain loop, no closure: the game moves it in its frame when the quality tier moves)
+  let known = false;
+  for (let i = 0; i < VOLUME_QUALITIES.length; i++) if (VOLUME_QUALITIES[i][0] === mode) known = true;
+  Q.mode = known ? mode : 'auto';
   if (Q.mode === 'auto') { Q.auto = 'high'; Q.ceiling = 0; Q.slow = Q.fast = 0; Q.sinceUp = 1e9; }
 }
 export const volumeTier = () => (Q.mode === 'auto' ? Q.auto : Q.mode);
@@ -191,11 +210,14 @@ export const volumeBakeCount = () => volumeBakes;
 
 function volumeUniforms() {
   const v3 = (x = 1, y = 1, z = 1) => uniform(new THREE.Vector3(x, y, z));
+  // (the GPU port's pass 2, wave 4b) the drift's turn, written every frame, is a vector's field: a number written into a uniform's
+  // own value is a number made each frame (its field holds every kind of value), a vector's field is written in place
+  const turnV = uniform(new THREE.Vector4(0, 0, 0, 0));
   return {
     steps: uniform(40), scale: uniform(1), so: v3(0, 0, 0),
     colour1: v3(), colour2: v3(), glow: uniform(1), density: uniform(1), see: uniform(0), cut: uniform(0.5), soft: uniform(0.3),
     detail: uniform(0.8), form: uniform(0.3), core: uniform(0.6), shapeInv: v3(), twist: uniform(0), turb: uniform(0.15),
-    turn: uniform(0), wob: v3(0, 0, 0), sunlit: uniform(0), sunDir: v3(0, 0, 1), sunPower: uniform(1), sunColour: v3(),
+    turnV, turn: turnV.x, wob: v3(0, 0, 0), sunlit: uniform(0), sunDir: v3(0, 0, 1), sunPower: uniform(1), sunColour: v3(),
     mawR: uniform(0), rimColour: v3(1, 0.7, 0.4), rimK: uniform(0), bendK: uniform(0), flashOn: uniform(0), flashGain: uniform(1), flashDepth: uniform(0.55),
     gain: uniform(1), body: uniform(0),
     inner: uniform(0), innerTint: v3(), knots: uniform(0), dust: uniform(0), discK: uniform(0), spin: uniform(1), eye: uniform(0), halo: uniform(0),
@@ -289,7 +311,8 @@ function discAt(chan, V, x, dir) {
   const streak = n.mul(n).mul(1.2).add(0.25);
   const vel = vec3(x.z, 0.0, x.x.negate()).div(rr).mul(V.spin);
   const beam = clamp(dot(vel, dir).mul(-0.6).add(1.0), 0.25, 1.8);
-  const hot = mix(V.rimColour, vec3(1.0, 0.94, 0.86), smoothstep(rh.mul(2.4), rh.mul(1.15), rr).mul(0.55));
+  // (pass 2, wave 4b: toward a warm white, not a near white, so the heart's disc keeps its rim colour)
+  const hot = mix(V.rimColour, vec3(HOT_EDGE.colour[0], HOT_EDGE.colour[1], HOT_EDGE.colour[2]), smoothstep(rh.mul(2.4), rh.mul(1.15), rr).mul(HOT_EDGE.share));
   const k = prof.mul(streak);
   return vec4(hot.mul(k.mul(beam).mul(V.discK)), clamp(k.mul(V.discK).mul(0.35), 0.0, 0.85));
 }
@@ -342,7 +365,11 @@ function marchMaterial(V, W, chan, large) {
       const D = dens(p);
       // never flown into: when a place is so wide the eye stands inside the ball, the gas within a
       // third of its radius of the eye thins away, so it stays scenery and never fogs the view
-      const near = smoothstep(0.04, 0.32, t);
+      // (the GPU port's pass 2, wave 4b: and out to most of a radius, NEAR_FADE, for a ball wider than
+      // about 72 degrees, whose near side then stands within 0.7 radii of the eye: the gas there,
+      // magnified several times over the rest, was drawn as long smeared streaks over a planet the veil
+      // stands in front of; a narrower ball's nearest gas is past it and keeps every wisp)
+      const near = smoothstep(NEAR_FADE.from, NEAR_FADE.to, t);
       const d = D.d.mul(near).toVar(), dust = D.dust.mul(near).toVar();
       If(d.add(dust).greaterThan(0.001), () => {
         // the light at this point: the gas's own glow (gathered into its thickest knots, as a real
@@ -399,7 +426,8 @@ function marchMaterial(V, W, chan, large) {
     const G = C.mul(V.gain);
     const m = max(max(G.x, G.y), max(G.z, 0.00001));
     const f = select(m.greaterThan(0.7), float(0.7).add(float(0.3).mul(float(1).sub(exp(m.sub(0.7).div(-0.3))))), m);
-    const Gc = G.mul(f.div(m)).add(vec3(m.sub(f).mul(0.22)));
+    // (pass 2, wave 4b: the grey the shoulder adds held to SHOULDER's most, so a bright heart keeps its colour)
+    const Gc = G.mul(f.div(m)).add(vec3(min(m.sub(f), SHOULDER.most).mul(SHOULDER.white)));
     return vec4(Gc, a);
   })();
   mat.colorNode = out;
@@ -492,7 +520,7 @@ export function syncVolume(vol, gen) {
  * Every frame: the tier, the drift's turn and the currents' circle (from the weather's motion clock),
  * the lightning (from the wall's), the sun in the volume's own frame. Nothing is made here.
  */
-export function updateVolume(vol, { motion, wall, lightWorld, sunPower = 1, sunColour = null, gain = 1 }) {
+export function updateVolume(vol, { motion, wall, lightWorld, sunPower = 1, sunColour = null, gain = 1, noStorms = false }) {
   const tier = volumeTier();
   if (vol.tier !== tier) {
     vol.tier = tier;
@@ -504,27 +532,50 @@ export function updateVolume(vol, { motion, wall, lightWorld, sunPower = 1, sunC
   // the live tier's shift of the noise follows here, at every place showing the look
   if (vol.seed !== vol.gen.seed) { seedShift(vol.gen.seed, V.so.value); vol.seed = vol.gen.seed; }
   V.steps.value = VOLUME_TIERS[tier].steps;
-  V.turn.value = ((+d.drift * Math.PI) / 180 / 60) * motion;
+  V.turnV.value.x = ((+d.drift * Math.PI) / 180 / 60) * motion;
   const w = motion * (+d.churn || 0) * 0.12;
-  V.wob.value.set(0.15 * Math.cos(w), 0.07 * Math.sin(w * 0.73), 0.15 * Math.sin(w));
+  // (pass 2, wave 4b: each written into its field: a number handed to a call is a number made, and the game runs this a frame)
+  const wob = V.wob.value;
+  wob.x = 0.15 * Math.cos(w);
+  wob.y = 0.07 * Math.sin(w * 0.73);
+  wob.z = 0.15 * Math.sin(w);
   V.gain.value = gain;
   V.sunPower.value = sunPower;
   if (sunColour) V.sunColour.value.copy(sunColour);
   vol.mesh.updateWorldMatrix(true, false);
   vol._mi.copy(vol.mesh.matrixWorld).invert();
   if (lightWorld) V.sunDir.value.copy(lightWorld).transformDirection(vol._mi);
+  // (the GPU port's pass 2, wave 4b) `noStorms`: the game's frame leaves the gas's lightning out, every flash dark, until the
+  // storms' step takes its numbers from a kept record (handed across this call, each makes a number a frame: the game's rule)
+  if (noStorms) {
+    const cells = vol.W.cells;
+    for (let i = 0; i < STORM_SLOTS; i++) if (cells[i].value.w !== 0) cells[i].value.w = 0;
+    return;
+  }
   vol.storms.step(wall, +d.flashes > 0, +d.flashes, +d.flashBright, Math.max(0.01, +d.flashSize || 0.14), vol.W.cells, vol.W.cellInv);
 }
 
-/** The bodies in the volume's way this frame: `list` of Vector4 (world centre, world radius), `n` of them. */
+/**
+ * The bodies in the volume's way this frame: `list` of Vector4 (world centre, world radius), `n` of them.
+ * (the GPU port's pass 2, wave 4b: every number written into its field, the ball's scale worked from its matrix's columns where it
+ * stands, since a number handed to a call the compiler does not build in is a number made, and the game draws this a frame)
+ */
 export function volumeOccluders(vol, list, n) {
-  const s = vol.mesh.matrixWorld.getMaxScaleOnAxis() || 1;
+  const e = vol.mesh.matrixWorld.elements;
+  const sx = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+  const sy = e[4] * e[4] + e[5] * e[5] + e[6] * e[6];
+  const sz = e[8] * e[8] + e[9] * e[9] + e[10] * e[10];
+  const s = Math.sqrt(Math.max(sx, sy, sz)) || 1;
+  const m = vol._mi.elements;
   let k = 0;
   for (let i = 0; i < n && k < OCC; i++) {
     const o = list[i];
     if (!(o.w > 0)) continue;
-    vol._v.set(o.x, o.y, o.z).applyMatrix4(vol._mi);
-    vol.V.occ[k++].value.set(vol._v.x, vol._v.y, vol._v.z, o.w / s);
+    const u = vol.V.occ[k++].value;
+    u.x = m[0] * o.x + m[4] * o.y + m[8] * o.z + m[12];
+    u.y = m[1] * o.x + m[5] * o.y + m[9] * o.z + m[13];
+    u.z = m[2] * o.x + m[6] * o.y + m[10] * o.z + m[14];
+    u.w = o.w / s;
   }
   for (; k < OCC; k++) vol.V.occ[k].value.w = 0;
   vol.occN = n;

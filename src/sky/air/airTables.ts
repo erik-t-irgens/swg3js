@@ -35,6 +35,30 @@ export const TABLE_STEPS = {
   hazeSub: 2,
 } as const;
 
+/**
+ * Pass 2, wave 4b (maker B): the factor the sky view and the haze volume store their light at, from the light on a level
+ * surface (`AIR.frame.level`, the scene's units): 1 while it is over `STORE_FIXED.top` (by day and into the dusk, so the
+ * tables are the base's to the bit), else the power of two that brings it back up to `top`, at most 2^`most`. A power of
+ * two, so a value in a half float's normal range keeps its very bits stored and read back; only the night's, which sat in its
+ * subnormals, gains. Not a dial: precision, not look. Allocates nothing.
+ */
+export const STORE_FIXED = { top: 0.05, most: 20 } as const;
+/** RGBA texels read back as stored (`x · store` in rgb) put back in the scene's units, in place; the alpha (a share) as it is. */
+export function unstore(rgba: Float32Array, store: number): Float32Array {
+  if (store !== 1) for (let i = 0; i < rgba.length; i += 4) {
+    rgba[i] /= store;
+    rgba[i + 1] /= store;
+    rgba[i + 2] /= store;
+  }
+  return rgba;
+}
+export function storeInto(f: { level: number }, out: { x: number }): void {
+  // Read off the frame's record and written into the uniform's own field: no number crosses a call (a frame makes none).
+  const lv = f.level > 1e-30 ? f.level : 1e-30;
+  const k = lv >= STORE_FIXED.top ? 0 : Math.floor(Math.log2(STORE_FIXED.top / lv));
+  out.x = 2 ** (k > STORE_FIXED.most ? STORE_FIXED.most : k);
+}
+
 /** The record's changes smaller than this share of a number draw nothing again (the slow tables). */
 export const REBUILD_SHARE = 1e-4;
 
@@ -78,6 +102,13 @@ class Tables implements AirTables {
   private readonly uMoonTop = new THREE.Vector3(0, 0, 0);
   private readonly uGain = new THREE.Vector3(1, 1, 1);
   private readonly uSunRadius = new THREE.Vector2(0.0047, 0);
+  /**
+   * Pass 2, wave 4b (maker B): the factor the sky view and the haze's light are stored at (x; y spare), a power of two, 1 by
+   * day (`storeInto`): a moonlit night's sky in the scene's units is about 1e-7, under a half float's smallest normal
+   * (6e-5), so the night's sky view held two bits and the sky round the moon drew as stepped rings (the measure of pass 2,
+   * wave 3); stored times 2^k it keeps its ten, and every reader divides it back out, so by day nothing moves by a bit.
+   */
+  private readonly uStore = new THREE.Vector2(1, 0);
   /** The frame camera's turn alone (no place: nothing measured from the world's middle reaches the card), and its projection's inverse. */
   private readonly camTurn = new THREE.Matrix4();
   private readonly projInv = new THREE.Matrix4();
@@ -186,6 +217,7 @@ class Tables implements AirTables {
     const h = Math.sqrt(sx * sx + sz * sz);
     this.uView.set(f.heightKm > 0.001 ? f.heightKm : 0.001, f.overcast, h > 1e-9 ? sx / h : 1, h > 1e-9 ? sz / h : 0);
     this.uSunRadius.x = f.sunRadius;
+    storeInto(f, this.uStore);
   }
 
   frame(camera: THREE.PerspectiveCamera): void {
@@ -251,7 +283,7 @@ class Tables implements AirTables {
    * The three drawn tables read back as floats (the proof's: the twin against the card's tables, `airProbe.js`), with the
    * record they were drawn from and the frame's lights and height in force. Not for play: it waits on the card.
    */
-  async readBack(): Promise<{ record: number[]; view: number[]; sun: number[]; sun2: number[]; moon: number[]; sunTop: number[]; sun2Top: number[]; moonTop: number[]; gain: number[]; transmittance: Float32Array; multiScatter: Float32Array; skyView: Float32Array }> {
+  async readBack(): Promise<{ record: number[]; view: number[]; sun: number[]; sun2: number[]; moon: number[]; sunTop: number[]; sun2Top: number[]; moonTop: number[]; gain: number[]; transmittance: Float32Array; multiScatter: Float32Array; skyView: Float32Array; store: number }> {
     const r = this.renderer;
     const read = async (t: THREE.RenderTarget): Promise<Float32Array> => {
       const raw = (await r.readRenderTargetPixelsAsync(t, 0, 0, t.width, t.height)) as ArrayLike<number>;
@@ -272,7 +304,9 @@ class Tables implements AirTables {
       gain: this.uGain.toArray(),
       transmittance: await read(this.tTarget),
       multiScatter: await read(this.msTarget),
-      skyView: await read(this.svTarget),
+      // Pass 2, wave 4b: the sky view is stored times the night's factor; read back in the scene's units, as the readers read it.
+      skyView: unstore(await read(this.svTarget), this.uStore.x),
+      store: this.uStore.x,
     };
   }
 
@@ -286,7 +320,7 @@ class Tables implements AirTables {
    * fetched at its centre, so texel (x, y, slice) is row `slice · 32 + y` of the copy as `uv()` counts it. Its one draw is
    * made the first time it is asked (`compileAsync` before it draws, so no frame meets it unbuilt) and never in play.
    */
-  async readHaze(): Promise<{ record: number[]; camTurn: number[]; projInv: number[]; view: number[]; sun: number[]; sun2: number[]; moon: number[]; sunTop: number[]; sun2Top: number[]; moonTop: number[]; gain: number[]; width: number; height: number; depth: number; volume: Float32Array }> {
+  async readHaze(): Promise<{ record: number[]; camTurn: number[]; projInv: number[]; view: number[]; sun: number[]; sun2: number[]; moon: number[]; sunTop: number[]; sun2Top: number[]; moonTop: number[]; gain: number[]; store: number; width: number; height: number; depth: number; volume: Float32Array }> {
     const r = this.renderer;
     const W = AIR_SIZES.haze.width;
     const H = AIR_SIZES.haze.height;
@@ -340,7 +374,9 @@ class Tables implements AirTables {
     const volume = new Float32Array(W * H * D * 4);
     const half = raw instanceof Uint16Array;
     for (let i = 0; i < volume.length; i++) volume[i] = half ? THREE.DataUtils.fromHalfFloat(raw[i]) : raw[i];
-    return { ...words, width: W, height: H, depth: D, volume };
+    // Pass 2, wave 4b: the haze's light (its texels' rgb, not their transmittance) read back in the scene's units.
+    unstore(volume, this.uStore.x);
+    return { ...words, store: this.uStore.x, width: W, height: H, depth: D, volume };
   }
 
   /**
@@ -405,8 +441,8 @@ class Tables implements AirTables {
   }
 
   /** The uniform objects, for the graphs (built once). */
-  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
-    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
+  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; store: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
+    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, store: this.uStore, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
   }
 
   /** The targets' textures, for the graphs. */
@@ -445,6 +481,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
   const moonTop = live(U.moonTop);
   const gain = live(U.gain);
   const sunRadius = live(U.sunRadius);
+  // Pass 2, wave 4b: the sky view's and the haze's light stored times this (a power of two, 1 by day), read back divided.
+  const storeK = live(U.store).x;
   const camTurn = live(U.camTurn);
   const projInv = live(U.projInv);
 
@@ -660,7 +698,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     const L = vec3(0).toVar('airSvL');
     const Tr = vec3(1).toVar('airSvT');
     march(r, d, float(1e9), TABLE_STEPS.skyView, L, Tr);
-    return vec4(L.mul(gain), 1);
+    return vec4(L.mul(gain).mul(storeK), 1);
   })();
 
   // ---------------------------------------------------------------- the haze volume (on compute)
@@ -701,7 +739,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         Tr.mulAssign(exp(sigma.negate().mul(dt)));
         prev.assign(e1);
       });
-      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(L.mul(gain), Tr.x.add(Tr.y).add(Tr.z).div(3)));
+      const store = storageTexture3D(U.volume, ivec3(int(ix), int(iy), i), vec4(L.mul(gain).mul(storeK), Tr.x.add(Tr.y).add(Tr.z).div(3)));
       store.toWriteOnly();
       store.toStack();
     });
@@ -725,7 +763,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const yb = float(0.5).add(sqrt(clamp(fromH.negate().div(max(float(PI / 2).sub(dip), 1e-6)), 0, 1)).mul(0.5));
       const y = select(fromH.greaterThanEqual(0), ya, yb);
       const x = sqrt(clamp(az.div(PI), 0, 1));
-      return texture(T.sv, vec2(unitToTexel(x, SW), unitToTexel(y, SH))).level(0).rgb;
+      return texture(T.sv, vec2(unitToTexel(x, SW), unitToTexel(y, SH))).level(0).rgb.div(storeK);
     },
     transmittanceToSpace(dir: Any): Any {
       const d = normalize(dir);
@@ -733,7 +771,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     },
     hazeAt(ndc: Any, distanceM: Any): Any {
       const w = sqrt(clamp(distanceM.div(HAZE_REACH_M), 0, 1));
-      return texture3D(U.volume, vec3(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5), w)).level(0);
+      const h = texture3D(U.volume, vec3(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5), w)).level(0);
+      return vec4(h.rgb.div(storeK), h.a);
     },
   };
 

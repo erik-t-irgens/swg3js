@@ -2585,6 +2585,23 @@ function kitKey(gen) {
 }
 
 const bakeKits = new Map();
+
+// (the GPU port's pass 2, wave 4b's fixer) The vertex stage three's `QuadMesh.render` swaps in for its draw (a triangle from the
+// vertex index, no vertex buffer), read off three's own quad by handing its `render` a stand-in renderer. A kit's materials
+// carry it as their own, so a pipeline asked for ahead (`warm`, through `compileAsync`, which takes the material as it stands)
+// is the very one the bake's draws use: with the material's own vertex stage the warm built a program reading a position
+// buffer, keyed apart from the draw's, and on a cold shader cache the draws then built theirs for a minute behind the screen.
+// The draws are unchanged (three swaps in the same node and puts the same one back).
+let QUAD_VERTEX;
+function quadVertexNode() {
+  if (QUAD_VERTEX === undefined) {
+    QUAD_VERTEX = null;
+    const q = new THREE.QuadMesh(new THREE.NodeMaterial());
+    q.render({ render: (o) => { QUAD_VERTEX = o.material.vertexNode ?? null; } });
+  }
+  return QUAD_VERTEX;
+}
+
 function kitFor(gen) {
   const key = kitKey(gen);
   if (bakeKits.has(key)) return bakeKits.get(key);
@@ -2633,7 +2650,7 @@ function kitFor(gen) {
       return out;
     };
   }
-  const make = (fn) => { const m = new THREE.NodeMaterial(); m.fragmentNode = Fn(fn)(); m.depthTest = false; m.depthWrite = false; m.name = 'generate-' + recipe; return m; };
+  const make = (fn) => { const m = new THREE.NodeMaterial(); m.fragmentNode = Fn(fn)(); m.vertexNode = quadVertexNode(); m.depthTest = false; m.depthWrite = false; m.name = 'generate-' + recipe; return m; };
 
   // 1: height (16 bits in r, g) and glow (b)
   const heightMat = make(() => {
@@ -2865,6 +2882,49 @@ export class GeneratedSet {
     const p = queue.then(run, run);
     queue = p.catch(() => {});
     return p;
+  }
+
+  /**
+   * (the GPU port's pass 2, wave 4b) Its bake's passes made ready on a renderer before it bakes: each pass's pipeline asked
+   * for against a target of the format it draws into (`compileAsync`, the game's warm-up behind its loading screen), so the
+   * bake that follows builds nothing in its draws. Resolves with the milliseconds it took (0 where the kit had baked
+   * before). The viewer never calls it: its own renderer builds a kit at its first bake, as ever.
+   */
+  async warm(renderer, gen, { withClouds = false, again = false } = {}) {
+    const kit = kitFor(gen);
+    // each pass's ask kept until it lands, so a warm begun on one screen and not landed by its end is awaited by the next;
+    // `again` asks once more (an ask that answers at once where its pipeline has landed: the game's probe of a slow kit)
+    kit.warming ??= new Map();
+    if (again) kit.warming.clear();
+    // each pass asked against the very target this set's bake draws it into (the game's compile keys a pipeline by its target)
+    if (withClouds && !this.clouds) this.clouds = target(this.width, this.height);
+    if (kit.moreMat && !this.more) this.more = target(this.width, this.height);
+    // the height's texture nodes pointed at the size's height target, as the bake points them (three writes a nearest-filtered
+    // picture's read as a load, not a sample: the warm's program must read the picture the draws will hand it)
+    const fields = fieldTarget(this.width, this.height);
+    for (const n of kit.fieldNodes) n.value = fields.texture;
+    const passes = [[kit.heightMat, fields],[kit.moreMat, this.more], [kit.colourMat, this.surface], [kit.reliefMat, this.relief], [withClouds ? kit.cloudsMat : null, this.clouds]].filter(([m, rt]) => m && rt);
+    const t0 = performance.now();
+    const prev = renderer.getRenderTarget();
+    const asked = [];
+    let fresh = 0;
+    try {
+      for (const [m, rt] of passes) {
+        let p = kit.warming.get(m);
+        if (!p) {
+          renderer.setRenderTarget(rt);
+          const q = new THREE.QuadMesh(m);
+          p = Promise.resolve(renderer.compileAsync(q, q.camera)).catch(() => {});
+          kit.warming.set(m, p);
+          fresh++;
+        }
+        asked.push(p);
+      }
+    } finally {
+      renderer.setRenderTarget(prev);
+    }
+    await Promise.all(asked);
+    return fresh ? performance.now() - t0 : 0;
   }
 
   /** Every texel of one of its textures, for checks (same seed, same picture). */

@@ -163,10 +163,60 @@ export function gameBodiesFile(data, opts = {}) {
     const air = out.looks[id]?.air;
     if (world && isObj(air) && !out.air[world]) out.air[world] = JSON.parse(JSON.stringify(air));
   }
+  // (pass 2, wave 4b) the bodies held still in a ground sky (the Death Star over Endor, any of SWG's sky sprites he places):
+  // numbers and one picture of the sky pack each, by world and the body's own id; a world with none is left out (an older
+  // game ignores the key, and a world absent from it keeps what SWG's environment says)
+  const held = heldForGame(data.held);
+  if (Object.keys(held).length) out.held = held;
   for (const name of [...used].sort()) out.pictures[gamePictureName(name)] = { kind: String(pictures[name]?.kind || 'other') };
   const credit = typeof data.credit === 'string' ? data.credit.trim().slice(0, 120) : '';
   const photos = Object.keys(out.pictures).length;
   out.credits = credit ? `Sky looks${photos ? ' and photos' : ''} by ${credit}, made in the space body viewer.` : 'Sky looks made in the space body viewer.';
+  return out;
+}
+
+/**
+ * The pictures a held body may wear, by SWG's names in the sky pack (the game's reader keeps the same list,
+ * `src/sky/look/bodiesFile.ts`'s `HELD_PICTURES`): the Death Star's three stages and its near-complete picture, SWG's two ship
+ * sprites.
+ */
+export const HELD_PICTURES = ['moon_deathstar1', 'moon_deathstar2', 'moon_deathstar3', 'moon_deathstar', 'cels_moncal_cruiser', 'cels_star_destroyer'];
+
+/** Each number's range (the game's reader holds them so too). */
+export const HELD_RANGE = { yawDeg: [-360, 360], pitchDeg: [-90, 90], size: [0.01, 20], rollDeg: [-360, 360], light: [0, 8] };
+
+/**
+ * SWG's own placement of Endor's Death Star (its environment's `GSCL` chunks): yaw 140, pitch 30, size 0.6, stage 1 (the
+ * half-built sphere), unrolled, as converted. A held body's number left out takes it.
+ */
+export const HELD_START = { picture: 'moon_deathstar1', yawDeg: 140, pitchDeg: 30, size: 0.6, rollDeg: 0, light: 1 };
+
+/** One held body as the game's file carries it (numbers and its picture), or null where its picture is not one of the list. */
+export function heldBody(b) {
+  if (!isObj(b)) return null;
+  const picture = typeof b.picture === 'string' ? b.picture.toLowerCase().replace(/\.(dds|png|tga)$/, '') : HELD_START.picture;
+  if (!HELD_PICTURES.includes(picture)) return null;
+  const out = { picture };
+  for (const [k, [lo, hi]] of Object.entries(HELD_RANGE)) {
+    const v = typeof b[k] === 'number' && Number.isFinite(b[k]) ? b[k] : HELD_START[k];
+    out[k] = v < lo ? lo : v > hi ? hi : v;
+  }
+  return out;
+}
+
+/** The page's held bodies (`{ <world>: { <id>: body } }`) as the game's file carries them. */
+export function heldForGame(held) {
+  const out = {};
+  for (const [world, bodies] of Object.entries(isObj(held) ? held : {})) {
+    if (!/^[a-z0-9_]{1,40}$/.test(world) || !isObj(bodies)) continue;
+    const kept = {};
+    for (const [id, b] of Object.entries(bodies)) {
+      if (!/^[a-z0-9_]{1,40}$/.test(id)) continue;
+      const h = heldBody(b);
+      if (h) kept[id] = h;
+    }
+    if (Object.keys(kept).length) out[GAME_WORLD[world] ?? world] = kept;
+  }
   return out;
 }
 
