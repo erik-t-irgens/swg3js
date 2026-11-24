@@ -30,7 +30,7 @@ import { MeshBasicNodeMaterial, NodeUpdateType, TextureNode } from 'three/webgpu
 import * as TSL from 'three/tsl';
 import { AIR } from '../air/airApi.ts';
 import { F } from '../air/airParams.ts';
-import { TABLES, airShader, type AirProfileTables } from '../look/airProfile.js';
+import { TABLES, airShader, smokeUniformValues, type AirProfileTables } from '../look/airProfile.js';
 import { markMotion } from '../../core/gpu/motion.ts';
 import { BODY_LAY, BODY_TUNE, bodyFormOf, tierRule } from './bodyTier.ts';
 import { bodyRecord, bodyTablesKey, hasAir, makeBodyTables } from './bodyAir.ts';
@@ -78,6 +78,13 @@ export class BodyCardState {
    * the worn look's own (`skyLooks.ts`) for a body wearing one.
    */
   readonly a5 = new THREE.Vector4(1, 0, 1, 0.3);
+  /**
+   * Pass 2, wave 6: the body's smoke and ash (`airProfile.js`' `smokeUniformValues`): its extinction at its peak and its
+   * middle; its scattering and its half depth; its glow from below over its sun and its phase. None: noughts and a shape.
+   */
+  readonly a6 = new THREE.Vector4(0, 0, 0, 2);
+  readonly a7 = new THREE.Vector4(0, 0, 0, 1.5);
+  readonly a8 = new THREE.Vector4(0, 0, 0, 0.7);
   /**
    * Pass 2, wave 5 (maker L): whether the body is up this frame (written by the frame), and whether its look is drawn whole
    * by `lookBody.ts` (set at its making): then this card, its Scattered twin and its halo stand down, and the look's card is
@@ -144,7 +151,7 @@ interface Frame {
 }
 
 /** A number of the drawn card's record, read at every draw (the object's own group). */
-function cardVec(field: 'card' | 'sun' | 'dir' | 'right' | 'up' | 'a0' | 'a1' | 'a2' | 'a3' | 'a4' | 'a5', init: THREE.Vector3 | THREE.Vector4): Any {
+function cardVec(field: 'card' | 'sun' | 'dir' | 'right' | 'up' | 'a0' | 'a1' | 'a2' | 'a3' | 'a4' | 'a5' | 'a6' | 'a7' | 'a8', init: THREE.Vector3 | THREE.Vector4): Any {
   return uniform(init).onObjectUpdate((f: Frame) => f.object?.userData?.swgBodyCard?.[field] ?? init);
 }
 
@@ -286,8 +293,12 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
     const a2 = cardVec('a2', new THREE.Vector4(0.5, 0.5, 0.5, 0.5));
     const a3 = cardVec('a3', new THREE.Vector4(25, 15, 0.8, 1e5));
     const a4 = cardVec('a4', new THREE.Vector4(1, 1, 1, 1));
+    // Pass 2, wave 6: the smoke and ash and the glow from below (noughts and a shape with none: a nought added at every step).
+    const a6 = cardVec('a6', new THREE.Vector4(0, 0, 0, 2));
+    const a7 = cardVec('a7', new THREE.Vector4(0, 0, 0, 1.5));
+    const a8 = cardVec('a8', new THREE.Vector4(0, 0, 0, 0.7));
     const steps = uniform(STEPS_U).setGroup(renderGroup);
-    const U = { bottom: a0.x, top: a0.y, rayH: a0.z, mieH: a0.w, ray: a1.xyz, mieS: a1.w, oz: a2.xyz, mieA: a2.w, ozC: a3.x, ozW: a3.y, mieG: a3.z, mieTint: a4.xyz, limb: a4.w, twilight: a5.x };
+    const U = { bottom: a0.x, top: a0.y, rayH: a0.z, mieH: a0.w, ray: a1.xyz, mieS: a1.w, oz: a2.xyz, mieA: a2.w, ozC: a3.x, ozW: a3.y, mieG: a3.z, mieTint: a4.xyz, limb: a4.w, twilight: a5.x, smokeE: a6.xyz, smokeC: a6.w, smokeS: a7.xyz, smokeW: a7.w, glow: a8.xyz, smokeG: a8.w };
     // The viewer's shader half handed three's namespace with its loop running to the tier's count (one graph for every tier),
     // its steps laid by the game's power (`BODY_LAY`: the limb within 3% of the ground path at High's 12).
     const NS = { ...(TSL as Any), Loop: (_n: unknown, body: Any) => TSL.Loop({ start: int(0), end: int(steps.x), type: 'int', condition: '<' }, body) };
@@ -610,6 +621,11 @@ function writeRecord(st: BodyCardState, rec: Float64Array): void {
   // The twilight alone (the fixer of pass 2, wave 4b): `a5`'s other three are the card's own (its cover, its light, its
   // reflectance), and setting them here halved every body with air's light and took half its cover from its picture's alpha.
   st.a5.x = BODY_TUNE.twilight;
+  // Pass 2, wave 6: the smoke and ash and the glow from below (`airProfile.js`' values: none for a record of 28 numbers).
+  const s = smokeUniformValues(rec);
+  st.a6.set(s.smokeE[0], s.smokeE[1], s.smokeE[2], s.smokeC);
+  st.a7.set(s.smokeS[0], s.smokeS[1], s.smokeS[2], s.smokeW > 1e-6 ? s.smokeW : 1e-6);
+  st.a8.set(s.glow[0], s.glow[1], s.glow[2], s.smokeG);
 }
 
 /** The bodies' graphs let go (a session's end; the tests'). */

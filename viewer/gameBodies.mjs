@@ -171,6 +171,8 @@ export function gameBodiesFile(data, opts = {}) {
   // (pass 2, wave 5, maker L) the space places he moved or sized (the page's place edits, `places`): numbers only, by place; a
   // file without any is as before (the game reads none)
   const places = spacePlacesForGame(data.places);
+  // (pass 2, wave 6, maker K) and a ground sky's places he moved or sized on the Place tab: SWG's slots and celestials
+  Object.assign(places, groundPlacesForGame(data.places));
   if (Object.keys(places).length) out.places = places;
   for (const name of [...used].sort()) out.pictures[gamePictureName(name)] = { kind: String(pictures[name]?.kind || 'other') };
   const credit = typeof data.credit === 'string' ? data.credit.trim().slice(0, 120) : '';
@@ -236,6 +238,28 @@ export function spacePlacesForGame(places) {
     if (!/^space_[a-z0-9_]{1,40}:[a-z0-9_]{1,60}(?:#\d{1,3})?$/.test(id) || !isObj(e)) continue;
     const o = {};
     for (const k of ['yaw', 'pitch', 'size', 'distance']) if (typeof e[k] === 'number' && Number.isFinite(e[k])) o[k] = e[k];
+    if (Object.keys(o).length) out[id] = o;
+  }
+  return out;
+}
+
+/** A ground sky's place of SWG's as the viewer names it: its four slots, or a celestial by its picture (`#n` where it repeats). */
+export const GROUND_PLACE = /^(?!space_)[a-z0-9_]{1,40}:(?:sun|sun2|moon|moon2|celestial:[a-z0-9_]{1,60}(?:#\d{1,3})?)$/;
+
+/**
+ * (pass 2, wave 6, maker K) A ground sky's places he moved or sized on the Place tab, as the game's file carries them: from the
+ * page's place edits, each of SWG's slots' and celestials' own size (the square SWG draws, degrees across, as the Place tab
+ * shows it) and, for a celestial, a second sun and a second moon, its yaw and pitch (a celestial's in the sky; a second body's
+ * its offset from the light, as SWG's file has them); nothing of the look's light, tilt or spin, which are the viewer's. The
+ * game lays them over SWG's sky file behind the next loading screen (`src/sky/look/groundPlaces.ts`).
+ */
+export function groundPlacesForGame(places) {
+  const out = {};
+  for (const [id, e] of Object.entries(isObj(places) ? places : {})) {
+    if (!GROUND_PLACE.test(id) || !isObj(e)) continue;
+    const turns = !/:(sun|moon)$/.test(id);
+    const o = {};
+    for (const k of turns ? ['yaw', 'pitch', 'size'] : ['size']) if (typeof e[k] === 'number' && Number.isFinite(e[k])) o[k] = e[k];
     if (Object.keys(o).length) out[id] = o;
   }
   return out;

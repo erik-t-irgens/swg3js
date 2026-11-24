@@ -13,9 +13,11 @@ import {
 // (the atmosphere brief's wave A) the air round a body: its record, tables and march (airProfile.js), built as nodes
 import * as TSL from 'three/tsl';
 import { Fn, dFdx, dFdy, cross, sign, cos } from 'three/tsl';
-import { airShader, cleanAir, recordOf, recordKey, makeTables, stepsOf, airUniformValues, airStartFor, airless } from './airProfile.js';
+import { airShader, cleanAir, recordOf, recordKey, makeTables, stepsOf, airUniformValues, airStartFor, airless, hasSmoke } from './airProfile.js';
 import { MESHES, HALOS, RINGS } from './looks.js';
 import { GeneratedSet, sampleLatLong, hashBytes, glowKind, glowKinds, depthOn, blendedLavaColour, lightDialsOf, cycloneSites } from './generate.js';
+// (the GPU port's pass 2, wave 6, maker C) the ring cities drawn by the material, and the cities' own glint
+import { ringsOn, ringsSharp, metalOn, ringLayer, ringsVersion, ringLayoutOf } from './generate.js';
 import { weatherUniforms, syncWeather, stormDial, flashAt, flashLight, motionPhases, movedDir, movedUV, churnedDir, churnedUV, phaseOffsetDir, phaseOffsetUV, Storms, stormArgs, STORM_TAPE } from './weather.js';
 
 // Wave 4: the weather's clocks, set once a frame by the page (setWeatherTime): the motion's (it stands
@@ -114,6 +116,13 @@ function makeAir(look) {
     limbDark: uniform(a.limbDark), glint: uniform(a.glint), glintRough: uniform(a.glintRough), cloudRelief: uniform(a.cloudRelief), cloudForward: uniform(a.cloudForward), cloudShadow: uniform(a.cloudShadow),
     nightFill: uniform(a.nightFill),
   };
+  // (the GPU port's pass 2, wave 6) the smoke and ash and the glow from below, only where the record carries them, so every
+  // look without keeps the graph it always had (raising its depth or its glow rebuilds the look: those dials are `struct`)
+  if (hasSmoke(rec)) {
+    U.smokeE = uniform(new THREE.Vector3(...v.smokeE)); U.smokeS = uniform(new THREE.Vector3(...v.smokeS));
+    U.smokeC = uniform(v.smokeC); U.smokeW = uniform(Math.max(v.smokeW, 1e-6)); U.smokeG = uniform(v.smokeG);
+    U.glow = uniform(new THREE.Vector3(...v.glow));
+  }
   const steps = airChoice.steps;
   return { a, key: tabs.key, tex, U, steps, shader: airShader(TSL, U, tex, steps), shell: null, cloudShadowNode: null, pending: 0 };
 }
@@ -133,6 +142,12 @@ function syncAir(state) {
   U.limbDark.value = a.limbDark; U.glint.value = a.glint; U.glintRough.value = a.glintRough;
   U.cloudRelief.value = a.cloudRelief; U.cloudForward.value = a.cloudForward; U.cloudShadow.value = a.cloudShadow;
   U.nightFill.value = a.nightFill;
+  // (the GPU port's pass 2, wave 6) the smoke and ash where the look was built with them (nought where its dials went to none)
+  if (U.smokeE) {
+    U.smokeE.value.set(...v.smokeE); U.smokeS.value.set(...v.smokeS);
+    U.smokeC.value = v.smokeC; U.smokeW.value = Math.max(v.smokeW, 1e-6); U.smokeG.value = v.smokeG;
+    U.glow.value.set(...v.glow);
+  }
   const ch =+state.look.layers.clouds?.height || 1.002;
   U.cloudH.value = Math.max(0.0001, ch - 1);
   U.cloudR.value = v.bottom * ch;
@@ -209,7 +224,8 @@ async function acquireGenerated(look, onStatus) {
   set.refs++;
   if (set.key !== GeneratedSet.keyOf(gen, withClouds)) {
     onStatus?.(`Baking ${look.name} (${set.width} x ${set.height})`);
-    await set.bake(bakeRenderer, gen, { withClouds });
+    // (wave 6, maker C) ring cities drawn sharp by the material are left out of its bake
+    await set.bake(bakeRenderer, gen, { withClouds, ringless: ringsSharp(gen) });
   }
   return set;
 }
@@ -228,7 +244,8 @@ export async function rebakeGenerated(look) {
   const set = genSets.get(look);
   if (!set || set.disposed || !look.generated || set.width !== look.generated.size) return vms;
   if (set.key === GeneratedSet.keyOf(look.generated, !!set.clouds)) return set.lastMs;
-  return set.bake(bakeRenderer, look.generated, { withClouds: !!set.clouds });
+  // (wave 6, maker C) ring cities drawn sharp by the material are left out of its bake
+  return set.bake(bakeRenderer, look.generated, { withClouds: !!set.clouds, ringless: ringsSharp(look.generated) });
 }
 
 // A shaped look's maps (shapes.js), one set a look as the textures are, baked again when its shape changes.
@@ -271,7 +288,10 @@ const partsKey = (g) => {
   const made = (list, part, kind) => (part ? [kind, ...list.filter((d) => !d.live).map((d) => part.dials[d.k])] : 0);
   return g.shape || g.belt || g.rings ? JSON.stringify([made(shapeDialsOf(g.shape?.kind), g.shape, g.shape?.kind), made(BELT_DIALS, g.belt, g.belt?.kind), made(RING_DIALS, g.rings, g.rings?.style)]) : '';
 };
-export const materialKeyOf = (look) => (look?.generated ? `${depthOn(look.generated) ? 'd' : ''}|${glowKinds(look.generated).join(',')}${partsKey(look.generated)}${look.generated.volume ? '|volume' : ''}` : '');
+// (wave 6, maker C) and, at the version that has them, whether its ring cities are drawn by the material and it carries the cities'
+// metal (every older look adds nothing)
+const ringsKey = (g) => ((+g.version || 1) >= ringsVersion(g.recipe) ? `|r${ringsSharp(g) ? 2 : ringsOn(g) ? 1 : 0}${ringsOn(g) ? 'L' + ringLayoutOf(g) : ''}${metalOn(g) ? 'm' : ''}` : '');
+export const materialKeyOf = (look) => (look?.generated ? `${depthOn(look.generated) ? 'd' : ''}|${glowKinds(look.generated).join(',')}${partsKey(look.generated)}${look.generated.volume ? '|volume' : ''}${ringsKey(look.generated)}` : '');
 const builtKeys = new WeakMap();
 export const needsRebuild = (look) => builtKeys.has(look) && builtKeys.get(look) !== materialKeyOf(look);
 
@@ -1051,6 +1071,32 @@ function airGlint(AIR, LU, Ng, mask, tint) {
   return tint.mul(LU.sunColour).mul(LU.sunPower).mul(sun).mul(D.mul(Fr).mul(G).div(nv.mul(4.0)).mul(Math.PI)).mul(mask).mul(AIR.U.glint);
 }
 
+/**
+ * (the GPU port's pass 2, wave 6, maker C) The cities' own glint: a microfacet reflection of the sun on their metal and glass alone
+ * (`mask`), rough by the look's Sharpness (0.5 satin to 0.12 glass: under 0.12 a pin-point glint would hold thousands of times the
+ * sun's light in one plate), its Fresnel a metal's (half at the normal), in its Glint colour, as strong as its City glint (a quarter
+ * at 1, so the start reads as a sheen over the plates, not a second sun); the sun through the air where the look has its air,
+ * the day's edge where it has none. `N` is the plate's own tilted normal, `Ng` the sphere's.
+ */
+function cityGlint(AIR, LU, N, Ng, mask, day) {
+  const Lv = normalize(LU.light);
+  const V = normalize(positionView.negate());
+  const H = normalize(Lv.add(V));
+  const nh = max(dot(N, H), 0.0), nv = max(dot(N, V), 0.001), nl = max(dot(N, Lv), 0.0);
+  const rough = mix(float(0.5), float(0.12), LU.glint.y);
+  const a = rough.mul(rough), a2 = a.mul(a);
+  const dd = nh.mul(nh).mul(a2.sub(1.0)).add(1.0);
+  const D = a2.div(dd.mul(dd).mul(Math.PI));
+  const Fr = float(0.5).add(float(0.5).mul(pow(float(1).sub(max(dot(V, H), 0.0)), 5.0)));
+  const k = a.mul(0.5);
+  const G = nv.div(nv.mul(float(1).sub(k)).add(k)).mul(nl.div(nl.mul(float(1).sub(k)).add(k)));
+  const sun = AIR ? AIR.shader.lightAt(AIR.U.bottom, max(dot(Ng, Lv), 0.0)).sun : day;
+  return LU.glintColour.xyz.mul(LU.sunColour).mul(LU.sunPower).mul(sun).mul(D.mul(Fr).mul(G).div(nv.mul(4.0)).mul(Math.PI)).mul(mask).mul(LU.glint.x).mul(0.25);
+}
+// (wave 6, maker C) the ring cities' night glow where the material draws them: their lines by the glow dial, their plates by the
+// fill, as the bake lays them into the city lights (generate.js's cityParts)
+const ringGlowOf = (RL, RU, rk) => max(RL.lines.mul(RU.look.z), RL.plate.mul(RU.look.w).mul(0.25)).mul(rk);
+
 // ---------------------------------------------------------------------------------------------
 // Materials.
 
@@ -1245,7 +1291,23 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
     Lo = normalize(modelWorldMatrixInverse.mul(vec4(cameraWorldMatrix.mul(vec4(LU.light, 0.0)).xyz, 0.0)).xyz);
   }
   const S = sampleLatLong(G.surface.texture, dir);
-  let colour = adjust(toL(S.rgb), U.surface);
+  // (the GPU port's pass 2, wave 6, maker C) ring cities drawn sharp: the bake was made without them, and the very function the bake
+  // lays them by (generate.js's ringLayer) is run here at each pixel drawn, its lines as fine as the screen, its plates and seams
+  // laid in their own colour over the baked ground as the bake lays them (in the picture's sRGB, before the layer's adjust)
+  const RS = !!(G.rings && ringsSharp(gen));
+  let RL = null, rk = null, surfRGB = S.rgb;
+  if (RS) {
+    const RU = G.rings;
+    // (run inside a function of its own: its loops over the sites and the trunk lines are statements, which need one; packed as
+    // plate, tone, seam (trunk lines with it), lines; each plate's tilt is read off its own tone)
+    const Rv = Fn(() => { const R = ringLayer(dir, RU, ringLayoutOf(gen)); return vec4(R.plate, R.tone, max(R.seam, R.trunks.mul(0.6)), R.lines); })();
+    RL = { plate: Rv.x, tone: Rv.y, seam: Rv.z, lines: Rv.w, tilt: fract(vec3(Rv.y.mul(13.7), Rv.y.mul(29.3).add(0.31), Rv.y.mul(7.1).add(0.57))) };
+    rk = RU.counts.w.mul(gen.recipe === 'cityworld' ? float(1) : float(1).sub(smoothstep(0.3, 0.6, S.a)));
+    const pc = RU.plate.xyz.mul(RL.tone.mul(0.35).add(0.8)).mul(RU.look.y.mul(0.7).add(0.65));
+    surfRGB = mix(surfRGB, clamp(pc, 0.0, 1.0), clamp(RL.plate.mul(rk).mul(0.85), 0.0, 1.0));
+    surfRGB = mix(surfRGB, clamp(pc.mul(0.55), 0.0, 1.0), clamp(RL.seam.mul(rk).mul(0.5), 0.0, 1.0));
+  }
+  let colour = adjust(toL(surfRGB), U.surface);
   const Ng = normalize(transformNormalToView(NsO || dir0));
   const Rr = sampleLatLong(G.relief.texture, dir);
   let Nb = Ng;
@@ -1327,6 +1389,16 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
     const sp = pow(max(dot(Ng, H), 0.0), U.specular.shine).mul(U.specular.shine.div(40.0)).mul(S.a).mul(U.specular.opacity).mul(day).mul(LU.sunPower).mul(fres);
     out = out.add(toL(U.specular.tint).mul(LU.sunColour).mul(sp).mul(U.surface.lit));
   }
+  // (the GPU port's pass 2, wave 6, maker C) the cities' own glint: the sun caught on their metal alone (the extra channels' alpha,
+  // and the sharp plates where the material draws them), each plate tilted its own way, with its own colour, sharpness and strength
+  if (G.more && metalOn(gen)) {
+    let metal = sampleLatLong(G.more.texture, dir).a;
+    if (RS) metal = max(metal, RL.plate.mul(RL.tone.mul(0.45).add(0.55)).mul(rk));
+    // (each plate tilted by its own numbers; the ground between, and every plate of a bake, untilted: a smooth sheen)
+    const jit = RS ? RL.tilt.sub(0.5).mul(RL.plate) : vec3(0.0);
+    const Nt = normalize(transformNormalToView(normalize(dir0.add(jit.mul(LU.glint.z.mul(0.35))))));
+    out = out.add(cityGlint(AIR, LU, Nt, Ng, metal, day).mul(U.surface.lit));
+  }
 
   // air seen edge on: toward the rim the surface fades into the lit atmosphere
   // (Scattered: the air itself does this, in airFinish, so none of the painted haze is laid on as well)
@@ -1352,7 +1424,8 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
     const Iv = Mx.g;
     const lavaTint = glowKind(gen) === 'lava' ? toL(U.night.tint) : LU.lavaColour.xyz;
     out = out.add(lavaTint.mul(Iv).add(vec3(1.0, 0.72, 0.32).mul(Iv.mul(Iv).mul(Iv)).mul(0.7)).mul(U.night.opacity).mul(U.night.bright));
-    const Ic = Mx.r;
+    // (wave 6, maker C) with the ring cities drawn sharp, their lines and fill alight as the bake would light them
+    const Ic = RS ? max(Mx.r, ringGlowOf(RL, G.rings, rk)) : Mx.r;
     const emC = mix(LU.glowColour.xyz, LU.lightColour.xyz, smoothstep(0.15, 0.7, Ic)).mul(Ic).add(vec3(1.0, 0.9, 0.75).mul(Ic.mul(Ic).mul(Ic)).mul(0.35))
       .mul(LU.lightBright).mul(U.night.opacity).mul(U.night.bright).mul(float(1).sub(LU.veil.mul(0.6)));
     out = out.add(emC.mul(mix(float(1), float(1).sub(smoothstep(-0.12, 0.1, ndlG)), U.surface.lit)));
@@ -1368,7 +1441,8 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
   // city lights: the glow colour where they thin out, the light colour where they are dense, on the
   // night side only (the night layer's strength over them, dimmed under a thick haze)
   if (L.night.on && gk === 'lights') {
-    const I = Rr.a;
+    // (wave 6, maker C) with the ring cities drawn sharp, their lines and fill alight as the bake would light them
+    const I = RS ? max(Rr.a, ringGlowOf(RL, G.rings, rk)) : Rr.a;
     const em = mix(LU.glowColour.xyz, LU.lightColour.xyz, smoothstep(0.15, 0.7, I)).mul(I).add(vec3(1.0, 0.9, 0.75).mul(I.mul(I).mul(I)).mul(0.35))
       .mul(LU.lightBright).mul(U.night.opacity).mul(U.night.bright).mul(float(1).sub(LU.veil.mul(0.6)));
     const night = float(1).sub(smoothstep(-0.12, 0.1, ndlG));
@@ -1589,6 +1663,9 @@ export async function buildLook(look, { onStatus, place = false } = {}) {
     lightColour: uniform(new THREE.Vector4(1, 0.6, 0.2, 1)), glowColour: uniform(new THREE.Vector4(1, 0.3, 0.05, 1)), lightBright: uniform(1),
     // a gas giant's decks (live), and the lava's colour when the lava came with a blend, linear
     depthSpread: uniform(0.5), depthShade: uniform(0.6), lavaColour: uniform(new THREE.Vector4(1, 0.4, 0.1, 1)),
+    // (wave 6, maker C) the cities' glint (generate.js's CITY_GLINT_DIALS, live): x strength, y sharpness, z the plates' tilt;
+    // its colour, linear
+    glint: uniform(new THREE.Vector4(0, 0.45, 0.35, 0)), glintColour: uniform(new THREE.Vector4(0.86, 0.81, 1, 1)),
     // wave 4: the storm cells' flashes and the clouds' own motion (weather.js)
     weather: weatherUniforms(),
   };
@@ -1813,6 +1890,11 @@ export function syncLook(state) {
     c.setStyle(ld.glowColour || '#ff8a30'); LU.glowColour.value.set(c.r, c.g, c.b, 1);
     LU.lightBright.value = Number.isFinite(+ld.lightBright) ? +ld.lightBright : 1;
   }
+  // (wave 6, maker C) the cities' glint, at the version that has it (none for every older look)
+  const gv = look.generated && (+look.generated.version || 1) >= ringsVersion(look.generated.recipe) ? gd : null;
+  LU.glint.value.set(gv ? Math.max(0, +gv.glintCity || 0) : 0, gv && Number.isFinite(+gv.glintSharp) ? +gv.glintSharp : 0.45, gv && Number.isFinite(+gv.glintScatter) ? +gv.glintScatter : 0.35, 0);
+  c.setStyle(gv?.glintColour || '#efe8ff'); // linear, as the city colours
+  LU.glintColour.value.set(c.r, c.g, c.b, 1);
   LU.depthSpread.value = gd && Number.isFinite(+gd.depthSpread) ? +gd.depthSpread : 0.5;
   LU.depthShade.value = gd && Number.isFinite(+gd.depthShade) ? +gd.depthShade : 0.6;
   c.setStyle(blendedLavaColour(look.generated) || '#ff8a30'); // linear, as the city colours

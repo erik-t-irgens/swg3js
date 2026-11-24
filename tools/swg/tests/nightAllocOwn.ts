@@ -45,6 +45,18 @@ f.level = 1e-6;
 const out: FxSkyLight[] = [0, 1].map(() => ({ dir: new THREE.Vector3(0, 1, 0), color: new THREE.Color(1, 1, 1), alpha: 0, discRadius: 0, glowRadius: 0, weight: 0, star: false, skyDistance: Infinity }));
 const discs = airFlareDiscs('tatooine', { size: 0.6, glowSize: 1.2 }, { size: 0.4, glowSize: 0 });
 const st = new Float64Array(4);
+// The fixer of pass 2, wave 6: the stars' turn about an applied system's own axis (the Tatoo draft's) in every other stretch of
+// 512 frames, SWG's turn in the rest. The day's `at`, which writes the world's celestial frame, is the day's frame and is
+// measured where the day runs it (`skyMotionAlloc`, through `DayCycle`); called from this harness's frame it makes some 200 B
+// a call with or without the celestial frame's lines (the module graph's inlining, `testing.md`), so here it runs once and
+// the frame turns the celestial frame it wrote about its pole, field by field, as each frame's `at` would.
+const { draftSystem } = await import('../../../src/sky/system/drafts.js');
+const { skyMotionFor, SKY_MOTION } = await import('../../../src/sky/system/skyMotion.ts');
+const motion = skyMotionFor({ tatoo: draftSystem('tatoo') }, 'tatooine', 'tatooine', { sun: { size: 0.6 }, supplementalSun: { size: 0.55 }, moon: { size: 0.5 }, celestials: [] })!;
+if (!motion) throw new Error('the Tatoo draft made no motion');
+motion.at({ count: 1000.25 });
+const cel0 = Float64Array.from(motion.celestial);
+let appliedFrames = 0;
 
 /** One frame: the sun round the day's circle, the moon opposite, the camera walking, the night and the flare's sources. */
 function frame(): void {
@@ -73,6 +85,18 @@ function frame(): void {
   f.moonHere.r = 2e-6;
   NIGHT_IN.camX = 4000 + 3000 * Math.sin(a * 0.3);
   NIGHT_IN.camZ = -1200 + 500 * c;
+  if ((st[0] & 512) !== 0) {
+    // the world's equator turned about its pole by the frame's angle (the pole kept), as the day's `at` writes it
+    const C = motion.celestial;
+    C[0] = c * cel0[0] + s * cel0[3];
+    C[1] = c * cel0[1] + s * cel0[4];
+    C[2] = c * cel0[2] + s * cel0[5];
+    C[3] = c * cel0[3] - s * cel0[0];
+    C[4] = c * cel0[4] - s * cel0[1];
+    C[5] = c * cel0[5] - s * cel0[2];
+    SKY_MOTION.now = motion;
+    appliedFrames++;
+  } else SKY_MOTION.now = null;
   night.frame();
   AIR_FLARE_IN.skyDistance = 3500 + c;
   // The wave's fixer: the nightSuns switch moved now and then, and the open gate a frame in space writes.
@@ -109,5 +133,5 @@ for (let attempt = 0; attempt < 3; attempt++) {
   if (best.scavenges === 0 && best.made <= 0) break;
 }
 const r = night.report() as Any;
-console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, drawn: r.drawn, towns: r.towns.count, stars: r.stars.drawn }));
+console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, drawn: r.drawn, towns: r.towns.count, stars: r.stars.drawn, appliedFrames }));
 process.exit(0);

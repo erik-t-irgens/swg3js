@@ -11,6 +11,8 @@
 // Tatooine's pair (decided on 18 November): the casting sun keeps the day's own path, and the second runs `PAIR_TUNE.belowDeg`
 // below it in the caster's own vertical plane, so it rises after the caster and sets before it (SWG hangs it higher); it
 // lights the world through the existing fill light, unshadowed, and both directions are kept for a later two-sun shadow.
+// Since the GPU port's pass 2, wave 6 (maker K, the owner's ask of 23 November) `PAIR_TUNE.angleDeg` turns it round the
+// caster (0 below as decided, 90 beside, 180 above), applied system or not.
 //
 // Pure: no three, no DOM; the node test imports it. Nothing here runs a frame but `pairDirectionIn`, which allocates nothing.
 
@@ -152,11 +154,54 @@ export function kelvinToLinear(kelvin: number, out: Float64Array | number[]): vo
 // ---------------------------------------------------------------- Tatooine's pair
 
 /**
- * The pair's rule (the owner's decision of 18 November): how far below the caster the second sun runs, degrees, in the
- * caster's own vertical plane. A dial (the sky's dials, `__debug.sky`); 1.5 is the decision's own number, small enough
- * that the two discs read as a pair at noon and large enough that the second visibly rises after and sets before.
+ * The pair's rule (the owner's decision of 18 November, and his ask of 23 November for the angle), two dials of the sky's
+ * (`__debug.sky({ pair })`, the debug menu's "Tatooine's second sun"):
+ *   - `belowDeg`, "Distance from the first": how far from the caster the second sun stands, degrees from middle to middle
+ *     along the sky. 1.5 is the decision's own number, small enough that the two discs read as a pair at noon and large
+ *     enough that the second visibly rises after and sets before.
+ *   - `angleDeg`, "Angle round the first": where round the caster it stands, in the caster's own tangent frame: 0 straight
+ *     below it (today's rule, to the bit: the decision's), 90 beside it, ahead on the side the sun's path runs toward (where the
+ *     caster goes next), 180 above it, -90 beside it behind. 0 to start: the decision's pair, nothing moved until he moves it.
+ * Under a star system he applied in the viewer the system's own Line angle and Separation say where the pair stands
+ * (`src/sky/system/skyMotion.ts`), measured the same way (its Line angle is this angle less 90: its -90 below, 0 ahead, 90
+ * above) and its separation the gap between the discs' edges; each loading screen of such a world sets these two dials to
+ * what the system says (`pairDialsFrom`), and a live move of either wins until the next screen (`PAIR_MOVES`).
  */
-export const PAIR_TUNE = { belowDeg: 1.5 };
+export const PAIR_TUNE = { belowDeg: 1.5, angleDeg: 0 };
+
+/**
+ * How many times the pair's dials were moved by hand (`tuneSky`, the menu's sliders and the console): an applied system's pair
+ * (`skyMotion.ts`) stands by its own numbers until this moves after its loading screen, then by the dials.
+ */
+export const PAIR_MOVES = { n: 0 };
+
+/** The pair's two dials' numbers. */
+interface PairDials {
+  belowDeg: number;
+  angleDeg: number;
+}
+
+/** What the last loading screen set the pair's dials to from an applied system, and what they stood at before; null for none. */
+let pairLent: { before: PairDials; to: PairDials } | null = null;
+
+/**
+ * A loading screen's word to the pair's dials (`World.followMotion`): an applied system's pair (`says`: its Line angle as
+ * this dial's angle, its middles' distance as the screen draws them) sets them, so the menu shows what the sky shows and a
+ * move starts from there; with no such pair, what an earlier screen set is put back, dial by dial, where it still stands
+ * where that screen put it (the saved air's rule, `bodiesFile.ts`' `applyFileAir`). Never in a frame.
+ */
+export function pairDialsFrom(says: { angleDeg: number; distanceDeg: number } | null): void {
+  if (pairLent) {
+    if (PAIR_TUNE.belowDeg === pairLent.to.belowDeg) PAIR_TUNE.belowDeg = pairLent.before.belowDeg;
+    if (PAIR_TUNE.angleDeg === pairLent.to.angleDeg) PAIR_TUNE.angleDeg = pairLent.before.angleDeg;
+    pairLent = null;
+  }
+  if (!says) return;
+  const before = { belowDeg: PAIR_TUNE.belowDeg, angleDeg: PAIR_TUNE.angleDeg };
+  PAIR_TUNE.belowDeg = says.distanceDeg;
+  PAIR_TUNE.angleDeg = says.angleDeg;
+  pairLent = { before, to: { belowDeg: PAIR_TUNE.belowDeg, angleDeg: PAIR_TUNE.angleDeg } };
+}
 
 /** A direction's three fields. */
 interface Dir {
@@ -166,25 +211,54 @@ interface Dir {
 }
 
 /**
- * The second sun's direction for a caster's `c` (unit, +Y up), into `out`: the caster's elevation less `PAIR_TUNE.belowDeg`
- * at the caster's own azimuth, so it stands under the caster on the caster's own arc of heights and meets the horizon after
- * it rises and before it sets. A caster straight overhead has no azimuth: the second then stands toward +Z. Reads and
- * writes the vectors' own fields, so no number crosses the call (a number handed to a call the compiler leaves out is a
- * number made): what a frame calls. Allocates nothing.
+ * The second sun's direction for a caster's `c` (unit, +Y up), into `out`. At `PAIR_TUNE.angleDeg` 0 (today's rule, kept
+ * line for line so it is the same to the bit): the caster's elevation less `PAIR_TUNE.belowDeg` at the caster's own azimuth,
+ * so it stands under the caster on the caster's own arc of heights and meets the horizon after it rises and before it sets.
+ * At any other angle: `belowDeg` along the sky from the caster toward `cos(angle) * down + sin(angle) * ahead`, the caster's
+ * own tangent frame (down its vertical, and the level way the sun's path runs on, (-z, 0, x) of its azimuth), which at 0 is
+ * the same place. A caster straight overhead has no azimuth: the second then stands toward +Z. Reads and writes the vectors'
+ * own fields, so no number crosses the call (a number handed to a call the compiler leaves out is a number made): what a
+ * frame calls. Allocates nothing. `src/sky/air/airRun.ts`' `pairInto` is its frame copy, held to it by `airRun.test.ts`.
  */
 export function pairDirectionOf(c: Dir, out: Dir): void {
   const h = Math.sqrt(c.x * c.x + c.z * c.z);
   const y = c.y > 1 ? 1 : c.y < -1 ? -1 : c.y;
-  const e = Math.asin(y) - (PAIR_TUNE.belowDeg * Math.PI) / 180;
-  const ce = Math.cos(e);
-  if (h > 1e-9) {
-    out.x = (c.x / h) * ce;
-    out.z = (c.z / h) * ce;
-  } else {
-    out.x = 0;
-    out.z = ce;
+  if (PAIR_TUNE.angleDeg === 0) {
+    const e = Math.asin(y) - (PAIR_TUNE.belowDeg * Math.PI) / 180;
+    const ce = Math.cos(e);
+    if (h > 1e-9) {
+      out.x = (c.x / h) * ce;
+      out.z = (c.z / h) * ce;
+    } else {
+      out.x = 0;
+      out.z = ce;
+    }
+    out.y = Math.sin(e);
+    return;
   }
-  out.y = Math.sin(e);
+  // The caster's tangent frame: its level way out (hx, hz), down its vertical (y hx, -h, y hz) and ahead (-hz, 0, hx).
+  let hx = 0;
+  let hz = 1;
+  if (h > 1e-9) {
+    hx = c.x / h;
+    hz = c.z / h;
+  }
+  const t = (PAIR_TUNE.angleDeg * Math.PI) / 180;
+  const ct = Math.cos(t);
+  const st = Math.sin(t);
+  const ox = ct * y * hx - st * hz;
+  const oy = -ct * h;
+  const oz = ct * y * hz + st * hx;
+  const d = (PAIR_TUNE.belowDeg * Math.PI) / 180;
+  const cd = Math.cos(d);
+  const sd = Math.sin(d);
+  const qx = cd * c.x + sd * ox;
+  const qy = cd * y + sd * oy;
+  const qz = cd * c.z + sd * oz;
+  const ql = Math.sqrt(qx * qx + qy * qy + qz * qz);
+  out.x = qx / ql;
+  out.y = qy / ql;
+  out.z = qz / ql;
 }
 
 /** The caster's three numbers held for `pairDirectionIn`. */

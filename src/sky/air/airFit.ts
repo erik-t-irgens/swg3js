@@ -15,11 +15,12 @@
 // are made here too, for the twin.
 //
 // Pure: plain numbers, so the worker and the node tests run this very code.
-import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setAirFileFields, setHazeGlow, setHazeTint, setVisibility, worldRecord, type AirFileFields, type AirRecord } from './airParams.ts';
+import { F, LUMA_B, LUMA_G, LUMA_R, EARTH, copyRecord, setAirFileFields, setHazeGlow, setHazeTint, setSmoke, setVisibility, smokeOn, worldRecord, type AirFileFields, type AirRecord } from './airParams.ts';
+import type { SmokeDials } from '../look/airProfile.js';
 
 /** A grey haze (pass 2, wave 4a): the haze colour every world's dial starts at, the record as it was. */
 const GREY_HAZE: readonly [number, number, number] = [1, 1, 1];
-import { buildDepthTable, buildPsiTable, columnDepths, hitsGround, miePhase, opticalDepth, rayLength, rayleighPhase, DEPTH_FLOATS, PSI_FLOATS } from './airTwin.ts';
+import { buildDepthTable, buildPsiTable, buildSmokeTable, columnDepths, hitsGround, miePhase, opticalDepth, rayLength, rayleighPhase, DEPTH_FLOATS, PSI_FLOATS, SMOKE_FLOATS, TWIN_STEPS } from './airTwin.ts';
 
 /** What the fit reads of one environment row (`SkyBlock`'s fields, so a block is handed as it is). */
 export interface FitRow {
@@ -402,7 +403,7 @@ export function fitOzone(rec: AirRecord, target: Float64Array, least: number = O
  * Every row of a world fitted (the worker's one job, and the node tests'): `visibilityKm` the owner's clear-day dial for
  * this world. Rows whose records come out the same share their tables.
  */
-export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX, hazeTint: readonly [number, number, number] = GREY_HAZE, glow: number | null = null): FitResult {
+export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSampler | null = null, ozoneLeast: number = OZONE_MIN, ozoneMost: number = OZONE_MAX, hazeTint: readonly [number, number, number] = GREY_HAZE, glow: number | null = null, smoke: SmokeDials | null = null): FitResult {
   const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
   const rows = sky.blocks;
   const shares = visibilityShares(rows);
@@ -442,6 +443,17 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
   buildDepthTable(base, depth64);
   const depth = new Float32Array(DEPTH_FLOATS);
   depth.set(depth64);
+  // Pass 2, wave 6: the smoke and ash's column table, made only where the world's layer is raised (its shape is the world's).
+  let smoke64: Float64Array | null = null;
+  if (smoke) {
+    const shape = new Float64Array(base.length);
+    copyRecord(base, shape);
+    setSmoke(shape, smoke);
+    if (smokeOn(shape)) {
+      smoke64 = new Float64Array(SMOKE_FLOATS);
+      buildSmokeTable(shape, smoke64);
+    }
+  }
   const tables = new Map<string, { psi: Float32Array; index: number }>();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -456,6 +468,10 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
     // The sky and light fix round: the glow round the sun (the haze's g, the world's dial; null its own) likewise, never fitted:
     // the hue and the ozone above are fitted at the world's own g, so the dial moves only the light the haze throws forward.
     if (glow !== null) setHazeGlow(rec, glow);
+    // Pass 2, wave 6: the smoke and ash and the glow from below (the world's dials; none to start but Mustafar) laid likewise
+    // after the fit, never fitted: the hue and the ozone above are fitted on the air without it, so the dials move only the
+    // layer itself, its multiple scattering below with it.
+    if (smoke) setSmoke(rec, smoke);
     // Rows alike to two figures share one multiple-scattering table (it turns slowly with the numbers; each row keeps its
     // own record, so its transmittance is exact).
     let key = '';
@@ -463,7 +479,7 @@ export function fitWorld(sky: FitSky, visibilityKm: number, gradient: GradientSa
     let t = tables.get(key);
     if (!t) {
       const psi = new Float32Array(PSI_FLOATS);
-      buildPsiTable(rec, depth64, psi);
+      buildPsiTable(rec, depth64, psi, TWIN_STEPS.psiDirs, TWIN_STEPS.psi, smoke64);
       t = { psi, index: tables.size };
       tables.set(key, t);
     }
@@ -497,6 +513,11 @@ export interface FitAsk {
    * own. Laid after the fields, though none of them is the haze's g: a saved air's forward glow sets this dial (`bodiesFile.ts`).
    */
   glow?: number;
+  /**
+   * Pass 2, wave 6: the world's smoke and ash and its glow from below (its dials, `airParams.ts`' `smokeDepth` and the rest);
+   * absent or null, none: laid into every row after the fit, the multiple scattering made with it.
+   */
+  smoke?: SmokeDials | null;
 }
 
 /** What the worker answers: the rows' records and tables as transferable arrays, in row order. */
@@ -518,7 +539,7 @@ export interface FitReply {
 export function fitReply(ask: FitAsk, gradient: GradientSampler | null = null): FitReply {
   try {
     if (ask.fileFields !== undefined) setAirFileFields(ask.sky.planet, ask.fileFields);
-    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE, typeof ask.glow === 'number' && Number.isFinite(ask.glow) ? ask.glow : null);
+    const r = fitWorld(ask.sky, ask.visibilityKm, gradient, ask.ozoneMin ?? OZONE_MIN, ask.ozoneMax ?? OZONE_MAX, ask.hazeTint ?? GREY_HAZE, typeof ask.glow === 'number' && Number.isFinite(ask.glow) ? ask.glow : null, ask.smoke ?? null);
     return {
       id: ask.id,
       planet: r.planet,

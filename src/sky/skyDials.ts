@@ -9,7 +9,7 @@
 // Pure: no three, no DOM; a node test moves every dial through the real tables.
 import type { DialGroup, DialSet, NumberDial } from '../ui/dials.ts';
 import { readDials } from '../ui/dials.ts';
-import { PAIR_TUNE } from './stars.ts';
+import { PAIR_MOVES, PAIR_TUNE } from './stars.ts';
 import { SKY_HOURS } from './skyHours.ts';
 
 /**
@@ -47,7 +47,9 @@ export const DISC_TUNE = { limb: 0.6, edge: 0.15, gain: 1, stops: -6, size: 1 };
 /** The ranges every number of `tuneSky` is held to, the sliders' and the console's alike. */
 export const SKY_TUNE_RANGE = {
   disc: { limb: [0, 0.95], edge: [0.01, 0.6], gain: [0, 4], stops: [-16, 0], size: [0.25, 10] },
-  pair: { belowDeg: [0, 12] },
+  // Pass 2, wave 6 (maker K): the distance reaches 30 so an applied system's widest pair (a separation of 20 between the edges)
+  // shows on its slider as the screen set it; the angle all the way round.
+  pair: { belowDeg: [0, 30], angleDeg: [-180, 180] },
   hours: { lowDeg: [0.5, 15] },
 } as const;
 
@@ -55,7 +57,7 @@ type Section = keyof typeof SKY_TUNE_RANGE;
 const TABLES: { [K in Section]: Record<string, number> } = { disc: DISC_TUNE, pair: PAIR_TUNE, hours: SKY_HOURS };
 
 /**
- * Set the sky's look from the console's argument (`{ disc: { limb, edge, gain }, pair: { belowDeg }, hours: { lowDeg } }`):
+ * Set the sky's look from the console's argument (`{ disc: { limb, edge, gain }, pair: { belowDeg, angleDeg }, hours: { lowDeg } }`):
  * each number held to its range, words for anything held or refused.
  */
 export function tuneSky(o: Record<string, unknown>): string[] {
@@ -81,6 +83,8 @@ export function tuneSky(o: Record<string, unknown>): string[] {
       const held = v < r[0] ? r[0] : v > r[1] ? r[1] : v;
       if (held !== v) said.push(`${s}.${k}: held to ${held}`);
       TABLES[s][k] = held;
+      // Pass 2, wave 6 (maker K): a move by hand of the pair's dials, which an applied system's pair then follows (`stars.ts`).
+      if (s === 'pair') PAIR_MOVES.n++;
     }
   }
   return said;
@@ -105,7 +109,12 @@ const GROUPS: DialGroup[] = [
   },
   {
     title: "Tatooine's second sun",
-    dials: [dial('pair', 'belowDeg', 'Under the caster', 0.1, '°', "How far under the casting sun the second runs on its arc: it rises after it and sets before it (the owner's decision of 18 November: 1.5°).")],
+    // Pass 2, wave 6 (maker K, the owner's ask of 23 November): the angle round the first, and the distance named for what it is.
+    note: "Where the second sun stands round the first, Tatooine applied as a system or not. Under a system applied in the viewer each loading screen sets both to what the system says (its Line angle is this angle less 90, its Separation the gap between the edges); a move here holds until the next screen, so keep one in the viewer's System tab.",
+    dials: [
+      dial('pair', 'belowDeg', 'Distance from the first', 0.1, '°', "How far from the casting sun the second stands, middle to middle (the owner's decision of 18 November: 1.5° under it, so it rises after it and sets before it)."),
+      dial('pair', 'angleDeg', 'Angle round the first', 1, '°', "Where round the casting sun the second stands: 0 below it (as decided: it rises after and sets before), 90 beside it, ahead on the side the sun's path runs toward, 180 above it, -90 beside it behind. 0 to start."),
+    ],
   },
   {
     title: 'The hours of __debug.sky',

@@ -32,7 +32,8 @@ import { BAND_RAY, BAND_SIZE, MILKY_STATE, SUN_LUX, bandUnit, densityOf, numberP
 import { catalogueOf, STAR_MOST, LIMIT_K, type StarCatalogue } from './starCatalogue.ts';
 import { CityGlow, CITY_MOST } from './cityGlow.ts';
 import { CITY_GLOW, NIGHT_STATE, NIGHT_TUNE, countOfTier, tiltOf } from './nightTune.ts';
-import { nightFrameInto, tiltFrameInto } from './skyTurn.ts';
+import { celestialFrameInto, nightFrameInto, tiltFrameInto } from './skyTurn.ts';
+import { SKY_MOTION } from '../system/skyMotion.ts';
 import { kelvinToLinear } from '../stars.ts';
 import { GALAXY_TUNE } from '../../data/galaxy.ts';
 import { tierIndexOf } from './nightTier.ts';
@@ -571,7 +572,12 @@ export class NightSky {
     }
     if (this.dialSeen !== NIGHT_STATE.version) this.readDials();
     if (this.baked && this.bakeReady && this.sigMoved()) this.rebake();
-    nightFrameInto(this.tilt, f.sunDir, this.u.frame.elements);
+    // (The fixer of pass 2, wave 6: the owner's late addition 2) under an applied star system the stars turn about the world's
+    // own axis at its own spin (`SkyMotion.celestial`, written by the day's `at` this frame), so they, the sun's path and the
+    // bodies share one sky; a world not applied keeps its turn about SWG's pole read off the sun, exactly as it was.
+    const motion = SKY_MOTION.now;
+    if (motion !== null && motion.celestialAt === motion.T) celestialFrameInto(this.tilt, motion.celestial, this.u.frame.elements);
+    else nightFrameInto(this.tilt, f.sunDir, this.u.frame.elements);
     // Every number written into a vector's own field, never handed to a setter (a number handed across a call is a number made).
     const T = NIGHT_TUNE;
     const look = this.u.look;
@@ -627,7 +633,14 @@ export class NightSky {
         catalogueMs: n3(this.cat.ms),
       },
       band: { baked: this.baked, size: [BAND_SIZE.width, BAND_SIZE.height], memoryMB: (BAND_SIZE.width * BAND_SIZE.height * 4) / (1024 * 1024), unit: this.unit, steps: BAND_RAY.steps },
-      turn: { galacticNorth: [n3(f[3]), n3(f[4]), n3(f[5])], tiltDeg: t.tiltDeg, nodeDeg: t.nodeDeg },
+      turn: {
+        galacticNorth: [n3(f[3]), n3(f[4]), n3(f[5])],
+        tiltDeg: t.tiltDeg,
+        nodeDeg: t.nodeDeg,
+        // (the fixer of pass 2, wave 6) which axis the stars turn about, and where that pole stands (+Y up, +Z north)
+        about: SKY_MOTION.now ? `the world's own axis (its applied system ${SKY_MOTION.now.id})` : "SWG's pole, read off the sun",
+        pole: SKY_MOTION.now ? [n3(SKY_MOTION.now.celestial[6]), n3(SKY_MOTION.now.celestial[7]), n3(SKY_MOTION.now.celestial[8])] : [0, n3(Math.sin((22.5 * Math.PI) / 180)), n3(Math.cos((22.5 * Math.PI) / 180))],
+      },
       towns: { count: this.cities.townCount, nearest: towns },
       frames: this.frames,
       hiddenByDay: this.hiddenFrames,

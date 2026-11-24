@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { readPrivateLooks, viewerPaths } from '../../viewer/server.mjs';
+import { resolvePictures } from '../../viewer/choices.mjs';
 
 const EXT = new Set(['.png', '.jpg', '.jpeg', '.fbx']);
 const TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.fbx': 'application/octet-stream' };
@@ -43,9 +44,12 @@ export function namesOfLook(look) {
  * `P` the viewer's paths. Pure of the network; reads only.
  */
 export async function privateSkyOf(P) {
+  // Pass 2, wave 6 (maker K): the repo's file of choices (`viewer/choices/`), else, before the viewer's first run has copied
+  // it in, his old file read in place; its pictures' keys made this machine's names (`viewer/choices.mjs`).
+  const from = !fs.existsSync(P.save) && P.firstFrom && fs.existsSync(P.firstFrom) ? P.firstFrom : P.save;
   let choices;
   try {
-    choices = JSON.parse(await fsp.readFile(P.save, 'utf8'));
+    choices = JSON.parse(await fsp.readFile(from, 'utf8'));
   } catch {
     return { why: `no file of choices at ${P.save}` };
   }
@@ -55,6 +59,7 @@ export async function privateSkyOf(P) {
   } catch {
     return { why: `no imported folder at ${P.imported}` };
   }
+  if (from === P.save && P.keyed) choices = resolvePictures(choices, files).file;
   let table = null;
   try {
     table = await readPrivateLooks(P);
@@ -74,7 +79,7 @@ export async function privateSkyOf(P) {
     uses[place] = id;
   }
   return {
-    from: P.save,
+    from,
     looks,
     uses,
     meshes: table?.table?.meshes ?? {},

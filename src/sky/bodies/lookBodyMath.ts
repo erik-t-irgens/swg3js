@@ -27,13 +27,15 @@ import { LOOK_BAKE_TUNE } from '../look/lookPictures.ts';
  *     read 0.5 ms more on the card at Low than the base's planet), at Medium at 1024 and 256; at least `least` either way.
  *   - **lowEvery: 4, mediumEvery: 2** (the fixer of wave 5). A moving look on the Low tier is drawn every fourth frame (clouds
  *     creeping and lightning flickering at 15 a second at 60), on Medium every other; High and Ultra take `everyFrames`.
- *   - **kitWaitMs: 2000** (the fixer of wave 5). The most a loading screen waits, in all, for the bake kits of the looks its
- *     bodies wear (a generated look's surface, relief and clouds, compiled once a session and kept by the browser's shader
- *     cache): a body whose kit has not landed by then keeps SWG's picture on this screen and wears its look from the next, its
- *     kit landing meanwhile, as wave 4b's bakes do within theirs. On a cold shader cache a kit took 5 to 15 s here, which the
- *     screens had waited out whole (Rori's first visit 40 s against the base's 23); 0 never waits (only kits already landed).
- *     Only a kit the screen's start asked for (a look the zone's places wear: wave 4b's `warmZoneLooks`) is waited on; one it
- *     did not (an applied system's extra body's preset, the map's opened systems) is asked once the screen is gone.
+ *   - **kitWaitMs: 60000** (the owner's word of 23 November, pass 2 wave 6's late addition 3: "one loading screen for
+ *     everything, unless it is very, very long"; the fixer of wave 5 had it at 2000). The most a loading screen waits, in all,
+ *     for the bake kits of the looks the arrival shows (a generated look's surface, relief and clouds, compiled once a session
+ *     and kept by the browser's shader cache) and for their bakes: every look the arrival shows is baked and its pipelines
+ *     compiled behind this one screen, an applied system's extra body's preset included (its kit asked as the bodies are
+ *     planned), and only a kit still out after a minute leaves its body in SWG's picture on this screen, to wear its look from
+ *     the next. On a cold shader cache a kit took 5 to 30 s here; a minute is a cap for the extreme alone, never a wait a
+ *     player meets on a warm cache. 0 waits for nothing (only kits already landed, wave 5's put-off). The map's opened
+ *     systems are not shown by the arrival: their kits are still asked once the screen is gone (`kitsAfterScreen`).
  *   - **kitsAfterScreen: 2** (the fixer of wave 5). How many of those kits are asked as each screen goes: they compile in play,
  *     off the frame, never by a draw, and land for the next screen; two keeps the card's compile threads from a minute's queue
  *     the next screen would wait behind, and the rest follow at the screens after.
@@ -52,7 +54,7 @@ export const LOOK_BODY_TUNE = {
   mediumShare: 0.5,
   lowEvery: 4,
   mediumEvery: 2,
-  kitWaitMs: 2000,
+  kitWaitMs: 60000,
   kitsAfterScreen: 2,
 };
 
@@ -69,7 +71,7 @@ export const LOOK_BODY_RANGE: Record<keyof typeof LOOK_BODY_TUNE, readonly [numb
   mediumShare: [0.0625, 1],
   lowEvery: [1, 8],
   mediumEvery: [1, 8],
-  kitWaitMs: [0, 60000],
+  kitWaitMs: [0, 300000],
   kitsAfterScreen: [0, 16],
 };
 

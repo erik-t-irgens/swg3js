@@ -360,7 +360,8 @@ const reachesAttr = reaches;
       d.set(d.min - 100);
       const bottom = d.get();
       d.set(was);
-      ok(near(top, d.max, 1e-12) && near(bottom, d.min, 1e-12) && near(d.get(), was, 1e-12) && /^(tune\.|lights\.)/.test(d.key), `the dial ${d.key} sets through its helper's own path (exposure's tune or lights) and is held to ${d.min} to ${d.max}`);
+      // (pass 2, wave 6: space's exposure, `exposure({ space: { stops } })`, joined the set as its third path)
+      ok(near(top, d.max, 1e-12) && near(bottom, d.min, 1e-12) && near(d.get(), was, 1e-12) && /^(tune\.|lights\.|space\.)/.test(d.key), `the dial ${d.key} sets through its helper's own path (exposure's tune, lights or space) and is held to ${d.min} to ${d.max}`);
     }
   }
   ok(n === Object.keys(EYE_TUNE).length, 'every one of the eye\'s numbers of feel is a dial');

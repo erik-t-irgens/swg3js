@@ -6,7 +6,7 @@
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import * as THREE from 'three';
-import { pairDirectionOf } from '../../../src/sky/stars.ts';
+import { PAIR_TUNE, pairDirectionOf } from '../../../src/sky/stars.ts';
 import { GpuHazePass } from '../../../src/sky/air/airHaze.ts';
 import { markSeeTarget } from '../../../src/sky/air/airSee.ts';
 import { markMotionTarget } from '../../../src/core/gpu/motion.ts';
@@ -76,23 +76,33 @@ try {
 }
 // Windows of 60,000: getHeapSpaceStatistics itself makes about 2.3 KB a read, 0.04 B a frame over this window (	esting.md).
 const N = 60_000;
-frames(20_000);
-let best = { made: Infinity, scavenges: Infinity };
-for (let attempt = 0; attempt < 3; attempt++) {
-  frames(2000);
-  for (let i = 0; i < 10; i++) await tick();
-  (globalThis as unknown as { gc: (o?: { type: string }) => void }).gc({ type: 'minor' });
-  // The collector's word reaches the observer a turn or two later: waited out before the count starts.
-  await tick();
-  await tick();
-  await tick();
-  scavenges = 0;
-  const before = young();
-  frames(N);
-  const made = young() - before;
-  await tick();
-  if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
-  if (best.scavenges === 0 && best.made <= 0) break;
+/** The least of three clean windows of `N` frames, after a warm of `warm`. */
+async function measure(warm: number): Promise<{ made: number; scavenges: number }> {
+  frames(warm);
+  let best = { made: Infinity, scavenges: Infinity };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    frames(2000);
+    for (let i = 0; i < 10; i++) await tick();
+    (globalThis as unknown as { gc: (o?: { type: string }) => void }).gc({ type: 'minor' });
+    // The collector's word reaches the observer a turn or two later: waited out before the count starts.
+    await tick();
+    await tick();
+    await tick();
+    scavenges = 0;
+    const before = young();
+    frames(N);
+    const made = young() - before;
+    await tick();
+    if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+    if (best.scavenges === 0 && best.made <= 0) break;
+  }
+  return best;
 }
-console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, pair: [pair.x, pair.y, pair.z].map((v) => +v.toFixed(3)) }));
+const best = await measure(20_000);
+// Pass 2, wave 6 (maker K): the pair turned beside the caster (`PAIR_TUNE.angleDeg` 90, its tangent frame's branch), set
+// between the windows as the console or a slider would, then warmed and measured again in the same process.
+PAIR_TUNE.angleDeg = 90;
+const beside = await measure(20_000);
+PAIR_TUNE.angleDeg = 0;
+console.log(JSON.stringify({ frames: N, made: best.made, scavenges: best.scavenges, besideMade: beside.made, besideScavenges: beside.scavenges, pair: [pair.x, pair.y, pair.z].map((v) => +v.toFixed(3)) }));
 process.exit(0);

@@ -441,7 +441,7 @@ import { CAPTURE_TUNE, captureDialsFor, tuneCapture } from './sky/capture/captur
 // Pass 2, wave 1 (maker A): the console's `air` part of `__debug.sky` (a world's visibility and steer dials).
 import { skyAirArgument } from './sky/air/airDials.ts';
 // Pass 2, wave 2 (maker A): the eye (`src/sky/exposure/`: pure, the WebGPU side through the runtime) and the sky's match.
-import { EYE_IN } from './sky/exposure/eyeRun.ts';
+import { EYE_IN, tuneSpaceEye } from './sky/exposure/eyeRun.ts';
 import { eyeDialsFor } from './sky/exposure/eyeDials.ts';
 import { tuneEyeLights } from './sky/eyeLights.ts';
 // Pass 2, wave 3 (maker A): the night sky's console helper and its dials (`src/sky/night/`).
@@ -453,6 +453,7 @@ import { tuneEye } from './sky/exposure/eyeMath.ts';
 import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, saveMatch, type MatchStore, type SkyMatch } from './sky/skyMatch.ts';
 // Pass 2, wave 4 (maker A): what the last loading screen read of the space body viewer's Save to game (pure).
 import { bodiesReport } from './sky/look/bodiesFile.ts';
+import { GROUND_PLACES_LAID } from './sky/look/groundPlaces.ts';
 import { motionConsole, motionHourTime, serverDayWord } from './sky/system/motionDials.ts';
 import { SKY_MOTION } from './sky/system/skyMotion.ts';
 import { SERVER_WORLD_DAYS } from './sky/system/worldDays.ts';
@@ -595,6 +596,7 @@ import { SKINNED_LOAD, SKINNED_STATS } from './core/skinnedLoad.ts';
 import { PERSON_KEYS_LIVE, PERSON_KEYS_STATS, PERSON_KEYS_TUNE, PERSON_KEYS_WARM, PERSON_TEST_BOUND, forEachPersonMaterial, givenTo, outsideWhy, personShapes, pickTestLooks, pixelDiff, setGiven, setPersonKeysLive, shapeName, type PixelStats } from './world/personKeys.ts';
 import type { CharacterPreview } from './ui/characterPreview.ts';
 import { centreAgrees, GPU_DRAW_EVERY_MS, LOADING_TUNE, LoadingLog, placeFromPois, programsForUp, raceCurtainNeed, tuneLoading } from './world/loadingTune.ts';
+import { stillBound } from './ui/stillBound.ts';
 import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, fetchPublic, fetchPublicBytes, filesReport, forgetFiles, importsAsks, packJson, packless, setShippedPublic } from './world/packFiles.ts';
 // The public files this build ships, the tracked tracks, placements and real-elevation rasters (`vite.config.ts`):
 // null on the dev server, which asks for every such file and answers it from the disk as the editors need.
@@ -8164,7 +8166,8 @@ class App {
           : // Pass 2, wave 4 (maker A): `sky({ bodies: true })`, what the last loading screen read of the viewer's Save to game.
             o && typeof o === 'object' && 'bodies' in o
             ? // Pass 2, wave 4b (maker A): and what the sky's bodies wore by it, and the looks' bakes (WebGPU's alone).
-              { ...bodiesReport(), worn: LOOKS_WORN, looks: GPU.webgpu && GPU.rt ? GPU.rt.looks.report() : null }
+              // (pass 2, wave 6, maker K: and the ground places he moved or sized, as the last screen laid them)
+              { ...bodiesReport(), worn: LOOKS_WORN, looks: GPU.webgpu && GPU.rt ? GPU.rt.looks.report() : null, groundPlaces: GROUND_PLACES_LAID }
             : // Pass 2, wave 5 (maker S): `sky({ motion: true })` says the applied star system this world follows now (its day, every
               // body's place, phase and cover, the night light); `sky({ motion: { giantshine, tint, eclipse } })` moves its dials.
               o && typeof o === 'object' && 'motion' in o
@@ -8186,6 +8189,8 @@ class App {
         // The sky and light fix round (maker L): `exposure({ lights: { carried, top, blade } })`, the Carried lights and the sun's
         // group of the same set (`src/sky/eyeLights.ts`).
         if (o && typeof o === 'object' && 'lights' in o) said.push(...tuneEyeLights(o.lights));
+        // Pass 2, wave 6 (maker A): `exposure({ space: { stops } })`, space's steady exposure (`src/sky/exposure/eyeRun.ts`).
+        if (o && typeof o === 'object' && 'space' in o) said.push(...tuneSpaceEye(o.space));
         if (!GPU.webgpu) return { ...(said.length ? { said } : {}), eye: "WebGPU's: WebGL's exposure is the Graphics page's Exposure row, as before" };
         if (o && typeof o === 'object' && typeof o.pre === 'boolean') GPU.rt!.eye.preSwitch(o.pre);
         const report = await GPU.rt!.eye.report(!!(o && typeof o === 'object' && o.check === true));
@@ -19708,6 +19713,16 @@ class App {
    * colour programs built in play in the first 30 s of a town, 360 to 520 ms frames on Direct3D 11.
    */
   private async settle(timeoutMs = 30000): Promise<void> {
+    // The settle run once more under a bound (`stillBound`): given up on, with words, once its screen has stood still for
+    // `LOADING_TUNE.stepGiveUpMs`, whichever of its waits never answered (the owner's Mac's screen of 23 November).
+    if (!this.settleBounded) {
+      this.settleBounded = true;
+      try {
+        return await this.stillBound(this.settle(timeoutMs));
+      } finally {
+        this.settleBounded = false;
+      }
+    }
     const t0 = performance.now();
     // Whether this machine links shader programs in the background (`linkMode.ts`): one salted program compiled now
     // and polled once a frame, decided long before the sweep below, once a page.
@@ -19794,10 +19809,12 @@ class App {
     // has none yet (in its first wave the master's "on" waits for an arrival, and this is it), and the chain given the
     // volume pass if it lacks one, before the effects' warm-up below compiles it; the air's own materials are compiled
     // by the sweep. With the master off, nothing.
+    if (this.settings.volumetrics) this.loadingScreen.setWhat('the moving air');
     await this.prepareAir();
     // Every pass and product too, whether it is on or not, so turning one on later or the sun
     // coming on screen for the first time never compiles on a live frame.
     if (this.postfx) {
+      this.loadingScreen.setWhat('the effects');
       const warmed = await this.postfx.warmUp();
       if (warmed) console.info(`effects: ${warmed} programs warmed`);
       // Every wisps mode's march is built now, behind the screen: the in-play warm's "only the mode in force" is over.
@@ -19892,6 +19909,22 @@ class App {
     this.loadingScreen.setWhat('ready');
     this.loadingScreen.setProgress(1);
     await new Promise((r) => setTimeout(r, 120));
+  }
+
+  /** Whether a settle is running under its bound now (`settle`, `stillBound`). */
+  private settleBounded = false;
+
+  /**
+   * A settle (`work`) waited for until it answers, or until the loading screen has stood still -- neither its words nor its
+   * bar moving -- for `LOADING_TUNE.stepGiveUpMs`: then the console and the message line say what the screen was waiting for
+   * and that it was given up on, and the arrival goes on with the world as it stands, the wait finishing in play. Looked at
+   * once a second, never in a frame. (The wave's fixer moved its body to `src/ui/stillBound.ts`, word for word, for a test.)
+   */
+  private async stillBound(work: Promise<void>): Promise<void> {
+    await stillBound(work, this.loadingScreen, (line) => {
+      console.warn(line);
+      this.messages.system(line);
+    });
   }
 
   /** The renderer's live program list, in the shape the watch reads. Nothing is copied. */
@@ -37401,6 +37434,8 @@ class App {
         e.stops = this.settings.exposureStops;
         e.loading = this.traveling || this.loadingScreen.opaque;
         e.level = AIR.frame.level;
+        // Pass 2, wave 6 (maker A): in a space zone the exposure is its own steady dial's (`SPACE_EYE`, `eyeRun.ts`).
+        e.space = !!this.world.planet?.space;
         GPU.rt!.eye.frame();
       }
       const screenHides = LOADING_TUNE.screenDraws && this.loadingScreen.opaque;

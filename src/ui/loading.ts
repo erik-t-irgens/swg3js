@@ -6,7 +6,7 @@
 // colours over stars, on two canvases shown where the pictures stand, never encoded into an image
 // (a readback of the whole canvas, 54 ms the first time).
 import type { PlanetDef } from '../data/planets';
-import { opaqueAt } from '../world/loadingTune.ts';
+import { LOADING_TUNE, opaqueAt } from '../world/loadingTune.ts';
 import { loadingPicture } from '../world/packFiles.ts';
 
 export class LoadingScreen {
@@ -51,8 +51,21 @@ export class LoadingScreen {
    * world counts as in play again: the people's loads at once follow it (`screenLoads`, pass 1, wave 8, cut 4).
    */
   onCover: ((covering: boolean) => void) | null = null;
+  /**
+   * The stall watch (`LOADING_TUNE.stallSayMs`): the words under the title as last asked, when they or the bar last moved, when
+   * the console was last told of a wait, and the once-a-second timer that looks while the screen is up. A timer rather than
+   * the reveal's frames, which a hidden or starved tab does not draw.
+   */
+  private whatNow = '';
+  private movedAt = 0;
+  private saidAt = 0;
+  private watch = 0;
 
-  constructor(parent: HTMLElement, private readonly baseUrl: string) {
+  /** The page's base address, for the planet's picture. (A field of its own, not a parameter property: node runs the stall's test.) */
+  private readonly baseUrl: string;
+
+  constructor(parent: HTMLElement, baseUrl: string) {
+    this.baseUrl = baseUrl;
     this.root = document.createElement('div');
     this.root.id = 'loading';
     this.root.innerHTML = `
@@ -112,6 +125,10 @@ export class LoadingScreen {
     this.shown = 0;
     this.title.textContent = title.toUpperCase();
     this.what.textContent = what;
+    this.whatNow = what;
+    this.movedAt = performance.now();
+    this.saidAt = 0;
+    if (!this.watch) this.watch = window.setInterval(this.watchStall, 1000);
     this.onChange?.('on', title, performance.now());
     this.onChange?.('what', what, performance.now());
     this.blurb.textContent = planet?.description ?? '';
@@ -157,14 +174,59 @@ export class LoadingScreen {
 
   /** What the wait is on now, under the title. */
   setWhat(what: string): void {
-    this.what.textContent = what;
+    if (what !== this.whatNow) {
+      this.whatNow = what;
+      this.movedAt = performance.now();
+      this.saidAt = 0;
+    }
+    this.what.textContent = this.lineNow(performance.now());
     this.onChange?.('what', what, performance.now());
   }
 
   /** Progress, 0 to 1. A lower value than before is ignored: the reveal never runs backwards. */
   setProgress(p: number): void {
+    const was = this.target;
     this.target = Math.max(this.target, Math.min(1, Math.max(0, p)));
+    if (this.target > was + 0.001) this.movedAt = performance.now();
   }
+
+  /** How long the screen has stood still, ms: up and not going, with neither its words nor its bar moving; 0 otherwise. */
+  stillMs(): number {
+    return this.visible && !this.hiding ? performance.now() - this.movedAt : 0;
+  }
+
+  /** What the screen says it waits for, as last asked (with none of the stall watch's seconds). */
+  get waitingFor(): string {
+    return this.whatNow;
+  }
+
+  /** The words under the title: as asked, and past `stallSayMs` with nothing moving, how long it has waited on them. */
+  private lineNow(now: number): string {
+    const ms = now - this.movedAt;
+    return ms >= LOADING_TUNE.stallSayMs ? `${this.whatNow}, waiting ${Math.round(ms / 1000)} s` : this.whatNow;
+  }
+
+  /**
+   * Once a second while the screen is up: past `stallSayMs` with neither the words nor the bar moving, the line says how
+   * long it has waited and on what, and the console says it at that interval, so a screen that stands still always names
+   * what it waits for.
+   */
+  private watchStall = (): void => {
+    if (!this.visible) {
+      window.clearInterval(this.watch);
+      this.watch = 0;
+      return;
+    }
+    if (this.hiding) return;
+    const now = performance.now();
+    const ms = now - this.movedAt;
+    if (ms < LOADING_TUNE.stallSayMs) return;
+    this.what.textContent = this.lineNow(now);
+    if (now - this.saidAt < LOADING_TUNE.stallSayMs) return;
+    this.saidAt = now;
+    const s = Math.round(ms / 1000);
+    console.warn(`loading: ${Math.round(this.target * 100)}%, still waiting for ${this.whatNow} after ${s} s`);
+  };
 
   /**
    * Fill to the end and fade away. `quick` goes at once, without the reveal's glide to the edge and its 180 ms:

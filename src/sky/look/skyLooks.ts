@@ -96,7 +96,8 @@ export async function wearSkyLooks(sky: string, cards: readonly SkyBodyCard[], l
       continue;
     }
     const t0 = performance.now();
-    const pics = await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.skySize);
+    // (the fixer of pass 2, wave 6) a look the arrival shows: the screen waits for its kit and bake (`kitWaitMs`)
+    const pics = await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.skySize, true, true);
     if (!pics) {
       LOOKS_WORN.worn.push({ place, look: hit.id, wears: "SWG's picture (put off to the next loading screen)" });
       out.push(card);

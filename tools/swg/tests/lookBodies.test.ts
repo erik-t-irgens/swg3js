@@ -344,7 +344,7 @@ presetStorm.layers.clouds.motion = { on: true, drift: 8, churn: 0.3, swirl: 0.25
   }, { at: 'now' });
   ok(JSON.stringify(made.places) === JSON.stringify({ 'space_naboo:planet_naboo': { yaw: 40, pitch: 12, size: 30, distance: 900 } }), 'Save to game carries a space place he moved, its yaw, pitch, size and distance alone');
   const c = BF.cleanBodiesFile(JSON.parse(JSON.stringify({ ...made, places: { ...made.places, 'space_naboo:planet_naboo#2': { pitch: 400, size: -3 }, 'rori:moon': { yaw: 1 } } })));
-  ok(c.file!.places['space_naboo:planet_naboo#2'].pitch === 90 && c.file!.places['space_naboo:planet_naboo#2'].size === 0.01 && !c.file!.places['rori:moon'], "the game's reader holds each number to its range and keeps space places alone");
+  ok(c.file!.places['space_naboo:planet_naboo#2'].pitch === 90 && c.file!.places['space_naboo:planet_naboo#2'].size === 0.01 && !c.file!.places['rori:moon'], "the game's reader holds each number to its range, and of a ground place keeps what the Place tab moves there (pass 2, wave 6: a moon's yaw is the day's, so a moon's yaw alone is dropped)");
   BF.SKY_BODIES.file = c.file;
   ok(BF.spacePlaceOf('space_naboo:planet_naboo')!.yaw === 40 && BF.spacePlaceOf('space_naboo:planet_moon') === null, 'a place read back by its id');
   const dir = { x: -0.3, y: 0.2, z: -0.93 };
@@ -391,11 +391,18 @@ presetStorm.layers.clouds.motion = { on: true, drift: 8, churn: 0.3, swirl: 0.25
   M.tuneLookBodies({ everyFrames: 6, kitWaitMs: -5, kitsAfterScreen: 99 });
   ok(M.everyFor(0) === 6 && T.kitWaitMs === 0 && T.kitsAfterScreen === 16, 'the cadence never quicker than `everyFrames`; the kits\' dials held to their ranges');
   Object.assign(T, keep);
-  ok(T.kitWaitMs === 2000 && T.kitsAfterScreen === 2 && T.lowShare === 0.25 && T.mediumShare === 0.5 && T.lowEvery === 4 && T.mediumEvery === 2, "the fixer's dials start where their reasons say");
-  // the kits: only a kit the screen's start asked is waited on, for what is left of the screen's wait in all; one it did not is
-  // asked once the screen is gone, and the world leaves those bodies out (their SWG cards up) on this screen
+  // (the fixer of wave 6: the owner's "one loading screen for everything") the kits' wait starts at a minute, a cap for the
+  // extreme alone, and may be raised to five
+  ok(T.kitWaitMs === 60000 && M.LOOK_BODY_RANGE.kitWaitMs[1] === 300000 && T.kitsAfterScreen === 2 && T.lowShare === 0.25 && T.mediumShare === 0.5 && T.lowEvery === 4 && T.mediumEvery === 2, "the fixers' dials start where their reasons say");
+  // the kits: every kit a body the arrival shows wears is waited on, for what is left of the screen's wait in all, one the
+  // screen's start did not ask (an extra body's preset) asked there and then; only with the wait at nought is such a kit put
+  // off and asked once the screen is gone (as the map's opened systems' always are), the world leaving those bodies out
   const bake = read('src/sky/look/lookBake.ts');
-  ok(/if \(!KITS\.has\(key\)\) \{\n\s+askLaterFor\(key, genOf\(look, size\), size, clouds\);\n\s+return false;\n\s+\}/.test(bake) && /export function askKitsLater\(renderer: Any\): number \{[\s\S]*?if \(n >= LOOK_BODY_TUNE\.kitsAfterScreen\) break;/.test(bake), 'a kit the screen did not ask is put off and asked once the screen is gone, a few at a time');
+  ok(/if \(!KITS\.has\(key\) && !\(waitMs > 0\)\) \{\n\s+askLaterFor\(key, genOf\(look, size\), size, clouds\);\n\s+return false;\n\s+\}\n\s+const kit = askKit\(renderer, key, genOf\(look, size\), size, clouds\);/.test(bake) && /export function askKitsLater\(renderer: Any\): number \{[\s\S]*?if \(n >= LOOK_BODY_TUNE\.kitsAfterScreen\) break;/.test(bake), 'a kit the screen did not ask is asked and waited on; put off (and asked once the screen is gone, a few at a time) only with no wait');
+  // the arrival's own bakes (a sky card's disc, a space planet's picture) are given the whole wait; the map's globes keep the
+  // bake cache's budget
+  ok(/const budget = shown && LOOK_BODY_TUNE\.kitWaitMs > BAKE_TUNE\.budgetMs \? LOOK_BODY_TUNE\.kitWaitMs : BAKE_TUNE\.budgetMs;/.test(bake) && bake.includes('return bakeOnCard(this.renderer, key, look, size, clouds, budget - cache.stats.screenMs);'), "a shown look's bake waits its kit for what is left of the screen's whole wait");
+  ok(read('src/sky/look/skyLooks.ts').includes('await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.skySize, true, true);') && read('src/space/spaceRims.ts').includes('await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.spaceSize, true, true);') && /const pics = await looks\.bake\(hit\.id, hit\.look, GLOBE_BAKE\);/.test(read('src/ui/galaxyLooks.ts')), "the sky's discs and the space planets are the arrival's (shown); the map's globes are not");
   const lbt = read('src/sky/bodies/lookBody.ts');
   ok(/const left = LOOK_BODY_TUNE\.kitWaitMs - \(performance\.now\(\) - t0\);\n\s+if \(await kitWithin\(renderer, look, Number\(gen\.size\) \|\| 1024, left\)\) kept\.push\(plan\);\n\s+else putOff\.push\(plan\.place\);/.test(lbt), "a screen waits for its bodies' kits `kitWaitMs` in all, and leaves out the bodies whose kits have not landed");
   const wt = read('src/world/world.ts');

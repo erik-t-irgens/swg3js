@@ -19,6 +19,7 @@
 // Pure: nothing of the page or of three's WebGPU build, so the node tests run it as the game does.
 import { F, LUMA_B, LUMA_G, LUMA_R, newAirRecord, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
 import { multiScatterUv, transmittanceUv } from './airApi.ts';
+import { DIFFUSIVITY, GLOW_PHASE, SMOKE_STEPS, smokeColumnAlong, smokeColumnTo, smokeDensity } from '../look/airProfile.js';
 
 /**
  * The twin's column-density table: Bruneton's mapping at the card's own transmittance size, so the twin's transmittance
@@ -34,6 +35,21 @@ export const TWIN_PSI = { width: 32, height: 16 } as const;
 /** Floats in each (three a texel). */
 export const DEPTH_FLOATS = TWIN_DEPTH.width * TWIN_DEPTH.height * 3;
 export const PSI_FLOATS = TWIN_PSI.width * TWIN_PSI.height * 3;
+/**
+ * Pass 2, wave 6: the smoke and ash's own column table, one float a texel at the column table's size and mapping: the tent's
+ * density summed along each texel's ray to the top of the air. A table of its own, so the three columns' table stays the
+ * base's to the bit; made only for a world whose smoke is raised (`buildSmokeTable`), read only where the record carries it.
+ */
+export const SMOKE_FLOATS = TWIN_DEPTH.width * TWIN_DEPTH.height;
+
+/** Pass 2, wave 6: whether a record's smoke and ash dims anything (its extinction), read where a frame's sums ask it. */
+function smokeDims(rec: AirRecord): boolean {
+  return rec[F.smokeER] > 0 || rec[F.smokeEG] > 0 || rec[F.smokeEB] > 0;
+}
+/** Pass 2, wave 6: whether a record's smoke and ash or its glow adds any light. */
+function smokeAdds(rec: AirRecord): boolean {
+  return rec[F.smokeSR] > 0 || rec[F.smokeSG] > 0 || rec[F.smokeSB] > 0 || rec[F.glowR] > 0 || rec[F.glowG] > 0 || rec[F.glowB] > 0;
+}
 
 /** Steps of the sums (the card's tables take their own: `airTables.ts`). */
 export const TWIN_STEPS = {
@@ -153,10 +169,41 @@ export function depthsToOptical(rec: AirRecord, d: Float64Array | Float32Array, 
   out[at + 2] = rec[F.rayB] * d[di] + mieExt * d[di + 1] + rec[F.ozB] * d[di + 2];
 }
 
+/**
+ * Pass 2, wave 6: the smoke and ash's tent summed along a ray from `r` with zenith cosine `mu` to the top of the air, km of
+ * its peak's density: `airProfile.js`' `smokeColumnAlong` (its even steps over the ray's stretch under the layer's top, which
+ * the card's transmittance pass sums alike), one column. Not a frame's: its answer crosses the call.
+ */
+export function smokeColumn(rec: AirRecord, r: number, mu: number, steps: number = SMOKE_STEPS): number {
+  return smokeColumnAlong(rec[F.smokeC], rec[F.smokeW], rec[F.bottom], rec[F.top], r, mu, steps);
+}
+
+/**
+ * Pass 2, wave 6: a world's smoke column table at the twin's size, into `out` (`SMOKE_FLOATS`): made again only when the
+ * layer's middle or depth moves (its strength is the record's coefficients, as the other columns' are).
+ */
+export function buildSmokeTable(rec: AirRecord, out: Float64Array | Float32Array, steps: number = SMOKE_STEPS): void {
+  const W = TWIN_DEPTH.width;
+  for (let j = 0; j < TWIN_DEPTH.height; j++) {
+    for (let i = 0; i < W; i++) {
+      depthRMuAt(i, j, rec, rmScratch);
+      out[j * W + i] = smokeColumn(rec, rmScratch[0], rmScratch[1], steps);
+    }
+  }
+}
+
 /** The optical depth along a ray to the top of the air, summed directly (the reference the tables are held to). */
 export function opticalDepth(rec: AirRecord, r: number, mu: number, steps: number, out: Float64Array, at: number): void {
   columnDepths(rec, r, mu, steps, dScratch, 0);
   depthsToOptical(rec, dScratch, 0, out, at);
+  // Pass 2, wave 6: the smoke and ash's column, added after by channel where the record carries it (its own even steps,
+  // `steps` of them over the ray's stretch under the layer's top).
+  if (smokeDims(rec)) {
+    const ts = smokeColumn(rec, r, mu, steps);
+    out[at] += rec[F.smokeER] * ts;
+    out[at + 1] += rec[F.smokeEG] * ts;
+    out[at + 2] += rec[F.smokeEB] * ts;
+  }
 }
 
 /** The (r, mu) of the twin's column-density texel (i, j): the mapping's inverse at the twin's size (`airApi.ts`'s at the card's). */
@@ -215,9 +262,10 @@ function bilinear(tab: Float64Array | Float32Array, W: number, H: number, u: num
 
 /**
  * The transmittance from a point `r` toward a light of zenith cosine `mu` (red, green, blue), from a column-density table,
- * into `out` at `at`: nought where the planet stands in the way.
+ * into `out` at `at`: nought where the planet stands in the way. (Pass 2, wave 6) `smoke` the smoke column table, read only
+ * where the record's smoke and ash dims anything.
  */
-export function lightTransmittance(rec: AirRecord, depth: Float64Array | Float32Array, r: number, mu: number, out: Float64Array, at: number): void {
+export function lightTransmittance(rec: AirRecord, depth: Float64Array | Float32Array, r: number, mu: number, out: Float64Array, at: number, smoke: Float64Array | Float32Array | null = null): void {
   if (hitsGround(r, mu, rec[F.bottom])) {
     out[at] = out[at + 1] = out[at + 2] = 0;
     return;
@@ -225,9 +273,51 @@ export function lightTransmittance(rec: AirRecord, depth: Float64Array | Float32
   transmittanceUv(r, mu, rec[F.bottom], rec[F.top], uvScratch, TWIN_DEPTH.width, TWIN_DEPTH.height);
   bilinear(depth, TWIN_DEPTH.width, TWIN_DEPTH.height, uvScratch[0], uvScratch[1], dScratch, 0);
   depthsToOptical(rec, dScratch, 0, out, at);
+  if (smoke !== null && smokeDims(rec)) {
+    const ts = bilinear1(smoke, TWIN_DEPTH.width, TWIN_DEPTH.height, uvScratch[0], uvScratch[1]);
+    out[at] += rec[F.smokeER] * ts;
+    out[at + 1] += rec[F.smokeEG] * ts;
+    out[at + 2] += rec[F.smokeEB] * ts;
+  }
   out[at] = Math.exp(-out[at]);
   out[at + 1] = Math.exp(-out[at + 1]);
   out[at + 2] = Math.exp(-out[at + 2]);
+}
+
+/** Pass 2, wave 6: `bilinear` of a one-channel table (the smoke column's), its answer handed back (not a frame's call). */
+function bilinear1(tab: Float64Array | Float32Array, W: number, H: number, u: number, v: number): number {
+  let x = u * W - 0.5;
+  let y = v * H - 0.5;
+  x = x < 0 ? 0 : x > W - 1 ? W - 1 : x;
+  y = y < 0 ? 0 : y > H - 1 ? H - 1 : y;
+  const x0 = x | 0;
+  const y0 = y | 0;
+  const x1 = x0 + 1 < W ? x0 + 1 : x0;
+  const y1 = y0 + 1 < H ? y0 + 1 : y0;
+  const fx = x - x0;
+  const fy = y - y0;
+  const t0 = tab[y0 * W + x0] + (tab[y0 * W + x1] - tab[y0 * W + x0]) * fx;
+  const t1 = tab[y1 * W + x0] + (tab[y1 * W + x1] - tab[y1 * W + x0]) * fx;
+  return t0 + (t1 - t0) * fy;
+}
+
+/**
+ * Pass 2, wave 6: the glow from the lava below reaching a height `h` km over the ground, into `out` at `at` (per unit of the
+ * record's glow share: multiply by the scene's units), dimmed on its way up as diffuse light is (`airProfile.js`' `glowUp`,
+ * the same rule: the clear air's and the haze's columns under the height by their scale heights, the layer's by its tent,
+ * times `DIFFUSIVITY`). Writes only into `out`: a frame's sums call it with their numbers in registers.
+ */
+function glowUpInto(rec: AirRecord, h: number, out: Float64Array, at: number): void {
+  const hh = h > 0 ? h : 0;
+  const cR = rec[F.rayH] * (1 - Math.exp(-hh / rec[F.rayH]));
+  const cM = rec[F.mieH] * (1 - Math.exp(-hh / rec[F.mieH]));
+  const c = rec[F.smokeC];
+  const w = rec[F.smokeW];
+  const cS = smokeColumnTo(c, w, hh) - smokeColumnTo(c, w, 0);
+  const mieT = rec[F.mieS] + rec[F.mieA];
+  out[at] = rec[F.glowR] * Math.exp(-DIFFUSIVITY * (rec[F.rayR] * cR + mieT * cM + rec[F.smokeER] * cS));
+  out[at + 1] = rec[F.glowG] * Math.exp(-DIFFUSIVITY * (rec[F.rayG] * cR + mieT * cM + rec[F.smokeEG] * cS));
+  out[at + 2] = rec[F.glowB] * Math.exp(-DIFFUSIVITY * (rec[F.rayB] * cR + mieT * cM + rec[F.smokeEB] * cS));
 }
 
 /** The multiple-scattering share at a point `r` with the light at zenith cosine `muS`, from a table, into `out` at `at`. */
@@ -245,7 +335,8 @@ export function psiAt(rec: AirRecord, psi: Float64Array | Float32Array, r: numbe
  * [5..7] its direction, for `viewRadianceReg`. The public functions above take numbers, for the builders and the tests.
  */
 const REG = new Float64Array(8);
-const regDepth = new Float64Array(3);
+// (pass 2, wave 6) four places: the smoke column's read in the fourth
+const regDepth = new Float64Array(4);
 
 /** `bilinear` reading its coordinates from `REG[2]`, `REG[3]`. */
 function bilinearReg(tab: Float64Array | Float32Array, W: number, H: number, out: Float64Array, at: number): void {
@@ -270,8 +361,11 @@ function bilinearReg(tab: Float64Array | Float32Array, W: number, H: number, out
   }
 }
 
-/** `lightTransmittance` with its point and light from `REG[0]`, `REG[1]` (the mapping written in, at the twin's size). */
-function transmitReg(rec: AirRecord, depth: Float64Array | Float32Array, out: Float64Array, at: number): void {
+/**
+ * `lightTransmittance` with its point and light from `REG[0]`, `REG[1]` (the mapping written in, at the twin's size); (pass 2,
+ * wave 6) `smoke` the smoke column table, read where the record's smoke and ash dims anything.
+ */
+function transmitReg(rec: AirRecord, depth: Float64Array | Float32Array, smoke: Float64Array | Float32Array, out: Float64Array, at: number): void {
   const r = REG[0];
   const mu = REG[1];
   const bottom = rec[F.bottom];
@@ -299,9 +393,35 @@ function transmitReg(rec: AirRecord, depth: Float64Array | Float32Array, out: Fl
   REG[3] = 0.5 / Hh + xR * (1 - 1 / Hh);
   bilinearReg(depth, W, Hh, regDepth, 0);
   const mieExt = rec[F.mieS] + rec[F.mieA];
-  out[at] = Math.exp(-(rec[F.rayR] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozR] * regDepth[2]));
-  out[at + 1] = Math.exp(-(rec[F.rayG] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozG] * regDepth[2]));
-  out[at + 2] = Math.exp(-(rec[F.rayB] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozB] * regDepth[2]));
+  if (!(rec[F.smokeER] > 0 || rec[F.smokeEG] > 0 || rec[F.smokeEB] > 0)) {
+    out[at] = Math.exp(-(rec[F.rayR] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozR] * regDepth[2]));
+    out[at + 1] = Math.exp(-(rec[F.rayG] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozG] * regDepth[2]));
+    out[at + 2] = Math.exp(-(rec[F.rayB] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozB] * regDepth[2]));
+    return;
+  }
+  // Pass 2, wave 6: the smoke and ash's column at the same place of its own table, by channel.
+  bilinear1Reg(smoke, W, Hh, regDepth);
+  const ts = regDepth[3];
+  out[at] = Math.exp(-(rec[F.rayR] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozR] * regDepth[2] + rec[F.smokeER] * ts));
+  out[at + 1] = Math.exp(-(rec[F.rayG] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozG] * regDepth[2] + rec[F.smokeEG] * ts));
+  out[at + 2] = Math.exp(-(rec[F.rayB] * regDepth[0] + mieExt * regDepth[1] + rec[F.ozB] * regDepth[2] + rec[F.smokeEB] * ts));
+}
+
+/** Pass 2, wave 6: a one-channel table read at `REG[2]`, `REG[3]` into `out[3]` (the smoke column's). */
+function bilinear1Reg(tab: Float64Array | Float32Array, W: number, H: number, out: Float64Array): void {
+  let x = REG[2] * W - 0.5;
+  let y = REG[3] * H - 0.5;
+  x = x < 0 ? 0 : x > W - 1 ? W - 1 : x;
+  y = y < 0 ? 0 : y > H - 1 ? H - 1 : y;
+  const x0 = x | 0;
+  const y0 = y | 0;
+  const x1 = x0 + 1 < W ? x0 + 1 : x0;
+  const y1 = y0 + 1 < H ? y0 + 1 : y0;
+  const fx = x - x0;
+  const fy = y - y0;
+  const t0 = tab[y0 * W + x0] + (tab[y0 * W + x1] - tab[y0 * W + x0]) * fx;
+  const t1 = tab[y1 * W + x0] + (tab[y1 * W + x1] - tab[y1 * W + x0]) * fx;
+  out[3] = t0 + (t1 - t0) * fy;
 }
 
 /** `psiAt` with its point and light from `REG[0]`, `REG[1]`. */
@@ -325,7 +445,7 @@ const psR = new Float64Array(3);
  * `viewRadiance` for the frame's sums: its origin and direction from `REG[4..7]`, to the ray's end (the top, or the
  * ground), every number kept in locals or registers and every phase written in.
  */
-function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi: Float64Array | Float32Array, lights: AirLights, steps: number, out: Float64Array, at: number): void {
+function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, smoke: Float64Array | Float32Array, psi: Float64Array | Float32Array, lights: AirLights, steps: number, out: Float64Array, at: number): void {
   const r = REG[4];
   const dx = REG[5];
   const dy = REG[6];
@@ -353,6 +473,19 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
   const mieH = rec[F.mieH];
   const ozC = rec[F.ozC];
   const ozW = rec[F.ozW];
+  // Pass 2, wave 6: the smoke and ash and the glow from below, summed after the rest where the record carries them.
+  const sm = smokeAdds(rec) || smokeDims(rec);
+  const gS = rec[F.smokeG];
+  const gS2 = gS * gS;
+  const smC = rec[F.smokeC];
+  const smW = rec[F.smokeW] > 1e-6 ? rec[F.smokeW] : 1e-6;
+  const glowK = lights.glowScale * GLOW_PHASE;
+  // The tent's column under the ground (`smokeColumnTo(c, w, 0)`, written in), which each step's column from the ground takes off.
+  let a0 = smW - smC;
+  a0 = a0 < 0 ? 0 : a0 > smW ? smW : a0;
+  let b0 = -smC;
+  b0 = b0 < 0 ? 0 : b0 > smW ? smW : b0;
+  const smCol0 = (a0 * a0) / (2 * smW) + b0 - (b0 * b0) / (2 * smW);
   let L0 = 0;
   let L1 = 0;
   let L2 = 0;
@@ -382,12 +515,23 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
     const sM0 = mS0 * dM;
     const sM1 = mS1 * dM;
     const sM2 = mS2 * dM;
-    const e0 = sR0 + mieT * dM + rec[F.ozR] * dO;
-    const ec1 = sR1 + mieT * dM + rec[F.ozG] * dO;
-    const e2 = sR2 + mieT * dM + rec[F.ozB] * dO;
+    let e0 = sR0 + mieT * dM + rec[F.ozR] * dO;
+    let ec1 = sR1 + mieT * dM + rec[F.ozG] * dO;
+    let e2 = sR2 + mieT * dM + rec[F.ozB] * dO;
     let S0 = 0;
     let S1 = 0;
     let S2 = 0;
+    let dS = 0;
+    if (sm) {
+      const tt = 1 - Math.abs(hh - smC) / smW;
+      dS = tt > 0 ? tt : 0;
+      e0 += rec[F.smokeER] * dS;
+      ec1 += rec[F.smokeEG] * dS;
+      e2 += rec[F.smokeEB] * dS;
+    }
+    const sS0 = rec[F.smokeSR] * dS;
+    const sS1 = rec[F.smokeSG] * dS;
+    const sS2 = rec[F.smokeSB] * dS;
     for (let k = 0; k < n; k++) {
       if (!lights.live[k]) continue;
       const lx = lights.dir[k * 3];
@@ -399,11 +543,34 @@ function viewRadianceReg(rec: AirRecord, depth: Float64Array | Float32Array, psi
       const pM = (MIE_K * (1 - g2) * (1 + c * c)) / ((2 + g2) * den * Math.sqrt(den));
       REG[0] = rr;
       REG[1] = (px * lx + py * ly + pz * lz) / rr;
-      transmitReg(rec, depth, ltR, 0);
+      transmitReg(rec, depth, smoke, ltR, 0);
       psiReg(rec, psi, psR, 0);
       S0 += lights.top[k * 3] * (ltR[0] * (sR0 * pR + sM0 * pM) + psR[0] * (sR0 + sM0));
       S1 += lights.top[k * 3 + 1] * (ltR[1] * (sR1 * pR + sM1 * pM) + psR[1] * (sR1 + sM1));
       S2 += lights.top[k * 3 + 2] * (ltR[2] * (sR2 * pR + sM2 * pM) + psR[2] * (sR2 + sM2));
+      if (sm) {
+        const denS = 1 + gS2 - 2 * gS * c;
+        const pS = (MIE_K * (1 - gS2) * (1 + c * c)) / ((2 + gS2) * denS * Math.sqrt(denS));
+        S0 += lights.top[k * 3] * (ltR[0] * sS0 * pS + psR[0] * sS0);
+        S1 += lights.top[k * 3 + 1] * (ltR[1] * sS1 * pS + psR[1] * sS1);
+        S2 += lights.top[k * 3 + 2] * (ltR[2] * sS2 * pS + psR[2] * sS2);
+      }
+    }
+    if (sm && glowK > 0) {
+      // The glow reaching this height (`glowUpInto`'s rule written in: a number handed across a call is a number made).
+      const cR = rayH * (1 - Math.exp(-hh / rayH));
+      const cM = mieH * (1 - Math.exp(-hh / mieH));
+      let a = hh - smC + smW;
+      a = a < 0 ? 0 : a > smW ? smW : a;
+      let b = hh - smC;
+      b = b < 0 ? 0 : b > smW ? smW : b;
+      const cS = (a * a) / (2 * smW) + b - (b * b) / (2 * smW) - smCol0;
+      const up0 = rec[F.glowR] * Math.exp(-DIFFUSIVITY * (rec[F.rayR] * cR + mieT * cM + rec[F.smokeER] * cS));
+      const up1 = rec[F.glowG] * Math.exp(-DIFFUSIVITY * (rec[F.rayG] * cR + mieT * cM + rec[F.smokeEG] * cS));
+      const up2 = rec[F.glowB] * Math.exp(-DIFFUSIVITY * (rec[F.rayB] * cR + mieT * cM + rec[F.smokeEB] * cS));
+      S0 += (sR0 + sM0 + sS0) * up0 * glowK;
+      S1 += (sR1 + sM1 + sS1) * up1 * glowK;
+      S2 += (sR2 + sM2 + sS2) * up2 * glowK;
     }
     const st0 = Math.exp(-e0 * dt);
     const st1 = Math.exp(-ec1 * dt);
@@ -446,7 +613,7 @@ const t3 = new Float64Array(3);
  * the sphere of rays round the point gathers (each scattered once toward it, isotropically, with the ground's bounce at a
  * ray's end), over one less the share `f_ms` the medium hands on at each further order, `L2 / (1 - f_ms)`.
  */
-export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: number, muS: number, dirs: Float64Array, nDirs: number, steps: number, out: Float64Array, at: number): void {
+export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: number, muS: number, dirs: Float64Array, nDirs: number, steps: number, out: Float64Array, at: number, smoke: Float64Array | Float32Array | null = null): void {
   const bottom = rec[F.bottom];
   const top = rec[F.top];
   const sx = Math.sqrt(Math.max(0, 1 - muS * muS));
@@ -457,6 +624,8 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
   const mS0 = mieS * rec[F.mieTintR];
   const mS1 = mieS * rec[F.mieTintG];
   const mS2 = mieS * rec[F.mieTintB];
+  // Pass 2, wave 6: the smoke and ash's extinction and scattering, added after the rest where the record carries them.
+  const sm = smokeDims(rec);
   let L0 = 0;
   let L1 = 0;
   let L2 = 0;
@@ -487,13 +656,23 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
       const sR0 = rec[F.rayR] * mScratch[0];
       const sR1 = rec[F.rayG] * mScratch[0];
       const sR2 = rec[F.rayB] * mScratch[0];
-      const e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
-      const ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
-      const e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
-      lightTransmittance(rec, depth, rr, (px * sx + py * sy) / rr, t3, 0);
-      const s0 = sR0 + mS0 * mScratch[1];
-      const s1 = sR1 + mS1 * mScratch[1];
-      const s2 = sR2 + mS2 * mScratch[1];
+      let e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
+      let ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
+      let e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
+      lightTransmittance(rec, depth, rr, (px * sx + py * sy) / rr, t3, 0, smoke);
+      let s0 = sR0 + mS0 * mScratch[1];
+      let s1 = sR1 + mS1 * mScratch[1];
+      let s2 = sR2 + mS2 * mScratch[1];
+      if (sm) {
+        const hh = rr - bottom;
+        const dS = smokeDensity(rec[F.smokeC], rec[F.smokeW], hh > 0 ? hh : 0);
+        e0 += rec[F.smokeER] * dS;
+        ec1 += rec[F.smokeEG] * dS;
+        e2 += rec[F.smokeEB] * dS;
+        s0 += rec[F.smokeSR] * dS;
+        s1 += rec[F.smokeSG] * dS;
+        s2 += rec[F.smokeSB] * dS;
+      }
       const st0 = Math.exp(-e0 * dt);
       const st1 = Math.exp(-ec1 * dt);
       const st2 = Math.exp(-e2 * dt);
@@ -518,7 +697,7 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
       const gr = Math.sqrt(gx * gx + gy * gy + gz * gz);
       const muG = (gx * sx + gy * sy) / gr;
       if (muG > 0) {
-        lightTransmittance(rec, depth, gr, muG, t3, 0);
+        lightTransmittance(rec, depth, gr, muG, t3, 0, smoke);
         L0 += (T0 * rec[F.groundR] * t3[0] * muG) / PI;
         L1 += (T1 * rec[F.groundG] * t3[1] * muG) / PI;
         L2 += (T2 * rec[F.groundB] * t3[2] * muG) / PI;
@@ -536,7 +715,7 @@ export function psiOf(rec: AirRecord, depth: Float64Array | Float32Array, r: num
 }
 
 /** A record's multiple-scattering table at the twin's size, into `out` (`PSI_FLOATS`), from its world's column densities. */
-export function buildPsiTable(rec: AirRecord, depth: Float64Array | Float32Array, out: Float64Array | Float32Array, nDirs: number = TWIN_STEPS.psiDirs, steps: number = TWIN_STEPS.psi): void {
+export function buildPsiTable(rec: AirRecord, depth: Float64Array | Float32Array, out: Float64Array | Float32Array, nDirs: number = TWIN_STEPS.psiDirs, steps: number = TWIN_STEPS.psi, smoke: Float64Array | Float32Array | null = null): void {
   const W = TWIN_PSI.width;
   const H = TWIN_PSI.height;
   const dirs = new Float64Array(nDirs * 3);
@@ -549,7 +728,7 @@ export function buildPsiTable(rec: AirRecord, depth: Float64Array | Float32Array
       // The texel centres' own (the card's `texelToUnit` at the twin's size), so a read at a centre is that texel's sum.
       const muS = (i / (W - 1)) * 2 - 1;
       const r = Math.min(bottom + (j / (H - 1)) * (top - bottom) + 0.001, top - 0.001);
-      psiOf(rec, depth, r, muS, dirs, nDirs, steps, tmp, 0);
+      psiOf(rec, depth, r, muS, dirs, nDirs, steps, tmp, 0, smoke);
       const o = (j * W + i) * 3;
       out[o] = tmp[0];
       out[o + 1] = tmp[1];
@@ -570,6 +749,14 @@ export class AirLights {
   readonly top = new Float64Array(9);
   /** Whether each lights anything at all this frame (a light deep under the horizon is left out of the sums). */
   readonly live = new Uint8Array(3);
+  /**
+   * Pass 2, wave 6: the scene's units of the record's glow from below (`F.glowR..B`, a share of a strength-1 sun at the top
+   * of the air): `AIR_UNITS.scene` in play, written by the twin's `lightsIn`; nought sums no glow.
+   */
+  glowScale = 0.5;
+  constructor() {
+    this.glowScale = 0;
+  }
 }
 
 /** A light deeper than this under the planet's horizon (its zenith cosine at the camera) sends nothing a sum would see. */
@@ -577,6 +764,7 @@ export const LIGHT_FLOOR_MU = -0.35;
 
 const lt = new Float64Array(3);
 const ps = new Float64Array(3);
+const glowScratch = new Float64Array(3);
 
 /**
  * The sky's radiance toward a view direction (dx, dy, dz) from a point `r` km from the centre, lit by `lights`, summed by
@@ -600,6 +788,7 @@ export function viewRadiance(
   out: Float64Array,
   at: number,
   transmittance: Float64Array | null,
+  smoke: Float64Array | Float32Array | null = null,
 ): void {
   const bottom = rec[F.bottom];
   const top = rec[F.top];
@@ -611,6 +800,10 @@ export function viewRadiance(
   const mS0 = mieS * rec[F.mieTintR];
   const mS1 = mieS * rec[F.mieTintG];
   const mS2 = mieS * rec[F.mieTintB];
+  // Pass 2, wave 6: the smoke and ash and the glow from below, summed after the rest where the record carries them.
+  const sm = smokeAdds(rec) || smokeDims(rec);
+  const gS = rec[F.smokeG];
+  const glowK = lights.glowScale * GLOW_PHASE;
   const g = rec[F.mieG];
   let L0 = 0;
   let L1 = 0;
@@ -637,12 +830,23 @@ export function viewRadiance(
     const sM0 = mS0 * mScratch[1];
     const sM1 = mS1 * mScratch[1];
     const sM2 = mS2 * mScratch[1];
-    const e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
-    const ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
-    const e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
+    let e0 = sR0 + mieT * mScratch[1] + rec[F.ozR] * mScratch[2];
+    let ec1 = sR1 + mieT * mScratch[1] + rec[F.ozG] * mScratch[2];
+    let e2 = sR2 + mieT * mScratch[1] + rec[F.ozB] * mScratch[2];
     let S0 = 0;
     let S1 = 0;
     let S2 = 0;
+    let dS = 0;
+    if (sm) {
+      const hh = rr - bottom;
+      dS = smokeDensity(rec[F.smokeC], rec[F.smokeW], hh > 0 ? hh : 0);
+      e0 += rec[F.smokeER] * dS;
+      ec1 += rec[F.smokeEG] * dS;
+      e2 += rec[F.smokeEB] * dS;
+    }
+    const sS0 = rec[F.smokeSR] * dS;
+    const sS1 = rec[F.smokeSG] * dS;
+    const sS2 = rec[F.smokeSB] * dS;
     for (let k = 0; k < n; k++) {
       if (!lights.live[k]) continue;
       const lx = lights.dir[k * 3];
@@ -652,11 +856,23 @@ export function viewRadiance(
       const c = dx * lx + dy * ly + dz * lz;
       const pR = rayleighPhase(c);
       const pM = miePhase(c, g);
-      lightTransmittance(rec, depth, rr, muL, lt, 0);
+      lightTransmittance(rec, depth, rr, muL, lt, 0, smoke);
       psiAt(rec, psi, rr, muL, ps, 0);
       S0 += lights.top[k * 3] * (lt[0] * (sR0 * pR + sM0 * pM) + ps[0] * (sR0 + sM0));
       S1 += lights.top[k * 3 + 1] * (lt[1] * (sR1 * pR + sM1 * pM) + ps[1] * (sR1 + sM1));
       S2 += lights.top[k * 3 + 2] * (lt[2] * (sR2 * pR + sM2 * pM) + ps[2] * (sR2 + sM2));
+      if (sm) {
+        const pS = miePhase(c, gS);
+        S0 += lights.top[k * 3] * (lt[0] * sS0 * pS + ps[0] * sS0);
+        S1 += lights.top[k * 3 + 1] * (lt[1] * sS1 * pS + ps[1] * sS1);
+        S2 += lights.top[k * 3 + 2] * (lt[2] * sS2 * pS + ps[2] * sS2);
+      }
+    }
+    if (sm && glowK > 0) {
+      glowUpInto(rec, rr - bottom, glowScratch, 0);
+      S0 += (sR0 + sM0 + sS0) * glowScratch[0] * glowK;
+      S1 += (sR1 + sM1 + sS1) * glowScratch[1] * glowK;
+      S2 += (sR2 + sM2 + sS2) * glowScratch[2] * glowK;
     }
     const st0 = Math.exp(-e0 * dt);
     const st1 = Math.exp(-ec1 * dt);
@@ -760,6 +976,10 @@ export class AirTwin {
   /** The world's column densities, and the multiple-scattering share blended from the rows'. */
   readonly depth = new Float64Array(DEPTH_FLOATS);
   readonly psi = new Float64Array(PSI_FLOATS);
+  /** Pass 2, wave 6: the world's smoke column table (nought until a world's smoke is raised: `useSmoke`). */
+  readonly smoke = new Float64Array(SMOKE_FLOATS);
+  /** Pass 2, wave 6: the scene's units of the record's glow from below (the caller's: `AIR_UNITS.scene`). */
+  glowScale = 0.5;
   readonly lights = new AirLights();
   readonly out = new AirTwinOut();
   /** The frame's inputs (`IN`): the sun's, the moon's and the second sun's directions (world unit vectors, +Y up) and the camera's height over the surface, km. */
@@ -786,6 +1006,7 @@ export class AirTwin {
     this.lastMuM = 0;
     this.lastMu2 = 0;
     this.lastH = 0;
+    this.glowScale = 0;
     this.inp[IN.sy] = 1;
     this.inp[IN.my] = -1;
     this.inp[IN.s2y] = 1;
@@ -795,6 +1016,12 @@ export class AirTwin {
   /** The world's column densities in force (one table a world). */
   useDepth(depth: Float64Array | Float32Array): void {
     for (let i = 0; i < DEPTH_FLOATS; i++) this.depth[i] = depth[i];
+    this.version++;
+  }
+
+  /** Pass 2, wave 6: the world's smoke column table in force (`buildSmokeTable`, made again when the layer's shape moves). */
+  useSmoke(smoke: Float64Array | Float32Array): void {
+    for (let i = 0; i < SMOKE_FLOATS; i++) this.smoke[i] = smoke[i];
     this.version++;
   }
 
@@ -850,25 +1077,31 @@ export class AirTwin {
     const s2y = inp[IN.s2y];
     REG[0] = r;
     REG[1] = sy;
-    transmitReg(rec, this.depth, this.rgb, 0);
+    transmitReg(rec, this.depth, this.smoke, this.rgb, 0);
     o.sunHere[0] = this.sunTop[0] * this.rgb[0];
     o.sunHere[1] = this.sunTop[1] * this.rgb[1];
     o.sunHere[2] = this.sunTop[2] * this.rgb[2];
     REG[0] = r;
     REG[1] = my;
-    transmitReg(rec, this.depth, this.rgb, 0);
+    transmitReg(rec, this.depth, this.smoke, this.rgb, 0);
     o.moonHere[0] = this.moonTop[0] * this.rgb[0];
     o.moonHere[1] = this.moonTop[1] * this.rgb[1];
     o.moonHere[2] = this.moonTop[2] * this.rgb[2];
     if (sun2) {
       REG[0] = r;
       REG[1] = s2y;
-      transmitReg(rec, this.depth, this.rgb, 0);
+      transmitReg(rec, this.depth, this.smoke, this.rgb, 0);
       o.sun2Here[0] = this.sun2Top[0] * this.rgb[0];
       o.sun2Here[1] = this.sun2Top[1] * this.rgb[1];
       o.sun2Here[2] = this.sun2Top[2] * this.rgb[2];
     } else o.sun2Here[0] = o.sun2Here[1] = o.sun2Here[2] = 0;
-    const ext = rec[F.rayG] + rec[F.mieS] + rec[F.mieA];
+    let ext = rec[F.rayG] + rec[F.mieS] + rec[F.mieA];
+    // Pass 2, wave 6: the smoke and ash where its tent reaches the ground (written in: nought when none, or lifted off it).
+    if (rec[F.smokeEG] > 0) {
+      const w = rec[F.smokeW] > 1e-6 ? rec[F.smokeW] : 1e-6;
+      const t0 = 1 - rec[F.smokeC] / w;
+      if (t0 > 0) ext += rec[F.smokeEG] * t0;
+    }
     o.visibilityKm = ext > 0 ? 3.912 / ext : 1e6;
     // The exponential-squared fog that falls to 2% at the visibility: (ρ v)² = −ln 0.02.
     o.fogDensity = 1.9778 / (o.visibilityKm * 1000);
@@ -930,6 +1163,8 @@ export class AirTwin {
       L.top[3 + k] = sun2 ? this.sun2Top[k] : 0;
       L.top[6 + k] = this.moonTop[k];
     }
+    // Pass 2, wave 6: the glow from below in the scene's units (the caller's).
+    L.glowScale = this.glowScale;
     L.live[0] = inp[IN.sy] > LIGHT_FLOOR_MU ? 1 : 0;
     L.live[1] = sun2 && inp[IN.s2y] > LIGHT_FLOOR_MU ? 1 : 0;
     // The moon sends 2.3 millionths of the sun's light: summed only once the sun is under the eye's level, where it starts to tell.
@@ -939,7 +1174,7 @@ export class AirTwin {
   /** The sky's radiance toward a direction in the sums' frame (the sun's azimuth +X), from the camera at `heightKm` (the proofs'). */
   radianceIn(dx: number, dy: number, dz: number, heightKm: number, steps: number, out: Float64Array): void {
     const r = this.record[F.bottom] + (heightKm > 0.001 ? heightKm : 0.001);
-    viewRadiance(this.record, this.depth, this.psi, r, dx, dy, dz, this.lights, steps, Infinity, out, 0, null);
+    viewRadiance(this.record, this.depth, this.psi, r, dx, dy, dz, this.lights, steps, Infinity, out, 0, null, this.smoke);
   }
 
   /** The camera's distance from the centre for the sums (a field: a number across a call is a number made), and the cycle's own. */
@@ -984,7 +1219,7 @@ export class AirTwin {
         REG[5] = HEMI_DIRS[k * 3];
         REG[6] = HEMI_DIRS[k * 3 + 1];
         REG[7] = HEMI_DIRS[k * 3 + 2];
-        viewRadianceReg(rec, this.depth, this.psi, this.lights, TWIN_STEPS.hemi, ray, 0);
+        viewRadianceReg(rec, this.depth, this.smoke, this.psi, this.lights, TWIN_STEPS.hemi, ray, 0);
         const w = HEMI_WEIGHTS[k];
         acc[0] += ray[0] * w;
         acc[1] += ray[1] * w;
@@ -998,7 +1233,7 @@ export class AirTwin {
         REG[5] = HORIZON_DIRS[j * 3];
         REG[6] = HORIZON_DIRS[j * 3 + 1];
         REG[7] = HORIZON_DIRS[j * 3 + 2];
-        viewRadianceReg(rec, this.depth, this.psi, this.lights, TWIN_STEPS.view, ray, 0);
+        viewRadianceReg(rec, this.depth, this.smoke, this.psi, this.lights, TWIN_STEPS.view, ray, 0);
         const w = HORIZON_WEIGHTS[j];
         acc[3] += ray[0] * w;
         acc[4] += ray[1] * w;
@@ -1009,7 +1244,7 @@ export class AirTwin {
         REG[5] = 0;
         REG[6] = 1;
         REG[7] = 0;
-        viewRadianceReg(rec, this.depth, this.psi, this.lights, TWIN_STEPS.view, ray, 0);
+        viewRadianceReg(rec, this.depth, this.smoke, this.psi, this.lights, TWIN_STEPS.view, ray, 0);
         acc[6] = ray[0];
         acc[7] = ray[1];
         acc[8] = ray[2];

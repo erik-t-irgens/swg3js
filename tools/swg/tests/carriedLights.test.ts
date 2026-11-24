@@ -333,7 +333,8 @@ const SABER = 0x66c8ff;
   const node = readFileSync(join(SRC, 'core', 'gpu', 'carriedLights.ts'), 'utf8');
   ok(node.includes('(CarriedPointLight as Any).registerNode(CarriedPointLightNode);') && node.includes('(CarriedSpotLight as Any).registerNode(CarriedSpotLightNode);'), "each carried light's node is registered as its module loads, before any material is built");
   const run = readFileSync(join(SRC, 'sky', 'air', 'airRun.ts'), 'utf8');
-  ok(run.includes('glow: this.glowSet };') && run.includes('setHazeGlow(this.base, dials.glow);') && run.includes('|| dials.glow !== this.glowSet;'), "the run sets the world's glow at its start, hands it to the fit's worker and asks again when it moves");
+  // (pass 2, wave 6: the ask carries the smoke and ash after the glow)
+  ok(/glow: this\.glowSet(?:, smoke: \{ \.\.\.this\.smokeSet \})? \};/.test(run) && run.includes('setHazeGlow(this.base, dials.glow);') && run.includes('|| dials.glow !== this.glowSet;'), "the run sets the world's glow at its start, hands it to the fit's worker and asks again when it moves");
 }
 
 // ---------------------------------------------------------------- 7. the frame makes nothing

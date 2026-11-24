@@ -28,7 +28,7 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial, NodeUpdateType, TextureNode } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { F } from '../sky/air/airParams.ts';
-import { TABLES, airShader } from '../sky/look/airProfile.js';
+import { TABLES, airShader, smokeUniformValues } from '../sky/look/airProfile.js';
 import { markMotion } from '../core/gpu/motion.ts';
 import { BODY_LAY, BODY_TUNE, bodyFormOf, tierRule, tuneBodies } from '../sky/bodies/bodyTier.ts';
 import { bodyRecord, bodyTablesKey, makeBodyTables } from '../sky/bodies/bodyAir.ts';
@@ -103,6 +103,10 @@ export class SpaceRimState {
   readonly a3 = new THREE.Vector4(25, 15, 0.8, 1);
   readonly a4 = new THREE.Vector4(1, 1, 1, 1);
   readonly a5 = new THREE.Vector4(1, 0.5, 0.5, 0.5);
+  /** Pass 2, wave 6: the smoke and ash and the glow from below (`skyBody.ts`' `a6` to `a8`, the same layout). */
+  readonly a6 = new THREE.Vector4(0, 0, 0, 2);
+  readonly a7 = new THREE.Vector4(0, 0, 0, 1.5);
+  readonly a8 = new THREE.Vector4(0, 0, 0, 0.7);
   /** The planet's colour where it has no picture (linear). */
   readonly colour = new THREE.Vector3(0.25, 0.28, 0.32);
   map: THREE.Texture;
@@ -163,7 +167,7 @@ function tableTexture(data: Float32Array, w: number, h: number): THREE.DataTextu
 interface Frame {
   object?: { userData?: { swgSpaceRim?: SpaceRimState } } | null;
 }
-type StateVec = 's0' | 's1' | 'sun' | 'light' | 'ambSky' | 'ambGround' | 'fillDir' | 'fill' | 'a0' | 'a1' | 'a2' | 'a3' | 'a4' | 'a5' | 'colour';
+type StateVec = 's0' | 's1' | 'sun' | 'light' | 'ambSky' | 'ambGround' | 'fillDir' | 'fill' | 'a0' | 'a1' | 'a2' | 'a3' | 'a4' | 'a5' | 'a6' | 'a7' | 'a8' | 'colour';
 
 /** A number of the drawn shell's record, read at every draw (the object's own group). */
 function rimVec(field: StateVec, init: THREE.Vector3 | THREE.Vector4): Any {
@@ -280,7 +284,11 @@ function rimGraph(form: 'painted' | 'scattered'): THREE.Material {
     const colour = rimVec('colour', new THREE.Vector3(0.25, 0.28, 0.32));
     const fillDir = rimVec('fillDir', new THREE.Vector3(0, 1, 0));
     const fill = rimVec('fill', new THREE.Vector3(0, 0, 0));
-    const U = { bottom, top, rayH: a0.z, mieH: a0.w, ray: a1.xyz, mieS: a1.w, oz: a2.xyz, mieA: a2.w, ozC: a3.x, ozW: a3.y, mieG: a3.z, mieTint: a4.xyz, limb: a4.w, twilight: a5.x };
+    // Pass 2, wave 6: the smoke and ash and the glow from below (noughts and a shape with none).
+    const a6 = rimVec('a6', new THREE.Vector4(0, 0, 0, 2));
+    const a7 = rimVec('a7', new THREE.Vector4(0, 0, 0, 1.5));
+    const a8 = rimVec('a8', new THREE.Vector4(0, 0, 0, 0.7));
+    const U = { bottom, top, rayH: a0.z, mieH: a0.w, ray: a1.xyz, mieS: a1.w, oz: a2.xyz, mieA: a2.w, ozC: a3.x, ozW: a3.y, mieG: a3.z, mieTint: a4.xyz, limb: a4.w, twilight: a5.x, smokeE: a6.xyz, smokeC: a6.w, smokeS: a7.xyz, smokeW: a7.w, glow: a8.xyz, smokeG: a8.w };
     const NS = { ...(TSL as Any), Loop: (_n: unknown, body: Any) => TSL.Loop({ start: int(0), end: int(tune.x), type: 'int', condition: '<' }, body) };
     // Its steps laid as the sky's bodies lay theirs (`BODY_LAY`), so a rim from orbit marches as the same world's rim from a moon.
     const air = airShader(NS, U, { T: rimTexture('tT', f.t), MS: rimTexture('tMS', f.ms), E: rimTexture('tE', f.e) }, tune.x, BODY_LAY);
@@ -348,7 +356,8 @@ async function wearLook(place: string, mat: THREE.MeshLambertMaterial): Promise<
   const hit = lookOfPlace(place);
   const looks = GPU.rt?.looks;
   if (!hit || !looks) return null;
-  const pics = await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.spaceSize);
+  // (the fixer of pass 2, wave 6) a look the arrival shows: the screen waits for its kit and bake (`kitWaitMs`)
+  const pics = await looks.bake(hit.id, hit.look, LOOK_BAKE_TUNE.spaceSize, true, true);
   if (!pics) return null;
   // Toned as the look's layers tone it, the clouds laid by their cover times their layer's opacity: the sky's disc's own rule
   // (`discPicture`), so a world reads the same from a moon and from its orbit (the fixer of pass 2, wave 4b).
@@ -650,6 +659,11 @@ function writeRecord(st: SpaceRimState, rec: Float64Array): void {
   st.a3.set(rec[F.ozC], rec[F.ozW], rec[F.mieG], 1);
   st.a4.set(rec[F.mieTintR], rec[F.mieTintG], rec[F.mieTintB], BODY_TUNE.limb);
   st.a5.set(BODY_TUNE.twilight, 0.5, 0.5, 0.5);
+  // Pass 2, wave 6: the smoke and ash and the glow from below (`airProfile.js`' values: none for a record of 28 numbers).
+  const s = smokeUniformValues(rec);
+  st.a6.set(s.smokeE[0], s.smokeE[1], s.smokeE[2], s.smokeC);
+  st.a7.set(s.smokeS[0], s.smokeS[1], s.smokeS[2], s.smokeW > 1e-6 ? s.smokeW : 1e-6);
+  st.a8.set(s.glow[0], s.glow[1], s.glow[2], s.smokeG);
 }
 
 /** The graphs let go (a session's end; the tests'). */

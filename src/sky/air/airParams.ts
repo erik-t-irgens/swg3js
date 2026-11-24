@@ -8,6 +8,7 @@
 //
 // Units: kilometres and coefficients per kilometre (`airApi.ts`).
 import { casterOf, kelvinToLinear as starKelvinToLinear, type SunSpec } from '../stars.ts';
+import { SMOKE_DIAL_NAMES, SMOKE_DIAL_RANGE, SMOKE_DIAL_START, SMOKE_NONE, hasSmoke, smokeInto, type SmokeDials } from '../look/airProfile.js';
 
 /** A record: the air's numbers in one kept array, laid out by `F`. */
 export type AirRecord = Float64Array;
@@ -57,10 +58,33 @@ export const F = {
   mieTintR: 25,
   mieTintG: 26,
   mieTintB: 27,
+  /**
+   * Pass 2, wave 6: the second aerosol layer, smoke and ash, appended as the haze's colour was (`src/sky/look/airProfile.js`
+   * lays the same twelve, `smokeInto`). Its extinction at the layer's peak, per km, red, green and blue: chromatic, by its
+   * Angstrom exponent (`(lambda / 550)^-alpha` at the channels' 680, 550 and 440 nm), so the sun reddens through it where
+   * the haze keeps its extinction grey.
+   */
+  smokeER: 28,
+  smokeEG: 29,
+  smokeEB: 30,
+  /** Its scattering at the peak, per km (its extinction less its absorption: its single-scattering albedo by channel). */
+  smokeSR: 31,
+  smokeSG: 32,
+  smokeSB: 33,
+  /** The layer's middle and half depth above the ground, km (a tent, as the ozone's), and its phase's g. */
+  smokeC: 34,
+  smokeW: 35,
+  smokeG: 36,
+  /** The glow from below (the lava's upward light the air scatters back down), a share of a strength-1 sun at the top of the air, linear rgb. */
+  glowR: 37,
+  glowG: 38,
+  glowB: 39,
 } as const;
 
-/** How many numbers a record holds (the game's 25 and, since pass 2's wave 4a, the haze's colour). */
-export const AIR_FIELD_COUNT = 28;
+/** How many numbers a record holds (the game's 25 and, since pass 2's wave 4a, the haze's colour, and since wave 6 the smoke and ash). */
+export const AIR_FIELD_COUNT = 40;
+/** Pass 2, wave 6: the record's count before the smoke and ash (a record with none is the record of 28 as it was, and appended nought). */
+export const HAZE_FIELD_COUNT = 28;
 
 /**
  * Hillaire's Earth, the published constants of the method (2020, its section 3 and the reference code's defaults): a
@@ -117,7 +141,24 @@ export function newAirRecord(): AirRecord {
   r[F.mieAlbedo] = 0.9;
   // Pass 2, wave 4a: a grey haze, the record as it was.
   r[F.mieTintR] = r[F.mieTintG] = r[F.mieTintB] = 1;
+  // Pass 2, wave 6: no smoke or ash and no glow (every number nought but the tent's finite shape: `SMOKE_NONE`).
+  r[F.smokeC] = SMOKE_NONE.c;
+  r[F.smokeW] = SMOKE_NONE.w;
+  r[F.smokeG] = SMOKE_NONE.g;
   return r;
+}
+
+/**
+ * Pass 2, wave 6: a world's smoke and ash and its glow from below laid into a record from its dials (`airProfile.js`'
+ * `smokeInto`, the viewer's and the body path's own rule): a depth and a glow of nought is none, the record as it was.
+ */
+export function setSmoke(r: AirRecord, d: SmokeDials): void {
+  smokeInto(r, d);
+}
+
+/** Whether a record carries any smoke, ash or glow (`airProfile.js`' `hasSmoke`). */
+export function smokeOn(r: AirRecord): boolean {
+  return hasSmoke(r);
 }
 
 /** A record's haze colour set (pass 2, wave 4a): each channel's share of the Mie scattering, held to [0, 1]. */
@@ -338,10 +379,58 @@ export interface AirDialRow {
    * and the blades light no haze. Feel is his.
    */
   glow: number;
+  /**
+   * Pass 2, wave 6 (the owner's "Mustafar very clear and different than its game and movie counterparts"): the second aerosol
+   * layer, smoke and ash, and the glow from below; the names and ranges `airProfile.js`' (`SMOKE_DIAL_RANGE`, one set for the
+   * game and the viewer's air box). **None to start on every world** (a depth and a glow of nought: every record and table the
+   * base's) but Mustafar, which starts at a measured volcanic plume (`SMOKE_STARTS`). Feel is his.
+   */
+  smokeDepth: number;
+  smokeAngstrom: number;
+  smokeAlbedo: number;
+  smokeBrown: number;
+  smokeHeightKm: number;
+  smokeThickKm: number;
+  smokeG: number;
+  glowLux: number;
+  glowKelvin: number;
 }
 
-/** Every row's start but the glow, whose start is each world's own (`glowStartOf`). */
-export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0, hazeR: 1, hazeG: 1, hazeB: 1, glow: EARTH.mieG };
+/**
+ * Pass 2, wave 6: each world's smoke and ash to start where it is not none (`SMOKE_DIAL_START`, `airProfile.js`, for the
+ * rest: a depth and a glow of nought, the other dials where a mixed volcanic plume stands when he raises the depth). Feel is
+ * his; these are where they start.
+ *
+ * **Mustafar** (black rock and open lava under ash and smoke), from measured plumes of both:
+ *   - `smokeDepth` 1: the optical depth at 500 nm of Eyjafjallajokull's ash layer over central Europe on 16 April 2010 stood
+ *     between about 0.6 and 1 (Ansmann et al. 2010, Geophys. Res. Lett. 37, L13810: EARLINET lidar and AERONET photometers at
+ *     Leipzig and Munich), a plume some 1,500 km from its vent; a world of open lava stands under its own at the top of that.
+ *   - `smokeHeightKm` 3, `smokeThickKm` 5: that layer stood between about 2 and 6 km (the same lidars); near its sources it
+ *     reaches lower, so here from half a kilometre to five and a half, densest at three.
+ *   - `smokeAngstrom` 1: between coarse ash's, near nought in the same measurements, and fresh smoke's 1.6 to 2.1 over 440 to
+ *     870 nm (Dubovik et al. 2002, J. Atmos. Sci. 59, 590-608, AERONET's biomass-burning sites): a plume of both, so the sun
+ *     through it reddens without the deep red of pure smoke.
+ *   - `smokeAlbedo` 0.85: smoke's single-scattering albedo at 440 nm runs from about 0.84 (African savanna) to 0.94 (Amazon
+ *     forest) in Dubovik et al. 2002; a dark, sooty plume over burning ground at the low end.
+ *   - `smokeBrown` 1.5: absorption Angstrom exponents near 1 for black carbon and about 1.5 to 2 for biomass smoke (Bergstrom et
+ *     al. 2007, Atmos. Chem. Phys. 7, 5937-5943): soot with some brown.
+ *   - `smokeG` 0.7: smoke's asymmetry at 440 nm is about 0.64 to 0.69 (Dubovik et al. 2002); ash's larger grains throw forward
+ *     a little more.
+ *   - `glowLux` 1 at `glowKelvin` 1250: **not measured** (no measure of a lava field's upward light over its whole area was found):
+ *     a start for his eye, four times a full moon's 0.25 lux, from crusted lava whose open cracks glow at basalt's 1,100 to
+ *     1,200 degrees C; the colour of the crust's mean, an orange.
+ */
+export const SMOKE_STARTS: Record<string, Partial<SmokeDials>> = {
+  mustafar: { smokeDepth: 1, smokeAngstrom: 1, smokeAlbedo: 0.85, smokeBrown: 1.5, smokeHeightKm: 3, smokeThickKm: 5, smokeG: 0.7, glowLux: 1, glowKelvin: 1250 },
+};
+
+/** A world's smoke and ash dials to start (`SMOKE_STARTS` over `SMOKE_DIAL_START`). */
+export function smokeStartOf(planetId: string): SmokeDials {
+  return { ...SMOKE_DIAL_START, ...(SMOKE_STARTS[planetId] ?? {}) };
+}
+
+/** Every row's start but the glow, whose start is each world's own (`glowStartOf`), and the smoke and ash (`smokeStartOf`). */
+export const AIR_DIAL_START: AirDialRow = { visibilityKm: 40, steer: 0, ozoneMin: 0, ozoneMax: 0, hazeR: 1, hazeG: 1, hazeB: 1, glow: EARTH.mieG, ...SMOKE_DIAL_START };
 
 /** A world's glow round the sun to start (the sky and light fix round): its own haze's g (`AIR_WORLDS`, else the default world's). */
 export function glowStartOf(planetId: string): number {
@@ -378,17 +467,20 @@ export function airDialsOf(planetId: string): AirDialRow {
   let d = AIR_DIALS[planetId];
   if (!d) {
     const s = AIR_DIAL_START;
-    d = { visibilityKm: s.visibilityKm, steer: s.steer, ozoneMin: s.ozoneMin, ozoneMax: s.ozoneMax, hazeR: s.hazeR, hazeG: s.hazeG, hazeB: s.hazeB, glow: glowStartOf(planetId) };
+    d = { visibilityKm: s.visibilityKm, steer: s.steer, ozoneMin: s.ozoneMin, ozoneMax: s.ozoneMax, hazeR: s.hazeR, hazeG: s.hazeG, hazeB: s.hazeB, glow: glowStartOf(planetId), ...smokeStartOf(planetId) };
     AIR_DIALS[planetId] = d;
   }
   return d;
 }
 
 /** The dials' ranges (the sliders'), and what a value outside is held to. */
-export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const, hazeR: [0, 1] as const, hazeG: [0, 1] as const, hazeB: [0, 1] as const, glow: [0, 0.95] as const };
+export const AIR_DIAL_RANGE = { visibilityKm: [0.2, 300] as const, steer: [0, 1] as const, hazeR: [0, 1] as const, hazeG: [0, 1] as const, hazeB: [0, 1] as const, glow: [0, 0.95] as const, ...SMOKE_DIAL_RANGE };
 
 /** The dials a world's row holds, as `tuneAirDials` takes them. */
-const ROW_DIALS = ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax', 'hazeR', 'hazeG', 'hazeB', 'glow'] as const;
+const ROW_DIALS = ['visibilityKm', 'steer', 'ozoneMin', 'ozoneMax', 'hazeR', 'hazeG', 'hazeB', 'glow', ...SMOKE_DIAL_NAMES] as const;
+
+/** Pass 2, wave 6: the smoke and ash dials of a world's row (the names `airProfile.js` and the viewer share). */
+export const SMOKE_ROW_DIALS = SMOKE_DIAL_NAMES;
 
 /** The haze's phase g written into a record (the sky and light fix round's glow round the sun), held to the dial's range. */
 export function setHazeGlow(r: AirRecord, g: number): void {
@@ -396,11 +488,16 @@ export function setHazeGlow(r: AirRecord, g: number): void {
   r[F.mieG] = g > lo ? (g < hi ? g : hi) : lo;
 }
 
-/** A world's haze colour in force (its dials), into a record (pass 2, wave 4a); and its glow round the sun (the fix round). */
+/**
+ * A world's haze colour in force (its dials), into a record (pass 2, wave 4a); and its glow round the sun (the fix round);
+ * and (pass 2, wave 6) its smoke and ash and its glow from below, so a body showing the world (`bodyAir.ts`) and the viewer's
+ * drawing of its ground sky carry them as its own sky does.
+ */
 export function applyHazeDials(planetId: string, r: AirRecord): void {
   const d = airDialsOf(planetId);
   setHazeTint(r, d.hazeR, d.hazeG, d.hazeB);
   setHazeGlow(r, d.glow);
+  smokeInto(r, d);
 }
 
 /** A count the dials move by, so a reader can tell the numbers moved without comparing them (the tables' rebuild). */
@@ -412,7 +509,7 @@ export const AIR_DIAL_STATE = { version: 0 };
  */
 export function tuneAirDials(o: Record<string, unknown>): string[] {
   const words: string[] = [];
-  if (!o || typeof o !== 'object') return ['the air dials take { <world>: { visibilityKm, steer, ozoneMin, ozoneMax, hazeR, hazeG, hazeB, glow } } and { all: { ozoneMin, ozoneMax } }'];
+  if (!o || typeof o !== 'object') return [`the air dials take { <world>: { ${ROW_DIALS.join(', ')} } } and { all: { ozoneMin, ozoneMax } }`];
   for (const [id, v] of Object.entries(o)) {
     if (!v || typeof v !== 'object') {
       words.push(`${id}: not a row`);
@@ -517,5 +614,16 @@ export function recordWords(r: AirRecord): Record<string, unknown> {
     visibilityKm: n(visibilityOf(r), 4),
     visShare: n(r[F.visShare], 3),
     hazeColour: [n(r[F.mieTintR], 3), n(r[F.mieTintG], 3), n(r[F.mieTintB], 3)],
+    // Pass 2, wave 6: the smoke and ash at its peak and the glow from below (none: nought throughout).
+    smoke: hasSmoke(r)
+      ? {
+          extinctionPerKm: [n(r[F.smokeER]), n(r[F.smokeEG]), n(r[F.smokeEB])],
+          scatterPerKm: [n(r[F.smokeSR]), n(r[F.smokeSG]), n(r[F.smokeSB])],
+          middleKm: n(r[F.smokeC]),
+          halfDepthKm: n(r[F.smokeW]),
+          g: n(r[F.smokeG], 3),
+          glowShare: [n(r[F.glowR], 3), n(r[F.glowG], 3), n(r[F.glowB], 3)],
+        }
+      : 'none',
   };
 }

@@ -36,14 +36,21 @@
 // system names (`look`), its size (`sizeDeg`, the angle its square fills, as SWG's squares are read), its colour and
 // brightness, and whether it is drawn. Nothing here touches three or a page: node runs it as it stands.
 
-import { compileSystem, makeSkyState, skyAtNext, EPOCH_MS, DAY_MS, NIGHT_REF_SIZE, SHEET_SHARE } from './system.js';
+import { compileSystem, makeSkyState, skyAtNext, EPOCH_MS, DAY_MS, NIGHT_REF_SIZE, SHEET_SHARE, POLE_ELEVATION } from './system.js';
 import { appliedSystemOf, worldDayOf, type SystemsRecord } from './worldDays.ts';
 import { DISC_FILL } from './places.js';
 import { EXTRA_PLACES } from './extraPlaces.js';
 import { DISC_TUNE } from '../skyDials.ts';
-import { casterOf, secondOf } from '../stars.ts';
+import { PAIR_MOVES, PAIR_TUNE, casterOf, secondOf } from '../stars.ts';
 
 const DEG = Math.PI / 180;
+
+/**
+ * SWG's pole in the sky (+Y up, +Z north): where a version 1 system's day turns the bodies (`system.js`' `POLE_ELEVATION`, 22.5
+ * degrees up over +Z), the celestial frame's pole for such a system. A typed array, so the frame reads plain numbers
+ * (the fixer of pass 2, wave 6).
+ */
+const SWG_POLE = new Float64Array([0, Math.sin(POLE_ELEVATION * DEG), Math.cos(POLE_ELEVATION * DEG)]);
 
 /**
  * The motion's dials (the owner's to set; feel and look are his, each starts where the reason beside it says):
@@ -213,6 +220,8 @@ type Model = {
 type State = {
   T: number;
   next: number;
+  /** The system's space into the sky (row after row): the bodies' turn, the stars' too (the fixer of pass 2, wave 6). */
+  R: Float64Array;
   dir: Float64Array;
   light: Float64Array;
   lit: Float64Array;
@@ -310,6 +319,16 @@ export class SkyMotion {
   readonly moonTint = new Float64Array(3);
   /** The system's own night brightness (1 a full 20-degree moon straight up), for the console. */
   night = 0.5;
+  /**
+   * (The fixer of pass 2, wave 6: the owner's late addition 2) The world's own celestial frame in the sky now, nine numbers
+   * column after column: its equator's reference (the system's fixed +X laid into the world's equator), the equator a quarter
+   * turn on, and the pole (version 2 the world's own axis, standing at the play area's latitude over its true north; version
+   * 1 SWG's pole, about which its day turns the bodies). Written by `at`, so the night's stars (`skyTurn.ts`'
+   * `celestialFrameInto`) turn with the world's own spin, its sidereal day, and share one sky with the sun and the bodies.
+   */
+  readonly celestial = new Float64Array(9);
+  /** The sky time `celestial` was written at (NaN before the first `at`). */
+  celestialAt = Number.NaN;
 
   private readonly model: Model;
   private readonly state: State;
@@ -323,6 +342,14 @@ export class SkyMotion {
   private readonly discA: number;
   private readonly discB: number;
   private readonly hemi: number;
+  /**
+   * Pass 2, wave 6 (maker K): what this system says to the pair's two dials of the `sky` helper (`stars.ts`' `PAIR_TUNE`): its
+   * Line angle as the dial's angle (the line angle plus 90, so its -90 below is the dial's 0) and its middles' distance as the
+   * sky draws them now; null with no pair. The loading screen sets the dials to it (`World.followMotion`, `pairDialsFrom`).
+   */
+  readonly pairSays: { angleDeg: number; distanceDeg: number } | null;
+  /** `PAIR_MOVES.n` when this motion was made: the pair stands by the system's own numbers until the dials are moved by hand. */
+  private readonly pairMovesAt: number;
 
   constructor(rule: 'system' | 'one-world', id: string, sys: Record<string, unknown>, world: string, planet: string, places: Map<string, SkyPlace>) {
     this.rule = rule;
@@ -408,6 +435,12 @@ export class SkyMotion {
     this.discB = (s2 ? s2.radiusDeg : c ? c.radiusDeg : 0.27) * DEG;
     this.hemi = (model.lat ?? 0) < 0 ? -1 : 1;
     if (pa >= 0 && pb >= 0 && this.casterJ !== pa && this.casterJ !== pb) this.secondJ = -1;
+    // Pass 2, wave 6 (maker K): the dials' agreement. The system's Line angle and the dial's angle are one direction measured
+    // from one place (below), the dial 90 more; the dial's distance is middle to middle, the system's separation edge to edge.
+    let ang = this.pairAngle / DEG + 90;
+    if (ang > 180) ang -= 360;
+    this.pairSays = this.secondJ >= 0 ? { angleDeg: Math.round(ang * 1e6) / 1e6, distanceDeg: Math.round((((this.discA + this.discB) * DISC_TUNE.size + this.pairGap) / DEG) * 1e6) / 1e6 } : null;
+    this.pairMovesAt = PAIR_MOVES.n;
   }
 
   /** The sky's time `T` for the day's unbroken count (`DayCycle.count`): version 2's real days, version 1's sky time. */
@@ -448,6 +481,53 @@ export class SkyMotion {
     st.next = T;
     skyAtNext(M, st);
     this.T = T;
+    // (The fixer of pass 2, wave 6) the world's celestial frame for the night's stars: its pole the axis the bodies turn about
+    // (version 2 the world's own, `poleSky`; version 1 SWG's), taken back into the system's space (R's transpose), the
+    // system's +X laid into that equator, and the three turned into the sky by R. Arrays read and written: nothing made.
+    {
+      const R = st.R;
+      const C = this.celestial;
+      if (this.version === 2) {
+        C[6] = st.poleSky[0];
+        C[7] = st.poleSky[1];
+        C[8] = st.poleSky[2];
+      } else {
+        C[6] = SWG_POLE[0];
+        C[7] = SWG_POLE[1];
+        C[8] = SWG_POLE[2];
+      }
+      const P0 = C[6];
+      const P1 = C[7];
+      const P2 = C[8];
+      const Ax = R[0] * P0 + R[3] * P1 + R[6] * P2;
+      const Ay = R[1] * P0 + R[4] * P1 + R[7] * P2;
+      const Az = R[2] * P0 + R[5] * P1 + R[8] * P2;
+      let ux = 1 - Ax * Ax;
+      let uy = -Ax * Ay;
+      let uz = -Ax * Az;
+      let ul = Math.sqrt(ux * ux + uy * uy + uz * uz);
+      if (ul < 1e-6) {
+        // the axis along the system's +X: its +Y laid into the equator instead
+        ux = -Ay * Ax;
+        uy = 1 - Ay * Ay;
+        uz = -Ay * Az;
+        ul = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        if (ul < 1e-12) ul = 1;
+      }
+      ux /= ul;
+      uy /= ul;
+      uz /= ul;
+      const vx = Ay * uz - Az * uy;
+      const vy = Az * ux - Ax * uz;
+      const vz = Ax * uy - Ay * ux;
+      C[0] = R[0] * ux + R[1] * uy + R[2] * uz;
+      C[1] = R[3] * ux + R[4] * uy + R[5] * uz;
+      C[2] = R[6] * ux + R[7] * uy + R[8] * uz;
+      C[3] = R[0] * vx + R[1] * vy + R[2] * vz;
+      C[4] = R[3] * vx + R[4] * vy + R[5] * vz;
+      C[5] = R[6] * vx + R[7] * vy + R[8] * vz;
+      this.celestialAt = T;
+    }
     const m = this.m;
     const dir = st.dir;
     // The pair, as the game draws it: the second beside the caster along the system's line, the gap between the edges of the
@@ -492,12 +572,16 @@ export class SkyMotion {
       nx *= k;
       ny *= k;
       nz *= k;
-      const ca = Math.cos(this.pairAngle);
-      const sa = Math.sin(this.pairAngle);
+      // Pass 2, wave 6 (maker K): the system's own numbers until the pair's dials are moved by hand after this motion's screen,
+      // then the dials (`PAIR_TUNE`: the angle less 90 as the line angle, the distance middle to middle). Fields read, no call.
+      const own = PAIR_MOVES.n === this.pairMovesAt;
+      const lineAngle = own ? this.pairAngle : ((PAIR_TUNE.angleDeg - 90) * Math.PI) / 180;
+      const ca = Math.cos(lineAngle);
+      const sa = Math.sin(lineAngle);
       const ox = ca * tx + sa * nx;
       const oy = ca * ty + sa * ny;
       const oz = ca * tz + sa * nz;
-      const apart = (this.discA + this.discB) * DISC_TUNE.size + this.pairGap;
+      const apart = own ? (this.discA + this.discB) * DISC_TUNE.size + this.pairGap : (PAIR_TUNE.belowDeg * Math.PI) / 180;
       const cc = Math.cos(apart);
       const sc = Math.sin(apart);
       const qx = cc * dx + sc * ox;

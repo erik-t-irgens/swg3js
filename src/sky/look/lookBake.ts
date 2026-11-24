@@ -124,13 +124,17 @@ export function askKitsLater(renderer: Any): number {
  * same memo the screen's own warm and bakes ask (`askKit`), so a kit asked at the screen's start is the one waited on, and one
  * not landed in time keeps landing on its own (asked behind the screen, never by a draw) for the next screen. A look that is
  * not generated has no kit: true.
+ *
+ * (The fixer of pass 2, wave 6: the owner's "one loading screen for everything") a kit the screen's start did not ask for (an
+ * applied system's extra body's preset) is a look the arrival shows all the same: it is asked here and waited on like the
+ * rest, where wave 5 put it off to the screen after. Only `waitMs` 0 (the dial at nought) keeps wave 5's put-off.
  */
 export async function kitWithin(renderer: Any, look: BodyLook, size: number, waitMs: number): Promise<boolean> {
   if (!look?.generated) return true;
   const clouds = lookHasClouds(look);
   const key = lookPicturesKey(look, size, clouds);
-  // a kit the screen's start did not ask for is not asked under the screen: it is asked once the screen is gone (`askKitsLater`)
-  if (!KITS.has(key)) {
+  // with no wait at all, a kit the screen's start did not ask for is asked once the screen is gone (`askKitsLater`)
+  if (!KITS.has(key) && !(waitMs > 0)) {
     askLaterFor(key, genOf(look, size), size, clouds);
     return false;
   }
@@ -243,9 +247,12 @@ export class LookBaker {
    * A look's pictures at a size (at most `most` wide: `LOOK_BAKE_TUNE.skySize` or `.spaceSize`, never over the look's own),
    * from this session's memo, the browser's storage, or baked now where the screen's budget has room (its kit waited on for
    * what the budget has left); null where it is put off to the next screen (its reader draws SWG's picture), or the look
-   * cannot be baked. Behind a loading screen alone.
+   * cannot be baked. Behind a loading screen alone. `shown` (the fixer of pass 2, wave 6): a look the arrival shows (a sky
+   * card's disc picture, a space planet's), whose kit and bake are given the screen's whole kit wait (`LOOK_BODY_TUNE.kitWaitMs`)
+   * rather than the bake cache's `BAKE_TUNE.budgetMs`, so the screen waits until it is baked (the owner's "one loading screen
+   * for everything"); the map's globes leave it false.
    */
-  async bake(id: string, look: BodyLook, most: number, mayAsk = true): Promise<LookPictures | null> {
+  async bake(id: string, look: BodyLook, most: number, mayAsk = true, shown = false): Promise<LookPictures | null> {
     if (!look?.generated) return null;
     const size = lookBakeSize(look, most);
     const clouds = lookHasClouds(look);
@@ -258,11 +265,16 @@ export class LookBaker {
     const cache = bakeCache();
     // (the fixer of pass 2, wave 5) `mayAsk` false: a look whose kit this session has not asked for is put off and its kit asked
     // once the screen is gone (`askKitsLater`; the map's opened systems' bakes); the browser's storage still answers
-    const got = await cache.takeBytes(key, () => {
-      if (mayAsk || KITS.has(key)) return bakeOnCard(this.renderer, key, look, size, clouds, BAKE_TUNE.budgetMs - cache.stats.screenMs);
-      askLaterFor(key, genOf(look, size), size, clouds);
-      return Promise.resolve(null);
-    });
+    const budget = shown && LOOK_BODY_TUNE.kitWaitMs > BAKE_TUNE.budgetMs ? LOOK_BODY_TUNE.kitWaitMs : BAKE_TUNE.budgetMs;
+    const got = await cache.takeBytes(
+      key,
+      () => {
+        if (mayAsk || KITS.has(key)) return bakeOnCard(this.renderer, key, look, size, clouds, budget - cache.stats.screenMs);
+        askLaterFor(key, genOf(look, size), size, clouds);
+        return Promise.resolve(null);
+      },
+      budget,
+    );
     if (!got.parts) {
       LOOK_BAKE_STATS.fallback++;
       return null;

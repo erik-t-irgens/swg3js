@@ -15,7 +15,8 @@ const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-12);
 // ---- the record: the same layout and the same numbers
 // (wave B) the viewer's record is the game's 25 numbers, then the haze's colour appended; (the GPU port's pass 2, wave 4a)
 // the game's record appended the same three, so the two are one record of 28
-ok(Object.entries(GP.F).every(([k, i]) => V.F[k] === i) && GP.AIR_FIELD_COUNT === V.AIR_FIELD_COUNT && V.GAME_FIELD_COUNT + 3 === GP.AIR_FIELD_COUNT && V.F.mieTintR === V.GAME_FIELD_COUNT && GP.F.mieTintR === V.F.mieTintR, `the record's ${GP.AIR_FIELD_COUNT} fields sit where the game's do (${Object.keys(GP.F).length} named), the haze's colour appended after the first 25 in both`);
+// (the GPU port's pass 2, wave 6 appended the smoke and ash's twelve after the haze's colour, in both: 40 in all)
+ok(Object.entries(GP.F).every(([k, i]) => V.F[k] === i) && GP.AIR_FIELD_COUNT === V.AIR_FIELD_COUNT && V.GAME_FIELD_COUNT + 3 === V.HAZE_FIELD_COUNT && V.HAZE_FIELD_COUNT + 12 === GP.AIR_FIELD_COUNT && V.F.mieTintR === V.GAME_FIELD_COUNT && GP.F.mieTintR === V.F.mieTintR && GP.F.smokeER === V.HAZE_FIELD_COUNT, `the record's ${GP.AIR_FIELD_COUNT} fields sit where the game's do (${Object.keys(GP.F).length} named), the haze's colour appended after the first 25 and the smoke and ash after the 28 in both`);
 ok(JSON.stringify(GP.EARTH) === JSON.stringify({ ...V.EARTH, rayleigh: GP.EARTH.rayleigh, ozone: GP.EARTH.ozone }) && GP.EARTH.rayleigh.every((v, i) => v === V.EARTH.rayleigh[i]) && GP.EARTH.ozone.every((v, i) => v === V.EARTH.ozone[i]), 'Hillaire\'s Earth is the game\'s, number for number');
 const g = GP.newAirRecord();
 GP.setVisibility(g, 40);

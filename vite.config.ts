@@ -9,6 +9,7 @@ import { trackFileOf } from './src/race/trackPath.ts';
 import { shippedPublic } from './tools/dev/shippedPublic.mjs';
 import { servedFile } from './tools/dev/servedFile.mjs';
 import { skyPrivateMiddleware } from './tools/dev/skyPrivate.mjs';
+import { PREBUNDLED } from './tools/dev/prebundled.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
@@ -414,6 +415,11 @@ export default defineConfig({
   base: './',
   plugins: [privateAssets(), privateStory(), privateImports(), privateSky(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor(), shippedPublicList()],
   build: { target: 'es2022', sourcemap: false },
+  // Every package and three addon the game imports made at the server's start, so none is first met in play (the GPU port's
+  // pass 2, wave 6, after the owner's Mac): with reloading off a dependency the optimiser meets in play is made again behind a
+  // page that keeps the old one, two copies of three in one page and a black world (`tools/dev/prebundled.mjs`). After a pull,
+  // restart `npm run dev` (the README).
+  optimizeDeps: { include: PREBUNDLED },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.
   // `hmr: false` (the owner's call, 2026-11-01): an edit to the source no longer reloads the page and an edit to this file

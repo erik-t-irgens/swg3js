@@ -12,8 +12,9 @@
 import * as THREE from 'three';
 import { GPU } from '../../core/gpuSwitch.ts';
 import { AIR, AIR_UNITS, type AirTables } from './airApi.ts';
-import { AIR_DIAL_STATE, AIR_FILE_FIELDS, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setHazeGlow, setHazeTint, setVisibility, worldRecord, type AirRecord } from './airParams.ts';
-import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, buildDepthTable, buildPsiTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
+import { AIR_DIAL_STATE, AIR_FILE_FIELDS, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf, newAirRecord, ozoneOf, recordWords, setHazeGlow, setHazeTint, setSmoke, setVisibility, smokeOn, worldRecord, type AirRecord } from './airParams.ts';
+import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, SMOKE_FLOATS, TWIN_STEPS, buildDepthTable, buildPsiTable, buildSmokeTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
+import { SMOKE_DIAL_NAMES, type SmokeDials } from '../look/airProfile.js';
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
 import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
 import { registerAirDials } from './airDials.ts';
@@ -80,6 +81,15 @@ export class AirRun {
   /** The sky and light fix round: the glow round the sun (the haze's g, the world's dial) the rows were last set to, and asked with. */
   private glowSet = 0.5;
   private glowAsked = 0.5;
+  /**
+   * Pass 2, wave 6: the smoke and ash dials the rows were last set to and the last fit was asked with (the world's: none to
+   * start but Mustafar), the layer's shape its column table was made for, and that table (nought while none).
+   */
+  private readonly smokeSet: SmokeDials;
+  private smokeAsked: SmokeDials;
+  private readonly smokeTable = new Float64Array(SMOKE_FLOATS);
+  private smokeShapeC = -1;
+  private smokeShapeW = -1;
   private worker: Worker | null = null;
   private fitAsked = 0;
   private fitAnswered = 0;
@@ -123,6 +133,12 @@ export class AirRun {
     // The sky and light fix round: the world's glow round the sun (its dial; its own haze's g to start).
     this.glowSet = dials.glow;
     setHazeGlow(this.base, dials.glow);
+    // Pass 2, wave 6: the world's smoke and ash and its glow from below (its dials; none to start but Mustafar's measured
+    // plume), laid after the haze as the fit lays them, the glow in the scene's units.
+    this.smokeSet = smokeDialsOf(dials);
+    this.smokeAsked = smokeDialsOf(dials);
+    setSmoke(this.base, this.smokeSet);
+    this.twin.glowScale = AIR_UNITS.scene;
     ozoneOf(planet, this.ozSet);
     this.dialSeen = AIR_DIAL_STATE.version;
     // The world's column densities on this thread at once (a millisecond): the transmittance is exact from the first frame,
@@ -130,7 +146,22 @@ export class AirRun {
     const depth = new Float64Array(DEPTH_FLOATS);
     buildDepthTable(this.base, depth);
     this.twin.useDepth(depth);
+    this.smokeShape();
     this.twin.useRecord(this.base, this.basePsi);
+  }
+
+  /**
+   * Pass 2, wave 6: the smoke column table made again for the base record's layer where its middle or depth moved and the
+   * layer is on (a few milliseconds on this thread, at a loading screen or a moved dial, never in a frame of play otherwise).
+   */
+  private smokeShape(): void {
+    const b = this.base;
+    if (!smokeOn(b)) return;
+    if (b[F.smokeC] === this.smokeShapeC && b[F.smokeW] === this.smokeShapeW) return;
+    this.smokeShapeC = b[F.smokeC];
+    this.smokeShapeW = b[F.smokeW];
+    buildSmokeTable(b, this.smokeTable);
+    this.twin.useSmoke(this.smokeTable);
   }
 
   /** The fit asked of the worker (at load, and again when the world's visibility dial moves). */
@@ -153,9 +184,11 @@ export class AirRun {
     this.hazeAsked[1] = this.hazeSet[1];
     this.hazeAsked[2] = this.hazeSet[2];
     this.glowAsked = this.glowSet;
+    // Pass 2, wave 6: the smoke and ash asked with, so a dial moved while the worker works is laid again when it answers.
+    this.smokeAsked = { ...this.smokeSet };
     // The world's saved air's record fields (wave 4b) and its glow round the sun (the fix round's dial, which the saved air's
     // forward glow sets: `bodiesFile.ts`) both handed over; the worker lays the fields, then the glow over them.
-    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1], hazeTint: [this.hazeSet[0], this.hazeSet[1], this.hazeSet[2]], fileFields: AIR_FILE_FIELDS[this.planet] ?? null, glow: this.glowSet };
+    const ask: FitAsk = { id: ++this.fitAsked, sky, visibilityKm: this.visSet, gradients, ozoneMin: this.ozSet[0], ozoneMax: this.ozSet[1], hazeTint: [this.hazeSet[0], this.hazeSet[1], this.hazeSet[2]], fileFields: AIR_FILE_FIELDS[this.planet] ?? null, glow: this.glowSet, smoke: { ...this.smokeSet } };
     this.worker.postMessage(ask);
   }
 
@@ -195,6 +228,8 @@ export class AirRun {
       if (this.visSet !== r.visibilityKm) this.setRowsVisibility(this.visSet);
       // Pass 2, wave 4a: likewise the haze's colour (its multiple scattering follows when the asked fit lands).
       if (this.hazeSet[0] !== this.hazeAsked[0] || this.hazeSet[1] !== this.hazeAsked[1] || this.hazeSet[2] !== this.hazeAsked[2] || this.glowSet !== this.glowAsked) this.setRowsHaze();
+      // Pass 2, wave 6: likewise the smoke and ash (its multiple scattering follows when the asked fit lands).
+      if (smokeMoved(this.smokeSet, this.smokeAsked)) this.setRowsSmoke();
     }
     const w = this.fitWaiters.splice(0);
     for (const f of w) f();
@@ -210,7 +245,8 @@ export class AirRun {
     console.warn(`air: ${why}; every row takes the world's base record`);
     const depth = new Float64Array(DEPTH_FLOATS);
     buildDepthTable(this.base, depth);
-    buildPsiTable(this.base, depth, this.basePsi);
+    // Pass 2, wave 6: with the smoke and ash where the world's layer is on (its column table made at the run's start).
+    buildPsiTable(this.base, depth, this.basePsi, TWIN_STEPS.psiDirs, TWIN_STEPS.psi, smokeOn(this.base) ? this.smokeTable : null);
     this.twin.useDepth(depth);
     this.lastN = -1;
     const w = this.fitWaiters.splice(0);
@@ -232,6 +268,17 @@ export class AirRun {
     // The sky and light fix round: the glow round the sun with it (the haze's g; its multiple scattering the worker's too).
     setHazeGlow(this.base, this.glowSet);
     for (const rec of this.recs) setHazeGlow(rec, this.glowSet);
+    this.lastN = -1;
+  }
+
+  /**
+   * Pass 2, wave 6: every row's smoke and ash and glow set to the world's dials, at once on this thread, the layer's column
+   * table made again where its shape moved; the fit's worker gives their multiple scattering.
+   */
+  private setRowsSmoke(): void {
+    setSmoke(this.base, this.smokeSet);
+    for (const rec of this.recs) setSmoke(rec, this.smokeSet);
+    this.smokeShape();
     this.lastN = -1;
   }
 
@@ -267,11 +314,18 @@ export class AirRun {
         this.glowSet = dials.glow;
         this.setRowsHaze();
       }
+      // Pass 2, wave 6: the smoke and ash or the glow from below moved (the owner's dials): the rows take it at once, the
+      // worker their multiple scattering (numbers only, nothing built).
+      const smokeNow = smokeMoved(this.smokeSet, dials);
+      if (smokeNow) {
+        for (const k of SMOKE_DIAL_NAMES) this.smokeSet[k] = dials[k];
+        this.setRowsSmoke();
+      }
       if (dials.visibilityKm !== this.visSet) {
         this.visSet = dials.visibilityKm;
         this.setRowsVisibility(this.visSet);
         this.ask();
-      } else if (ozMoved || hazeMoved) this.ask();
+      } else if (ozMoved || hazeMoved || smokeNow) this.ask();
     }
     this.blendMix(mix);
     const tw = this.twin;
@@ -486,23 +540,63 @@ export class AirRun {
 
 /**
  * Tatooine's second sun's direction for the caster's `s`, into `out`: `src/sky/stars.ts`'s pair rule (`pairDirectionIn`,
- * its dial `PAIR_TUNE.belowDeg`), worked here from the vectors' own fields, since that function takes the caster's three
- * numbers across its call, and in four processes of twelve V8 left it out of the frame and made each one (48 B a frame).
- * `airRun.test.ts` holds the two to the same answer.
+ * its dials `PAIR_TUNE.belowDeg` and, since pass 2's wave 6, `PAIR_TUNE.angleDeg` round the caster: 0 today's lines to the
+ * bit), worked here from the vectors' own fields, since that function takes the caster's three numbers across its call, and
+ * in four processes of twelve V8 left it out of the frame and made each one (48 B a frame). `airRun.test.ts` holds the two
+ * to the same answer at every angle.
  */
 export function pairInto(s: THREE.Vector3, out: THREE.Vector3): void {
   const h = Math.sqrt(s.x * s.x + s.z * s.z);
   const y = s.y > 1 ? 1 : s.y < -1 ? -1 : s.y;
-  const e = Math.asin(y) - (PAIR_TUNE.belowDeg * Math.PI) / 180;
-  const ce = Math.cos(e);
-  if (h > 1e-9) {
-    out.x = (s.x / h) * ce;
-    out.z = (s.z / h) * ce;
-  } else {
-    out.x = 0;
-    out.z = ce;
+  if (PAIR_TUNE.angleDeg === 0) {
+    const e = Math.asin(y) - (PAIR_TUNE.belowDeg * Math.PI) / 180;
+    const ce = Math.cos(e);
+    if (h > 1e-9) {
+      out.x = (s.x / h) * ce;
+      out.z = (s.z / h) * ce;
+    } else {
+      out.x = 0;
+      out.z = ce;
+    }
+    out.y = Math.sin(e);
+    return;
   }
-  out.y = Math.sin(e);
+  // The caster's tangent frame (`pairDirectionOf`'s): down its vertical (y hx, -h, y hz) and ahead (-hz, 0, hx).
+  let hx = 0;
+  let hz = 1;
+  if (h > 1e-9) {
+    hx = s.x / h;
+    hz = s.z / h;
+  }
+  const t = (PAIR_TUNE.angleDeg * Math.PI) / 180;
+  const ct = Math.cos(t);
+  const st = Math.sin(t);
+  const ox = ct * y * hx - st * hz;
+  const oy = -ct * h;
+  const oz = ct * y * hz + st * hx;
+  const d = (PAIR_TUNE.belowDeg * Math.PI) / 180;
+  const cd = Math.cos(d);
+  const sd = Math.sin(d);
+  const qx = cd * s.x + sd * ox;
+  const qy = cd * y + sd * oy;
+  const qz = cd * s.z + sd * oz;
+  const ql = Math.sqrt(qx * qx + qy * qy + qz * qz);
+  out.x = qx / ql;
+  out.y = qy / ql;
+  out.z = qz / ql;
+}
+
+/** Pass 2, wave 6: a world's smoke and ash dials copied out of its row (`airParams.ts`' `AirDialRow`). */
+function smokeDialsOf(d: SmokeDials): SmokeDials {
+  const out = {} as SmokeDials;
+  for (const k of SMOKE_DIAL_NAMES) out[k] = d[k];
+  return out;
+}
+
+/** Pass 2, wave 6: whether any smoke and ash dial differs between two rows (read only when the dials' count moved). */
+function smokeMoved(a: SmokeDials, b: SmokeDials): boolean {
+  for (const k of SMOKE_DIAL_NAMES) if (a[k] !== b[k]) return true;
+  return false;
 }
 
 /** A colour's fields from a kept rgb (no number across a call). */

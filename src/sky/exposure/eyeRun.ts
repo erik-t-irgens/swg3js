@@ -8,8 +8,9 @@
 //     prepared, the computes not landed): the exposure the sun's height and the moon's give (`offStops`: the light on a level
 //     surface the air's twin works out, taken as a scene's brightness by `OFF_MEAN`, through the eye's own curve), written
 //     into the card's buffer by the main thread when it moves, so every reader of the buffer reads the same answer;
-//   - **today's** (WebGL, SWG's sky, space, a world with no air): an exposure of 1 and no glow compensation, the picture of
-//     before this wave.
+//   - **today's** (WebGL, SWG's sky, a world with no air): an exposure of 1 and no glow compensation, the picture of
+//     before this wave; and (pass 2, wave 6) **space's** on WebGPU: the steady exposure of its dial (`SPACE_EYE`), its emissives
+//     compensated alike.
 //
 // The renderer's own exposure (three's tone mapping) is the player's compensation (±2 stops) where a chain draws, since the
 // chain's output multiplies by the eye's buffer itself; with no chain every material tone-maps itself onto the canvas at the
@@ -38,7 +39,46 @@ export const EYE_IN = {
   loading: true,
   /** The light on a level surface this frame, scene units (the air's twin: each body's light times its height, and the sky's). */
   level: 1.5,
+  /** Pass 2, wave 6: the player stands in a space zone (WebGPU), where the exposure is `SPACE_EYE`'s. */
+  space: false,
 };
+
+/**
+ * Pass 2, wave 6 (wave 4b's leftover, "Naboo from orbit is dark"): space's exposure, in stops, where the card does not adapt
+ * (space has no air for the eye's follow-the-sun answer, so its exposure was today's 1). Its emissives take the eye's own
+ * compensation for the same stops (`EYE_TUNE.glow`), so lit windows, engines and bolts keep their look as at 1. **A dial, the
+ * owner's**: the brief's choice was the eye's rule or a dial, his call; a dial keeps every space zone one steady picture (the
+ * eye's measure of a frame mostly black would open it toward the stars and a planet's night side), and starts where Naboo from
+ * its orbit reads: **3 stops** (an exposure of 8). Seen from its zone's arrival at 0 to 4 stops (a 30-degree field facing it,
+ * its sun beside: `A:\swg3js\port\scratch\p2w6-makerA\shots\sheet-naboo-orbit.png`), at 0 the lit crescent alone showed and
+ * the face read black (the old picture), at 2 the land was still dim, at 3 its seas and land read in their colours with its
+ * limb's air bright short of white and no pixel clipped, at 4 the limb whitened; the station's sunlit hull at 3 is pale, not
+ * clipped. 0 puts space back as it was.
+ */
+export const SPACE_EYE = { stops: 3 };
+/** The dial's range, stops. */
+export const SPACE_EYE_RANGE = [-2, 6] as const;
+
+/** The space exposure moved as the console writes it (`{ stops: 1.5 }`), held to its range; words for anything held or refused. */
+export function tuneSpaceEye(o: unknown): string[] {
+  if (!o || typeof o !== 'object') return ['space takes { stops }'];
+  const said: string[] = [];
+  for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+    if (k !== 'stops') {
+      said.push(`space.${k}: no such dial (stops)`);
+      continue;
+    }
+    const n = Number(v);
+    if (!Number.isFinite(n)) {
+      said.push('space.stops: not a number');
+      continue;
+    }
+    const held = n < SPACE_EYE_RANGE[0] ? SPACE_EYE_RANGE[0] : n > SPACE_EYE_RANGE[1] ? SPACE_EYE_RANGE[1] : n;
+    if (held !== n) said.push(`space.stops held to ${held}`);
+    SPACE_EYE.stops = held;
+  }
+  return said;
+}
 
 /** What the eye answers a frame: the mode, the main thread's own exposure and glow (when the card does not adapt), and the renderer's exposure. */
 export const EYE_OUT = {
@@ -84,6 +124,12 @@ export function eyeFrameRun(): void {
     EK[0] = Math.log2(l * OFF_MEAN);
     kneeInto();
     const s = EK[1];
+    o.stops = s;
+    o.exposure = Math.pow(2, s);
+    o.glow = Math.pow(2, -EYE_TUNE.glow * s);
+  } else if (i.space) {
+    // Pass 2, wave 6: space's own steady exposure (the dial), its emissives compensated as the eye compensates them.
+    const s = SPACE_EYE.stops;
     o.stops = s;
     o.exposure = Math.pow(2, s);
     o.glow = Math.pow(2, -EYE_TUNE.glow * s);

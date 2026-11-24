@@ -50,6 +50,19 @@ export const LOADING_TUNE = {
    * only the Interface page's sentence: a screen held a second on every arrival for it would be paid for nothing.
    */
   driverWaitMs: 1000,
+  /**
+   * A screen whose words and bar have not moved for this long, ms, says so: its line reads "<what>, waiting N s" and the
+   * console says what it waits for, at this interval for as long as it waits (the owner's Mac's screen of 23 November stood
+   * at 62% saying nothing). A technical bound: past every still step's ordinary length here (13 s), short of giving up.
+   */
+  stallSayMs: 15000,
+  /**
+   * How long a settle's screen may stand still, ms (neither its words nor its bar moving), before the settle is given up on
+   * with words and the world opens as it stands, whatever it was waiting for finishing in play (`App.stillBound`). A cold
+   * driver cache's sweep moves its words with every program it builds, so only a wait that answers nothing reaches it; the
+   * slowest still step here (the people's shaders) took 13 s.
+   */
+  stepGiveUpMs: 120000,
 };
 
 export type LoadingTune = typeof LOADING_TUNE;
@@ -76,6 +89,8 @@ const RANGES: Partial<Record<keyof LoadingTune, [number, number]>> = {
   courseLoads: [1, 16],
   gridSettleMs: [0, 60000],
   driverWaitMs: [0, 10000],
+  stallSayMs: [1000, 600000],
+  stepGiveUpMs: [1000, 3600000],
 };
 
 /** Any of `LOADING_TUNE` moved live, in memory; words for anything refused or held to its range. */

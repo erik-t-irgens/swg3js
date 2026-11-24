@@ -94,7 +94,10 @@ function sameAsBase(what: string): void {
     const n = NP.worldRecord(id);
     NP.setVisibility(n, vis);
     NP.applyHazeDials(id, n);
-    if (!sameBits(o, n)) rec = false;
+    // (pass 2, wave 6 appended the smoke and ash after the 28 numbers, none on every world but Mustafar's measured plume:
+    // the base is held over its 28 and, having no layer, against the tree's record with the layer laid to none)
+    if (!sameBits(o, n, 28)) rec = false;
+    NP.setSmoke(n, V.SMOKE_DIAL_START);
     const dO = new Float64Array(OT.DEPTH_FLOATS);
     const dN = new Float64Array(NT.DEPTH_FLOATS);
     OT.buildDepthTable(o, dO);
@@ -151,7 +154,8 @@ function sameAsBase(what: string): void {
     if (a.records.length !== b.records.length || !sameBits(a.depth, b.depth)) fit = false;
     for (let i = 0; i < a.records.length; i++) {
       rows++;
-      if (!sameBits(a.records[i], b.records[i]) || !sameBits(a.psis[i], b.psis[i])) fit = false;
+      // (pass 2, wave 6: the tree's records are 40, the layer none after the base's 28 with no smoke asked)
+      if (!sameBits(a.records[i], b.records[i], 28) || !sameBits(a.psis[i], b.psis[i])) fit = false;
     }
   }
   ok(fit, `${what}: the fit's ${rows} rows over three worlds, as the page asks the worker (the tree's ask with its fields), are the base's to the bit`);
@@ -204,7 +208,8 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
   const ext = n[F.rayG] + n[F.mieS] + n[F.mieA];
   ok(Math.abs(ext - NP.KOSCHMIEDER / 30) < 1e-12 && Math.abs(n[F.mieS] / (n[F.mieS] + n[F.mieA]) - 0.8) < 1e-12, `the haze's scattering and absorption from the same visibility and albedo: the surface's extinction ${ext.toFixed(6)} per km sees 30 km, 0.8 of the haze's share scattered (the clear air's own Rayleigh in it is the world's: the game fits its colour, the viewer's sky colour stays the viewer's)`);
   NP.setAirFileFields(id, null);
-  ok(sameBits(NP.worldRecord(id), OP.worldRecord(id)), 'the fields taken off, the record is the base again');
+  // (pass 2, wave 6: the tree's record is 40, the smoke and ash none after the base's 28)
+  ok(sameBits(NP.worldRecord(id), OP.worldRecord(id), 28), 'the fields taken off, the record is the base again');
 }
 
 // ---------------------------------------------------------------- 3. the saved air made a world's air, and put back
@@ -235,7 +240,7 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
   ok(NP.AIR_FILE_FIELDS.naboo?.hazeHeightKm === 3 && NP.AIR_FILE_FIELDS.naboo?.groundAlbedo === 0.25 && r.naboo, "and lays the fields it names on Naboo's record");
   const rec = NP.worldRecord('naboo');
   ok(rec[NP.F.mieH] === 3 && rec[NP.F.groundG] === 0.25, "Naboo's record (its ground sky's base and its body's seen from Rori) carries them");
-  ok(sameBits(NP.worldRecord('rori'), OP.worldRecord('rori')) && NP.airDialsOf('rori').visibilityKm === 40, 'a world the file does not name is as before');
+  ok(sameBits(NP.worldRecord('rori'), OP.worldRecord('rori'), 28) && NP.airDialsOf('rori').visibilityKm === 40, 'a world the file does not name is as before');
   // The worker is handed them: its fit's records carry the fields.
   const sky = { planet: 'naboo', sunElevationDegrees: 67.5, blocks: [{ name: 'global', weatherIndex: 0, ramp: null, fog: { enabled: false, min: 0, max: 0 } }] };
   const fields = { ...NP.AIR_FILE_FIELDS.naboo };
@@ -461,7 +466,8 @@ const NOWORLD = B.cleanBodiesFile({ version: 1, made: 'x', credits: 'c', looks: 
   const bake = readFileSync(join(REPO, 'src', 'sky', 'look', 'lookBake.ts'), 'utf8');
   // (The fixer of wave 5: a bake asked with `mayAsk` false puts off a look whose kit was never asked, its kit asked once the
   // screen is gone; one that may ask, or whose kit was asked, bakes as before.)
-  ok(/cache\.takeBytes\(key, \(\) => \{\n\s+if \(mayAsk \|\| KITS\.has\(key\)\) return bakeOnCard\(this\.renderer, key, look, size, clouds, BAKE_TUNE\.budgetMs - cache\.stats\.screenMs\);\n\s+askLaterFor\(key, genOf\(look, size\), size, clouds\);\n\s+return Promise\.resolve\(null\);/.test(bake) && /\.warm\(renderer, gen, \{ withClouds: clouds, again: !!had \}\)/.test(bake) && /set\.dispose\(\);/.test(bake), "a bake goes through the bake cache's budget, its kit waited on for what the budget has left, its targets freed after the read-back");
+  // (the fixer of wave 6) the budget is the bake cache's, or for a look the arrival shows the screen's whole kit wait (`shown`)
+  ok(/const budget = shown && LOOK_BODY_TUNE\.kitWaitMs > BAKE_TUNE\.budgetMs \? LOOK_BODY_TUNE\.kitWaitMs : BAKE_TUNE\.budgetMs;\n\s+const got = await cache\.takeBytes\(\n\s+key,\n\s+\(\) => \{\n\s+if \(mayAsk \|\| KITS\.has\(key\)\) return bakeOnCard\(this\.renderer, key, look, size, clouds, budget - cache\.stats\.screenMs\);\n\s+askLaterFor\(key, genOf\(look, size\), size, clouds\);\n\s+return Promise\.resolve\(null\);\n\s+\},\n\s+budget,\n\s+\);/.test(bake) && /\.warm\(renderer, gen, \{ withClouds: clouds, again: !!had \}\)/.test(bake) && /set\.dispose\(\);/.test(bake), "a bake goes through its budget (the bake cache's, or a shown look's whole kit wait), its kit waited on for what the budget has left, its targets freed after the read-back");
   ok(/if \(!landed\) \{[\s\S]{0,300}return null;/.test(bake) && /if \(!drawn\(surface\)/.test(bake), 'a kit not landed within the budget, or a read-back that came back empty, bakes nothing and keeps nothing');
   ok(/landed = kit\.clean;/.test(bake) && /ask\.clean = took < LOST_AFTER_MS;/.test(bake) && /if \(had && \(!had\.done \|\| had\.clean\)\) return had;/.test(bake), "an ask answered only at the warm-up's own bound is not a landing: the next bake asks again before it draws");
   // The kit's ask: each pass's pipeline asked once and kept until it lands, so a later screen awaits the same asks.

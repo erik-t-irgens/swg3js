@@ -53,7 +53,8 @@ const NP = await load(NEW, 'sky/air/airParams.ts');
 const NT = await load(NEW, 'sky/air/airTwin.ts');
 const NF = await load(NEW, 'sky/air/airFit.ts');
 const V = await load(NEW, 'sky/look/airProfile.js');
-ok(OP.AIR_FIELD_COUNT === 25 && NP.AIR_FIELD_COUNT === 28, `the code before the wave (${BASE}) is written out of git beside the tree's: its record of 25 numbers, the tree's of 28`);
+// (pass 2, wave 6 appended the smoke and ash after the haze's colour: the tree's record is 40 numbers, its first 28 this wave's)
+ok(OP.AIR_FIELD_COUNT === 25 && NP.AIR_FIELD_COUNT === 40 && NP.HAZE_FIELD_COUNT === 28, `the code before the wave (${BASE}) is written out of git beside the tree's: its record of 25 numbers, the tree's of 28 and (since wave 6) the smoke and ash after them`);
 
 /** Two arrays the same to the bit over their first `n` numbers (every number by `Object.is`). */
 function sameBits(a: ArrayLike<number>, b: ArrayLike<number>, n = Math.max(a.length, b.length)): boolean {
@@ -70,7 +71,7 @@ ok(
 );
 {
   const r = NP.newAirRecord();
-  ok(r.length === 28 && r[NP.F.mieTintR] === 1 && r[NP.F.mieTintG] === 1 && r[NP.F.mieTintB] === 1 && sameBits(r, OP.newAirRecord(), 25), 'a fresh record is the old one to the bit, with a grey haze (1, 1, 1)');
+  ok(r.length === NP.AIR_FIELD_COUNT && r[NP.F.mieTintR] === 1 && r[NP.F.mieTintG] === 1 && r[NP.F.mieTintB] === 1 && sameBits(r, OP.newAirRecord(), 25), 'a fresh record is the old one to the bit, with a grey haze (1, 1, 1)');
 }
 ok(
   Object.entries(NP.F).every(([k, i]) => V.F[k] === i) && V.AIR_FIELD_COUNT === NP.AIR_FIELD_COUNT,
@@ -375,9 +376,10 @@ const worldPair = (id: string, vis: number): [Any, Any] => {
     hits('mieTint.mul(mieS.mul(m.y))') === 3 && t.includes('this.u5.set(r[F.mieTintR], r[F.mieTintG], r[F.mieTintB]);') && t.includes('const mieTint = live(U.u5);') && t.includes('tl.mul(sR.mul(rayleighPhase(c)).add(sM.mul(miePhase(c)))).add(ps.mul(sR.add(sM)))'),
     "the card's multiple scattering, sky view and haze volume take the haze's scattering times its colour (one uniform written from the record with the rest), and every light's source the coloured scattering; the extinction stays grey (`mieS.add(mieA)`)",
   );
-  ok(hits('mieS.add(mieA)') === 1, "the card's extinction is the grey haze's alone");
+  // (pass 2, wave 6: the glow from below dims through the haze's whole extinction too, `glowAt`: the second and only other)
+  ok(hits('mieS.add(mieA)') === 2 && t.includes('const extinction = (d: Any): Any => rayS.mul(d.x).add(vec3(mieS.add(mieA).mul(d.y))).add(ozA.mul(d.z));'), "the card's extinction is the grey haze's alone (the smoke and ash's is its own, added after)");
   const run = readFileSync(join(NEW, 'sky', 'air', 'airRun.ts'), 'utf8');
-  ok(/hazeTint: \[this\.hazeSet\[0\], this\.hazeSet\[1\], this\.hazeSet\[2\]\]/.test(run) && /setHazeTint\(this\.base, dials\.hazeR, dials\.hazeG, dials\.hazeB\)/.test(run) && /else if \(ozMoved \|\| hazeMoved\) this\.ask\(\);/.test(run), "the run reads the world's haze dials at its start, hands them to the fit's worker and asks again when they move");
+  ok(/hazeTint: \[this\.hazeSet\[0\], this\.hazeSet\[1\], this\.hazeSet\[2\]\]/.test(run) && /setHazeTint\(this\.base, dials\.hazeR, dials\.hazeG, dials\.hazeB\)/.test(run) && /else if \(ozMoved \|\| hazeMoved(?: \|\| smokeNow)?\) this\.ask\(\);/.test(run), "the run reads the world's haze dials at its start, hands them to the fit's worker and asks again when they move");
 }
 
 console.log(`\nairHazeTint: ${checks} checks passed`);

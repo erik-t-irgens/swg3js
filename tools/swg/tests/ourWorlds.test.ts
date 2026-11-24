@@ -243,7 +243,8 @@ const game = PLANETS.filter((p) => !p.ours);
     [world, "await wildLife.load(standsLife(planet) ? this.packId : '', import.meta.env.BASE_URL", 'a copy stands no wildlife and no people of the data'],
     [world, 'this.ambience?.begin(packId, standsLife(planet));', 'nor a placed sound'],
     [world, 'if (standsLife(this.planet)) ambientPeople.step(dt, this.simTime, playerPos, this.ambientDeps());', 'nor a person of ours'],
-    [world, 'const sky = await SwgSky.load(pack, mix ?? undefined);', 'the sky made from its parts'],
+    // (pass 2, wave 6: on WebGPU his ground places from the viewer laid over the parts' mix, `groundPlaces.ts`)
+    [world, 'const sky = await SwgSky.load(pack, placed ? (d) => placed!(mix ? mix(d) : d) : (mix ?? undefined));', 'the sky made from its parts (his moved ground places over them)'],
     [main, 'const placesFor = editKeyOf(planet, this.zone);', 'the arrival reads its places by the edit key'],
     [main, 'const dressingPack = editKeyOf(planet, this.zone);', 'its permanent rows'],
     [main, 'void this.enterPlaced(editKeyOf(planet, this.zone));', "the player's own things there"],

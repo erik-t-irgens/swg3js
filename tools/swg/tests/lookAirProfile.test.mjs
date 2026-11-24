@@ -17,7 +17,8 @@ const worst3 = (a, b, i = 0, j = 0) => Math.max(rel(a[i], b[j]), rel(a[i + 1], b
 const rec = A.recordOf({ mode: 'scattered' });
 const fresh = A.newRecord();
 // (wave B) the game's 25 numbers, then the haze's colour (three more)
-ok(rec.length === A.AIR_FIELD_COUNT && A.AIR_FIELD_COUNT === 28 && A.GAME_FIELD_COUNT === 25, 'a record holds the game\'s 25 numbers and the haze\'s colour (28)');
+// (the GPU port's pass 2, wave 6 appended the smoke and ash's twelve after the haze's colour: 40 in all, the first 28 as they were)
+ok(rec.length === A.AIR_FIELD_COUNT && A.AIR_FIELD_COUNT === 40 && A.HAZE_FIELD_COUNT === 28 && A.GAME_FIELD_COUNT === 25, 'a record holds the game\'s 25 numbers and the haze\'s colour (28), then the smoke and ash (40)');
 ok(rec[F.bottom] === 6360 && rec[F.top] === 6460 && rec[F.rayH] === 8 && rec[F.mieH] === 1.2 && rec[F.mieG] === 0.8 && rec[F.ozC] === 25 && rec[F.ozW] === 15, 'the start\'s planet, heights, phase and ozone layer are Hillaire\'s');
 ok(worst3(rec, fresh, F.rayR, F.rayR) < 0.01, `its Rayleigh is Hillaire's within 1% (the sky colour's hex rounds it: ${[F.rayR, F.rayG, F.rayB].map((i) => (rel(rec[i], fresh[i]) * 100).toFixed(2) + '%').join(', ')})`);
 ok(worst3(rec, fresh, F.ozR, F.ozR) < 1e-12, 'its ozone is Hillaire\'s');

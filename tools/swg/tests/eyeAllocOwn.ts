@@ -49,7 +49,9 @@ function frame(): void {
   const n = st[0];
   const a = n * 0.0007;
   e.dt = 0.0069 + (n % 7) * 0.0003;
-  e.air = (n & 1023) !== 0;
+  // The fixer of pass 2, wave 6: a quarter of the frames in space (no air there: `EYE_IN.space`, its own steady exposure).
+  e.space = (n & 4095) >= 3072;
+  e.air = !e.space && (n & 1023) !== 0;
   e.chain = (n & 511) !== 3;
   e.eye = e.chain && (n & 255) !== 7;
   e.adapt = (n & 2047) < 1024 ? 1 : 0;

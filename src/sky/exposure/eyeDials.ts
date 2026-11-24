@@ -13,6 +13,7 @@ import type { DialGroup, DialSet, NumberDial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
 import { EYE_DEMO, EYE_TUNE, EYE_TUNE_RANGE, tuneEye } from './eyeMath.ts';
 import { eyeLightsGroup } from '../eyeLights.ts';
+import { SPACE_EYE, SPACE_EYE_RANGE, tuneSpaceEye } from './eyeRun.ts';
 
 type Key = keyof typeof EYE_TUNE;
 
@@ -57,8 +58,21 @@ const GROUPS: DialGroup[] = [
   },
 ];
 
+/**
+ * Pass 2, wave 6 (maker A): space's steady exposure (`SPACE_EYE`, set through `__debug.exposure({ space: { stops } })`): a dial of
+ * the owner's, its start and reason with the number in `eyeRun.ts`.
+ */
+export function spaceEyeGroup(): DialGroup {
+  const [min, max] = SPACE_EYE_RANGE;
+  return {
+    title: "Space's exposure",
+    note: 'In a space zone there is no air for the eye to follow, so its exposure is one steady number: this many stops over the old 1. Emissives (windows, engines, bolts) are compensated as the eye compensates them, so only the sunlit planets, hulls and nebulae brighten.',
+    dials: [{ kind: 'number', key: 'space.stops', label: 'Space exposure', note: `Stops over an exposure of 1 (0 is space as it was): ${SPACE_EYE.stops} to start, where Naboo's lit face from its orbit reads (eyeRun.ts says how it was found).`, min, max, step: 0.05, unit: 'stops', get: () => SPACE_EYE.stops, set: (v) => tuneSpaceEye({ stops: v }) }],
+  };
+}
+
 /** More groups for the same set, each made when the set is first asked for (pushed as their modules load). */
-export const EYE_DIAL_GROUPS: (() => DialGroup)[] = [eyeLightsGroup];
+export const EYE_DIAL_GROUPS: (() => DialGroup)[] = [eyeLightsGroup, spaceEyeGroup];
 
 let SET: DialSet | null = null;
 

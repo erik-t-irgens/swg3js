@@ -123,16 +123,21 @@ if (!ALLOC) {
     let worst = 0;
     const out = new THREE.Vector3();
     const want = { x: 0, y: 0, z: 0 };
-    for (const below of [0, 1.5, 6]) {
-      PAIR_TUNE.belowDeg = below;
-      for (const s of [new THREE.Vector3(0.3, 0.9, 0.31).normalize(), new THREE.Vector3(0, 1, 0), new THREE.Vector3(-0.99, 0.02, 0.1).normalize(), new THREE.Vector3(0.5, -0.2, -0.84).normalize()]) {
-        pairInto(s, out);
-        pairDirectionIn(s.x, s.y, s.z, want);
-        worst = Math.max(worst, Math.abs(out.x - want.x), Math.abs(out.y - want.y), Math.abs(out.z - want.z));
+    // Pass 2, wave 6 (maker K): at every angle round the caster too (0 today's lines, 90 beside, 180 above, and between).
+    for (const angle of [0, 90, 180, -90, 37, -150]) {
+      PAIR_TUNE.angleDeg = angle;
+      for (const below of [0, 1.5, 6]) {
+        PAIR_TUNE.belowDeg = below;
+        for (const s of [new THREE.Vector3(0.3, 0.9, 0.31).normalize(), new THREE.Vector3(0, 1, 0), new THREE.Vector3(-0.99, 0.02, 0.1).normalize(), new THREE.Vector3(0.5, -0.2, -0.84).normalize()]) {
+          pairInto(s, out);
+          pairDirectionIn(s.x, s.y, s.z, want);
+          worst = Math.max(worst, Math.abs(out.x - want.x), Math.abs(out.y - want.y), Math.abs(out.z - want.z));
+        }
       }
     }
     PAIR_TUNE.belowDeg = 1.5;
-    ok(worst === 0, "the run's pair rule is stars.ts's own to the bit, at three heights under the caster and four casters");
+    PAIR_TUNE.angleDeg = 0;
+    ok(worst === 0, "the run's pair rule is stars.ts's own to the bit, at six angles round the caster, three distances and four casters");
   }
   const rep = run.report() as { fit: { rows: number }; record: unknown };
   ok(rep.fit.rows === T.blocks.length && !!rep.record, "the run's report (for __debug.sky) names the fit and the record in force");
@@ -150,6 +155,8 @@ if (ALLOC) {
   const young = (): number => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')!.space_used_size;
   const turn = () => new Promise((r) => setImmediate(r));
   const moving = process.argv.includes('--moving');
+  // (pass 2, wave 6, maker K) the pair turned beside the caster, set before any frame as the console would set it
+  if (process.argv.includes('--beside')) PAIR_TUNE.angleDeg = 90;
   const L = lighting();
   const day = dayAt(40);
   const clearIdx = T.blocks.findIndex((b) => b.weatherIndex === 0);
@@ -197,11 +204,12 @@ if (ALLOC) {
   process.exit(0);
 } else {
   const me = fileURLToPath(import.meta.url);
-  for (const kind of ['steady', 'moving'] as const) {
-    const runs = await Promise.all(
-      Array.from({ length: 12 }, () =>
+  // (pass 2, wave 6, maker K) a third kind, the moving frame with Tatooine's pair turned beside the caster (its other branch);
+  // and the twelve processes in two waves of six, the machine's cap on node processes at once
+  for (const kind of ['steady', 'moving', 'beside'] as const) {
+    const one = () =>
         new Promise<number | string>((res) => {
-          const ch = spawn(process.execPath, ['--expose-gc', me, '--alloc', ...(kind === 'moving' ? ['--moving'] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
+          const ch = spawn(process.execPath, ['--expose-gc', me, '--alloc', ...(kind === 'steady' ? [] : ['--moving']), ...(kind === 'beside' ? ['--beside'] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
           let out = '';
           let err = '';
           ch.stdout.on('data', (b) => (out += b));
@@ -213,9 +221,9 @@ if (ALLOC) {
               res(`no answer: ${err.slice(0, 300)}`);
             }
           });
-        }),
-      ),
-    );
+        });
+    const runs: (number | string)[] = [];
+    for (let wave = 0; wave < 2; wave++) runs.push(...(await Promise.all(Array.from({ length: 6 }, one))));
     const said = runs.map((x) => (typeof x === 'number' ? `${x.toFixed(3)} B` : x));
     ok(runs.every((x) => typeof x === 'number' && x < 0.5), `a ${kind} frame of the run (the mix, the twin, the frame record, SWG's lighting kept, the lighting written) makes nothing in 12 of 12 fresh processes (${said.join(', ')})`);
   }

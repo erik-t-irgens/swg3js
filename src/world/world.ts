@@ -187,6 +187,8 @@ import { heldPictureOf, heldPlanOf, type HeldPlan } from '../sky/bodies/heldBodi
 import { PLUME_TUNE, groundDistantOf, installPlumeDebug, plumeReach, setPlumesCurrent } from '../sky/bodies/groundDistant.ts';
 import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
 import { SKY_MOTION, skyMotionFor, type SkyMotion, type SystemsRecord } from '../sky/system/skyMotion.ts';
+import { pairDialsFrom } from '../sky/stars.ts';
+import { groundPlacesMix } from '../sky/look/groundPlaces.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
@@ -3984,7 +3986,15 @@ export class World {
     // A world of yours' sky in parts (the race drawer's fourth wave): the other skies its parts come from, read first.
     const mix = await this.skyMixFor(basePack);
     if (token !== this.loadToken) return;
-    const sky = await SwgSky.load(pack, mix ?? undefined);
+    // Pass 2, wave 6 (maker K): on WebGPU the ground places he moved or sized in the viewer laid over the sky file before it is
+    // made (`groundPlaces.ts`; this screen's Save to game read first, as it is a few lines on); none named, the sky as it was.
+    let placed: ((d: SkyData) => SkyData) | null = null;
+    if (GPU.webgpu && this.bodiesRead) {
+      await this.bodiesRead;
+      if (token !== this.loadToken) return;
+      placed = groundPlacesMix(basePack);
+    }
+    const sky = await SwgSky.load(pack, placed ? (d) => placed!(mix ? mix(d) : d) : (mix ?? undefined));
     if (!sky) return;
     // Another world was loaded while the textures came: this sky is not wanted any more.
     if (token !== this.loadToken) {
@@ -4249,6 +4259,8 @@ export class World {
     this.day.follow(motion);
     SKY_MOTION.now = motion;
     sky?.useMotion(motion);
+    // Pass 2, wave 6 (maker K): an applied system's pair sets the sky's two pair dials at its screen; with none, they go back.
+    pairDialsFrom(motion ? motion.pairSays : null);
     if (motion) console.info(`sky: ${motion.world} follows ${motion.name} (${motion.ownsDay ? `its own day of ${(motion.lengthSeconds / 3600).toFixed(2)} h` : "the game's day"}, ${motion.items.length} bodies)`);
   }
 

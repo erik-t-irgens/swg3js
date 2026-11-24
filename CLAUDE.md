@@ -96,7 +96,7 @@ Each is told at length in the file named.
 
 The whole account, pass by pass, is `docs/STATUS.md`: what each pass built, what is not built and what nobody has seen yet, and at its end the known gaps and the agreed order. Read the paragraph of the area you are about to change, and add one there when a wave lands. In brief:
 
-- `claude/three-187` is the trunk: the WebGPU port on three 0.187, carrying everything main has, the climbing included. It draws on WebGPU by default; `?renderer=webgl` gives the WebGL renderer to compare.
+- `claude/three-187` is the trunk: the WebGPU port on three 0.187, carrying everything main has, the climbing included. It draws on WebGPU by default; `?renderer=webgl` gives the WebGL renderer to compare. Since 2026-11-23 WebGL needs no consideration (the owner's word): no WebGL proof, parity check or fallback for new work.
 - `main`, and `claude/webgl-backup` beside it, is the last WebGL release. Main moves only on the owner's word (the hard rules).
 - The port's plan and each step's design are kept on the owner's machine under `A:\swg3js\port\`, and the session's handoff note says what comes next.
 

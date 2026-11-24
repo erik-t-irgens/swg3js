@@ -106,6 +106,31 @@ export function tiltFrameInto(tiltDeg: number, nodeDeg: number, out: Float64Arra
 }
 
 /**
+ * (The fixer of pass 2, wave 6: the owner's late addition 2) The galaxy's frame in the sky of a world whose star system is
+ * applied, into `out` (nine numbers column after column): the world's own celestial frame now, `cel` (its equator's reference,
+ * the equator a quarter turn on and its pole: `SkyMotion.celestial`, written by the day's `at` each frame), carrying `tilt`
+ * (`tiltFrameInto`'s frame at the day's angle nought, laid against SWG's day frame: `QUARTER`, `NOON` and the upper pole) as
+ * the world's own equator and pole carry it. So the tilt dials keep their meaning (the galactic pole `tiltDeg` off the world's
+ * celestial pole, turned `nodeDeg` about it), and the stars turn about the world's own axis at its own spin, its sidereal day:
+ * the stars, the sun's path and the bodies one sky. Reads the arrays alone and writes the kept one: what a frame calls.
+ */
+export function celestialFrameInto(tilt: ArrayLike<number>, cel: ArrayLike<number>, out: Float64Array | Float32Array | number[]): void {
+  for (let col = 0; col < 3; col++) {
+    const x = tilt[col * 3];
+    const y = tilt[col * 3 + 1];
+    const z = tilt[col * 3 + 2];
+    // into the day frame's own terms (along `QUARTER`, along `NOON`, along the upper pole)...
+    const a = x;
+    const b = SP * y - CP * z;
+    const c = CP * y + SP * z;
+    // ...and out along the world's own
+    out[col * 3] = a * cel[0] + b * cel[3] + c * cel[6];
+    out[col * 3 + 1] = a * cel[1] + b * cel[4] + c * cel[7];
+    out[col * 3 + 2] = a * cel[2] + b * cel[5] + c * cel[8];
+  }
+}
+
+/**
  * The galaxy's frame in the world's sky now, into `out` (nine numbers column after column): `tilt` the frame at the day's
  * angle nought (`tiltFrameInto`, worked when a dial moves), turned about the day's axis by the angle the sun `sun` (unit)
  * stands at. A direction of the map's frame `g` stands in the world's sky at `out · g`. Reads the vectors' fields and writes

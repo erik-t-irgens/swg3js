@@ -18,9 +18,13 @@
 //   - **the haze on solids** (wave 5): the stage's ground, a level ground at the eye's height round as the world is, lit by
 //     the twin's own ground light and hazed at its own distance by the haze volume and the sky view as the game's haze pass
 //     hazes every solid pixel (`airHaze.ts`' `airTerms`);
-//   - **the eye**: the game's "follow the sun" answer (`eyeFrameRun` over the twin's level light, the Eye adaptation row
-//     off, the merged eye's curve with the night's `low` and `share`), or a match's measured exposure handed over as JSON
-//     from the game (`__debug.sky({ match })`'s `json`);
+//   - **the eye**: a match's measured exposure handed over as JSON from the game (`__debug.sky({ match })`'s `json`); else
+//     (pass 2, wave 6, maker K) the game's own adapting eye, as the game's Eye adaptation row draws it on: the game's eye pass
+//     (`GpuEyePass`) measures the chain's buffer on the card and eases toward its answer at the game's pace, taken at once when
+//     the world or the hour jumps as a loading screen takes it, and the output reads the eye's buffer; where the eye's
+//     computes have not landed (or `eyeAdapts` is off), the game's "follow the sun" answer (`eyeFrameRun` over the twin's level
+//     light, the row off, the merged eye's curve with the night's `low` and `share`). The viewer's scene is not stored
+//     pre-exposed (its `pre` stands at 1, so the eye measures it straight);
 //   - **the chain** (wave 5: the sky and light fix round's, in the game's order on WebGPU under our sky): the scene stored
 //     into the chain's buffer through the sanitize (values not numbers zeroed, the brightest held to its 8192), the owner's
 //     demo's bloom (`GpuMixBloomPass`: no threshold, the Graphics page's 4% laid over the picture as `mix(picture, bloom,
@@ -43,7 +47,8 @@ import { IN as TWIN_IN, lightTransmittance } from '../air/airTwin.ts';
 import { airSkyMaterial } from '../air/airSky.ts';
 import { DayCycle } from '../../world/daycycle.ts';
 import { EYE_IN, EYE_OUT, eyeFrameRun } from '../exposure/eyeRun.ts';
-import { writeEyeCpu } from '../exposure/eyeBuffer.ts';
+import { eyeExposureNode, writeEyeCpu } from '../exposure/eyeBuffer.ts';
+import { GpuEyePass, eyeReady } from '../exposure/eyeGpu.ts';
 import { createGradeParams, createGradeSource, deriveGrade, lookFor, LUMA, GRADE_PIVOT, type GradeParams, type GradeSource } from '../../core/fx/gradeMath.ts';
 import { sanitizeGraph, type ChainGraph } from '../../core/gpu/gpuChain.ts';
 import { GpuMixBloomPass } from '../../core/gpu/gpuBloomMix.ts';
@@ -252,6 +257,16 @@ export class GameLook {
   private readonly chainCtx = { renderer: null as Any };
   /** The exposure last written into the eye's buffer (the bloom's first level weighs by it, as the game's does). */
   private eyeWritten = -1;
+  /**
+   * Pass 2, wave 6 (maker K): the game's adapting eye with no match held (the game's Eye adaptation row's start, on); false for
+   * the follow-the-sun answer, to compare. The eye's pass (made with the chain, on WebGPU's backend alone), when the last frame
+   * was taken, and the world and hour it was taken at (a jump is taken at once, as a loading screen takes it).
+   */
+  eyeAdapts = true;
+  private eyePass: GpuEyePass | null = null;
+  private eyeAt = 0;
+  private eyeWorld = '';
+  private eyeHours = -100;
   /** The game's file as the game would read it from what Save to game writes now (`setFile`), and its revision. */
   private file: BodiesFile | null = null;
   private fileRev = 0;
@@ -275,6 +290,8 @@ export class GameLook {
     this.U = {
       exposure: uniform(1), comp: uniform(1), amount: uniform(1), balance: uniform(new THREE.Vector3(1, 1, 1)), shadow: uniform(new THREE.Vector3(1, 1, 1)), high: uniform(new THREE.Vector3(1, 1, 1)),
       split: uniform(0), sat: uniform(1), contrast: uniform(1), pivot: uniform(GRADE_PIVOT),
+      // (pass 2, wave 6) 1 while the card's eye adapts: the output reads the eye's buffer, as the game's does
+      adapting: uniform(0),
     };
     this.groundU = { light: uniform(new THREE.Color(0.05, 0.045, 0.04)), eyeM: uniform(GAME.heightM), reachM: uniform(5000) };
     this.report = { path: 'off', planet: '', params: this.params, source: this.source, air: null, eye: null, motion: null, night: null, bloom: null };
@@ -296,6 +313,8 @@ export class GameLook {
     // The game's sanitize under our sky (values not numbers zeroed, the stored picture held to 8192) and its bloom.
     this.sanitize = sanitizeGraph({ tScene: this.sceneIn }, true);
     this.bloomPass = new GpuMixBloomPass(1, 1, GAME.bloomMix);
+    // (pass 2, wave 6, maker K) the game's eye pass: its quarter copy and its two computes, asked as the chain is made
+    if (renderer.backend?.isWebGPUBackend === true) this.eyePass = new GpuEyePass(renderer);
     const L = vec3(LUMA[0], LUMA[1], LUMA[2]);
     // grade.ts's fragment, line for line (as gpuChain.ts's gradeGraph draws it on WebGPU), in the exposed light
     const grade = Fn(([inp]: Any[]) => {
@@ -322,7 +341,8 @@ export class GameLook {
     // The output (the game's `outputGraph` and its inline output): the buffer times the eye's exposure, graded, three's ACES
     // at the player's compensation, the sRGB curve, and the dither of wave 4b onto the canvas.
     const pic = texture(buf.texture);
-    const exposed = vec3(pic.rgb).mul(U.exposure);
+    // (pass 2, wave 6, maker K) the card's own exposure while its eye adapts, the main thread's answer otherwise
+    const exposed = vec3(pic.rgb).mul(select(U.adapting.greaterThan(0.5), eyeExposureNode(), U.exposure));
     const graded = grade(exposed);
     const shown = renderOutput(vec4(graded.mul(U.comp), 1.0), THREE.ACESFilmicToneMapping, THREE.SRGBColorSpace);
     const out = ditheredOut(shown, float(1));
@@ -365,6 +385,7 @@ export class GameLook {
 
   /** The stage's eye (a look close up, in plain light): an exposure of 1, as before. */
   stageEye(): void {
+    this.U.adapting.value = 0;
     this.setExposure(1);
   }
 
@@ -406,6 +427,8 @@ export class GameLook {
       r.setRenderTarget(this.buffer);
       r.render(this.sanitize.mesh, FX_CAMERA);
       this.chainCtx.renderer = r;
+      // (pass 2, wave 6, maker K) the eye measured and eased on the card over the buffer, before the bloom (the game's order)
+      if (this.eyePass && this.U.adapting.value > 0.5) this.eyePass.render(this.chainCtx as Any, this.buffer as Any, null);
       this.bloomPass.render(this.chainCtx as Any, this.buffer as Any, null);
     } finally {
       r.autoClear = auto;
@@ -679,18 +702,39 @@ export class GameLook {
     const rM = run.twin.record[F.bottom] * 1000;
     this.groundU.eyeM.value = hM;
     this.groundU.reachM.value = Math.sqrt(2 * rM * hM + hM * hM);
-    // The eye: the match's measured exposure, else the game's "follow the sun" answer over the twin's level light.
+    // The eye: the match's measured exposure; else (pass 2, wave 6, maker K) the game's adapting eye on the card, as the game's
+    // Eye adaptation row draws it on (its pass measures the chain's buffer in `render`), eased at the game's pace over the frame's
+    // own seconds and taken at once when the world changes or the hour jumps over an hour (as a loading screen takes it); else,
+    // its computes not landed or `eyeAdapts` off, the game's "follow the sun" answer over the twin's level light.
+    const held = !!(m?.eye && m.eye.exposure > 0);
+    const adapt = !held && this.eyeAdapts && this.eyePass !== null && eyeReady();
+    const now = performance.now();
+    EYE_IN.dt = this.eyeAt > 0 ? (now - this.eyeAt) / 1000 : 0.016;
+    this.eyeAt = now;
+    let dh = hours - this.eyeHours;
+    dh = dh - 24 * Math.round(dh / 24);
+    const jump = a.world !== this.eyeWorld || dh > 1 || dh < -1;
+    this.eyeWorld = a.world;
+    this.eyeHours = hours;
     EYE_IN.air = true;
     EYE_IN.chain = true;
-    EYE_IN.eye = false;
-    EYE_IN.adapt = 0;
+    EYE_IN.eye = adapt;
+    EYE_IN.adapt = adapt ? 1 : 0;
     EYE_IN.stops = 0;
-    EYE_IN.loading = false;
+    EYE_IN.loading = adapt && jump;
     EYE_IN.level = AIR.frame.level;
     eyeFrameRun();
-    const exposure = m?.eye && m.eye.exposure > 0 ? m.eye.exposure : EYE_OUT.exposure;
-    this.setExposure(exposure);
-    this.report.eye = { exposure: Number(exposure.toPrecision(5)), stops: Number(Math.log2(exposure).toFixed(3)), from: m?.eye ? `the match '${m.name}'` : "the game's follow-the-sun answer (Eye adaptation off)" };
+    if (adapt) {
+      this.U.adapting.value = 1;
+      // the card writes the buffer now; a later answer of the main thread's is written afresh
+      this.eyeWritten = -1;
+      this.report.eye = { exposure: 'on the card (`__debug` reads it back: readEyeBuffer)', from: `the game's adapting eye${jump ? ', taken at once (a jump)' : ''}` };
+    } else {
+      this.U.adapting.value = 0;
+      const exposure = held ? m!.eye!.exposure : EYE_OUT.exposure;
+      this.setExposure(exposure);
+      this.report.eye = { exposure: Number(exposure.toPrecision(5)), stops: Number(Math.log2(exposure).toFixed(3)), from: held ? `the match '${m!.name}'` : `the game's follow-the-sun answer (${this.eyeAdapts ? "the eye's computes not landed" : 'adapting off'})` };
+    }
     this.report.air = { world: a.world, time: Number(day.time.toFixed(4)), count: Number(day.count.toFixed(6)), sunDir: day.sunDir.toArray().map((v) => Number(v.toFixed(4))), level: Number(AIR.frame.level.toPrecision(4)), visibilityKm: Number(AIR.frame.visibilityKm.toFixed(2)), rows: mix.mixLength };
     this.report.motion = motion ? { system: motion.id, version: motion.version, T: Number(motion.T.toFixed(6)), daylight: Number(motion.daylight.toFixed(4)), sunShare: Number(motion.sunShare.toFixed(4)), moonShare: Number(motion.moonShare.toPrecision(4)) } : null;
     this.report.night = this.night && this.nightWorld === a.world ? { drawn: this.night.group.visible, world: a.world } : null;

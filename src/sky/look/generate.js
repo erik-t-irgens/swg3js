@@ -24,6 +24,8 @@ import {
 } from 'three/tsl';
 // (wave B: the planet features) the great cyclone's spiral
 import { log } from 'three/tsl';
+// (wave 6, maker C) the ring cities' arrays of numbers and the hexagonal lattice's wrap
+import { uniformArray, mod } from 'three/tsl';
 
 const TAU = Math.PI * 2;
 
@@ -268,6 +270,8 @@ export const GRADE_DIALS = [
 // the lakes), `sinceFor` naming a recipe's own version where it differs from `since`; a look saved at an older
 // version never has them and never changes.
 const PART = (group, note) => (d) => ({ ...d, since: 3, sinceFor: { living: 4 }, group, groupNote: note });
+// (wave 6, maker C) a dial of recipe version 4 (the living world's 5): see RING_CITY_DIALS below
+const V4 = (group, note) => (d) => ({ ...d, since: 4, sinceFor: { living: 5 }, group, groupNote: note });
 export const PART_DIALS = [
   ...[
     R('atolls', 'Atolls', 0, 1, 0.01, 0, 'Many tiny islands in the open sea, each ringed by bright shallow water: none at 0'),
@@ -294,6 +298,11 @@ export const PART_DIALS = [
     R('starLat', 'Latitude', -90, 90, 1, 45), R('starLon', 'Longitude', -180, 180, 1, 0),
     C('starColour', 'Crack colour', '#5a3c2a'),
   ].map(PART('Fracture star', 'A radial fracture star of cracks (Jakku\'s). None at 0.')),
+  // (wave 6, maker C) the cracks laid after the colour grade, in their own colour, with no mottle drifting it (his Jakku's star
+  // drifted from the colour picked): none at 0
+  ...[
+    R('starKeep', 'Cracks keep their colour', 0, 1, 0.01, 0, 'The cracks drawn in their own colour after the colour grade, with no drift of tone (version 4): graded with the ground at 0'),
+  ].map(V4('Fracture star', 'A radial fracture star of cracks (Jakku\'s). None at 0.')),
   ...[
     R('trench', 'Great trench', 0, 1, 0.01, 0, 'One great trench cut round the globe: none at 0'),
     R('trenchWidth', 'Width', 0.2, 3, 0.01, 1),
@@ -313,6 +322,10 @@ export const PART_DIALS = [
     R('regionSize', 'Region size', 0, 1, 0.01, 0.35),
     C('regionColour', 'Region colour', '#1f4a1c'),
   ].map(PART('Glow specks and a great region', 'Local glow specks on dark land (Sullust\'s cyan, Pillio dead\'s green) and one great region of its own colour. None at 0.')),
+  // (wave 6, maker C) a soft glow round each speck, so a scatter of specks reads at sky size (his Sullust's cyan): none at 0
+  ...[
+    R('speckHalo', 'Halo round each', 0, 1, 0.01, 0, 'A soft halo of the speck\'s colour round each one, so they read from far off (version 4): none at 0'),
+  ].map(V4('Glow specks and a great region', 'Local glow specks on dark land (Sullust\'s cyan, Pillio dead\'s green) and one great region of its own colour. None at 0.')),
   ...[
     R('lace', 'Lacy growth', 0, 1, 0.01, 0, 'Lacy, branching growth over the ground: none at 0'),
     R('laceScale', 'Lace size', 0.3, 3, 0.01, 1),
@@ -320,12 +333,26 @@ export const PART_DIALS = [
     R('laceSea', 'Over the sea too', 0, 1, 0.01, 0, 'On the land only at 0; over the sea as well toward 1'),
     C('laceColour', 'Lace colour', '#2e5a24'),
   ].map(PART('Lacy growth', 'Lacy, branching vegetation (Athulla, Fondor\'s mottling). None at 0.')),
+  // (wave 6, maker C) a two-tone lace: the ground between taken to the lace's own colour, and a second, bright tone where the lace
+  // is thickest (his Fondor: dark maroon under a bright white mottle). Both none at 0; the start's second tone a warm white.
+  ...[
+    R('laceGround', 'Ground in the lace colour', 0, 1, 0.01, 0, 'The ground between the lace taken toward the lace\'s own colour, so the lace lies on a ground of its colour (version 4): none at 0'),
+    R('laceTwoTone', 'Second tone', 0, 1, 0.01, 0, 'The thickest of the lace in a second colour, a mottle over the first (version 4): one tone at 0'),
+    R('laceTwoShare', 'Second tone\'s share', 0, 1, 0.01, 0.4, 'How much of the lace takes the second tone'),
+    C('laceColour2', 'Second tone colour', '#f2ece6'),
+  ].map(V4('Lacy growth', 'Lacy, branching vegetation (Athulla, Fondor\'s mottling). None at 0.')),
   ...[
     R('mottle', 'Smoky mottle', 0, 1, 0.01, 0, 'Dark billows of smoke over the ground with pale wisps at their edges: none at 0'),
     R('mottleScale', 'Billow size', 0.3, 3, 0.01, 1),
     R('mottleSoft', 'Softness', 0, 1, 0.01, 0.5),
     C('mottleColour', 'Smoke', '#2a1e14'), C('mottleLight', 'Pale wisps', '#d8b060'),
   ].map(PART('Smoky mottle', 'A smoky mottle (Kessel). None at 0.')),
+  // (wave 6, maker C) a rim of its own colour round each billow (his Resurgent's red-rimmed dark blotches): none at 0
+  ...[
+    R('mottleRim', 'Rim round each billow', 0, 1, 0.01, 0, 'A rim of its own colour round the edge of each dark billow (version 4): none at 0'),
+    R('mottleRimWidth', 'Rim width', 0, 1, 0.01, 0.4),
+    C('mottleRimColour', 'Rim colour', '#a8301c'),
+  ].map(V4('Smoky mottle', 'A smoky mottle (Kessel). None at 0.')),
   ...[
     R('fineSpecks', 'Fine specks', 0, 1, 0.01, 0, 'Bright and dark specks at the texture\'s own fineness (best at the largest texture size): none at 0'),
     R('fineDark', 'Dark among them', 0, 1, 0.01, 0.5, 'All bright at 0, all dark at 1'),
@@ -341,6 +368,79 @@ export const PART_DIALS = [
 ];
 /** The version of a recipe that has the planet features (PART_DIALS). */
 export const partsVersion = (recipe) => (recipe === 'living' ? 4 : 3);
+
+// (the GPU port's pass 2, wave 6, maker C: city worlds and the planet maker's gaps) Recipe version 4 of every recipe (the living
+// world's 5): ring cities and the cities' own glint (on the recipes that grow cities), soft hazy cloud, soft edges over the
+// ground's colours, colour picked by its hue and kept in its hue when strong, and the smaller parts the critic's "cannot" list
+// asked for (a two-tone lace, red-rimmed smoke, cracks that keep their colour, a halo round glow specks, a gas giant's softer and
+// more varied bands). As at version 3, each is nothing at its start and built into a bake only when on, and a look saved at an
+// older version never has them and never changes. Every start below is a feel number: the owner's to move.
+/** The version of a recipe that has wave 6's parts (ring cities, soft cloud and edges, the colour pick): 4, the living world's 5. */
+export const ringsVersion = (recipe) => (recipe === 'living' ? 5 : 4);
+/** The ring cities' layouts, as the Layout dial offers them. */
+export const RING_LAYOUTS = [['0', 'Concentric rings with spokes'], ['1', 'Broken gear arcs'], ['2', 'Hexagonal plates']];
+// Ring cities (the recipes that grow cities: the whole-planet city and the living world): great hubs of rings inside rings with
+// spokes from the centre, smaller satellite rings round them, long straight trunk lines between them along great circles; pale
+// metal plates by day, a glow along the rings, spokes and trunks at night, a dim fill between (his Coruscant pictures).
+// The starts (wave 6's critic J, against his three Coruscant pictures of 23 November; maker C's first starts in brackets): sixteen
+// hubs of 10 degrees with four satellites each (12, 11 and 3: his night picture crowds some 25 to 30 ring towns of every size over
+// the face we see, where 12 hubs with 3 satellites stood five or six; sixteen hubs, four satellites a hub and 10 degrees fill the
+// 80 sites a look can hold, about a sixth of the globe in cities), six rings and eight spokes each (4: his hubs are rings inside
+// rings, five to eight), the trunk lines at 1 (0.8: his night picture links every hub and most satellites), the lines 0.18 wide
+// (0.35: his lines are hair-thin against a hub, where 0.35 read as bands from orbit), plates at 0.9 in a pale cream (0.6 and a
+// lilac grey: his day picture's plates are the palest thing on the globe, cream over a blue-grey city), the rings' glow at 0.9
+// and the fill at 0.1 (0.8 and 0.3: his night ground is near black between bright lines, and the fill's speckle read coarse),
+// drawn sharp (he wants them sharp from orbit).
+export const RING_CITY_DIALS = [
+  R('ringCity', 'Ring cities', 0, 1, 0.01, 0, 'Great round cities of rings inside rings, plated in metal, alight along their rings at night: none at 0'),
+  { k: 'ringLayout', label: 'Layout', type: 'select', def: 0, options: RING_LAYOUTS, title: 'Concentric rings crossed by spokes; rings broken into arcs like gears; or rings of hexagonal plates' },
+  R('ringHubs', 'Great hubs', 1, 16, 1, 16, 'How many great ring cities stand on the globe'),
+  R('ringHubSize', 'Hub size', 2, 30, 0.5, 10, 'The great hubs\' radius, in degrees of the globe (each one larger or smaller by its own number)'),
+  R('ringRings', 'Rings in each', 2, 8, 1, 6, 'How many rings each great hub has inside its rim'),
+  R('ringSpokes', 'Spokes', 0, 16, 1, 8, 'Spokes from each centre out to its rim: none at 0'),
+  R('ringSatellites', 'Satellite rings', 0, 4, 1, 4, 'Smaller ring towns round each great hub: none at 0'),
+  R('ringTrunks', 'Trunk lines', 0, 1, 0.01, 1, 'Long straight lines linking the hubs across the globe, and each satellite to its hub: none at 0, every hub linked toward 1'),
+  R('ringWidth', 'Ring width', 0, 1, 0.01, 0.18, 'How wide the rings, spokes and trunk lines are'),
+  R('ringPlates', 'Plate brightness', 0, 1, 0.01, 0.9, 'How bright the metal plates are by day against the city round them'),
+  C('ringPlateColour', 'Plate colour', '#e8dccc', 'The metal plates\' colour by day (his pictures: a pale cream over a blue-grey city)'),
+  R('ringGlow', 'Glow along the rings', 0, 1, 0.01, 0.9, 'The rings, spokes and trunk lines alight at night, in the city light colours'),
+  R('ringFill', 'Glow between', 0, 1, 0.01, 0.1, 'The dim lights between the rings and over the rest of the city at night: dark at 0'),
+  { k: 'ringSharp', label: 'Drawn', type: 'select', def: 1, options: [['0', 'Baked into the picture only'], ['1', 'Sharp at every size (drawn as the body is drawn)']], title: 'Sharp: the rings are drawn by the look\'s own material, so they stay sharp with the planet filling the screen; baked: they are as fine as the texture size' },
+].map(V4('Ring cities', 'Great round cities of rings inside rings, with spokes, satellite rings and trunk lines between them; pale metal plates by day, alight along the rings at night. None while "Ring cities" is at 0. The night layer shows the glow; the city light colours are the Cities group\'s.'));
+// The cities' own glint: the sun caught on their metal and glass alone (the ring cities' plates; on a whole-planet city every
+// built-up place), with a colour, a sharpness and a strength of its own, land, sea and the water's shine left as they are. Live.
+// The starts: none (his saved looks and every preset draw as before until he turns it up), sharpness 0.3 (wave 6's critic J; maker
+// C's 0.45: his day picture's glint is a broad soft bright patch over the plates round the sun's point, nearer satin metal than
+// glass), plates tilted 0.35 (so the glint breaks into a scatter of bright plates rather than one spot), a warm white (the critic;
+// C's pale lilac white: his day picture's glint over the plates is warm, the plates cream).
+export const CITY_GLINT_DIALS = [
+  R('glintCity', 'City glint', 0, 1, 0.01, 0, 'The sun caught on the cities\' metal and glass alone: none at 0'),
+  R('glintSharp', 'Sharpness', 0, 1, 0.01, 0.3, 'Satin metal at 0 (a broad soft sheen), polished glass toward 1 (a small bright glint)'),
+  R('glintScatter', 'Plates tilted', 0, 1, 0.01, 0.35, 'Every plate tilted its own way, so the glint breaks into a scatter of bright plates: one smooth sheen at 0'),
+  C('glintColour', 'Glint colour', '#fff4ea'),
+].map((d) => ({ ...V4('City glint', 'The sun caught on the cities\' metal and glass alone, with a colour, sharpness and strength of its own; land, sea and the water\'s shine stay as they are. Live (no bake).')(d), live: true }));
+// Soft hazy cloud (any recipe with clouds): the cloud's edges softened and its crisp erosion eased, and a thin even haze of cloud
+// over everything (his Kamino and Rori: a deep sea seen through soft, hazy cloud). Both none at 0.
+export const CLOUD_SOFT_DIALS = [
+  R('cloudSoft', 'Soft edges', 0, 1, 0.01, 0, 'The cloud masses\' edges soft and hazy, their crisp ragged margins eased: crisp at 0'),
+  R('cloudHaze', 'Thin haze', 0, 1, 0.01, 0, 'A thin, even haze of cloud over the whole globe, thicker where the masses gather: none at 0'),
+].map(V4('Clouds: softness', 'Soft, hazy cloud (version 4): softened edges and a thin haze over everything. None at 0.'));
+// Soft edges over the ground's colours (any recipe): the baked colour blended softly across its borders, so regions meet in soft
+// gradients (his Tatooine, Geonosis and Kashyyyk), at a reach in degrees. None at 0.
+export const SOFT_DIALS = [
+  R('softEdges', 'Soft edges', 0, 1, 0.01, 0, 'The ground\'s colours blended softly across their borders, so regions meet in soft gradients: crisp at 0'),
+  R('softWidth', 'How far', 0.2, 3, 0.01, 1, 'How far the blend reaches: about a degree of the globe at 1'),
+].map(V4('Soft edges', 'The ground\'s colours blended softly across their borders (version 4), at the end of the bake: none at 0.'));
+// The colour picked by its hue (any recipe): one hue range turned or made stronger alone (his Yavin 4's blue without turning its
+// jungle, Athulla's green without its yellow), and strong colours kept in their hue when pushed past what a screen shows (Endor's
+// strength raised without its hue turning). Each nothing at its start.
+export const GRADE4_DIALS = [
+  R('gradeHold', 'Keep hue when strong', 0, 1, 0.01, 0, 'A colour pushed past what the screen can show is clipped (and turns) at 0; toward 1 it is eased in, keeping its hue'),
+  R('gradePickHue', 'Picked hue', 0, 360, 1, 220, 'The middle of the hue range the two dials below change, in degrees round the colour wheel (OKLab: about 30 red, 90 yellow, 140 green, 200 teal, 260 blue)'),
+  R('gradePickWidth', 'Picked range', 5, 120, 1, 40, 'How wide the picked range is, in degrees'),
+  R('gradePickTurn', 'Turn the picked hue', -60, 60, 1, 0, 'The picked range\'s colours turned round the wheel alone, in degrees: none at 0'),
+  R('gradePickStrength', 'Picked strength', 0, 3, 0.01, 1, 'The picked range\'s colour strength alone: as the rest at 1'),
+].map(V4('Colour', 'Colour picked by its hue, and kept in its hue when strong (version 4).'));
 
 export const RECIPES = {
   gasgiant: {
@@ -359,6 +459,13 @@ export const RECIPES = {
         { ...R('depthSpread', 'Height spread', 0, 1, 0.01, 0.5, 'How far apart the decks stand: longer shadows toward the terminator, more parallax toward the limb'), live: true },
         { ...R('depthShade', 'Shading strength', 0, 1, 0.01, 0.6, 'How darkly the upper decks shade and shadow the lower'), live: true },
       ].map((d) => ({ ...d, group: 'Cloud depth' })),
+      // (wave 6, maker C: version 4) softer bands and two more band colours (his Bespin: soft bands, not candy stripes). The
+      // softness none at 0 (the bands as sharp as before); the two colours mixed in by a band field of their own, none at 0.
+      ...[
+        R('bandSoft', 'Soft bands', 0, 1, 0.01, 0, 'The steps between the bands softened into blends: as sharp as before at 0'),
+        R('moreColours', 'More band colours', 0, 1, 0.01, 0, 'Two more colours mixed into the bands, band by band: the four above alone at 0'),
+        C('c5', 'Fifth colour', '#d9b48c'), C('c6', 'Sixth colour', '#b68c6e'),
+      ].map((d) => ({ ...d, group: 'Softer bands', since: 4 })),
     ],
   },
   desert: {
@@ -665,6 +772,37 @@ Object.assign(PRESETS, {
 });
 PRESET_ORDER.push('w-naboo', 'w-endor', 'w-kashyyyk', 'w-dantooine', 'w-felucia', 'w-dagobah', 'w-utapau', 'w-ryloth', 'w-monca',
   'w-nalhutta', 'w-vardos', 'w-hoth', 'w-mustafar', 'w-lok', 'w-crait', 'w-ilum', 'w-coruscant');
+// (wave 6, maker C) Coruscant of ring cities (recipe version 4), after his three pictures of 23 November: lilac-grey plates in great
+// round hubs with satellite rings and trunk lines, a glint on the metal by day, orange-gold along the rings at night, soft cloud
+// over all, in its own Scattered air. The Layout dial chooses concentric, gear or hexagonal cities. Its numbers are starts for
+// the critic who follows and for the owner (his pictures: the built-up city a grey toward lilac and brown, the rings a little
+// lighter, the night's lines gold over a dark ground, the clouds soft and patchy).
+// (wave 6, its critic J, against his three pictures: the lit disc of his day picture at noon on the close-up stage, lightness
+// 74.4, colour strength 5.7, hue 58 degrees; the maker's start read 48.7 / 12.4 / 288, a darker violet-blue ball, 30.6 apart. Now
+// a blue-grey city (his day picture's ground between the plates) under cream plates (his palest thing on the globe), its grade
+// lifted toward his day's lightness but kept well short of it so the plates read cream over a lilac-grey city (gradeLightness 1.4,
+// plates at 1: 62.2 / 6.0 / 327, 14.8 apart; at 1.84 the mean came within 6.7 but the plates vanished into a near-white ground, and his
+// day picture's mean is lifted by glare and cloud), more and softer cloud (his day picture is much cloud), a thinner sky (0.4 of
+// Earth's: his ground reads grey, not blue, with a blue limb) and a warm city haze over 30 km; the ring cities as the recipe's
+// starts now stand but the plates at their brightest, the glint stronger and broader (0.8 and 0.3: his day picture's bright patch
+// over the plates).)
+Object.assign(PRESETS, {
+  'w-coruscant-rings': {
+    name: 'Coruscant (ring cities)', recipe: 'cityworld', version: 4, seed: 1138, group: WORLD,
+    dials: {
+      base: '#7a7480', lightTone: '#9a94a0', darkTone: '#4a4652', density: 0.75, gridScale: 1, lanes: 0.2, hubs: 0, dark: 0.2,
+      lightColour: '#ffb35c', glowColour: '#ff6a1e', lightBright: 1.2,
+      ringCity: 1, ringLayout: 0, ringHubs: 16, ringHubSize: 10, ringRings: 6, ringSpokes: 8, ringSatellites: 4, ringTrunks: 1, ringWidth: 0.18,
+      ringPlates: 1, ringPlateColour: '#e8dccc', ringGlow: 0.9, ringFill: 0.1, ringSharp: 1,
+      glintCity: 0.8, glintSharp: 0.3, glintScatter: 0.35, glintColour: '#fff4ea',
+      cloudCover: 0.4, cloudScale: 0.9, cloudStorms: 1, cloudSoft: 0.5, cloudHaze: 0.15, haze: 0.3,
+      gradeStrength: 1.12, gradeLightness: 1.4,
+    },
+    layers: { atmosphere: air('#9cb8ff', 0.8), clouds: cloudy(0.6), night: cityNight },
+    air: { skyStrength: 0.4, visibilityKm: 30, hazeHeightKm: 2, hazeColour: '#f4e8dc' },
+  },
+});
+PRESET_ORDER.push('w-coruscant-rings');
 
 // The shapes of wave 2 (partdials.js): irregular bodies, a broken planet, a debris field and rings.
 // A preset's `shape`, `belt` and `rings` are the parts' dials over their starts.
@@ -844,12 +982,21 @@ const RYLOTH_V3 = {
 };
 Object.assign(PRESETS, {
   // (his / the twin, over the lit disc: lightness 75.8 / 75.8, colour strength 10.0 / 10.0, hue 42 / 68 degrees)
-  'twin-tatooine': { name: "Tatooine (twin of his Tatooine circle)", recipe: 'desert', version: 2, seed: 1977, compare: 'menu:tatooine', group: TWINS,
-    dials: { sandLight: '#ccb698', sandDark: '#8a7278', rock: '#6a5a5e', salt: '#f2ece2', duneScale: 1.6, duneStrength: 0.3, badlands: 0.3, saltFlats: 0.03, variety: 0.85, haze: 0.25, dusty: 0.2, gradeStrength: 0.957, gradeLightness: 1.332, gradeWash: 0.002, gradeWashColour: '#cbb7b1' },
+  // (pass 2, wave 6, its critic J: moved to version 4, its regions' borders softened, soft edges 0.7 over 2 degrees, and its grade
+  // brought back to his mean; his / the twin over the lit disc at noon, lightness 75.3 / 74.9, colour strength 10.3 / 10.0, hue 44 /
+  // 41 degrees, 0.7 apart as before)
+  'twin-tatooine': { name: "Tatooine (twin of his Tatooine circle)", recipe: 'desert', version: 4, seed: 1977, compare: 'menu:tatooine', group: TWINS,
+    dials: { sandLight: '#ccb698', sandDark: '#8a7278', rock: '#6a5a5e', salt: '#f2ece2', duneScale: 1.6, duneStrength: 0.3, badlands: 0.3, saltFlats: 0.03, variety: 0.85, haze: 0.25, dusty: 0.2, gradeStrength: 1.475, gradeLightness: 1.446, gradeHue: 11.505, gradeWash: 0.002, gradeWashColour: '#cbb7b1',
+      softEdges: 0.7, softWidth: 2 },
     layers: { atmosphere: { opacity: 0.45, tint: '#ffe4c4', power: 3.5, height: 1.025 } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 74.8 / 74.8, colour strength 26.2 / 26.3, hue 62 / 72 degrees)
-  'twin-jakku': { name: "Jakku (twin of his Jakku circle)", recipe: 'desert', version: 2, seed: 3434, compare: 'menu:jakku', group: TWINS,
-    dials: { sandLight: '#e8c294', sandDark: '#c89a6a', rock: '#8a6a50', salt: '#f0e0c8', duneScale: 1.6, duneStrength: 0.5, badlands: 0.08, saltFlats: 0.04, variety: 0.35, canyons: 0.15, canyonSize: 1.2, canyonColour: '#8a5a3a', haze: 0.25, dusty: 0.2, gradeStrength: 1.328, gradeLightness: 1.162, gradeWash: 1, gradeWashColour: '#ddaf8e' },
+  // (pass 2, wave 6, its critic J: moved to version 4 for his picture's fracture star, up and to the left of the face as his, twenty
+  // brown cracks reaching 30 degrees, kept in their own colour after the grade (the drift wave B met); his / the twin over the lit
+  // disc at noon, lightness 74.3 / 72.6, colour strength 26.6 / 24.0, hue 62 / 73 degrees, 5.7 apart (5.8 before): the hue is the
+  // twin's warm air's, which a grade cannot turn back)
+  'twin-jakku': { name: "Jakku (twin of his Jakku circle)", recipe: 'desert', version: 4, seed: 3434, compare: 'menu:jakku', group: TWINS,
+    dials: { sandLight: '#e8c294', sandDark: '#c89a6a', rock: '#8a6a50', salt: '#f0e0c8', duneScale: 1.6, duneStrength: 0.5, badlands: 0.08, saltFlats: 0.04, variety: 0.35, canyons: 0.15, canyonSize: 1.2, canyonColour: '#8a5a3a', haze: 0.25, dusty: 0.2, gradeStrength: 1.603, gradeLightness: 1.191, gradeWash: 1, gradeWashColour: '#ddaf8e',
+      star: 0.8, starColour: '#6a4a32', starKeep: 1, starRays: 20, starReach: 30, starWidth: 0.5, starLat: 30, starLon: -35 },
     layers: { atmosphere: { opacity: 0.4, tint: '#ffd8b0', power: 3.5, height: 1.025 } }, size: 2048 },
   // (his / the twin, over the albedo: lightness 28.9 / 28.9, colour strength 30.4 / 30.2, hue 53 / 53 degrees)
   'twin-jakku-map': { name: "Jakku (twin of his Jakku map)", recipe: 'desert', version: 2, seed: 3435, compare: 'set:jakku', group: TWINS,
@@ -868,8 +1015,12 @@ Object.assign(PRESETS, {
       gradeStrength: 1.703, gradeLightness: 1.741, gradeWash: 0.08, gradeWashColour: '#aa824d' },
     layers: { atmosphere: { opacity: 0.35, tint: '#ffd090', power: 3.5, height: 1.025 }, night: { on: true, where: 'night', opacity: 0.8, tint: '#ffd060' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 65.1 / 65.1, colour strength 43.3 / 43.3, hue 59 / 68 degrees)
-  'twin-geonosis': { name: "Geonosis (twin of his Geonosis circle)", recipe: 'desert', version: 2, seed: 2202, compare: 'menu:geonosis', group: TWINS,
-    dials: { sandLight: '#e8a048', sandDark: '#a04018', rock: '#6a2010', salt: '#f0c070', duneScale: 0.9, duneStrength: 0.3, badlands: 0.25, saltFlats: 0.2, variety: 1, haze: 0.2, dusty: 0.15, gradeStrength: 0.984, gradeLightness: 1.222, gradeWashColour: '#d48e5f' },
+  // (pass 2, wave 6, its critic J: moved to version 4, its blotches' borders softened, soft edges 0.6 over 1.5 degrees, its grade
+  // brought back to his mean; his / the twin over the lit disc at noon, lightness 63.9 / 63.3, colour strength 43.6 / 42.8, hue 58 /
+  // 58 degrees, 1.1 apart (1.5 before); his cream swirls are finer than any edge the part softens)
+  'twin-geonosis': { name: "Geonosis (twin of his Geonosis circle)", recipe: 'desert', version: 4, seed: 2202, compare: 'menu:geonosis', group: TWINS,
+    dials: { sandLight: '#e8a048', sandDark: '#a04018', rock: '#6a2010', salt: '#f0c070', duneScale: 0.9, duneStrength: 0.3, badlands: 0.25, saltFlats: 0.2, variety: 1, haze: 0.2, dusty: 0.15, gradeStrength: 1.399, gradeLightness: 1.312, gradeHue: -16.238, gradeWashColour: '#d48e5f',
+      softEdges: 0.6, softWidth: 1.5 },
     layers: { atmosphere: { opacity: 0.4, tint: '#ffb070', power: 3.5, height: 1.025 } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 75.9 / 75.9, colour strength 12.0 / 12.1, hue 282 / 279 degrees)
   'twin-hoth': { name: "Hoth (twin of his Hoth circle)", recipe: 'ice', version: 2, seed: 1980, compare: 'menu:hoth', group: TWINS,
@@ -892,8 +1043,13 @@ Object.assign(PRESETS, {
     dials: { c1: '#d8e8f0', c2: '#a8c4d4', c3: '#6a8aa4', c4: '#8ab0c4', polar: '#7a90a4', bands: 26, contrast: 0.35, turbulence: 0.4, streaks: 0.8, storms: 0, stormSize: 0.8, stormColour: '#e4f0f8', haze: 0.2, limbDark: 0.45, gradeStrength: 1.415, gradeLightness: 1.182, gradeWash: 0.759, gradeWashColour: '#a0c0cc' },
     layers: { atmosphere: { opacity: 0.45, tint: '#bcd8ff', power: 3.2, height: 1.03 } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 63.6 / 63.5, colour strength 42.9 / 42.7, hue 58 / 69 degrees)
-  'twin-bespin': { name: "Bespin (twin of his Bespin circle)", recipe: 'gasgiant', version: 2, seed: 2210, compare: 'menu:bespin', group: TWINS,
-    dials: { c1: '#f0c080', c2: '#e09850', c3: '#b06028', c4: '#d08040', polar: '#a07050', bands: 24, contrast: 0.45, streaks: 0.6, storms: 0, stormColour: '#f8dcb0', haze: 0.15, limbDark: 0.5, gradeStrength: 1.119, gradeLightness: 1.074, gradeWash: 0.201, gradeWashColour: '#d1895a' },
+  // (pass 2, wave 6, its critic J: moved to version 4, its bands soft blends rather than candy stripes (soft bands 0.8, band contrast
+  // 0.35 for 0.45, turbulence 0.9) with two more colours mixed in (a pale cream and a rust, 0.6), its grade brought back to his
+  // mean; his / the twin over the lit disc at noon, lightness 63.6 / 63.1, colour strength 43.0 / 42.0, hue 59 / 61 degrees, 1.9
+  // apart (1.8 before))
+  'twin-bespin': { name: "Bespin (twin of his Bespin circle)", recipe: 'gasgiant', version: 4, seed: 2210, compare: 'menu:bespin', group: TWINS,
+    dials: { c1: '#f0c080', c2: '#e09850', c3: '#b06028', c4: '#d08040', polar: '#a07050', bands: 24, contrast: 0.35, turbulence: 0.9, streaks: 0.6, storms: 0, stormColour: '#f8dcb0', haze: 0.15, limbDark: 0.5, gradeStrength: 1.372, gradeLightness: 1.169, gradeHue: -18.659, gradeContrast: 0.949, gradeWash: 0.201, gradeWashColour: '#d1895a',
+      bandSoft: 0.8, moreColours: 0.6, c5: '#f0d0a8', c6: '#b86838' },
     layers: { atmosphere: { opacity: 0.45, tint: '#ffc890', power: 3.2, height: 1.03 } }, size: 2048 },
   // (his / the twin, over the albedo: lightness 53.7 / 53.7, colour strength 62.0 / 61.8, hue 56 / 60 degrees)
   'twin-bespin-map': { name: "Bespin (twin of his Bespin map)", recipe: 'gasgiant', version: 2, seed: 2211, compare: 'set:bespin', group: TWINS,
@@ -936,9 +1092,11 @@ Object.assign(PRESETS, {
     layers: { night: { on: true, opacity: 0.4, tint: '#ff5a20' }, clouds: { on: true, opacity: 0.9, tint: '#c0c4c8' }, atmosphere: { opacity: 0.9, tint: '#9ab0e0' } }, size: 2048 },
   // (wave B, with the planet features, its albedo against his map: lightness 19.5 / 20.0, colour strength 13.5 / 13.5,
   // 1.4 apart (2.4 before); bright specks 7.9k / 7.6k a sphere (1.9k before): his scattered cyan glow specks)
-  'twin-sullust': { name: "Sullust (twin of his Sullust map)", recipe: 'volcanic', version: 3, seed: 6161, compare: 'set:sullust', group: TWINS,
+  // (wave 6, maker C: moved to version 4, a halo round each cyan speck so they read at sky size; its disc's lightness 27.9 to 32.1,
+  // his map's 39.1)
+  'twin-sullust': { name: "Sullust (twin of his Sullust map)", recipe: 'volcanic', version: 4, seed: 6161, compare: 'set:sullust', group: TWINS,
     dials: { crust: '#141016', ash: '#3a1418', lava: '#ff3020', lavaAmount: 0.25, rivers: 0.5, cracks: 0.7, cloudCover: 0.35, cloudStorms: 0, haze: 0.2,
-      specks: 0.6, speckSize: 0.8, speckColour: '#50e8f0', speckGlow: 0.8,
+      specks: 0.6, speckSize: 0.8, speckColour: '#50e8f0', speckGlow: 0.8, speckHalo: 0.7,
       gradeStrength: 1.739, gradeLightness: 1.55, gradeWashColour: '#3c2a33' },
     layers: { night: { on: true, opacity: 0.8, tint: '#ff4020' }, clouds: { on: true, opacity: 0.6, tint: '#a89090' }, atmosphere: { opacity: 0.35, tint: '#c87a7a' } }, size: 2048 },
   // (wave B, re-tuned with the planet features, its albedo against his map: lightness 10.8 / 10.6, colour strength
@@ -950,16 +1108,26 @@ Object.assign(PRESETS, {
       gradeStrength: 0.638, gradeLightness: 0.744, gradeWashColour: '#191f0d' },
     layers: { night: { on: true, opacity: 0.8, tint: '#40ff60' }, clouds: { on: true, opacity: 0.5, tint: '#8a9080' }, atmosphere: { opacity: 0.35, tint: '#8aa080' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 74.4 / 74.1, colour strength 12.9 / 12.3, hue 249 / 247 degrees)
-  'twin-kashyyyk': { name: "Kashyyyk (twin of his Kashyyyk circle)", recipe: 'living', version: 3, seed: 7731, compare: 'menu:kashyyyk', group: TWINS,
-    dials: { land: 0.4, continentSize: 1.1, mountains: 0.3, rivers: 0.2, spots: 0.3, warmth: 0.72, wetness: 0.85, grass: '#5a7a40', forest: '#2e5030', jungle: '#2a5432', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.12, cloudStreaks: 0.7, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.561, gradeLightness: 1.955, gradeWash: 0.218, gradeWashColour: '#a3bacb' },
+  // (pass 2, wave 6, its critic J: moved to version 5, its land's green picked stronger and kept in its hue (his land is a deep
+  // forest green where the twin's read a pale blue-green), the land's borders a little softer and the cloud soft, its grade brought
+  // back to his mean; his / the twin over the lit disc at noon, lightness 73.7 / 73.4, colour strength 13.1 / 12.9, hue 249 / 251
+  // degrees, 0.6 apart as before)
+  'twin-kashyyyk': { name: "Kashyyyk (twin of his Kashyyyk circle)", recipe: 'living', version: 5, seed: 7731, compare: 'menu:kashyyyk', group: TWINS,
+    dials: { land: 0.4, continentSize: 1.1, mountains: 0.3, rivers: 0.2, spots: 0.3, warmth: 0.72, wetness: 0.85, grass: '#5a7a40', forest: '#2e5030', jungle: '#2a5432', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.12, cloudStreaks: 0.7, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.729, gradeLightness: 1.989, gradeHue: 15.82, gradeWash: 0.218, gradeWashColour: '#a3bacb',
+      softEdges: 0.4, softWidth: 1.2, cloudSoft: 0.6, cloudHaze: 0.1, gradePickHue: 140, gradePickWidth: 40, gradePickStrength: 1.8, gradeHold: 1 },
     layers: { specular: { on: true, opacity: 0.4, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.9, tint: '#f0f6ff' }, atmosphere: { opacity: 0.8, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 63.7 / 62.3, colour strength 13.5 / 15.2, hue 266 / 261 degrees)
   'twin-endor': { name: "Endor (twin of his Endor circle)", recipe: 'living', version: 3, seed: 1983, compare: 'menu:endor', group: TWINS,
     dials: { land: 0.55, continentSize: 0.8, mountains: 0.3, rivers: 0.2, spotScale: 0.7, spotFray: 0.6, warmth: 0.62, wetness: 0.85, grass: '#4a7a60', forest: '#2a5a48', jungle: '#2a5a48', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.5, cloudStreakScale: 1.6, haze: 0.6, gradeStrength: 0.299, gradeLightness: 1.161, gradeWashColour: '#8c9cb1' },
     layers: { specular: { on: true, opacity: 0.4, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.85, tint: '#f0f6ff' }, atmosphere: { opacity: 0.8, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 71.6 / 64.0, colour strength 19.9 / 19.4, hue 267 / 260 degrees)
-  'twin-yavin4': { name: "Yavin 4 (twin of his Yavin 4 circle)", recipe: 'living', version: 3, seed: 4444, compare: 'menu:yavin4', group: TWINS,
-    dials: { land: 0.45, continentSize: 0.8, mountains: 0.3, rivers: 0.2, spots: 0.4, spotFray: 0.2, warmth: 0.75, wetness: 0.9, grass: '#3a7a60', forest: '#2a6050', jungle: '#2a6050', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.5, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 1.108, gradeLightness: 2, gradeWash: 0.459, gradeWashColour: '#9ab2d2' },
+  // (wave 6, maker C: moved to version 5, its blues alone turned 20 degrees toward his blue with the jungle left as it was; his /
+  // the twin over the lit disc at noon, hue 267 / 258 degrees, 3.8 apart (6.8 before))
+  // (wave 6, its critic J: the re-grade airTuned.js laid over it, strength 1.49, carried into its own dials as the maker's numbers
+  // were drawn, since a twin at its recipe's newest version now takes its grade from its own dials alone: presetDials)
+  'twin-yavin4': { name: "Yavin 4 (twin of his Yavin 4 circle)", recipe: 'living', version: 5, seed: 4444, compare: 'menu:yavin4', group: TWINS,
+    dials: { land: 0.45, continentSize: 0.8, mountains: 0.3, rivers: 0.2, spots: 0.4, spotFray: 0.2, warmth: 0.75, wetness: 0.9, grass: '#3a7a60', forest: '#2a6050', jungle: '#2a6050', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.5, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 1.49, gradeLightness: 2, gradeWash: 0.459, gradeWashColour: '#9ab2d2',
+      gradePickHue: 240, gradePickWidth: 40, gradePickTurn: 20, gradePickStrength: 1.2 },
     layers: { specular: { on: true, opacity: 0.4, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.85, tint: '#f0f6ff' }, atmosphere: { opacity: 0.8, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 67.1 / 66.7, colour strength 14.5 / 14.3, hue 131 / 140 degrees)
   'twin-felucia': { name: "Felucia (twin of his Felucia circle)", recipe: 'living', version: 3, seed: 6061, compare: 'menu:felucia', group: TWINS,
@@ -1001,17 +1169,34 @@ Object.assign(PRESETS, {
       gradeStrength: 1.255, gradeLightness: 1.79, gradeWash: 0.263, gradeWashColour: '#7aaec8' },
     layers: { specular: { on: true, opacity: 0.6, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.9, tint: '#f0f6ff' }, atmosphere: { opacity: 0.8, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 71.4 / 67.0, colour strength 25.4 / 21.9, hue 265 / 277 degrees)
-  'twin-kamino': { name: "Kamino (twin of his Kamino circle)", recipe: 'living', version: 3, seed: 3322, compare: 'menu:kamino', group: TWINS,
+  // (pass 2, wave 6, its critic J: moved to version 5, a deeper sea, #0a2660 where it was #0a2a70, under soft, hazy cloud (soft
+  // edges 0.8, a thin haze 0.5, more of it, 0.72) where it was crisp-edged, its blues picked a little stronger and turned 8 degrees
+  // toward his; his / the twin over the lit disc at noon, lightness 70.6 / 70.7, colour strength 25.8 / 23.5, hue 266 / 274 degrees,
+  // 4.2 apart (2.1 before, with crisp cloud over an azure sea: his "cannot" item 1). The grade's strength stands at its end (2), so
+  // the colour strength his navy asks under the twin's air is the air's to give)
+  // (the fixer of wave 6: moved though its mean stands further from his picture than the old version's, because what his item 1
+  // named was the pattern, soft hazy cloud over a deep navy sea, which only the new version draws; whether that outweighs the mean
+  // is the owner's call: set `version: 3` and the old dials (`TWIN_PAST_DIALS`) back to keep the old twin)
+  'twin-kamino': { name: "Kamino (twin of his Kamino circle)", recipe: 'living', version: 5, seed: 3322, compare: 'menu:kamino', group: TWINS,
     // (wave B, its critic: more cloud, 0.6, under a lighter air, so less of the disc is a flat bright sea)
-    dials: { land: 0, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#0a2a70', shallow: '#1a4aa0', cloudCover: 0.6, cloudSwirl: 1.1, cloudStorms: 4, cloudSpots: 0.15, cloudStreaks: 0.9, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 2, gradeLightness: 1.416, gradeWash: 0.675, gradeWashColour: '#8eb2dc' },
+    dials: { land: 0, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#0a2660', shallow: '#14408a', cloudCover: 0.72, cloudSwirl: 1.1, cloudStorms: 4, cloudSpots: 0.15, cloudStreaks: 0.9, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 2, gradeLightness: 2, gradeContrast: 1.37, gradeWash: 0.675, gradeWashColour: '#8eb2dc',
+      cloudSoft: 0.8, cloudHaze: 0.5, gradePickHue: 272, gradePickWidth: 50, gradePickTurn: -8, gradePickStrength: 1.5, gradeHold: 1 },
     layers: { specular: { on: true, opacity: 0.6, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.9, tint: '#e4eeff' }, atmosphere: { opacity: 0.8, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the albedo: lightness 35.7 / 35.6, colour strength 30.9 / 30.9, hue 270 / 279 degrees)
   'twin-kamino-map': { name: "Kamino (twin of his Kamino map)", recipe: 'living', version: 3, seed: 3323, compare: 'set:kamino', group: TWINS,
     dials: { land: 0, mountains: 0.3, rivers: 0.2, spots: 1, spotScale: 1.5, spotVariety: 1, warmth: 1, wetness: 0.65, deep: '#1c3e7a', shallow: '#2a5494', cloudCover: 0, cloudSwirl: 1.1, cloudStorms: 4, haze: 0.15, gradeStrength: 0.791, gradeLightness: 1.19, gradeWashColour: '#265685' },
     layers: { specular: { on: true, opacity: 0.6, tint: '#fff4e0', shine: 150 }, clouds: { opacity: 0.9 }, atmosphere: { opacity: 0.5, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the lit disc: lightness 60.1 / 52.7, colour strength 12.6 / 12.1, hue 237 / 235 degrees)
-  'twin-rori': { name: "Rori from space (twin of his Rori picture)", recipe: 'living', version: 3, seed: 5353, compare: 'set:rori', group: TWINS,
-    dials: { land: 0, continentSize: 0.5, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#0a3040', shallow: '#104a5a', cloudCover: 0.25, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.8, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.637, gradeLightness: 2, gradeWash: 0.74, gradeWashColour: '#7995a3' },
+  // (wave 6, maker C: moved to version 5, its soft hazy cloud over a darker teal sea and its teal picked stronger; his / the twin
+  // over the lit disc at noon, lightness 60.2 / 60.1, colour strength 12.7 / 13.5, hue 237 / 232 degrees, 1.5 apart (13.7 before))
+  // (wave 6, its critic J: those numbers were read off his own saved copy of this twin, which he has edited (land 0.48, rivers,
+  // storms 8, 4096) and which his page keeps; the table's own look at the maker's dials read a flat pale teal ball, 7.8 apart. Now
+  // a darker teal sea, more soft cloud with more storms (0.45 and 4, soft 0.6, a thin haze 0.15), its grade brought back to his
+  // mean; the table's look against his picture at noon, lightness 60.2 / 60.3, colour strength 12.7 / 12.8, hue 237 / 243 degrees,
+  // 1.2 apart (the base table's 60.4 / 12.6 / 242, 1.0 apart but a flat pale teal ball with its cloud near unseen: his item 2))
+  'twin-rori': { name: "Rori from space (twin of his Rori picture)", recipe: 'living', version: 5, seed: 5353, compare: 'set:rori', group: TWINS,
+    dials: { land: 0, continentSize: 0.5, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#08303a', shallow: '#0e4250', cloudCover: 0.45, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 4, cloudSpots: 0.1, cloudStreaks: 0.8, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.596, gradeLightness: 1.828, gradeHue: -7.168, gradeWash: 0.74, gradeWashColour: '#7995a3',
+      cloudSoft: 0.6, cloudHaze: 0.15, gradePickHue: 200, gradePickWidth: 50, gradePickStrength: 1.8 },
     layers: { specular: { on: true, opacity: 0.6, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.85, tint: '#e0f0ff' }, atmosphere: { opacity: 0.5, tint: '#60c0e0' } }, size: 2048 },
   // (wave B, with the planet features under its Scattered air: his / the twin over the lit disc at noon, lightness
   // 54.7 / 54.4, colour strength 24.2 / 22.0, hue 307 / 307 degrees, 2.2 apart (5.2 before): a lacy purple mottle,
@@ -1026,8 +1211,13 @@ Object.assign(PRESETS, {
     dials: { land: 0.68, continentSize: 0.8, mountains: 0.05, rivers: 0.2, spots: 1, spotScale: 2.4, spotEdge: 0.8, spotVariety: 1, spotFray: 0.6, warmth: 1, tilt: 45, wetness: 0.65, deep: '#1a6a5a', shallow: '#2a8a74', shelf: '#3a9a80', grass: '#3a6a28', forest: '#24481c', jungle: '#20441a', cloudCover: 0.15, cloudSwirl: 0.9, cloudStorms: 2, haze: 0.15, gradeStrength: 0.92, gradeLightness: 0.849, gradeWash: 0.526, gradeWashColour: '#294f30' },
     layers: { specular: { on: true, opacity: 0.4, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.6 }, atmosphere: { opacity: 0.5, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the albedo: lightness 21.0 / 21.0, colour strength 9.9 / 9.6, hue 178 / 185 degrees)
-  'twin-pillio': { name: "Pillio, alive (twin of his map)", recipe: 'living', version: 3, seed: 1313, compare: 'set:pillio-alive', group: TWINS,
-    dials: { land: 0.45, mountains: 0.05, rivers: 0.2, spots: 0.3, warmth: 1, tilt: 45, wetness: 0.65, deep: '#0a3040', shallow: '#1a4a5a', desert: '#9a6a38', steppe: '#7a5030', grass: '#4a4a28', forest: '#23361a', cloudCover: 0.1, cloudSwirl: 0.9, cloudStorms: 2, haze: 0.15, gradeStrength: 0.64, gradeLightness: 0.883, gradeWash: 0.231, gradeWashColour: '#2b3532' },
+  // (pass 2, wave 6, its critic J: moved to version 5, its teal picked stronger and kept in its hue, its grade brought back to his
+  // look; against his own look wearing his map on the close-up stage at noon (set:pillio-alive, the like-for-like target for a map),
+  // lightness 45.5 / 44.3, colour strength 17.6 / 15.8, hue 278 / 265 degrees, 4.4 apart (5.6 before). The teal his map holds reads
+  // only where his look's air lets it; under the twin's the sea's blue still wins)
+  'twin-pillio': { name: "Pillio, alive (twin of his map)", recipe: 'living', version: 5, seed: 1313, compare: 'set:pillio-alive', group: TWINS,
+    dials: { land: 0.45, mountains: 0.05, rivers: 0.2, spots: 0.3, warmth: 1, tilt: 45, wetness: 0.65, deep: '#0a3040', shallow: '#1a4a5a', desert: '#9a6a38', steppe: '#7a5030', grass: '#4a4a28', forest: '#23361a', cloudCover: 0.1, cloudSwirl: 0.9, cloudStorms: 2, haze: 0.15, gradeStrength: 0.714, gradeLightness: 0.962, gradeWash: 0.231, gradeWashColour: '#2b3532',
+      gradePickHue: 190, gradePickWidth: 40, gradePickStrength: 2.5, gradeHold: 1 },
     layers: { specular: { on: true, opacity: 0.4, tint: '#fff4e0', shine: 150 }, clouds: { on: true, opacity: 0.6 }, atmosphere: { opacity: 0.5, tint: '#8fc0ff' } }, size: 2048 },
   // (his / the twin, over the albedo: lightness 34.2 / 34.1, colour strength 17.5 / 15.4, hue 154 / 140 degrees)
   'twin-planet': { name: "The generic green planet (twin of his map)", recipe: 'living', version: 3, seed: 1010, compare: 'gen:planet-01', group: TWINS,
@@ -1078,7 +1268,10 @@ const inVersion = (version, recipe) => (d) => !(sinceOf(d, recipe) > (+version |
  */
 export function dialsOf(recipe, version = 1) {
   const r = RECIPES[recipe] || RECIPES.desert;
-  return [...r.dials, ...(r.lights ? LIGHT_DIALS : []), ...(r.relief > 0 ? FEATURE_DIALS : []), ...CLOUD_DIALS, ...CLOUD_SPOT_DIALS, ...CLOUD_STREAK_DIALS, ...SHADING_DIALS, ...GRADE_DIALS, ...PART_DIALS].filter(inVersion(version, recipe));
+  // (wave 6, maker C) and from version 4 (the living world's 5) wave 6's, last: the ring cities and their glint on the recipes
+  // that grow cities, soft cloud, soft edges and the colour pick on every recipe (each earlier version's list as it was)
+  return [...r.dials, ...(r.lights ? LIGHT_DIALS : []), ...(r.relief > 0 ? FEATURE_DIALS : []), ...CLOUD_DIALS, ...CLOUD_SPOT_DIALS, ...CLOUD_STREAK_DIALS, ...SHADING_DIALS, ...GRADE_DIALS, ...PART_DIALS,
+    ...(r.lights ? [...RING_CITY_DIALS, ...CITY_GLINT_DIALS] : []), ...CLOUD_SOFT_DIALS, ...SOFT_DIALS, ...GRADE4_DIALS].filter(inVersion(version, recipe));
 }
 /** The dials a recipe blended into another reads at a version: its own and its lights'. */
 export function mixDialsOf(recipe, version = 1) {
@@ -1086,18 +1279,43 @@ export function mixDialsOf(recipe, version = 1) {
   return [...r.dials, ...(r.lights ? LIGHT_DIALS : [])].filter(inVersion(version, recipe));
 }
 
+/**
+ * (Pass 2, wave 6, its fixer) The own dials of each twin moved to a newer recipe version this wave, as they stood before it
+ * (1b2a6c6), and the version they stood at: an older-version look of such a twin that lacks a dial is filled, and a dial of it
+ * reset, from these and the wave B re-grade, so every older version of the preset stays exactly as it was (the checker's
+ * finding: the version 4 tuning reached them; the prints of the same looks stand in `placeholders.js`' `TWIN_PAST_PRINTS`).
+ * Numbers and colours alone.
+ */
+const TWIN_PAST_DIALS = {
+  'twin-tatooine': { version: 2, dials: { sandLight: '#ccb698', sandDark: '#8a7278', rock: '#6a5a5e', salt: '#f2ece2', duneScale: 1.6, duneStrength: 0.3, badlands: 0.3, saltFlats: 0.03, variety: 0.85, haze: 0.25, dusty: 0.2, gradeStrength: 0.957, gradeLightness: 1.332, gradeWash: 0.002, gradeWashColour: '#cbb7b1' } },
+  'twin-jakku': { version: 2, dials: { sandLight: '#e8c294', sandDark: '#c89a6a', rock: '#8a6a50', salt: '#f0e0c8', duneScale: 1.6, duneStrength: 0.5, badlands: 0.08, saltFlats: 0.04, variety: 0.35, canyons: 0.15, canyonSize: 1.2, canyonColour: '#8a5a3a', haze: 0.25, dusty: 0.2, gradeStrength: 1.328, gradeLightness: 1.162, gradeWash: 1, gradeWashColour: '#ddaf8e' } },
+  'twin-geonosis': { version: 2, dials: { sandLight: '#e8a048', sandDark: '#a04018', rock: '#6a2010', salt: '#f0c070', duneScale: 0.9, duneStrength: 0.3, badlands: 0.25, saltFlats: 0.2, variety: 1, haze: 0.2, dusty: 0.15, gradeStrength: 0.984, gradeLightness: 1.222, gradeWashColour: '#d48e5f' } },
+  'twin-bespin': { version: 2, dials: { c1: '#f0c080', c2: '#e09850', c3: '#b06028', c4: '#d08040', polar: '#a07050', bands: 24, contrast: 0.45, streaks: 0.6, storms: 0, stormColour: '#f8dcb0', haze: 0.15, limbDark: 0.5, gradeStrength: 1.119, gradeLightness: 1.074, gradeWash: 0.201, gradeWashColour: '#d1895a' } },
+  'twin-sullust': { version: 3, dials: { crust: '#141016', ash: '#3a1418', lava: '#ff3020', lavaAmount: 0.25, rivers: 0.5, cracks: 0.7, cloudCover: 0.35, cloudStorms: 0, haze: 0.2, specks: 0.6, speckSize: 0.8, speckColour: '#50e8f0', speckGlow: 0.8, gradeStrength: 1.739, gradeLightness: 1.55, gradeWashColour: '#3c2a33' } },
+  'twin-kashyyyk': { version: 3, dials: { land: 0.4, continentSize: 1.1, mountains: 0.3, rivers: 0.2, spots: 0.3, warmth: 0.72, wetness: 0.85, grass: '#5a7a40', forest: '#2e5030', jungle: '#2a5432', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.12, cloudStreaks: 0.7, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.561, gradeLightness: 1.955, gradeWash: 0.218, gradeWashColour: '#a3bacb' } },
+  'twin-yavin4': { version: 3, dials: { land: 0.45, continentSize: 0.8, mountains: 0.3, rivers: 0.2, spots: 0.4, spotFray: 0.2, warmth: 0.75, wetness: 0.9, grass: '#3a7a60', forest: '#2a6050', jungle: '#2a6050', cloudCover: 0.3, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.5, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 1.108, gradeLightness: 2, gradeWash: 0.459, gradeWashColour: '#9ab2d2' } },
+  'twin-kamino': { version: 3, dials: { land: 0, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#0a2a70', shallow: '#1a4aa0', cloudCover: 0.6, cloudSwirl: 1.1, cloudStorms: 4, cloudSpots: 0.15, cloudStreaks: 0.9, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 2, gradeLightness: 1.416, gradeWash: 0.675, gradeWashColour: '#8eb2dc' } },
+  'twin-rori': { version: 3, dials: { land: 0, continentSize: 0.5, mountains: 0.3, rivers: 0.2, warmth: 0.62, wetness: 0.65, deep: '#0a3040', shallow: '#104a5a', cloudCover: 0.25, cloudScale: 1.1, cloudSwirl: 0.9, cloudStorms: 2, cloudSpots: 0.1, cloudStreaks: 0.8, cloudStreakScale: 1.6, haze: 0.4, gradeStrength: 0.637, gradeLightness: 2, gradeWash: 0.74, gradeWashColour: '#7995a3' } },
+  'twin-pillio': { version: 3, dials: { land: 0.45, mountains: 0.05, rivers: 0.2, spots: 0.3, warmth: 1, tilt: 45, wetness: 0.65, deep: '#0a3040', shallow: '#1a4a5a', desert: '#9a6a38', steppe: '#7a5030', grass: '#4a4a28', forest: '#23361a', cloudCover: 0.1, cloudSwirl: 0.9, cloudStorms: 2, haze: 0.15, gradeStrength: 0.64, gradeLightness: 0.883, gradeWash: 0.231, gradeWashColour: '#2b3532' } },
+};
+
 /** The dials of a preset (at its own version, or at `version`): the recipe's starts with the preset's own over them. */
 export function presetDials(presetId, version) {
   const p = PRESETS[presetId];
   const v = version ?? (p.version || recipeVersion(p.recipe));
   const out = {};
   for (const d of dialsOf(p.recipe, v)) out[d.k] = d.def;
+  // (the fixer of pass 2, wave 6) a twin moved this wave asked at the version it stood at or older: its dials as they were
+  const past = version !== undefined && version !== null && TWIN_PAST_DIALS[presetId] && v <= TWIN_PAST_DIALS[presetId].version ? TWIN_PAST_DIALS[presetId] : null;
   // (a preset's dial of a later version is left out: a version 1 look never holds a later one's)
   const later = new Set(dialsOf(p.recipe, 99).map((d) => d.k).filter((k) => !(k in out)));
-  for (const [k, val] of Object.entries(p.dials || {})) if (!later.has(k)) out[k] = val;
+  for (const [k, val] of Object.entries((past ? past.dials : p.dials) || {})) if (!later.has(k)) out[k] = val;
   // (the atmosphere brief's wave B) a generated twin's grade re-tuned under its Scattered air (airTuned.js), over its own:
   // its look and the reset of each of its dials alike (only dials its version has)
-  const g = p.group === TWINS ? TWIN_GRADE[presetId] : null;
+  // (pass 2, wave 6, its critic J) but not over a twin moved to its recipe's newest version: its grade is fitted under its air
+  // with that version's parts and stands in its own dials (the re-grade was found for the older version's look, and laid over the
+  // new one it put the mean back where the new parts had moved it: Kashyyyk 5.3 apart where its own grade reads 0.6)
+  const g = p.group === TWINS && (past || (p.version || 1) < ringsVersion(p.recipe)) ? TWIN_GRADE[presetId] : null;
   if (g) for (const [k, val] of Object.entries(g)) if (k in out) out[k] = val;
   return out;
 }
@@ -1172,7 +1390,29 @@ export function depthOn(gen) {
  */
 export function extraChannels(gen) {
   const split = glowKinds(gen).length > 1, depth = depthOn(gen);
-  return split || depth ? { split, depth } : null;
+  // (wave 6, maker C) and the cities' metal for their glint (a), only at the version that has it: every older look as it was
+  const metal = metalOn(gen);
+  return split || depth || metal ? (metal ? { split, depth, metal } : { split, depth }) : null;
+}
+/** (wave 6, maker C) A look's ring cities are on: the version that has them, a recipe that grows cities, its dial above 0. */
+export function ringsOn(gen) {
+  return !!gen && (+gen.version || 1) >= ringsVersion(gen.recipe) && !!RECIPES[gen.recipe]?.lights && (+gen.dials?.ringCity || 0) > 0;
+}
+/** (wave 6, maker C) Its ring cities' layout: 0 concentric, 1 gears, 2 hexagonal. */
+export function ringLayoutOf(gen) {
+  const v = Math.round(+gen?.dials?.ringLayout || 0);
+  return v === 1 || v === 2 ? v : 0;
+}
+/** (wave 6, maker C) Its ring cities are drawn by its own material at every size, not only baked (the Drawn dial). */
+export function ringsSharp(gen) {
+  return ringsOn(gen) && +gen.dials?.ringSharp === 1;
+}
+/**
+ * (wave 6, maker C) A look carries its cities' metal for their glint (the extra channels' alpha): a whole-planet city at the
+ * version that has it (every built-up place is metal), a living world with ring cities (their plates).
+ */
+export function metalOn(gen) {
+  return !!gen && (+gen.version || 1) >= ringsVersion(gen.recipe) && (gen.recipe === 'cityworld' || ringsOn(gen));
 }
 /** The dials that hold a look's city light colours (its own, or its blended recipe's). */
 export function lightDialsOf(gen) {
@@ -1235,7 +1475,9 @@ export function presetLook(presetId, extra = {}) {
   // new version of itself: Scattered, from its recipe's start (airProfile.js). Every other preset was made before
   // that wave and keeps what it drew (no air: Painted).
   // (wave A's critic) with the air tuned for that twin against his picture (airTuned.js)
-  const air = p.group === TWINS ? { air: { ...airStartFor(p.recipe, presetDials(presetId), { shaped: !!p.shape }), ...(TWIN_AIR[presetId] || {}) } } : {};
+  // (wave 6) and a preset made after it that asks for its own air (its `air`, over its recipe's start), likewise
+  const air = p.group === TWINS ? { air: { ...airStartFor(p.recipe, presetDials(presetId), { shaped: !!p.shape }), ...(TWIN_AIR[presetId] || {}) } }
+    : p.air ? { air: { ...airStartFor(p.recipe, presetDials(presetId), { shaped: !!p.shape }), ...p.air } } : {};
   return {
     ...air,
     name: p.name, group: p.group || 'Generated (a test)', kind: 'sphere', mesh: 'planet_01_mesh',
@@ -1508,8 +1750,8 @@ function gasgiant(dir, D, X) {
 // belts lowest, each deck flat with a short rise to the next; the great storms tower over their
 // bands, the white ovals stand a deck above theirs and the brown ones sink a deck below. Only the
 // height changes (the relief and the extra height channel carry it; build.js shades with them).
-function gasgiantDepth(dir, D, X) {
-  const g = gasgiantCore(dir, D, X);
+function gasgiantDepth(dir, D, X, v4 = false) {
+  const g = v4 ? gasgiantCore(dir, D, X, true) : gasgiantCore(dir, D, X);
   const n = max(D.depthLayers, 1.0);
   const x = clamp(float(1).sub(g.tt), 0.0, 1.0).mul(n).mul(0.9999);
   const deck = floor(x).add(sstep(0.8, 1.0, fract(x))).div(n).toVar();
@@ -1520,7 +1762,14 @@ function gasgiantDepth(dir, D, X) {
   return { h: deck.mul(0.9).add(0.05), albedo: g.col, spec: float(0), glow: float(0) };
 }
 
-function gasgiantCore(dir, D, X) {
+// (wave 6) `v4`: version 4's softer bands and two more colours (its dials `bandSoft`, `moreColours`, `c5`, `c6`); left out, the graph
+// is exactly what it was.
+function gasgiant4(dir, D, X) {
+  const g = gasgiantCore(dir, D, X, true);
+  return { h: float(0.5), albedo: g.col, spec: float(0), glow: float(0) };
+}
+function gasgiantDepth4(dir, D, X) { return gasgiantDepth(dir, D, X, true); }
+function gasgiantCore(dir, D, X, v4 = false) {
   const { maxF, so } = X;
   let p = dir;
   // storms: each turns the gas round its centre (a vortex), stronger toward the middle
@@ -1560,10 +1809,18 @@ function gasgiantCore(dir, D, X) {
   const latW = lat.add(D.turbulence.mul(w1.mul(0.1).add(w2.mul(0.065).mul(rough)).add(w3.mul(0.02).mul(rough))));
   const bx = latW.mul(D.bands).div(Math.PI);
   const tl = clamp(bandOf(bx).mul(D.contrast).mul(0.9).add(0.5), 0.0, 1.0);
-  const tt = mix(tl, sstep(0.2, 0.8, tl), 0.55);
+  // (version 4: the steps between bands sharpened less as the bands soften, and the accent's edge widened with them)
+  const tt = v4 ? mix(tl, sstep(0.2, 0.8, tl), float(0.55).mul(float(1).sub(D.bandSoft))) : mix(tl, sstep(0.2, 0.8, tl), 0.55);
   let col = mix3(D.c1, D.c2, D.c3, tt);
-  const acc = sstep(0.25, 0.6, fbm4(vec3(bx.mul(0.9), 2.1, 1.3), float(1.0), so.add(vec3(9, 0, 0)), float(1000), float(0.5)));
+  const accN = fbm4(vec3(bx.mul(0.9), 2.1, 1.3), float(1.0), so.add(vec3(9, 0, 0)), float(1000), float(0.5));
+  const acc = v4 ? sstep(float(0.25).sub(D.bandSoft.mul(0.2)), float(0.6).add(D.bandSoft.mul(0.25)), accN) : sstep(0.25, 0.6, accN);
   col = mix(col, D.c4, acc.mul(0.6));
+  if (v4) {
+    // two more colours, band by band (a band field of their own, which of the two by a second), softly as the bands are
+    const more = fbm4(vec3(bx.mul(0.7), 4.3, -2.1), float(1.0), so.add(vec3(-13, 0, 4)), float(1000), float(0.5));
+    const which = sstep(-0.25, 0.25, fbm4(vec3(bx.mul(1.3), -3.7, 5.2), float(1.0), so.add(vec3(6, -11, 2)), float(1000), float(0.5)));
+    col = mix(col, mix(D.c5, D.c6, which), sstep(float(0.05).sub(D.bandSoft.mul(0.15)), float(0.3).add(D.bandSoft.mul(0.2)), more).mul(D.moreColours).mul(0.85));
+  }
   // each band's colour drifts along its length (no band is the same all the way round)
   const along = fbm4(vec3(p.x, p.y.mul(9.0), p.z), float(2.5), so.add(vec3(-2, 0, 7)), maxF, float(0.5));
   col = col.mul(along.mul(0.22).add(1.0));
@@ -2180,19 +2437,319 @@ function blendMask(dir, sA, X, M) {
   return sstep(thr.sub(w), thr.add(w), f).mul(sstep(0.0, 0.01, M.amount));
 }
 
+// ---------------------------------------------------------------------------------------------
+// (wave 6, maker C) Ring cities. Where they stand is worked out here in JS from the seed and the dials (ringSitesOf, pure: the
+// same look gives the same cities on every machine), and handed to the card as arrays of numbers; what each point of the globe
+// shows is one function of those numbers (ringLayer), run by the bake into the look's pictures and, when the look draws them
+// sharp, by the look's own material at every pixel it draws (build.js), so the lines are as fine from orbit as the screen is.
+
+/** At most this many ring sites (great hubs and their satellites) and trunk lines a look. */
+export const MAX_RING_SITES = 80, MAX_RING_TRUNKS = 64;
+const RING_TURN = new THREE.Vector3(0.31, 0.95, 0.07);
+// a direction moved `ang` radians from `a` toward the side at `phi` round it (on the unit sphere)
+function awayFrom(a, phi, ang, out = new THREE.Vector3()) {
+  const e = new THREE.Vector3().crossVectors(RING_TURN, a).normalize();
+  const n = new THREE.Vector3().crossVectors(a, e);
+  const t = e.multiplyScalar(Math.cos(phi)).add(n.multiplyScalar(Math.sin(phi)));
+  return out.copy(a).multiplyScalar(Math.cos(ang)).add(t.multiplyScalar(Math.sin(ang))).normalize();
+}
+const angleOf = (a, b) => Math.acos(Math.max(-1, Math.min(1, a.dot(b))));
+/**
+ * Where a look's ring cities stand (pure, from its seed and dials; none unless its ring cities are on): `sites` each
+ * [x, y, z, chord radius] (the centre on the unit sphere and the radius as a chord), `meta` each [rings, spokes, turn, kind]
+ * (kind 0 a great hub, 1 a satellite), `trunks` each [px, py, pz, cos half arc] (the pole of the great circle the line runs
+ * along, and how far either side of its middle it runs) with `mids` each [x, y, z, width share] (its middle).
+ */
+export function ringSitesOf(gen) {
+  const out = { sites: [], meta: [], trunks: [], mids: [] };
+  if (!ringsOn(gen)) return out;
+  const d = gen.dials;
+  // its own generator, so nothing else of the look moves when its cities do
+  const r = rng((gen.seed | 0) * 104729 + 71);
+  const nh = Math.max(1, Math.min(16, Math.round(+d.ringHubs || 1)));
+  const base = Math.max(2, Math.min(30, +d.ringHubSize || 8)) * Math.PI / 180;
+  const placed = []; // { c, R }
+  const fits = (c, R) => placed.every((p) => angleOf(c, p.c) > (R + p.R) * 1.12);
+  // the great hubs: within 72 degrees of the equator, apart from each other
+  for (let tries = 0; placed.length < nh && tries < 400; tries++) {
+    const c = onSphere(r(), r(), -1.25, 1.25);
+    const R = base * (0.6 + 0.8 * r());
+    if (fits(c, R)) placed.push({ c, R, hub: true, k: Math.max(2, Math.round((+d.ringRings || 4) * (0.8 + 0.4 * r()))), s: Math.round((+d.ringSpokes || 0) * (0.7 + 0.6 * r())), a: r() * TAU });
+  }
+  const hubs = placed.slice();
+  // their satellites: smaller rings a little beyond each hub's rim, each linked to its hub
+  const sats = [];
+  const ns = Math.max(0, Math.min(4, Math.round(+d.ringSatellites || 0)));
+  for (const h of hubs) {
+    const want = Math.round(ns * (0.5 + r()));
+    for (let i = 0, tries = 0; i < want && tries < 24 && placed.length < MAX_RING_SITES; tries++) {
+      const R = h.R * (0.2 + 0.25 * r());
+      const c = awayFrom(h.c, r() * TAU, h.R * (1.3 + 0.7 * r()) + R);
+      if (!fits(c, R)) continue;
+      const s = { c, R, hub: false, k: Math.max(2, Math.round((+d.ringRings || 4) * 0.6)), s: Math.round((+d.ringSpokes || 0) * 0.5), a: r() * TAU, of: h };
+      placed.push(s); sats.push(s); i++;
+    }
+  }
+  for (const p of placed) {
+    out.sites.push([p.c.x, p.c.y, p.c.z, 2 * Math.sin(p.R / 2)]);
+    out.meta.push([p.k, p.s, p.a, p.hub ? 0 : 1]);
+  }
+  // the trunk lines: the hubs joined by their shortest links (a spanning tree, its shortest share by the dial), a few more toward 1,
+  // and each satellite to its hub; each from rim to rim along the great circle through the two centres
+  const tr = Math.max(0, Math.min(1, +d.ringTrunks || 0));
+  if (tr > 0) {
+    const edges = [];
+    const inTree = [0];
+    while (inTree.length < hubs.length) {
+      let best = null;
+      for (const i of inTree) for (let j = 0; j < hubs.length; j++) {
+        if (inTree.includes(j)) continue;
+        const a = angleOf(hubs[i].c, hubs[j].c);
+        if (!best || a < best.a) best = { i, j, a };
+      }
+      inTree.push(best.j);
+      edges.push(best);
+    }
+    edges.sort((x, y) => x.a - y.a);
+    const links = edges.slice(0, Math.round(tr * edges.length)).map((e) => [hubs[e.i], hubs[e.j], 1]);
+    // toward 1, each hub also to its nearest hub it is not yet linked to
+    if (tr > 0.5) for (const h of hubs) {
+      if (r() > (tr - 0.5) * 2) continue;
+      let best = null;
+      for (const o of hubs) {
+        if (o === h || links.some(([a, b]) => (a === h && b === o) || (a === o && b === h))) continue;
+        const a = angleOf(h.c, o.c);
+        if (!best || a < best.a) best = { o, a };
+      }
+      if (best && best.a < Math.PI * 0.6) links.push([h, best.o, 1]);
+    }
+    for (const s of sats) links.push([s.of, s, 0.6]);
+    for (const [a, b, w] of links) {
+      if (out.trunks.length >= MAX_RING_TRUNKS) break;
+      const ab = angleOf(a.c, b.c);
+      if (ab < 1e-4) continue;
+      const pole = new THREE.Vector3().crossVectors(a.c, b.c).normalize();
+      // from a's rim to b's rim: the points a little inside each rim along the circle
+      const start = a.c.clone().multiplyScalar(Math.cos(a.R * 0.95)).add(new THREE.Vector3().crossVectors(pole, a.c).multiplyScalar(Math.sin(a.R * 0.95))).normalize();
+      const end = b.c.clone().multiplyScalar(Math.cos(b.R * 0.95)).add(new THREE.Vector3().crossVectors(b.c, pole).multiplyScalar(Math.sin(b.R * 0.95))).normalize();
+      const half = angleOf(start, end) / 2;
+      if (!(half > 1e-4) || a.R * 0.95 + b.R * 0.95 >= ab) continue;
+      const mid = start.clone().add(end).normalize();
+      out.trunks.push([pole.x, pole.y, pole.z, Math.cos(half)]);
+      out.mids.push([mid.x, mid.y, mid.z, w]);
+    }
+  }
+  return out;
+}
+
+/** The card's arrays a ring cities' function reads (one set for the bake, one a look's pictures for its material). */
+export function ringUniforms() {
+  return {
+    sites: uniformArray(Array.from({ length: MAX_RING_SITES }, () => new THREE.Vector4(0, 1, 0, 0.0001)), 'vec4'),
+    meta: uniformArray(Array.from({ length: MAX_RING_SITES }, () => new THREE.Vector4()), 'vec4'),
+    trunks: uniformArray(Array.from({ length: MAX_RING_TRUNKS }, () => new THREE.Vector4(0, 1, 0, 2)), 'vec4'),
+    mids: uniformArray(Array.from({ length: MAX_RING_TRUNKS }, () => new THREE.Vector4(0, 1, 0, 0)), 'vec4'),
+    // x sites, y trunks, z layout, w the ring cities' strength
+    counts: uniform(new THREE.Vector4()),
+    // x width, y plate brightness, z glow along the rings, w glow between
+    look: uniform(new THREE.Vector4()),
+    // the plates' colour (sRGB), w whether the rings are baked into the pictures (0: the material draws them)
+    plate: uniform(new THREE.Vector4(0.76, 0.74, 0.8, 1)),
+  };
+}
+const _rc = new THREE.Color();
+/** A look's ring cities written into one such set of arrays (at a bake: never in a frame). */
+export function writeRings(RU, gen, { baked = true } = {}) {
+  const S = ringSitesOf(gen);
+  const d = gen?.dials || {};
+  for (let i = 0; i < MAX_RING_SITES; i++) {
+    const s = S.sites[i], m = S.meta[i];
+    if (s) { RU.sites.array[i].set(s[0], s[1], s[2], s[3]); RU.meta.array[i].set(m[0], m[1], m[2], m[3]); } else { RU.sites.array[i].set(0, 1, 0, 0.0001); RU.meta.array[i].set(0, 0, 0, 0); }
+  }
+  for (let i = 0; i < MAX_RING_TRUNKS; i++) {
+    const t = S.trunks[i], m = S.mids[i];
+    if (t) { RU.trunks.array[i].set(t[0], t[1], t[2], t[3]); RU.mids.array[i].set(m[0], m[1], m[2], m[3]); } else { RU.trunks.array[i].set(0, 1, 0, 2); RU.mids.array[i].set(0, 1, 0, 0); }
+  }
+  RU.counts.value.set(S.sites.length, S.trunks.length, +d.ringLayout || 0, ringsOn(gen) ? Math.max(0, Math.min(1, +d.ringCity || 0)) : 0);
+  RU.look.value.set(+d.ringWidth || 0, +d.ringPlates || 0, +d.ringGlow || 0, +d.ringFill || 0);
+  _rc.setStyle(typeof d.ringPlateColour === 'string' ? d.ringPlateColour : '#c2bccb', THREE.NoColorSpace);
+  RU.plate.value.set(_rc.r, _rc.g, _rc.b, baked ? 1 : 0);
+}
+
+// a line `w` wide (in the same units as `n`) drawn with its coverage kept when it is thinner than a pixel or a texel: a line a
+// tenth of a pixel wide reads a tenth as strong, not a whole pixel (the ring cities are seen from a few pixels to a screen across)
+const aaLine = (n, w) => {
+  const fw = fwidth(n).add(0.000001);
+  return float(1).sub(sstep(w.mul(0.5), w.mul(0.5).add(fw), abs(n))).mul(min(float(1), w.div(fw)));
+};
+// the distance from a point to the nearest of `S` spokes through the middle (in the same units as `rad`), with no seam where the
+// angle wraps (|sin| of S half-turns is the same either side)
+const spokeDist = (rad, ang, S) => rad.mul(abs(sin(ang.mul(S).mul(0.5)))).mul(2.0).div(max(S, 1.0));
+const cellHash = (a, b, c) => hashFloats(hashCell(int(floor(a)), int(floor(b)), int(floor(c))));
+
+/**
+ * What the ring cities make of one point of the globe (`dir`, a unit vector in the body's frame), from the arrays `RU`:
+ * `plate` (the metal plates' cover, 0..1), `tone` (each plate's own brightness, 0..1), `seam` (the darker lines between plates by
+ * day), `lines` (the rings, spokes and trunk lines alight at night), `inside` (the cities' own ground), `tilt` (each plate's own
+ * three numbers, for its glint). `layout` (0 concentric, 1 gears, 2 hexagonal) is the look's own, chosen when the graph is made, so a
+ * program holds one layout's arithmetic alone (a kit and a material a layout: the Layout dial bakes and builds anew).
+ */
+export function ringLayer(dir, RU, layout = 0) {
+  const best = float(9).toVar(), bi = int(0).toVar();
+  // the site whose own radius holds this point nearest its middle (ringSitesOf keeps sites apart, so one site a point)
+  Loop({ start: int(0), end: int(RU.counts.x), type: 'int', condition: '<' }, ({ i }) => {
+    const s = RU.sites.element(i);
+    const rr = length(dir.sub(s.xyz)).div(s.w);
+    bi.assign(select(rr.lessThan(best), i, bi));
+    best.assign(min(best, rr));
+  });
+  const s = RU.sites.element(bi).toVar(), m = RU.meta.element(bi).toVar();
+  const c = s.xyz;
+  const e = normalize(cross(vec3(0.31, 0.95, 0.07), c)), nn = cross(c, e);
+  const rel = dir.sub(c).div(s.w);
+  const u0 = dot(rel, e), v0 = dot(rel, nn);
+  const ca = cos(m.z), sa = sin(m.z);
+  const u = u0.mul(ca).sub(v0.mul(sa)).toVar(), v = u0.mul(sa).add(v0.mul(ca)).toVar();
+  const rad = length(vec2(u, v)).toVar();
+  const ang = atan(v, u).toVar();
+  const K = max(m.x, 1.0), S = m.y;
+  const kk = K.add(0.6);
+  const id = float(bi).add(0.5);
+  // the lines' width in the site's radii (a satellite's a little wider for its size, so it still reads)
+  const W = RU.look.x.mul(0.05).add(0.012).mul(m.w.mul(0.5).add(1.0)).toVar();
+  const disc = float(1).sub(sstep(1.0, float(1.0).add(fwidth(rad)).add(0.002), rad)).toVar();
+  const t = rad.mul(kk).toVar();
+  const spokesOn = step(0.5, S);
+  const ringIx = floor(t.sub(0.6));
+  let plate, tone, lines, seam, tilt;
+  if (layout === 1) {
+    // rings broken into arcs like gears: each band between two rings a run of arcs with gaps, the rim toothed
+    const f = fract(t.sub(0.6));
+    const bandD = abs(f.sub(0.5)).div(kk);
+    const band = aaLine(bandD, float(0.62).div(kk)).mul(step(0.6, t));
+    const hb = cellHash(id.mul(53.0), ringIx.add(5.0), float(7.0)).toVar();
+    const arcsN = floor(hb.x.mul(5.0).add(3.0));
+    const q = fract(ang.div(TAU)).mul(arcsN).add(hb.y);
+    const gap = hb.z.mul(0.2).add(0.12);
+    const qf = fract(q);
+    const qw = fwidth(q).add(0.00001);
+    const arcOn = sstep(float(1).sub(gap), float(1).sub(gap).sub(qw.mul(1.5)), qf).mul(sstep(0.0, qw.mul(1.5), qf));
+    const teeth = step(abs(ringIx.sub(K.sub(1.0))), 0.5).mul(sstep(0.3, 0.2, tri(fract(ang.div(TAU)).mul(floor(K.mul(6.0).add(18.0)))))).mul(sstep(0.0, 0.06, f.sub(0.75))).mul(sstep(0.36, 0.3, f.sub(0.75)));
+    const rings1 = max(aaLine(bandD.sub(float(0.31).div(kk)), W.mul(0.6)), aaLine(bandD, W.mul(0.5))).mul(band.max(teeth)).mul(arcOn.mul(0.85).add(0.15));
+    const spokes1 = aaLine(spokeDist(rad, ang, floor(S.mul(0.5))), W.mul(1.4)).mul(sstep(0.45, 0.6, t)).mul(step(1.5, S)).mul(sstep(K.mul(0.75).add(0.6), K.mul(0.6).add(0.6), t));
+    plate = max(band.mul(arcOn), teeth);
+    tone = hb.w;
+    lines = max(rings1, spokes1);
+    seam = max(rings1.mul(0.6), aaLine(bandD.sub(float(0.31).div(kk)), W.mul(0.4)));
+    tilt = hb;
+  } else if (layout === 2) {
+    // rings of hexagonal plates: a hexagonal lattice in the site's plane, cells about a ring wide, the outer ones thinning out
+    const hp = vec2(u, v).mul(kk.mul(1.05));
+    const sz = vec2(1.0, Math.sqrt(3));
+    const ga = mod(hp, sz).sub(sz.mul(0.5)), gb = mod(hp.sub(sz.mul(0.5)), sz).sub(sz.mul(0.5));
+    const g = select(dot(ga, ga).lessThan(dot(gb, gb)), ga, gb).toVar();
+    const cid = hp.sub(g);
+    const hx = max(dot(abs(g), vec2(0.5, Math.sqrt(3) / 2)), abs(g).x);
+    const edgeD = float(0.5).sub(hx).div(kk.mul(1.05));
+    const cellR = length(cid).div(kk.mul(1.05));
+    const hh = cellHash(cid.x.mul(2.0).add(id.mul(131.0)), cid.y.mul(2.0).add(3.0), id.add(11.0)).toVar();
+    const ringOfCell = floor(length(cid).add(0.5));
+    const rings2 = aaLine(edgeD, W.mul(0.5)).mul(step(cellR, 1.02)).mul(mix(0.35, 1.0, step(0.5, fract(ringOfCell.mul(0.5)))));
+    const spokes2 = aaLine(spokeDist(rad, ang, float(6.0)), W.mul(0.7)).mul(spokesOn).mul(sstep(0.3, 0.45, t));
+    plate = step(cellR, 0.97).mul(step(cellR.mul(0.35).add(0.06), hh.y));
+    tone = hh.x;
+    lines = max(rings2, spokes2);
+    seam = lines;
+    tilt = hh;
+  } else {
+    // concentric rings crossed by spokes, the plates the cells between, a few left out
+    const rings0 = aaLine(tri(t.sub(0.6)).div(kk), W).mul(step(0.1, t));
+    const spokes0 = aaLine(spokeDist(rad, ang, S), W.mul(0.8)).mul(sstep(0.45, 0.6, t)).mul(spokesOn);
+    const sector = floor(fract(ang.div(TAU)).mul(max(S, 1.0)));
+    const hc0 = cellHash(id.mul(97.0), ringIx.add(17.0), sector.add(31.0)).toVar();
+    // finer seams inside the plates: thirds of a ring, and a radial cut between the spokes (fine detail for a near view)
+    const sub0 = max(aaLine(tri(t.mul(3.0)).div(kk.mul(3.0)), W.mul(0.3)), aaLine(spokeDist(rad, ang, max(S, 4.0).mul(3.0)), W.mul(0.25)).mul(sstep(0.6, 1.2, t))).mul(0.5);
+    plate = step(0.12, hc0.y);
+    tone = hc0.x;
+    lines = max(rings0, spokes0);
+    seam = max(lines, sub0);
+    tilt = hc0;
+  }
+  plate = plate.mul(disc);
+  lines = lines.mul(disc).toVar();
+  seam = seam.mul(disc);
+  // the trunk lines: arcs of great circles, from rim to rim, not drawn over a city's own ground; the loop keeps only the nearest
+  // line's distance (in its own width's share), the line drawn once after it
+  const near = float(9).toVar();
+  Loop({ start: int(0), end: int(RU.counts.y), type: 'int', condition: '<' }, ({ i }) => {
+    const tr = RU.trunks.element(i), md = RU.mids.element(i);
+    const d = abs(dot(dir, tr.xyz)).div(max(md.w, 0.05));
+    near.assign(select(dot(dir, md.xyz).greaterThanEqual(tr.w), min(near, d), near));
+  });
+  const TW = RU.look.x.mul(0.0035).add(0.0009);
+  const outside = float(1).sub(disc);
+  const trunks = aaLine(near, TW).mul(outside);
+  const all = max(lines, trunks);
+  return { plate, tone, seam, lines: all, inside: disc, tilt, trunks };
+}
+
+// The soft edges' taps (wave 6): a Vogel disc of 12, its points' offsets in the disc's radius
+const SOFT_TAPS = Array.from({ length: 12 }, (_, k) => { const rr = Math.sqrt((k + 0.5) / 12), a = k * 2.39996323; return [rr * Math.cos(a), rr * Math.sin(a)]; });
+
+// Version 4's grade (wave 6): version 2's, then one hue range turned and made stronger alone, and a colour that leaves what a
+// screen can show eased back toward grey in its own hue (toward 1 of the hold) where it was clipped. At its starts (the hold 0,
+// the turn 0, the strength 1) it is version 2's.
+function grade4(srgb, D) {
+  const lab = toOklab(srgb).toVar();
+  const wash = toOklab(D.gradeWashColour);
+  const L = float(0.5).add(lab.x.mul(D.gradeLightness).sub(0.5).mul(D.gradeContrast)).toVar();
+  // the picked range, by the colour's own hue before any turn (a soft bump of the picked width round the picked hue)
+  const h = atan(lab.z, lab.y).mul(180 / Math.PI);
+  const dh = abs(mod(h.sub(D.gradePickHue).add(540.0), 360.0).sub(180.0));
+  const pick = sstep(D.gradePickWidth, D.gradePickWidth.mul(0.4), dh).mul(sstep(0.0, 0.02, length(lab.yz)));
+  const ang = D.gradeHue.add(D.gradePickTurn.mul(pick)).mul(Math.PI / 180);
+  const ca = cos(ang), sa = sin(ang);
+  const a0 = lab.y.mul(ca).sub(lab.z.mul(sa)), b0 = lab.y.mul(sa).add(lab.z.mul(ca));
+  const ab = mix(vec2(a0, b0), wash.yz, D.gradeWash).mul(D.gradeStrength).mul(mix(float(1), D.gradePickStrength, pick)).toVar();
+  const toRGB = (c) => { const lms = OK_LMS_.mul(vec3(L, c.x, c.y)); return OK_RGB.mul(lms.mul(lms).mul(lms)); };
+  // the hold: the largest share of the colour that stays on the screen, found by halving (eight steps), and used where asked
+  const lo = float(0).toVar(), hi = float(1).toVar();
+  for (let k = 0; k < 8; k++) {
+    const mid = lo.add(hi).mul(0.5);
+    const cm = toRGB(ab.mul(mid));
+    const inside = step(-0.0005, min(min(cm.x, cm.y), cm.z)).mul(step(max(max(cm.x, cm.y), cm.z), 1.0005));
+    lo.assign(select(inside.greaterThan(0.5), mid, lo));
+    hi.assign(select(inside.greaterThan(0.5), hi, mid));
+  }
+  const keep = mix(float(1), lo, D.gradeHold);
+  return toSRGB(clamp(toRGB(ab.mul(keep)), 0.0, 1.0));
+}
+
+// Version 4's clouds (wave 6): version 3's (or 2's), their edges softened and crisp erosion eased by `cloudSoft`, and a thin haze
+// of cloud over everything, thicker where the masses gather, by `cloudHaze`. Both nothing at 0.
+function clouds4(dir, D, X) {
+  const c = clouds3(dir, D, X, D.cloudSoft);
+  const { maxF, so } = X;
+  const broad = fbm4(dir, float(1.6), so.add(vec3(-23, 41, 7)), maxF, float(0.5));
+  const haze = D.cloudHaze.mul(sstep(-0.35, 0.45, broad).mul(0.35).add(0.4)).mul(sstep(0.0, 0.01, D.cloudHaze));
+  return { cover: clamp(max(c.cover, haze), 0.0, 1.0), bright: mix(c.bright, float(0.9), haze.mul(float(1).sub(c.cover))) };
+}
+
 // Each recipe's code by version: a look keeps the version it was saved with, so improving a recipe
 // means adding its next version here, never changing one a look may use.
 // Version 2 (21 November) of every recipe is its first's ground under the colour grade and with the
 // cloud flecks (kitFor lays both on any version 2); the living world's also has its spots.
 // (wave B) The planet features' version (partsVersion: 3, the living world's 4) is the version before's ground with
 // the features laid over it (planetParts, in kitFor) and, in the cloud pass, the great cyclone.
+// (wave 6, maker C) Version 4 (the living world's 5) is the version before's ground with wave 6's parts laid on in the kit (ring
+// cities, soft edges, the colour pick, soft cloud) and, for the gas giant, its softer bands and two more colours.
 const SURFACES = {
-  desert: { 1: desert, 2: desert, 3: desert }, ice: { 1: ice, 2: ice, 3: ice }, volcanic: { 1: volcanic, 2: volcanic, 3: volcanic }, terran: { 1: terran, 2: terran, 3: terran },
-  gasgiant: { 1: gasgiant, 2: gasgiant, 3: gasgiant }, moon: { 1: moon, 2: moon, 3: moon },
-  living: { 1: living, 2: living2, 3: living3, 4: living3 }, molten: { 1: molten, 2: molten, 3: molten }, flats: { 1: flats, 2: flats, 3: flats }, cityworld: { 1: cityworld, 2: cityworld, 3: cityworld },
+  desert: { 1: desert, 2: desert, 3: desert, 4: desert }, ice: { 1: ice, 2: ice, 3: ice, 4: ice }, volcanic: { 1: volcanic, 2: volcanic, 3: volcanic, 4: volcanic }, terran: { 1: terran, 2: terran, 3: terran, 4: terran },
+  gasgiant: { 1: gasgiant, 2: gasgiant, 3: gasgiant, 4: gasgiant4 }, moon: { 1: moon, 2: moon, 3: moon, 4: moon },
+  living: { 1: living, 2: living2, 3: living3, 4: living3, 5: living3 }, molten: { 1: molten, 2: molten, 3: molten, 4: molten }, flats: { 1: flats, 2: flats, 3: flats, 4: flats }, cityworld: { 1: cityworld, 2: cityworld, 3: cityworld, 4: cityworld },
 };
 // A recipe version's variant with depth (its decks), used only while its depth dial is above 0.
-const DEPTH = { 'gasgiant@1': gasgiantDepth, 'gasgiant@2': gasgiantDepth, 'gasgiant@3': gasgiantDepth };
+const DEPTH = { 'gasgiant@1': gasgiantDepth, 'gasgiant@2': gasgiantDepth, 'gasgiant@3': gasgiantDepth, 'gasgiant@4': gasgiantDepth4 };
 
 // ---------------------------------------------------------------------------------------------
 // (wave B) The planet features (PART_DIALS), laid over a recipe's ground after its features and blend. F says which
@@ -2208,6 +2765,8 @@ function planetParts(dir, s, D, X, F) {
   const { maxF, so } = X;
   let h = s.h, col = s.albedo, spec = s.spec, glow = s.glow, water = s.water || float(0);
   const land = float(1).sub(water).toVar();
+  // (wave 6, version 4) what is laid after the colour grade, each { m, c } (sRGB): none for every earlier version
+  const post = [];
   // a shared mottle for the parts' own tones, so no part is a flat paint
   const tone = fbm4(dir, float(14.0), so.add(vec3(-21, 17, 3)), maxF, float(0.6)).toVar();
 
@@ -2303,7 +2862,11 @@ function planetParts(dir, s, D, X, F) {
     const star = max(max(ray, side), pit).mul(D.star).toVar();
     const shade = line(dist, wr.mul(4.0)).mul(taper).mul(D.star);
     col = mix(col, col.mul(0.84), shade.mul(0.5));
-    col = mix(col, D.starColour.mul(tone.mul(0.3).add(1.0)), star.mul(0.9));
+    if (F.keep) {
+      // (wave 6, version 4) the cracks laid after the grade in their own colour, with no drift of tone, as much as asked
+      col = mix(col, D.starColour.mul(tone.mul(0.3).add(1.0)), star.mul(0.9).mul(float(1).sub(D.starKeep)));
+      post.push({ m: star.mul(0.9).mul(D.starKeep), c: D.starColour });
+    } else col = mix(col, D.starColour.mul(tone.mul(0.3).add(1.0)), star.mul(0.9));
     h = h.sub(star.mul(0.008)).add(sstep(reach.mul(0.12), reach.mul(0.075), th).mul(float(1).sub(pit)).mul(D.star).mul(0.002));
   }
 
@@ -2349,6 +2912,12 @@ function planetParts(dir, s, D, X, F) {
       const dot0 = sstep(0.34, 0.1, wc.x).mul(on).mul(wc.w.mul(0.6).add(0.4)).toVar();
       col = mix(col, D.speckColour.mul(wc.w.mul(0.3).add(0.85)), dot0.mul(0.95));
       glow = max(glow, dot0.mul(D.speckGlow));
+      if (F.halo) {
+        // (wave 6, version 4) a soft halo of the speck's colour round each, out to most of its cell, glowing as the speck does
+        const halo = sstep(float(0.34).add(D.speckHalo.mul(0.5)), 0.12, wc.x).mul(on).mul(wc.w.mul(0.4).add(0.6)).mul(D.speckHalo).toVar();
+        col = mix(col, D.speckColour.mul(wc.w.mul(0.2).add(0.8)), halo.mul(0.6));
+        glow = max(glow, halo.mul(D.speckGlow).mul(0.55));
+      }
     }
   }
 
@@ -2363,7 +2932,16 @@ function planetParts(dir, s, D, X, F) {
     const t = mix(0.9, 0.3, D.lace);
     const where = mix(land, float(1), D.laceSea);
     const lace = sstep(t, t.add(0.07), v).mul(where).mul(sstep(0.0, 0.02, D.lace)).toVar();
+    // (wave 6, version 4) the ground between taken toward the lace's own colour first
+    if (F.lace4) col = mix(col, D.laceColour.mul(tone.mul(0.3).add(0.85)), where.mul(D.laceGround).mul(float(1).sub(lace)));
     col = mix(col, D.laceColour.mul(tone.mul(0.3).add(1.0)), lace.mul(0.9));
+    if (F.lace4) {
+      // and the thickest of the lace in its second tone
+      const t2 = t.add(mix(0.35, 0.01, D.laceTwoShare));
+      const lace2 = sstep(t2, t2.add(0.05), v).mul(where).mul(D.laceTwoTone).mul(sstep(0.0, 0.02, D.lace));
+      col = mix(col, D.laceColour2.mul(tone.mul(0.15).add(1.0)), lace2);
+      spec = spec.mul(float(1).sub(lace2.mul(0.8)));
+    }
     water = water.mul(float(1).sub(lace.mul(D.laceSea)));
     spec = spec.mul(float(1).sub(lace.mul(0.8)));
   }
@@ -2380,6 +2958,13 @@ function planetParts(dir, s, D, X, F) {
     const pale = sstep(0.3, 0.5, billow).mul(sstep(t.add(soft.mul(3.0)), t, v)).mul(D.mottle);
     col = mix(col, D.mottleColour.mul(billow.mul(0.6).add(0.8)), smoke.mul(0.88));
     col = mix(col, D.mottleLight.mul(tone.mul(0.2).add(1.0)), pale.mul(0.55));
+    if (F.rim) {
+      // (wave 6, version 4) a rim of its own colour round each billow's edge, from a little outside it to its soft inside
+      const rw = D.mottleRimWidth.mul(0.12).add(0.015);
+      const edge = t.sub(soft);
+      const rim = sstep(edge.sub(rw), edge.sub(rw.mul(0.3)), v).mul(sstep(t.add(soft).add(rw.mul(0.5)), t.add(soft.mul(0.3)), v)).mul(D.mottleRim);
+      col = mix(col, D.mottleRimColour.mul(billow.mul(0.4).add(0.85)), rim.mul(0.9));
+    }
   }
 
   if (F.fine) {
@@ -2393,7 +2978,35 @@ function planetParts(dir, s, D, X, F) {
     const grain = fbm4(dir, maxF.mul(0.32), so.add(vec3(27, -13, 8)), maxF, float(0.7));
     col = col.mul(grain.mul(D.fineGrain.mul(0.5)).add(1.0));
   }
-  return { h, albedo: col, spec, glow, water: s.water ? water : s.water, cold: s.cold, depth: s.depth };
+  const res = { h, albedo: col, spec, glow, water: s.water ? water : s.water, cold: s.cold, depth: s.depth };
+  if (post.length) res.post = post;
+  return res;
+}
+
+// (wave 6, maker C) The ring cities and the cities' metal, laid over a look's ground after its features, blend and parts: the
+// plates and seams after the colour grade in their own colour (`post`), the glow along the rings and the dim fill into the city
+// lights, the metal for the glint. With the rings drawn by the material (`RU.plate.w` 0) the ground's glow is still dimmed to the
+// fill and its metal kept, and the material lays the rings itself.
+function cityParts(dir, s, D, X, F, recipe) {
+  const RU = X.rings;
+  const post = [...(s.post || [])];
+  let { h, glow } = s;
+  // a whole-planet city's built-up ground is metal where it is not ice (its shine, 0.12, is the built-up share)
+  let metal = recipe === 'cityworld' ? clamp(s.spec.div(0.12), 0.0, 1.0).mul(0.3) : float(0);
+  if (F.rings) {
+    const R = ringLayer(dir, RU, F.ringLayout);
+    const k = RU.counts.w.mul(float(1).sub(s.water || float(0))).toVar();
+    const bake = RU.plate.w;
+    const pc = RU.plate.xyz.mul(R.tone.mul(0.35).add(0.8)).mul(RU.look.y.mul(0.7).add(0.65));
+    post.push({ m: R.plate.mul(k).mul(0.85).mul(bake), c: pc });
+    post.push({ m: max(R.seam, R.trunks.mul(0.6)).mul(k).mul(0.5).mul(bake), c: pc.mul(0.55) });
+    glow = max(max(glow.mul(mix(float(1), RU.look.w, k)), R.lines.mul(RU.look.z).mul(k).mul(bake)), R.plate.mul(RU.look.w).mul(0.25).mul(k).mul(bake));
+    metal = max(metal, R.plate.mul(R.tone.mul(0.45).add(0.55)).mul(k).mul(bake));
+    h = h.add(R.plate.mul(0.0015).mul(k).mul(bake)).sub(R.seam.mul(0.001).mul(k).mul(bake));
+  }
+  const out = { ...s, h, glow, metal };
+  if (post.length) out.post = post;
+  return out;
 }
 
 // The great cyclone over a version's clouds: the whole cloud field curled round one centre, then bands of thick
@@ -2452,7 +3065,9 @@ const DEPTH_RELIEF = 0.006;
 
 // The shared cloud layer: masses from warped noise squeezed east-west, sorted into belts by latitude,
 // curled round a few spiral storms with clear eyes. Returns (brightness, cover).
-function clouds(dir, D, X) {
+// (wave 6) `S`, version 4's softness (a node), softens the masses' edges and eases their crisp erosion; left out (every earlier
+// version), the graph is exactly what it was.
+function clouds(dir, D, X, S = null) {
   const { maxF, so } = X;
   let p = dir;
   const eye = float(1).toVar();
@@ -2487,8 +3102,9 @@ function clouds(dir, D, X) {
   const erode = fbm4(q, float(22.0).div(sc), so.add(vec3(17, -3, 8)), maxF, float(0.6));
   const v0 = n.add(bias).add(wisp.mul(0.25)).toVar();
   const margin = sstep(th.sub(0.16), th, v0).mul(sstep(th.add(0.2), th.add(0.04), v0));
-  const v = v0.add(puff.sub(0.5).mul(0.1).mul(margin)).add(erode.mul(0.1));
-  const cover = sstep(th.sub(0.04), th.add(0.17), v).mul(eye);
+  const v = S ? v0.add(puff.sub(0.5).mul(0.1).mul(margin).mul(float(1).sub(S))).add(erode.mul(0.1).mul(float(1).sub(S.mul(0.8))))
+    : v0.add(puff.sub(0.5).mul(0.1).mul(margin)).add(erode.mul(0.1));
+  const cover = S ? sstep(th.sub(0.04).sub(S.mul(0.22)), th.add(0.17).add(S.mul(0.3)), v).mul(eye) : sstep(th.sub(0.04), th.add(0.17), v).mul(eye);
   // thin streaks of high cloud in the open spaces, combed along the winds
   const cir = fbm6(vec3(q.x, q.y.mul(5.0), q.z), float(4.0).div(sc), so.add(vec3(-12, 4, 30)), maxF, float(0.58));
   const cirrus = sstep(0.12, 0.3, cir).mul(sstep(-0.05, 0.15, fbm4(q, float(1.5), so.add(vec3(8, 8, -8)), maxF, float(0.5)))).mul(0.22).mul(eye);
@@ -2499,22 +3115,22 @@ function clouds(dir, D, X) {
 
 // Version 2's clouds: the first's, with many small flecks and wisps of cloud between the masses (as on
 // Naboo's picture), a little stretched east-west; none at 0.
-function clouds2(dir, D, X) {
-  const c = clouds(dir, D, X);
+function clouds2(dir, D, X, S = null) {
+  const c = S ? clouds(dir, D, X, S) : clouds(dir, D, X);
   const { maxF, so } = X;
   const f = float(22.0).div(D.cloudSpotScale);
   const p = warp(vec3(dir.x, dir.y.mul(1.5), dir.z), f.mul(0.4), float(0.7).div(f), so.add(vec3(13, -31, 7)), maxF);
   const n = fbm6(p, f, so.add(vec3(-23, 11, 37)), maxF, float(0.62));
   const th = mix(0.4, 0.02, D.cloudSpots);
-  const fleck = sstep(th, th.add(0.14), n).mul(sstep(0.0, 0.02, D.cloudSpots));
+  const fleck = (S ? sstep(th, th.add(0.14).add(S.mul(0.3)), n) : sstep(th, th.add(0.14), n)).mul(sstep(0.0, 0.02, D.cloudSpots));
   return { cover: clamp(max(c.cover, fleck.mul(0.85)), 0.0, 1.0), bright: c.bright };
 }
 
 // Version 3's clouds (living worlds): the second's, with long thin streaks of high cloud combed along
 // the winds (a noise stretched hard east-west and bent by a broad warp, so the streaks curl and fan as
 // cirrus does), thin and bright; none at 0.
-function clouds3(dir, D, X) {
-  const c = clouds2(dir, D, X);
+function clouds3(dir, D, X, S = null) {
+  const c = S ? clouds2(dir, D, X, S) : clouds2(dir, D, X);
   const { maxF, so } = X;
   const sc = D.cloudStreakScale;
   const bent = warp(dir, float(1.3).div(sc), float(0.28), so.add(vec3(-31, 9, 17)), maxF);
@@ -2539,6 +3155,8 @@ const shared = {
   cyclones: Array.from({ length: 8 }, () => uniform(new THREE.Vector4(0, 1, 0, 0))),
   craters: Array.from({ length: 6 }, () => uniform(new THREE.Vector4(0, 1, 0, 0))),
   lanes: Array.from({ length: 12 }, () => uniform(new THREE.Vector4(0, 1, 0, 0))),
+  // (wave 6) the ring cities' arrays, written at each bake of a look that has them (ringSitesOf)
+  rings: ringUniforms(),
 };
 
 const dirOfUV = (t) => {
@@ -2552,7 +3170,7 @@ const dirOfUV = (t) => {
 // the height pass itself it is nothing.
 function contextAt(t, slope = float(0)) {
   const { dir, lat, lon } = dirOfUV(t);
-  return { dir, lat, lon, X: { maxF: shared.maxF, so: shared.so, lat, slope, storms: shared.storms, cyclones: shared.cyclones, craters: shared.craters, lanes: shared.lanes } };
+  return { dir, lat, lon, X: { maxF: shared.maxF, so: shared.so, lat, slope, storms: shared.storms, cyclones: shared.cyclones, craters: shared.craters, lanes: shared.lanes, rings: shared.rings } };
 }
 
 // The slope is measured over a fixed angle (two texels of the 2048 size), so the same seed and dials
@@ -2572,16 +3190,29 @@ function featureFlags(gen) {
     lace: p('lace'), mottle: p('mottle'), fine: p('fineSpecks') || p('fineGrain'), cyclone: p('greatStorm'),
   };
   P.parts = P.atoll || P.coast || P.lines || P.star || P.trench || P.specks || P.region || P.lace || P.mottle || P.fine;
+  // (wave 6, maker C) wave 6's parts, only at the version that has them (none of them for an older look: its flags as they were)
+  const v4 = (+gen.version || 1) >= ringsVersion(gen.recipe);
+  if (v4) {
+    const q = (k) => (+gen.dials?.[k] || 0) > 0;
+    Object.assign(P, {
+      keep: P.star && q('starKeep'), halo: P.specks && q('speckHalo'), lace4: P.lace && (q('laceGround') || q('laceTwoTone')), rim: P.mottle && q('mottleRim'),
+      rings: ringsOn(gen), metal: metalOn(gen), soft: q('softEdges'),
+      // (the ring cities' layout is a kit's own: one layout's arithmetic a program)
+      ringLayout: ringLayoutOf(gen),
+    });
+  }
   return { sink: on('sinkholes'), canyon: on('canyons'), crater: on('craterField'), depth: depthOn(gen), ...P };
 }
 // (wave B) the letters of the planet features a kit has (none: the kit's key is exactly what it was)
-const PART_KEYS = [['atoll', 'A'], ['coast', 'B'], ['lines', 'L'], ['star', 'S'], ['trench', 'T'], ['specks', 'P'], ['region', 'R'], ['lace', 'C'], ['mottle', 'M'], ['fine', 'F'], ['cyclone', 'Y']];
+// (wave 6) and wave 6's after them, each only when on: keep, halo, two-tone lace, rim, rings, metal, soft edges
+const PART_KEYS = [['atoll', 'A'], ['coast', 'B'], ['lines', 'L'], ['star', 'S'], ['trench', 'T'], ['specks', 'P'], ['region', 'R'], ['lace', 'C'], ['mottle', 'M'], ['fine', 'F'], ['cyclone', 'Y'],
+  ['keep', 'K'], ['halo', 'H'], ['lace4', 'W'], ['rim', 'E'], ['rings', 'G'], ['metal', 'X'], ['soft', 'O']];
 // A bake kit a recipe version, blended recipe version and set of features: with none of the last two,
 // the recipe's surface alone, exactly as it was before either existed. Depth ('d') is a kit of its own.
 function kitKey(gen) {
   const F = featureFlags(gen);
   const parts = PART_KEYS.filter(([k]) => F[k]).map(([, l]) => l).join('');
-  return `${gen.recipe}@${gen.version || 1}|${gen.mix ? gen.mix.recipe + '@' + (gen.mix.version || 1) : ''}|${F.sink ? 's' : ''}${F.canyon ? 'c' : ''}${F.crater ? 'k' : ''}${F.depth ? 'd' : ''}${parts ? '|' + parts : ''}`;
+  return `${gen.recipe}@${gen.version || 1}|${gen.mix ? gen.mix.recipe + '@' + (gen.mix.version || 1) : ''}|${F.sink ? 's' : ''}${F.canyon ? 'c' : ''}${F.crater ? 'k' : ''}${F.depth ? 'd' : ''}${parts ? '|' + parts : ''}${F.rings ? '#' + F.ringLayout : ''}`;
 }
 
 const bakeKits = new Map();
@@ -2617,7 +3248,7 @@ function kitFor(gen) {
   const split = kinds.length > 1;
   const ownLava = RECIPES[recipe].glow && !RECIPES[recipe].lights;
   let D2 = null, M = null, surface = own;
-  if (gen.mix || F.sink || F.canyon || F.crater || F.parts) {
+  if (gen.mix || F.sink || F.canyon || F.crater || F.parts || F.rings || F.metal) {
     let second = null;
     if (gen.mix) {
       D2 = {};
@@ -2646,6 +3277,8 @@ function kitFor(gen) {
       let out = F.sink || F.canyon || F.crater ? features(dir, s, D, X, F) : s;
       // (wave B) the planet features over all of that
       if (F.parts) out = planetParts(dir, { ...out, depth: s.depth }, D, X, F);
+      // (wave 6, maker C) the ring cities and the cities' metal over everything
+      if (F.rings || F.metal) out = cityParts(dir, out, D, X, F, recipe);
       if (lavaShare) out.lavaShare = lavaShare;
       return out;
     };
@@ -2657,7 +3290,8 @@ function kitFor(gen) {
     const a = contextAt(uv());
     const sA = surface(a.dir, D, a.X);
     const hh = clamp(sA.h, 0.0, 0.99998).toVar();
-    return vec4(floor(hh.mul(255)).div(255), fract(hh.mul(255)), clamp(sA.glow, 0.0, 1.0), split && sA.lavaShare ? sA.lavaShare : 1.0);
+    // (wave 6) its spare alpha carries the cities' metal where the look has it and no lava share
+    return vec4(floor(hh.mul(255)).div(255), fract(hh.mul(255)), clamp(sA.glow, 0.0, 1.0), split && sA.lavaShare ? sA.lavaShare : F.metal && sA.metal ? clamp(sA.metal, 0.0, 1.0) : 1.0);
   });
 
   // the height's texture nodes are made here, outside the passes' functions (which run only when the
@@ -2673,6 +3307,7 @@ function kitFor(gen) {
 
   // 2: colour (sRGB) and shine, knowing the slope of the height baked just before
   const se = H(SLOPE_DU, 0), sw = H(-SLOPE_DU, 0), sn = H(0, SLOPE_DV), ss = H(0, -SLOPE_DV);
+  const v4 = ver >= ringsVersion(recipe);
   const colourMat = make(() => {
     const lat = t.y.sub(0.5).mul(Math.PI);
     const gE = dec(se).sub(dec(sw)).div(max(cos(lat), 0.02).mul(2 * SLOPE_DU * TAU));
@@ -2681,8 +3316,31 @@ function kitFor(gen) {
     const sB = surface(b.dir, D, b.X);
     // (version 2 and later: the colour grade over the ground's colour, blend and features included)
     const albedo = clamp(sB.albedo, 0.0, 1.0);
-    return vec4(ver >= 2 ? grade(albedo, D) : albedo, clamp(sB.spec, 0.0, 1.0));
+    // (wave 6: version 4's grade with its colour pick and hold, then what is laid after the grade in its own colour)
+    let rgb = ver >= 2 ? (v4 ? grade4(albedo, D) : grade(albedo, D)) : albedo;
+    if (sB.post) for (const p of sB.post) rgb = mix(rgb, clamp(p.c, 0.0, 1.0), clamp(p.m, 0.0, 1.0));
+    return vec4(rgb, clamp(sB.spec, 0.0, 1.0));
   });
+
+  // (wave 6, maker C) 2b: soft edges over the ground's colours (only for a look that has them): the colour pass drawn into a
+  // picture of its own with its levels, read here at twelve points of a disc round each texel (a Vogel disc, each read at the
+  // level of its spacing), their mean mixed in by the dial. Every older look draws its colour straight into its surface.
+  const softSrc = F.soft ? texture(new THREE.Texture()) : null;
+  const softMat = F.soft ? make(() => {
+    const { dir, lat } = dirOfUV(t);
+    const fr = frameOf(dir);
+    const reach = D.softWidth.mul(Math.PI / 180);
+    // the taps' spacing in texels of the 2048 size at the equator, as a level (the size's own share comes in by maxF)
+    const lod = max(log(reach.mul(shared.maxF).mul(2.0).div(Math.sqrt(SOFT_TAPS.length)).div(max(cos(lat), 0.2))).div(Math.LN2), 0.0);
+    let acc = vec4(0);
+    for (const [a, b] of SOFT_TAPS) {
+      const p = normalize(dir.add(fr.e.mul(a).add(fr.n.mul(b)).mul(reach)));
+      const uu = atan(p.x, p.z).div(TAU).add(0.5), vv = atan(p.y, length(vec2(p.x, p.z))).div(Math.PI).add(0.5);
+      acc = acc.add(softSrc.sample(vec2(uu, vv)).level(lod));
+    }
+    const own = softSrc.sample(t).level(0);
+    return mix(own, acc.div(SOFT_TAPS.length), D.softEdges);
+  }) : null;
 
   // 3: relief: the normal of the height field on the sphere, in the body's frame
   const tx = (k) => shared.texel.x.mul(k), ty = (k) => shared.texel.y.mul(k);
@@ -2700,7 +3358,8 @@ function kitFor(gen) {
   // 4: clouds (any recipe)
   const cloudsMat = make(() => {
     const k = contextAt(uv());
-    const own = ver >= 3 ? clouds3 : ver >= 2 ? clouds2 : clouds;
+    // (wave 6: version 4, the living world's 5, softens them and lays a thin haze)
+    const own = v4 ? clouds4 : ver >= 3 ? clouds3 : ver >= 2 ? clouds2 : clouds;
     // (wave B) the great cyclone, only while it is on
     const cl = (F.cyclone ? greatCyclone(own) : own)(k.dir, D, k.X);
     return vec4(vec3(cl.bright), cl.cover);
@@ -2710,14 +3369,22 @@ function kitFor(gen) {
   // g, each its own (a look with one kind of glow keeps it in the relief's alpha, as before); the
   // decks' height in b. Read straight from the height pass's texel.
   const extra = extraChannels(gen);
+  // (wave 6) and the cities' metal (a), only for a look that has it: from the height pass's alpha, or, where that carries the lava's
+  // share, from the ring cities' plates alone
   const moreMat = extra ? make(() => {
     const g = c0.b;
     const lavaPart = split ? g.mul(c0.a) : kinds[0] === 'lava' ? g : float(0);
     const lightPart = split ? g.mul(float(1).sub(c0.a)) : kinds[0] === 'lights' ? g : float(0);
+    if (extra.metal) {
+      const metal = !split ? c0.a : F.rings ? (() => { const R = ringLayer(dirOfUV(t).dir, shared.rings, F.ringLayout); return R.plate.mul(R.tone.mul(0.45).add(0.55)).mul(shared.rings.counts.w).mul(shared.rings.plate.w); })() : float(0);
+      return vec4(lightPart, lavaPart, extra.depth ? dec(c0) : float(0), metal);
+    }
     return vec4(lightPart, lavaPart, extra.depth ? dec(c0) : float(0), 1.0);
   }) : null;
 
   const kit = { D, D2, M, heightMat, colourMat, reliefMat, cloudsMat, moreMat, fieldNodes, quad: new THREE.QuadMesh(heightMat), compiled: false };
+  // (wave 6) the soft edges' pass and the picture node it reads, only for a look that has them
+  if (softMat) { kit.softMat = softMat; kit.softSrc = softSrc; }
   bakeKits.set(key, kit);
   return kit;
 }
@@ -2738,6 +3405,13 @@ function fieldTarget(w, h) {
   const key = w + 'x' + h;
   if (!fieldTargets.has(key)) fieldTargets.set(key, target(w, h, { mips: false, nearest: true }));
   return fieldTargets.get(key);
+}
+// (wave 6) One soft edges' picture a size (the colour pass's, with its levels), shared likewise; made only by a look with soft edges.
+const softTargets = new Map();
+function softTarget(w, h) {
+  const key = w + 'x' + h;
+  if (!softTargets.has(key)) softTargets.set(key, target(w, h));
+  return softTargets.get(key);
 }
 
 // The seed's numbers: the noise's shift, the storms', cyclones' and young craters' places and sizes.
@@ -2830,8 +3504,12 @@ export class GeneratedSet {
       m ? [m.recipe, m.version || 1, ...MIX_DIALS.map((d) => +m[d.k]), ...mixDialsOf(m.recipe, m.version || 1).filter((d) => !d.live).map((d) => m.dials[d.k])] : 0]);
   }
 
-  /** Bake (queued after any bake already running). Resolves with the milliseconds it took. */
-  bake(renderer, gen, { withClouds = false } = {}) {
+  /**
+   * Bake (queued after any bake already running). Resolves with the milliseconds it took. (Wave 6) `ringless`: a look whose ring
+   * cities are drawn sharp by its material bakes its pictures without them (the material lays them); the set keeps their numbers
+   * in `rings` for that material either way.
+   */
+  bake(renderer, gen, { withClouds = false, ringless = false } = {}) {
     const run = async () => {
       if (this.disposed) return 0;
       if (withClouds && !this.clouds) this.clouds = target(this.width, this.height);
@@ -2848,11 +3526,19 @@ export class GeneratedSet {
       fill(kit.D, dialsOf(gen.recipe, gen.version || 1), gen.dials);
       if (kit.D2 && gen.mix) { fill(kit.D2, mixDialsOf(gen.mix.recipe, gen.mix.version || 1), gen.mix.dials); fill(kit.M, MIX_DIALS, gen.mix); }
       seedUniforms(gen);
+      // (wave 6) the ring cities' numbers, for the bake and for the material (a look without them: none)
+      if (ringsOn(gen) || this.rings) {
+        writeRings(shared.rings, gen, { baked: !ringless });
+        writeRings((this.rings ||= ringUniforms()), gen, { baked: !ringless });
+      }
       shared.maxF.value = this.width / (4 * Math.PI);
       shared.texel.value.set(1 / this.width, 1 / this.height);
       shared.reliefAmp.value = depthOn(gen) ? DEPTH_RELIEF : RECIPES[gen.recipe].relief || (gen.mix ? RECIPES[gen.mix.recipe].relief : 0);
       const fields = fieldTarget(this.width, this.height);
       for (const n of kit.fieldNodes) n.value = fields.texture;
+      // (wave 6) the soft edges' own picture, read by its pass
+      const soft = kit.softMat ? softTarget(this.width, this.height) : null;
+      if (soft) kit.softSrc.value = soft.texture;
       // the extra channels: made for a look that has them, dropped when it no longer does
       if (kit.moreMat && !this.more) this.more = target(this.width, this.height);
       if (!kit.moreMat && this.more) { this.more.dispose(); this.more = null; }
@@ -2861,7 +3547,8 @@ export class GeneratedSet {
       try {
         pass(kit.heightMat, fields);
         if (kit.moreMat) pass(kit.moreMat, this.more);
-        pass(kit.colourMat, this.surface);
+        pass(kit.colourMat, soft || this.surface);
+        if (soft) pass(kit.softMat, this.surface);
         pass(kit.reliefMat, this.relief);
         if (withClouds && this.clouds) pass(kit.cloudsMat, this.clouds);
       } finally {
@@ -2901,9 +3588,12 @@ export class GeneratedSet {
     if (kit.moreMat && !this.more) this.more = target(this.width, this.height);
     // the height's texture nodes pointed at the size's height target, as the bake points them (three writes a nearest-filtered
     // picture's read as a load, not a sample: the warm's program must read the picture the draws will hand it)
+    // (wave 6) a look with soft edges draws its colour into the soft picture and its soft pass into the surface, as its bake does
+    const soft = kit.softMat ? softTarget(this.width, this.height) : null;
+    if (soft) kit.softSrc.value = soft.texture;
     const fields = fieldTarget(this.width, this.height);
     for (const n of kit.fieldNodes) n.value = fields.texture;
-    const passes = [[kit.heightMat, fields],[kit.moreMat, this.more], [kit.colourMat, this.surface], [kit.reliefMat, this.relief], [withClouds ? kit.cloudsMat : null, this.clouds]].filter(([m, rt]) => m && rt);
+    const passes = [[kit.heightMat, fields],[kit.moreMat, this.more], [kit.colourMat, soft || this.surface], [kit.softMat || null, this.surface], [kit.reliefMat, this.relief], [withClouds ? kit.cloudsMat : null, this.clouds]].filter(([m, rt]) => m && rt);
     const t0 = performance.now();
     const prev = renderer.getRenderTarget();
     const asked = [];

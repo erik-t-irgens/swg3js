@@ -4,7 +4,7 @@
 // `src/sky/look/airProfile.js`'s `airStartFor`), and a moon none. Until the owner's looks name each place's bodies (Save to
 // game, the viewer's `bodies.json`), SWG's own sky pictures are told apart by the world they show. Pure: no three, no page.
 import { AIR_FIELD_COUNT, applyHazeDials, airDialsOf, setVisibility, worldRecord } from '../air/airParams.ts';
-import { airStartFor, makeTables, recordKey, recordOf, type AirProfileTables } from '../look/airProfile.js';
+import { airStartFor, makeTables, recordKey, recordLength, recordOf, type AirProfileTables } from '../look/airProfile.js';
 
 /** What a sky picture shows: a ground world (its id), a body of air but no ground, a moon, or no body at all (a sun, a ship). */
 export type BodyAir = { kind: 'world'; world: string } | { kind: 'giant' } | { kind: 'temperate' } | { kind: 'airless' } | { kind: 'none' };
@@ -53,10 +53,16 @@ export function bodyRecord(b: BodyAir): Float64Array | null {
   return null;
 }
 
-/** The record a body's tables are made from, by its numbers (the bake cache's key: the same numbers make the same tables). */
+/**
+ * The record a body's tables are made from, by its numbers (the bake cache's key: the same numbers make the same tables). Pass 2,
+ * wave 6: a record with no smoke or ash is keyed by its 28 numbers as before the layer came (`recordLength`), so every table the
+ * browser kept is found again; one with the layer by all `AIR_FIELD_COUNT`.
+ */
 export function bodyTablesKey(rec: ArrayLike<number>): string {
-  return `air-${AIR_FIELD_COUNT}:${recordKey(rec)}`;
+  return `air-${recordLength(rec)}:${recordKey(rec)}`;
 }
+/** The record's whole count (the game's layout and the viewer's), for the tests. */
+export const BODY_RECORD_FIELDS = AIR_FIELD_COUNT;
 
 /** A body's three tables (the transmittance, the multiple scattering, the sky's light on its ground), the viewer's own. */
 export function makeBodyTables(rec: ArrayLike<number>): AirProfileTables {

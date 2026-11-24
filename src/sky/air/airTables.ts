@@ -15,7 +15,8 @@ import { NodeMaterial, Storage3DTexture } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { chainMaterial, chainMesh } from '../../core/gpu/gpuChain.ts';
 import { FX_CAMERA } from '../../core/fx/pass.ts';
-import { AIR, AIR_SIZES, HAZE_REACH_M, type AirNode, type AirNodes, type AirTables } from './airApi.ts';
+import { AIR, AIR_SIZES, AIR_UNITS, HAZE_REACH_M, type AirNode, type AirNodes, type AirTables } from './airApi.ts';
+import { DIFFUSIVITY, GLOW_PHASE, SMOKE_STEPS } from '../look/airProfile.js';
 import { AIR_FIELD_COUNT, F, copyRecord, newAirRecord, recordMoved, recordWords, type AirRecord } from './airParams.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -107,6 +108,14 @@ class Tables implements AirTables {
   private readonly u4 = new THREE.Vector4(); // ground r, g, b, 0
   /** Pass 2, wave 4a: the haze's colour, each channel's share of the Mie scattering (1, 1, 1 a grey haze). */
   private readonly u5 = new THREE.Vector3(1, 1, 1);
+  /**
+   * Pass 2, wave 6: the smoke and ash: its extinction at its peak (rgb, per km) and its middle (km); its scattering at its
+   * peak and its half depth; the glow from below in the scene's units (rgb) and its phase's g. Nought but the shape with none,
+   * where every term it adds is a nought added (the tables the base's to the bit).
+   */
+  private readonly u6 = new THREE.Vector4(0, 0, 0, 2);
+  private readonly u7 = new THREE.Vector4(0, 0, 0, 1.5);
+  private readonly u8 = new THREE.Vector4(0, 0, 0, 0.7);
   /** heightKm, overcast, the sun's azimuth as (cx, cz). */
   private readonly uView = new THREE.Vector4(0.5, 0, 1, 0);
   private readonly uSun = new THREE.Vector3(0, 1, 0);
@@ -215,6 +224,11 @@ class Tables implements AirTables {
     this.u3.set(r[F.ozC], r[F.ozW], r[F.mieG], r[F.sunRadius]);
     this.u4.set(r[F.groundR], r[F.groundG], r[F.groundB], 0);
     this.u5.set(r[F.mieTintR], r[F.mieTintG], r[F.mieTintB]);
+    // Pass 2, wave 6: the smoke and ash, its tent's half depth held off nought, its glow in the scene's units.
+    this.u6.set(r[F.smokeER], r[F.smokeEG], r[F.smokeEB], r[F.smokeC]);
+    this.u7.set(r[F.smokeSR], r[F.smokeSG], r[F.smokeSB], r[F.smokeW] > 1e-6 ? r[F.smokeW] : 1e-6);
+    const k = AIR_UNITS.scene;
+    this.u8.set(r[F.glowR] * k, r[F.glowG] * k, r[F.glowB] * k, r[F.smokeG]);
   }
 
   /** `AIR.frame`'s numbers into the frame's uniforms' vectors. */
@@ -457,8 +471,8 @@ class Tables implements AirTables {
   }
 
   /** The uniform objects, for the graphs (built once). */
-  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; store: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
-    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, store: this.uStore, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
+  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; u6: THREE.Vector4; u7: THREE.Vector4; u8: THREE.Vector4; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; store: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
+    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, u6: this.u6, u7: this.u7, u8: this.u8, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, store: this.uStore, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
   }
 
   /** The targets' textures, for the graphs. */
@@ -488,6 +502,10 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
   const u4 = live(U.u4);
   // Pass 2, wave 4a: the haze's colour (each channel's share of the Mie scattering; its extinction stays grey).
   const mieTint = live(U.u5);
+  // Pass 2, wave 6: the smoke and ash and the glow from below (nought but the shape with none).
+  const u6 = live(U.u6);
+  const u7 = live(U.u7);
+  const u8 = live(U.u8);
   const view = live(U.view);
   const sunDir = live(U.sun);
   const sun2Dir = live(U.sun2);
@@ -515,6 +533,12 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
   const mieG = u3.z;
   const ground = u4.xyz;
   const heightKm = view.x;
+  const smokeE = u6.xyz;
+  const smokeC = u6.w;
+  const smokeS = u7.xyz;
+  const smokeW = u7.w;
+  const glowTop = u8.xyz;
+  const smokeG = u8.w;
 
   const TW = AIR_SIZES.transmittance.width;
   const TH = AIR_SIZES.transmittance.height;
@@ -567,16 +591,46 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     );
   };
 
+  // ---------------------------------------------------------------- the smoke and ash (pass 2, wave 6)
+  /** The layer's tent at a height `h` km over the ground (the twin's `smokeDensity` at `max(h, 0)`). */
+  const smokeAt = (h: Any): Any => max(float(0), float(1).sub(abs(max(h, 0).sub(smokeC)).div(smokeW)));
+  /** Its phase (Cornette and Shanks', as the haze's) at its own g. */
+  const smokePhase = (c: Any): Any => {
+    const g2 = smokeG.mul(smokeG);
+    const den = g2.add(1).sub(smokeG.mul(c).mul(2));
+    return float(3 / (8 * PI)).mul(float(1).sub(g2)).mul(c.mul(c).add(1)).div(g2.add(2).mul(den).mul(sqrt(den)));
+  };
+  /** The tent's column from far below to `z` km (`airProfile.js`' `smokeColumnTo`). */
+  const smokeColTo = (z: Any): Any => {
+    const a = clamp(z.sub(smokeC).add(smokeW), 0, smokeW);
+    const b = clamp(z.sub(smokeC), 0, smokeW);
+    return a.mul(a).div(smokeW.mul(2)).add(b).sub(b.mul(b).div(smokeW.mul(2)));
+  };
+  /**
+   * The glow from below a scatterer at a height `h` km is lit by (scene units, rgb), every scatterer sending `GLOW_PHASE` of
+   * it each way: the lava's upward light dimmed on its way up as diffuse light is through the clear air's, the haze's and the
+   * layer's columns under the height (`airProfile.js`' `glowUp`, the twin's `glowUpInto`).
+   */
+  const glowAt = (h: Any): Any => {
+    const hh = max(h, 0);
+    const cR = rayH.mul(float(1).sub(exp(hh.negate().div(rayH))));
+    const cM = mieH.mul(float(1).sub(exp(hh.negate().div(mieH))));
+    const cS = smokeColTo(hh).sub(smokeColTo(float(0)));
+    const tau = rayS.mul(cR).add(vec3(mieS.add(mieA).mul(cM))).add(smokeE.mul(cS));
+    return glowTop.mul(exp(tau.mul(-DIFFUSIVITY))).mul(GLOW_PHASE);
+  };
+
   /**
    * One light's share of a step's source (`viewRadiance`'s inner loop): its transmittance, both phases and its multiple
-   * scattering. `sM` the haze's scattering by channel (pass 2, wave 4a: its colour times its scattering, a vec3).
+   * scattering. `sM` the haze's scattering by channel (pass 2, wave 4a: its colour times its scattering, a vec3); `sS` (pass 2,
+   * wave 6) the smoke and ash's, added after the rest by its own phase (nought with none: a nought added, the sum the base's).
    */
-  const lightSource = (px: Any, rr: Any, d: Any, L: Any, Ltop: Any, sR: Any, sM: Any): Any => {
+  const lightSource = (px: Any, rr: Any, d: Any, L: Any, Ltop: Any, sR: Any, sM: Any, sS: Any): Any => {
     const muL = px.dot(L).div(rr);
     const c = d.dot(L);
     const tl = transmittanceTo(rr, muL);
     const ps = psiAt(rr, muL);
-    return Ltop.mul(tl.mul(sR.mul(rayleighPhase(c)).add(sM.mul(miePhase(c)))).add(ps.mul(sR.add(sM))));
+    return Ltop.mul(tl.mul(sR.mul(rayleighPhase(c)).add(sM.mul(miePhase(c)))).add(ps.mul(sR.add(sM)))).add(Ltop.mul(tl.mul(sS.mul(smokePhase(c))).add(ps.mul(sS))));
   };
 
   /**
@@ -596,8 +650,11 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const m = densities(rr.sub(bottom)).toVar('airVM');
       const sR = rayS.mul(m.x).toVar('airVSR');
       const sM = mieTint.mul(mieS.mul(m.y)).toVar('airVSM');
-      const sigma = extinction(m).toVar('airVSig');
-      const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM));
+      // Pass 2, wave 6: the smoke and ash's tent here, its scattering, and its extinction added after the rest.
+      const dS = smokeAt(rr.sub(bottom)).toVar('airVDS');
+      const sS = smokeS.mul(dS).toVar('airVSS');
+      const sigma = extinction(m).add(smokeE.mul(dS)).toVar('airVSig');
+      const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
       L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));
       Tr.mulAssign(exp(sigma.negate().mul(dt)));
       prev.assign(e1);
@@ -631,7 +688,22 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       depth.addAssign(extinction(densities(rr.sub(bottom))).mul(dt));
       prev.assign(e1);
     });
-    return vec4(exp(depth.negate()), 1);
+    // Pass 2, wave 6: the smoke and ash's tent summed apart over the ray's stretch under the layer's top, by its own even
+    // steps (`airProfile.js`' `smokeColumnAlong`, the twin's column table alike), its extinction laid on at the end: with none
+    // a nought taken off, the table the base's to the bit.
+    const smokeCol = float(0).toVar('airTSmoke');
+    const rt = bottom.add(smokeC).add(smokeW);
+    const sd = r.mul(r).mul(mu.mul(mu).sub(1)).add(rt.mul(rt)).toVar('airTSd');
+    const sq = sqrt(max(sd, 0)).toVar('airTSq');
+    const t1 = max(r.negate().mul(mu).sub(sq), 0).toVar('airTS1');
+    const t2 = min(r.negate().mul(mu).add(sq), len).toVar('airTS2');
+    const sdt = select(sd.greaterThan(0), max(t2.sub(t1), 0), float(0)).div(SMOKE_STEPS).toVar('airTSdt');
+    Loop({ start: 0, end: SMOKE_STEPS, type: 'int', condition: '<', name: 'k' }, ({ k }: Any) => {
+      const tm = t1.add(float(k).add(0.5).mul(sdt));
+      const rr = sqrt(tm.mul(tm).add(r.mul(mu).mul(tm).mul(2)).add(r.mul(r)));
+      smokeCol.addAssign(smokeAt(rr.sub(bottom)));
+    });
+    return vec4(exp(depth.negate().sub(smokeE.mul(smokeCol.mul(sdt)))), 1);
   })();
 
   // ---------------------------------------------------------------- the multiple scattering (`psiOf` at the card's size)
@@ -664,8 +736,10 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         const p = vec3(d.x.mul(tm), r.add(d.y.mul(tm)), d.z.mul(tm)).toVar('airMP');
         const rr = p.length().toVar('airMR');
         const m = densities(rr.sub(bottom)).toVar('airMM');
-        const sigS = rayS.mul(m.x).add(mieTint.mul(mieS.mul(m.y))).toVar('airMSS');
-        const sigma = extinction(m).toVar('airMSig');
+        // Pass 2, wave 6: the smoke and ash's scattering and extinction added after the rest (noughts with none).
+        const dS = smokeAt(rr.sub(bottom)).toVar('airMDS');
+        const sigS = rayS.mul(m.x).add(mieTint.mul(mieS.mul(m.y))).add(smokeS.mul(dS)).toVar('airMSS');
+        const sigma = extinction(m).add(smokeE.mul(dS)).toVar('airMSig');
         const tl = transmittanceTo(rr, p.dot(sun).div(rr)).toVar('airMTl');
         const g = stepIntegral(sigma, dt).toVar('airMG');
         Li.addAssign(Tr.mul(sigS).mul(tl).mul(1 / (4 * PI)).mul(g));
@@ -751,8 +825,11 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         const m = densities(rr.sub(bottom)).toVar('airHM');
         const sR = rayS.mul(m.x).toVar('airHSR');
         const sM = mieTint.mul(mieS.mul(m.y)).toVar('airHSM');
-        const sigma = extinction(m).toVar('airHSig');
-        const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM));
+        // Pass 2, wave 6: the smoke and ash and the glow from below, as the sky view's march takes them.
+        const dS = smokeAt(rr.sub(bottom)).toVar('airHDS');
+        const sS = smokeS.mul(dS).toVar('airHSS');
+        const sigma = extinction(m).add(smokeE.mul(dS)).toVar('airHSig');
+        const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
         L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));
         Tr.mulAssign(exp(sigma.negate().mul(dt)));
         prev.assign(e1);

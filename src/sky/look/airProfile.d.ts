@@ -22,9 +22,55 @@ export const F: Readonly<Record<string, number>> & {
   readonly mieTintR: number;
   readonly mieTintG: number;
   readonly mieTintB: number;
+  readonly smokeER: number;
+  readonly smokeEG: number;
+  readonly smokeEB: number;
+  readonly smokeSR: number;
+  readonly smokeSG: number;
+  readonly smokeSB: number;
+  readonly smokeC: number;
+  readonly smokeW: number;
+  readonly smokeG: number;
+  readonly glowR: number;
+  readonly glowG: number;
+  readonly glowB: number;
 };
 export const GAME_FIELD_COUNT: number;
+export const HAZE_FIELD_COUNT: number;
 export const AIR_FIELD_COUNT: number;
+
+/** (pass 2, wave 6) The smoke and ash: its dials (the game's and the viewer's, one set of names), their starts and ranges. */
+export interface SmokeDials {
+  smokeDepth: number;
+  smokeAngstrom: number;
+  smokeAlbedo: number;
+  smokeBrown: number;
+  smokeHeightKm: number;
+  smokeThickKm: number;
+  smokeG: number;
+  glowLux: number;
+  glowKelvin: number;
+}
+export const SMOKE_NONE: { c: number; w: number; g: number };
+export const SMOKE_NM: readonly number[];
+export const SMOKE_SUN_LUX: number;
+export const DIFFUSIVITY: number;
+export const GLOW_PHASE: number;
+export const SMOKE_DIAL_START: SmokeDials;
+export const SMOKE_DIAL_RANGE: { readonly [K in keyof SmokeDials]: readonly [number, number] };
+export const SMOKE_DIAL_NAMES: readonly (keyof SmokeDials)[];
+export function hasSmoke(rec: ArrayLike<number>): boolean;
+export function smokeDensity(c: number, w: number, h: number): number;
+export function smokeColumnTo(c: number, w: number, z: number): number;
+export const SMOKE_STEPS: number;
+export function smokeColumnAlong(c: number, w: number, bottom: number, top: number, r: number, mu: number, steps?: number): number;
+export function blackBody(kelvin: number, out: Float64Array | number[]): Float64Array | number[];
+export function smokeInto(rec: Float64Array, d: Partial<SmokeDials> | Record<string, unknown> | null | undefined): Float64Array;
+export function glowUp(rec: ArrayLike<number>, h: number, out: Float64Array | number[]): Float64Array | number[];
+export function recordLength(rec: ArrayLike<number>): number;
+export function smokeUniformValues(rec: ArrayLike<number>): { smokeE: number[]; smokeS: number[]; smokeC: number; smokeW: number; smokeG: number; glow: number[] };
+export function opticalDepth(rec: ArrayLike<number>, r: number, mu: number, steps: number, out: Float64Array | number[]): Float64Array | number[];
+export function marchDirect(rec: ArrayLike<number>, tabs: AirProfileTables, ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, lx: number, ly: number, lz: number, steps: number, sEnd: number, out: Float64Array | number[], sunSteps?: number, withMs?: boolean): Float64Array | number[];
 
 /** A look's air (its form and dials, `AIR_DIALS`' keys). */
 export interface LookAir {
@@ -95,6 +141,12 @@ export function airUniformValues(rec: ArrayLike<number>, a: { limbBright: number
   limb: number;
   twilight: number;
   mieTint: number[];
+  smokeE: number[];
+  smokeS: number[];
+  smokeC: number;
+  smokeW: number;
+  smokeG: number;
+  glow: number[];
 };
 export const AIR_QUALITIES: [string, string, number][];
 export function stepsOf(q: string): number;

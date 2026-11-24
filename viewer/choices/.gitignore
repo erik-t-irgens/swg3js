@@ -1,0 +1,4 @@
+# The owner's file of choices (space-bodies.json) is committed from here; the one kept before each save and a save's
+# half-written file are this machine's alone.
+*.prev.json
+*.tmp

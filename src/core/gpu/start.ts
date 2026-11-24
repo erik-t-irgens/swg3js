@@ -84,6 +84,8 @@ import { ringProfile, ringScatter } from '../../sky/look/shapes.js';
 // The sky and light fix round (maker L): the lights the player carries, their nodes registered with three as this module
 // loads, before any material is built (`carriedLights.ts`).
 import { CARRIED_LIGHTS } from './carriedLights.ts';
+// Pass 2, wave 6 (maker K): a lost device said on the screen.
+import { showDeviceLost } from '../../ui/deviceLost.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -236,6 +238,14 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     lastError = String(info?.message ?? info).slice(0, 300);
     onError?.(info);
   };
+  // Pass 2, wave 6 (maker K, the owner's Mac): a lost device is said on the screen with a Reload button, after three's own word
+  // in the console, never a silent black world (`src/ui/deviceLost.ts`). Three calls this when the device's `lost` settles for
+  // any reason but our own `destroy`.
+  const onLost = renderer.onDeviceLost?.bind(renderer);
+  renderer.onDeviceLost = (info: Any) => {
+    onLost?.(info);
+    showDeviceLost(info);
+  };
   // Whether a loading screen was up at the last frame's end (`endFrame`): what a pipeline made now counts as.
   let loadingNow = true;
   // The region tiers' bundles (item 7): shown within the sun's shadow reach as well as the view.
@@ -376,7 +386,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     looks: (() => {
       const baker = new LookBaker(renderer);
       return {
-        bake: (id, look, most, mayAsk) => baker.bake(id, look, most, mayAsk),
+        bake: (id, look, most, mayAsk, shown) => baker.bake(id, look, most, mayAsk, shown),
         askLater: () => baker.askLater(),
         warm: (look, most) => baker.warm(look, most),
         beginScreen: () => bakeCache().beginScreen(),

@@ -42,7 +42,10 @@ const run = () =>
       }
     });
   });
-const all = await Promise.all(Array.from({ length: 12 }, () => run()));
+// (the fixer of pass 2, wave 6) two waves of six, so the suite keeps to six node processes at once; a quarter of each window's
+// frames in space (`EYE_IN.space`, the space exposure's branch, the checker's finding that no measure reached it)
+const all: Answer[] = [];
+for (let wave = 0; wave < 2; wave++) all.push(...(await Promise.all(Array.from({ length: 6 }, () => run()))));
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   if (!Number.isFinite(a.made) || !Number.isFinite(a.scavenges)) {
@@ -50,6 +53,6 @@ for (let i = 0; i < all.length; i++) {
     continue;
   }
   const per = Math.max(0, a.made) / a.frames;
-  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the eye's frame makes ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
+  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the eye's frame (on the ground and in space) makes ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
 }
 console.log(`\neyeAlloc: ${checks} checks passed`);

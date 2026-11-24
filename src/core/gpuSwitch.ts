@@ -323,8 +323,9 @@ export interface GpuLooks {
    * A look's pictures at most `most` wide (`LOOK_BAKE_TUNE.skySize` 1024 or `.spaceSize` 2048, never over the look's own size):
    * from the session's memo, the browser's storage, or baked now on the card where the screen's budget has room; null where
    * it is put off to the next screen (draw SWG's picture) or the look is not a generated one. **Behind a loading screen alone.**
+   * `shown` (the fixer of pass 2, wave 6): a look the arrival shows, given the screen's whole kit wait (`kitWaitMs`).
    */
-  bake(id: string, look: import('../sky/look/bodiesFile.ts').BodyLook, most: number, mayAsk?: boolean): Promise<import('../sky/look/lookPictures.ts').LookPictures | null>;
+  bake(id: string, look: import('../sky/look/bodiesFile.ts').BodyLook, most: number, mayAsk?: boolean, shown?: boolean): Promise<import('../sky/look/lookPictures.ts').LookPictures | null>;
   /**
    * (The fixer of pass 2, wave 5) The bake kits put off behind the screen just gone (a `bake` with `mayAsk` false, a look body's
    * extra) asked now, a few at a time (`LOOK_BODY_TUNE.kitsAfterScreen`), to land in play off the frame: called as each screen goes.

@@ -23,6 +23,9 @@
 //     round's dial, held to its 0 to 0.95 as the viewer's is). A record field until the two lines met (22 November); now the dial
 //     is the one number every path lays (the run's rows, the fit's ask, a body's record), so the file and the dial never fight:
 //     the file sets the dial at each loading screen as it sets the visibility, the owner's live move holds until the next.
+//   - (pass 2, wave 6) Smoke and ash (depth, fine or coarse, brightness, brown, height, thickness, forward glow), Glow from below
+//     and Glow colour -> the world's dials of the same names (`smokeDepth` ... `glowKelvin`), held to their ranges; a look that
+//     names none leaves the world's own (none to start but Mustafar's measured plume).
 // A dial with no twin among the game's dials but naming a field of the game's record that no fit moves sets that field on the
 // world's record (`airParams.ts`'s `AIR_FILE_FIELDS`, laid over by `worldRecord`, so the fitted rows, the twin and the body's
 // record all carry it):
@@ -41,6 +44,7 @@
 
 import { fetchPublic } from '../../world/packFiles.ts';
 import { AIR_DIAL_RANGE, AIR_FILE_FIELD_NAMES, airDialsOf, setAirFileFields, tuneAirDials, type AirFileFields } from '../air/airParams.ts';
+import { SMOKE_DIAL_NAMES } from './airProfile.js';
 
 /** The version this reader knows (the viewer's `GAME_BODIES_VERSION`). */
 export const BODIES_VERSION = 1;
@@ -113,6 +117,8 @@ export interface BodiesFile {
 
 /** A space place's id as the viewer names it (`spaceAir.ts`' `spacePlaceIds`). */
 const SPACE_PLACE = /^space_[a-z0-9_]{1,40}:[a-z0-9_]{1,60}(?:#\d{1,3})?$/;
+/** Pass 2, wave 6 (maker K): a ground sky's place of SWG's as the viewer names it (`viewer/gameBodies.mjs`' `GROUND_PLACE`). */
+export const GROUND_PLACE = /^(?!space_)[a-z0-9_]{1,40}:(?:sun|sun2|moon|moon2|celestial:[a-z0-9_]{1,60}(?:#\d{1,3})?)$/;
 /** Each space place number's range (yaw any turn, the size under a half turn across, the distance positive). */
 export const SPACE_PLACE_RANGE = { yaw: [-720, 720], pitch: [-90, 90], size: [0.01, 179], distance: [0.001, 1e7] } as const;
 
@@ -188,6 +194,8 @@ const WORD = /^[A-Za-z0-9_.:# -]{0,64}$/;
 const COLOUR = /^#[0-9a-fA-F]{6}$/;
 /** A key the file may use: an id, a slot, a dial. */
 const KEY = /^[A-Za-z0-9_.:#-]{1,96}$/;
+/** A name as he typed it (pass 2, wave 6): up to 80 of any printable letters but a folder's and markup's marks. */
+const NAME = /^[^\u0000-\u001f\u007f<>\\/]{1,80}$/u;
 
 /** A photo's path as a look names it, `pictures/<name>`, its name plain and its kind a picture's. */
 function photoPath(s: string, pictures: Record<string, { kind: string }>): boolean {
@@ -197,7 +205,7 @@ function photoPath(s: string, pictures: Record<string, { kind: string }>): boole
 }
 
 /** A value kept numbers only (`count` counts what is dropped), or undefined where nothing of it is kept. */
-function keep(v: unknown, pictures: Record<string, { kind: string }>, count: { dropped: number }, depth = 0): Plain | undefined {
+function keep(v: unknown, pictures: Record<string, { kind: string }>, count: { dropped: number }, depth = 0, key = ''): Plain | undefined {
   if (depth > 8) {
     count.dropped++;
     return undefined;
@@ -207,6 +215,9 @@ function keep(v: unknown, pictures: Record<string, { kind: string }>, count: { d
   if (typeof v === 'string') {
     if (v === '' || COLOUR.test(v) || photoPath(v, pictures)) return v;
     if (WORD.test(v) && !/\.(png|jpe?g|fbx|dds|tga)$/i.test(v)) return v;
+    // Pass 2, wave 6 (maker K): a body's own name is kept as he typed it (an apostrophe, a comma, an accent), so a body of his
+    // own shows its name on the map and in the game, never its id; still never a file's name.
+    if (key === 'name' && NAME.test(v) && !/\.(png|jpe?g|fbx|dds|tga)$/i.test(v)) return v;
     count.dropped++;
     return undefined;
   }
@@ -229,7 +240,7 @@ function keep(v: unknown, pictures: Record<string, { kind: string }>, count: { d
         count.dropped++;
         continue;
       }
-      const kept = keep(x, pictures, count, depth + 1);
+      const kept = keep(x, pictures, count, depth + 1, k);
       if (kept !== undefined) out[k] = kept;
     }
     return out;
@@ -313,11 +324,22 @@ export function cleanBodiesFile(raw: unknown): { file: BodiesFile | null; why: s
   // Pass 2, wave 5 (maker L): the space places he moved or sized (additive: a file without the key moves none).
   const places: Record<string, SpacePlace> = {};
   for (const [id, p] of Object.entries(isObj(raw.places) ? raw.places : {})) {
-    if (!SPACE_PLACE.test(id)) {
+    // Pass 2, wave 6 (maker K): and a ground sky's slots and celestials he moved or sized (`groundPlaces.ts` lays them).
+    if (!SPACE_PLACE.test(id) && !GROUND_PLACE.test(id)) {
       count.dropped++;
       continue;
     }
     const c = cleanSpacePlace(p, count);
+    // (pass 2, wave 6) a ground place keeps what the Place tab moves there: no distance, and a sun's or moon's size alone (its
+    // direction is the day's)
+    if (c && GROUND_PLACE.test(id)) {
+      delete c.distance;
+      if (/:(sun|moon)$/.test(id)) {
+        delete c.yaw;
+        delete c.pitch;
+      }
+      if (!Object.keys(c).length) continue;
+    }
     if (c) places[id] = c;
   }
   const file: BodiesFile = {
@@ -428,6 +450,16 @@ export interface FileAirDials {
   hazeB?: number;
   /** The haze's forward glow (the viewer's `hazeG`, its phase's g) as the game's glow round the sun. */
   glow?: number;
+  /** Pass 2, wave 6: the smoke and ash and the glow from below (the viewer's dials and the game's share their names). */
+  smokeDepth?: number;
+  smokeAngstrom?: number;
+  smokeAlbedo?: number;
+  smokeBrown?: number;
+  smokeHeightKm?: number;
+  smokeThickKm?: number;
+  smokeG?: number;
+  glowLux?: number;
+  glowKelvin?: number;
 }
 
 /** The haze colour as its three shares (the viewer's `hazeTintFromHex`, number for number: linear channels over the brightest). */
@@ -475,6 +507,14 @@ export function gameAirOf(air: Record<string, Plain> | null | undefined): { dial
   if (fg !== null) {
     const [lo, hi] = AIR_DIAL_RANGE.glow;
     dials.glow = fg < lo ? lo : fg > hi ? hi : fg;
+  }
+  // Pass 2, wave 6: the smoke and ash and the glow from below, the viewer's dials of the game's own names, held to their range;
+  // a look that names none leaves the world's (none to start, Mustafar's measured plume).
+  for (const k of SMOKE_DIAL_NAMES) {
+    const v = num(k);
+    if (v === null) continue;
+    const [lo, hi] = AIR_DIAL_RANGE[k];
+    dials[k] = v < lo ? lo : v > hi ? hi : v;
   }
   // The viewer's own ranges (airProfile.js's AIR_DIALS), so a file edited by hand stays within what the viewer offers.
   const span: Record<(typeof AIR_FILE_FIELD_NAMES)[number], [number, number]> = {

@@ -39,10 +39,198 @@ export const F = {
   sunR: 18, sunG: 19, sunB: 20, sunStrength: 21, sunRadius: 22,
   visShare: 23, mieAlbedo: 24,
   mieTintR: 25, mieTintG: 26, mieTintB: 27,
+  // (the GPU port's pass 2, wave 6) the second aerosol layer, smoke and ash, appended as the haze's colour was: its
+  // extinction and its scattering at the layer's peak, per km, red, green and blue (the extinction chromatic by its
+  // Angstrom exponent, so the sun reddens through it), the layer's middle and half depth above the ground, km (a tent, as
+  // the ozone's), its phase's g, and the glow from below (the lava's upward light the air scatters back down, as a share
+  // of a strength-1 sun's illuminance at the top of the air, linear red, green and blue). All nought but the shape's
+  // three: none, the record as it was (`SMOKE_NONE`).
+  smokeER: 28, smokeEG: 29, smokeEB: 30,
+  smokeSR: 31, smokeSG: 32, smokeSB: 33,
+  smokeC: 34, smokeW: 35, smokeG: 36,
+  glowR: 37, glowG: 38, glowB: 39,
 };
 /** The game's record's own count (`airParams.ts`), before the haze's colour. */
 export const GAME_FIELD_COUNT = 25;
-export const AIR_FIELD_COUNT = 28;
+/** (pass 2, wave 6) The record's count before the smoke and ash: what a record with none is keyed by (`recordKey`). */
+export const HAZE_FIELD_COUNT = 28;
+export const AIR_FIELD_COUNT = 40;
+
+// ---------------------------------------------------------------- the smoke and ash (pass 2, wave 6)
+
+/**
+ * The layer's none: no extinction, no scattering, no glow, and a finite shape (a tent 2 km up and 1.5 km either way, a
+ * phase of 0.7) so nothing divides by nought where a reader works the tent whatever its strength.
+ */
+export const SMOKE_NONE = { c: 2, w: 1.5, g: 0.7 };
+/**
+ * The three wavelengths the record's channels stand for (nm): Bruneton's and Hillaire's red, green and blue, whose
+ * Rayleigh coefficients (5.802, 13.558, 33.1 per Mm) are 550 nm's times (lambda / 550)^-4 to the third figure.
+ */
+export const SMOKE_NM = [680, 550, 440];
+/**
+ * The sun's illuminance at the top of the air, lux (`src/sky/night/galaxyDensity.ts`' `SUN_LUX`, held equal by
+ * `airSmoke.test.ts`): the glow's lux are a share of it.
+ */
+export const SMOKE_SUN_LUX = 128000;
+/**
+ * Elsasser's diffusivity factor: diffuse light crossing a plane layer goes as though straight through 1.66 times its
+ * vertical optical depth (the mean of 1 / cos over a Lambert hemisphere's flux, to the usual approximation), which is how
+ * the glow from the lava below is dimmed on its way up to a height (`glowUp`).
+ */
+export const DIFFUSIVITY = 1.66;
+
+/** Whether a record carries the smoke and ash (any extinction or any glow); a record of 28 numbers or fewer never does. */
+export function hasSmoke(rec) {
+  return rec.length > F.glowB && (rec[F.smokeER] > 0 || rec[F.smokeEG] > 0 || rec[F.smokeEB] > 0 || rec[F.glowR] > 0 || rec[F.glowG] > 0 || rec[F.glowB] > 0);
+}
+
+/** The tent's density at `h` km above the ground (1 at its middle `c`, nought `w` either side and beyond). */
+export function smokeDensity(c, w, h) {
+  const t = 1 - Math.abs(h - c) / (w > 1e-6 ? w : 1e-6);
+  return t > 0 ? t : 0;
+}
+
+/**
+ * The tent's column from far below up to `z` km (its peak taken as 1): its lower half's area grows as the square, its
+ * upper half's as one less the square of what is left, `w` in all. The vertical column from the ground up is
+ * `smokeColumnTo(c, w, inf) - smokeColumnTo(c, w, 0)`.
+ */
+export function smokeColumnTo(c, w, z) {
+  const ww = w > 1e-6 ? w : 1e-6;
+  let a = z - c + ww;
+  a = a < 0 ? 0 : a > ww ? ww : a;
+  let b = z - c;
+  b = b < 0 ? 0 : b > ww ? ww : b;
+  return (a * a) / (2 * ww) + b - (b * b) / (2 * ww);
+}
+
+/**
+ * How many even steps the layer's column along a ray is summed by (`smokeColumnAlong`, the card's transmittance pass the
+ * same): over only the stretch of the ray under the layer's top, so a tent lifted off the ground is crossed by all of them
+ * (the haze's steps, laid by the square of their place from the ray's start, put some nine across Mustafar's plume at noon
+ * and read its column 1.5% short, 15% in the light at 1.5 degrees; these read a 4,000-step sum within a few parts in ten
+ * thousand from the zenith to the horizon).
+ */
+export const SMOKE_STEPS = 32;
+
+/**
+ * The tent's column (km of its peak's density) along a ray from `r` km from the centre with zenith cosine `mu` to the
+ * top of the air (`bottom`, `top` its sphere's radii): the stretch of the ray inside the sphere of the layer's top is found
+ * by the ray's quadratic and summed by `steps` even steps at their middles. A ray that never comes under the layer's top
+ * sums nought. (Not a frame's: its answer crosses the call.)
+ */
+export function smokeColumnAlong(c, w, bottom, top, r, mu, steps = SMOKE_STEPS) {
+  const ww = w > 1e-6 ? w : 1e-6;
+  const discT = r * r * (mu * mu - 1) + top * top;
+  const len = Math.max(0, -r * mu + Math.sqrt(discT > 0 ? discT : 0));
+  const rt = bottom + c + ww;
+  const d = r * r * (mu * mu - 1) + rt * rt;
+  if (!(d > 0)) return 0;
+  const s = Math.sqrt(d);
+  let t1 = -r * mu - s;
+  let t2 = -r * mu + s;
+  if (t1 < 0) t1 = 0;
+  if (t2 > len) t2 = len;
+  if (!(t2 > t1)) return 0;
+  const dt = (t2 - t1) / steps;
+  let sum = 0;
+  for (let i = 0; i < steps; i++) {
+    const t = t1 + (i + 0.5) * dt;
+    const h = Math.sqrt(t * t + 2 * r * mu * t + r * r) - bottom;
+    sum += smokeDensity(c, ww, h > 0 ? h : 0);
+  }
+  return sum * dt;
+}
+
+const PLANCK_H = 6.62607015e-34, LIGHT_C = 2.99792458e8, BOLTZ_K = 1.380649e-23;
+const lobe = (l, mu, s1, s2) => { const t = (l - mu) / (l < mu ? s1 : s2); return Math.exp(-0.5 * t * t); };
+/**
+ * A black body's colour at `kelvin` as linear Rec. 709, luminance 1, into `out`: `src/sky/stars.ts`' `kelvinToLinear`
+ * line for line (Planck's law over 380 to 780 nm at 5 nm through Wyman, Sloan and Shirley's fit of the CIE 1931
+ * matching functions), here because this file imports nothing; `airSmoke.test.ts` holds the two to the bit.
+ */
+export function blackBody(kelvin, out) {
+  const T = kelvin > 500 ? kelvin : 500;
+  let X = 0, Y = 0, Z = 0;
+  for (let nm = 380; nm <= 780; nm += 5) {
+    const l = nm * 1e-9;
+    const b = (2 * PLANCK_H * LIGHT_C * LIGHT_C) / (l ** 5 * (Math.exp((PLANCK_H * LIGHT_C) / (l * BOLTZ_K * T)) - 1));
+    const x = 1.056 * lobe(nm, 599.8, 37.9, 31.0) + 0.362 * lobe(nm, 442.0, 16.0, 26.7) - 0.065 * lobe(nm, 501.1, 20.4, 26.2);
+    const y = 0.821 * lobe(nm, 568.8, 46.9, 40.5) + 0.286 * lobe(nm, 530.9, 16.3, 31.1);
+    const z = 1.217 * lobe(nm, 437.0, 11.8, 36.0) + 0.681 * lobe(nm, 459.0, 26.0, 13.8);
+    X += b * x; Y += b * y; Z += b * z;
+  }
+  const r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
+  const g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
+  const bl = 0.0557 * X - 0.204 * Y + 1.057 * Z;
+  const rr = r > 0 ? r : 0, gg = g > 0 ? g : 0, bb = bl > 0 ? bl : 0;
+  const lum = 0.2126 * rr + 0.7152 * gg + 0.0722 * bb;
+  const s = lum > 0 ? 1 / lum : 0;
+  out[0] = rr * s; out[1] = gg * s; out[2] = bb * s;
+  return out;
+}
+
+/**
+ * The smoke and ash's dials (each `undefined` takes `SMOKE_DIAL_START`'s) laid into a record's twelve numbers: its
+ * vertical optical depth at 550 nm from the ground up (`smokeDepth`; nought is none, and then the record is exactly
+ * `SMOKE_NONE`'s) spread over the tent the middle and thickness make (`smokeHeightKm`, `smokeThickKm`, the thickness its
+ * whole depth), its extinction by channel `(lambda / 550)^-smokeAngstrom`, its absorption `(1 - smokeAlbedo)` of the
+ * green's extinction by channel `(lambda / 550)^-smokeBrown` (held under the extinction), the rest scattered; its phase
+ * `smokeG`; and the glow from below, `glowLux` lux of a black body at `glowKelvin` as a share of `SMOKE_SUN_LUX`. A layer
+ * wholly under the ground has no column and is none.
+ */
+export function smokeInto(rec, d) {
+  const s = SMOKE_DIAL_START;
+  const pick = (k) => { const v = d?.[k]; return typeof v === 'number' && Number.isFinite(v) ? v : s[k]; };
+  const tau = pick('smokeDepth');
+  const glow = pick('glowLux');
+  const c = pick('smokeHeightKm');
+  const w = pick('smokeThickKm') * 0.5;
+  rec[F.smokeER] = rec[F.smokeEG] = rec[F.smokeEB] = 0;
+  rec[F.smokeSR] = rec[F.smokeSG] = rec[F.smokeSB] = 0;
+  rec[F.glowR] = rec[F.glowG] = rec[F.glowB] = 0;
+  if (!(tau > 0) && !(glow > 0)) {
+    rec[F.smokeC] = SMOKE_NONE.c; rec[F.smokeW] = SMOKE_NONE.w; rec[F.smokeG] = SMOKE_NONE.g;
+    return rec;
+  }
+  rec[F.smokeC] = c;
+  rec[F.smokeW] = w > 1e-3 ? w : 1e-3;
+  rec[F.smokeG] = pick('smokeG');
+  const col = smokeColumnTo(c, rec[F.smokeW], c + rec[F.smokeW]) - smokeColumnTo(c, rec[F.smokeW], 0);
+  const e550 = tau > 0 && col > 1e-9 ? tau / col : 0;
+  const alpha = pick('smokeAngstrom'), albedo = pick('smokeAlbedo'), brown = pick('smokeBrown');
+  for (let k = 0; k < 3; k++) {
+    const x = SMOKE_NM[k] / 550;
+    const e = e550 * Math.pow(x, -alpha);
+    const a0 = (1 - albedo) * e550 * Math.pow(x, -brown);
+    const a = a0 < e ? (a0 > 0 ? a0 : 0) : e;
+    rec[F.smokeER + k] = e;
+    rec[F.smokeSR + k] = e - a;
+  }
+  if (glow > 0) {
+    blackBody(pick('glowKelvin'), _c3);
+    const share = glow / SMOKE_SUN_LUX;
+    rec[F.glowR] = _c3[0] * share; rec[F.glowG] = _c3[1] * share; rec[F.glowB] = _c3[2] * share;
+  }
+  return rec;
+}
+
+/**
+ * The smoke and ash's dials, their ranges and every world's start (the GPU port's pass 2, wave 6; feel is the owner's):
+ * **none** to start (`smokeDepth` 0, `glowLux` 0), so every record and table is the base's; the rest are where a mixed
+ * volcanic plume of ash and smoke stands when he raises the depth (the reasons in `airParams.ts`' `SMOKE_STARTS`, which
+ * gives Mustafar its measured start).
+ */
+export const SMOKE_DIAL_START = {
+  smokeDepth: 0, smokeAngstrom: 1, smokeAlbedo: 0.85, smokeBrown: 1.5, smokeHeightKm: 3, smokeThickKm: 5, smokeG: 0.7, glowLux: 0, glowKelvin: 1250,
+};
+/** Each dial's range (the sliders'; a value outside is held to it). */
+export const SMOKE_DIAL_RANGE = {
+  smokeDepth: [0, 6], smokeAngstrom: [-0.5, 3], smokeAlbedo: [0.3, 1], smokeBrown: [0, 6], smokeHeightKm: [0, 30], smokeThickKm: [0.2, 30], smokeG: [0, 0.95], glowLux: [0, 200], glowKelvin: [800, 3000],
+};
+/** The dials' names, in the order the menus show them. */
+export const SMOKE_DIAL_NAMES = ['smokeDepth', 'smokeAngstrom', 'smokeAlbedo', 'smokeBrown', 'smokeHeightKm', 'smokeThickKm', 'smokeG', 'glowLux', 'glowKelvin'];
 
 /** A record's haze colour into `out` (1, 1, 1 for a record of the game's 25 numbers, which has none). */
 export function hazeTintOf(rec, out) {
@@ -116,6 +304,18 @@ export const AIR_DIALS = [
   // air the night side is dark at the exposure of a lit disc (only city lights and lava stay), so only this share of
   // it is kept. A start, not a measurement: feel is his.
   R('nightFill', 'Night-side fill', 0, 1, 0.01, 0.15, 'How much of the look\'s own ambient light still lights its night side: 0 is as dark as space, 1 as the Painted form lit it (city lights and lava are their own and stay)', { group: 'light' }),
+  // (the GPU port's pass 2, wave 6) the second aerosol layer, smoke and ash, the game's own dials of the same names
+  // (`airParams.ts`); none to start (a depth of 0, no glow), so a look's air is drawn as before until it is raised
+  // (its depth and the glow rebuild the look, `struct`: a look with none keeps the graph it always had, `build.js`' `makeAir`)
+  R('smokeDepth', 'Smoke and ash: depth', ...SMOKE_DIAL_RANGE.smokeDepth, 0.01, SMOKE_DIAL_START.smokeDepth, 'How much the smoke and ash layer dims the sun straight overhead: its vertical optical depth at 550 nm (0: none, the air as before; 1 lets through about a third, as a thick eruption plume does)', { group: 'air', struct: true }),
+  R('smokeAngstrom', 'Smoke and ash: fine (smoke) or coarse (ash)', ...SMOKE_DIAL_RANGE.smokeAngstrom, 0.05, SMOKE_DIAL_START.smokeAngstrom, 'Its Angstrom exponent: how much more it dims the blue than the red. About 2 for fine smoke (the sun through it reddens hard), near 0 for coarse ash (grey, every colour dimmed alike)', { group: 'air' }),
+  R('smokeAlbedo', 'Smoke and ash: brightness', ...SMOKE_DIAL_RANGE.smokeAlbedo, 0.01, SMOKE_DIAL_START.smokeAlbedo, 'Its single-scattering albedo in the green: the share of the light it meets that it scatters rather than absorbs (ash about 0.9, smoke 0.8 to 0.9, soot lower: darker)', { group: 'air' }),
+  R('smokeBrown', 'Smoke and ash: brown', ...SMOKE_DIAL_RANGE.smokeBrown, 0.05, SMOKE_DIAL_START.smokeBrown, 'How much more it absorbs the blue than the red (its absorption Angstrom exponent): 1 a grey soot, 2 a brown smoke, 3 to 6 browner still', { group: 'air' }),
+  R('smokeHeightKm', 'Smoke and ash: height', ...SMOKE_DIAL_RANGE.smokeHeightKm, 0.1, SMOKE_DIAL_START.smokeHeightKm, 'The middle of the layer above the ground, km', { unit: ' km', group: 'air' }),
+  R('smokeThickKm', 'Smoke and ash: thickness', ...SMOKE_DIAL_RANGE.smokeThickKm, 0.1, SMOKE_DIAL_START.smokeThickKm, 'How deep the layer is, km: it thickens from its bottom to its middle and thins to its top', { unit: ' km', group: 'air' }),
+  R('smokeG', 'Smoke and ash: forward glow', ...SMOKE_DIAL_RANGE.smokeG, 0.01, SMOKE_DIAL_START.smokeG, 'How strongly it throws light forward (its phase\'s g): the glow round the sun seen through it', { group: 'air' }),
+  R('glowLux', 'Glow from below', ...SMOKE_DIAL_RANGE.glowLux, 0.05, SMOKE_DIAL_START.glowLux, 'The lava\'s light the air above it scatters back down: the upward light at the ground, lux (0 none; a full moon gives 0.25 lux, a deep twilight a few). An orange night sky over lava', { unit: ' lx', group: 'air', struct: true }),
+  R('glowKelvin', 'Glow colour', ...SMOKE_DIAL_RANGE.glowKelvin, 10, SMOKE_DIAL_START.glowKelvin, 'The lava\'s temperature, kelvin: 1,000 a deep red, 1,250 orange, 1,500 yellow-orange', { unit: ' K', group: 'air' }),
 ];
 AIR_DIALS[3].group = 'air';
 /** Every dial's start, by key. */
@@ -204,6 +404,8 @@ export function newRecord() {
   r[F.mieAlbedo] = 0.9;
   // (wave B) a grey haze: the game's record as it is
   r[F.mieTintR] = r[F.mieTintG] = r[F.mieTintB] = 1;
+  // (pass 2, wave 6) no smoke or ash and no glow: the shape's three finite, everything else nought
+  r[F.smokeC] = SMOKE_NONE.c; r[F.smokeW] = SMOKE_NONE.w; r[F.smokeG] = SMOKE_NONE.g;
   return r;
 }
 
@@ -253,14 +455,23 @@ export function recordOf(airIn, out = new Float64Array(AIR_FIELD_COUNT)) {
   out[F.ozC] = EARTH.ozoneCentre * thin;
   out[F.ozW] = EARTH.ozoneHalfWidth * thin;
   out[F.groundR] = out[F.groundG] = out[F.groundB] = a.groundAlbedo;
+  // (pass 2, wave 6) the smoke and ash and the glow from below (none to start)
+  smokeInto(out, a);
   return out;
+}
+
+/** (pass 2, wave 6) How many of a record's numbers say what it is: 28 with no smoke or ash (the record as it was), else all. */
+export function recordLength(rec) {
+  return hasSmoke(rec) ? Math.min(rec.length, AIR_FIELD_COUNT) : Math.min(rec.length, HAZE_FIELD_COUNT);
 }
 
 /** A short name for a record's numbers (the tables are made again only when it moves). */
 export function recordKey(rec) {
   let s = '';
-  // (a record of the game's 25 numbers is keyed by those alone)
-  for (let i = 0; i < rec.length && i < AIR_FIELD_COUNT; i++) s += (i ? ',' : '') + (+rec[i]).toPrecision(7);
+  // (a record of the game's 25 numbers is keyed by those alone; (pass 2, wave 6) one with no smoke or ash by its 28, as
+  // before the layer came, so every table kept by its key is found again)
+  const n = recordLength(rec);
+  for (let i = 0; i < n; i++) s += (i ? ',' : '') + (+rec[i]).toPrecision(7);
   return s;
 }
 
@@ -283,15 +494,46 @@ export function miePhase(c, g) {
   return (MIE_K * (1 - g2) * (1 + c * c)) / ((2 + g2) * den * Math.sqrt(den));
 }
 
-/** The densities at height `h` km above the ground, into `m`: [Rayleigh, Mie, ozone]. */
+/**
+ * The densities at height `h` km above the ground, into `m`: [Rayleigh, Mie, ozone], and (pass 2, wave 6) where `m` has
+ * a fourth place and the record the layer, the smoke and ash's tent there (nought for a record without).
+ */
 export function densities(rec, h, m) {
   const hh = h > 0 ? h : 0;
   m[0] = rec[F.rayH] > 0 ? Math.exp(-hh / rec[F.rayH]) : 0;
   m[1] = rec[F.mieH] > 0 ? Math.exp(-hh / rec[F.mieH]) : 0;
   const o = rec[F.ozW] > 0 ? 1 - Math.abs(hh - rec[F.ozC]) / rec[F.ozW] : 0;
   m[2] = o > 0 ? o : 0;
+  if (m.length > 3) m[3] = rec.length > F.glowB ? smokeDensity(rec[F.smokeC], rec[F.smokeW], hh) : 0;
   return m;
 }
+
+/**
+ * (pass 2, wave 6) The glow from the lava below reaching a height `h` km, into `out` (red, green, blue, per unit of the
+ * record's sun at the top of the air): the record's glow over its sun's strength, dimmed on its way up by the air under
+ * the height (the clear air's and the haze's columns by their scale heights, the layer's by its tent, ozone left out
+ * under its 25 km), crossed as diffuse light does (`DIFFUSIVITY`). Nought for a record without.
+ */
+export function glowUp(rec, h, out) {
+  if (!(rec.length > F.glowB) || !(rec[F.glowR] > 0 || rec[F.glowG] > 0 || rec[F.glowB] > 0)) { out[0] = out[1] = out[2] = 0; return out; }
+  const hh = h > 0 ? h : 0;
+  const k = rec[F.sunStrength] > 1e-9 ? 1 / rec[F.sunStrength] : 0;
+  const cR = rec[F.rayH] > 0 ? rec[F.rayH] * (1 - Math.exp(-hh / rec[F.rayH])) : 0;
+  const cM = rec[F.mieH] > 0 ? rec[F.mieH] * (1 - Math.exp(-hh / rec[F.mieH])) : 0;
+  const cS = smokeColumnTo(rec[F.smokeC], rec[F.smokeW], hh) - smokeColumnTo(rec[F.smokeC], rec[F.smokeW], 0);
+  const mieT = rec[F.mieS] + rec[F.mieA];
+  for (let j = 0; j < 3; j++) {
+    const tau = rec[F.rayR + j] * cR + mieT * cM + rec[F.smokeER + j] * cS;
+    out[j] = rec[F.glowR + j] * k * Math.exp(-DIFFUSIVITY * tau);
+  }
+  return out;
+}
+/**
+ * What a scatterer sends any way of the glow it is lit by, per unit of its scattering and of the glow's illuminance: a
+ * Lambert plane of exitance M below has a radiance of M / pi over the lower hemisphere's 2 pi sr, met by the isotropic phase
+ * 1 / (4 pi), so M / (2 pi). Isotropic, as the light of a thick plume lit from below is once it has scattered a few times.
+ */
+export const GLOW_PHASE = 1 / (2 * Math.PI);
 
 /** Whether a ray from `r` km with zenith cosine `mu` meets the ground ahead. */
 export function hitsGround(r, mu, bottom) {
@@ -310,12 +552,16 @@ const smoothstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b
 /** The share of the sun a point at `r` sees over the planet's edge (0 below it, 1 above, soft across it). */
 export const sunShare = (r, mu, bottom) => smoothstep(-SHADOW_SOFT, SHADOW_SOFT, mu - horizonMu(r, bottom));
 
-const mS = new Float64Array(3);
+// (pass 2, wave 6) four places: the smoke and ash's tent in the fourth (`densities`)
+const mS = new Float64Array(4);
+const gU = [0, 0, 0];
 
 /**
  * The optical depth (red, green, blue) from `r` toward zenith cosine `mu` to the top of the air, summed directly by
  * `steps` segments laid by the square of their place (the haze's thin layer at the start has most of them), as the
- * game's `columnDepths` does: the reference the table is held to.
+ * game's `columnDepths` does: the reference the table is held to. (Pass 2, wave 6) The smoke and ash's column is added
+ * after, by channel, only where the record carries it, summed along the ray's stretch under the layer's top by its own
+ * steps (`smokeColumnAlong`): a record without is summed as it always was, to the bit.
  */
 export function opticalDepth(rec, r, mu, steps, out) {
   const top = rec[F.top], bottom = rec[F.bottom];
@@ -336,6 +582,11 @@ export function opticalDepth(rec, r, mu, steps, out) {
   out[0] = rec[F.rayR] * tr + mieExt * tm + rec[F.ozR] * to;
   out[1] = rec[F.rayG] * tr + mieExt * tm + rec[F.ozG] * to;
   out[2] = rec[F.rayB] * tr + mieExt * tm + rec[F.ozB] * to;
+  if (hasSmoke(rec)) {
+    // the layer's column along the ray's stretch under its top, by its own even steps (`smokeColumnAlong`)
+    const ts = smokeColumnAlong(rec[F.smokeC], rec[F.smokeW], bottom, top, r, mu);
+    out[0] += rec[F.smokeER] * ts; out[1] += rec[F.smokeEG] * ts; out[2] += rec[F.smokeEB] * ts;
+  }
   return out;
 }
 
@@ -466,6 +717,8 @@ export function multiScatterOf(rec, tabs, r, muS, dirs, steps, out) {
   // (wave B) the haze's scattering by channel (its extinction stays grey)
   hazeTintOf(rec, tintS);
   const mS0 = mieS * tintS[0], mS1 = mieS * tintS[1], mS2 = mieS * tintS[2];
+  // (pass 2, wave 6) the smoke and ash's extinction and scattering, added after the rest where the record carries them
+  const smoke = hasSmoke(rec);
   const n = dirs.length / 3;
   let L0 = 0, L1 = 0, L2 = 0, f0 = 0, f1 = 0, f2 = 0;
   for (let k = 0; k < n; k++) {
@@ -485,11 +738,16 @@ export function multiScatterOf(rec, tabs, r, muS, dirs, steps, out) {
       const rr = Math.sqrt(px * px + py * py + pz * pz);
       densities(rec, rr - bottom, mS);
       const sR0 = rec[F.rayR] * mS[0], sR1 = rec[F.rayG] * mS[0], sR2 = rec[F.rayB] * mS[0];
-      const e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
-      const ec1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
-      const e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
+      let e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
+      let ec1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
+      let e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
       transmittanceAt(rec, tabs, rr, (px * sx + py * sy) / rr, tS);
-      const s0 = sR0 + mS0 * mS[1], s1 = sR1 + mS1 * mS[1], s2 = sR2 + mS2 * mS[1];
+      let s0 = sR0 + mS0 * mS[1], s1 = sR1 + mS1 * mS[1], s2 = sR2 + mS2 * mS[1];
+      if (smoke) {
+        const dS = mS[3];
+        e0 += rec[F.smokeER] * dS; ec1 += rec[F.smokeEG] * dS; e2 += rec[F.smokeEB] * dS;
+        s0 += rec[F.smokeSR] * dS; s1 += rec[F.smokeSG] * dS; s2 += rec[F.smokeSB] * dS;
+      }
       const st0 = Math.exp(-e0 * dt), st1 = Math.exp(-ec1 * dt), st2 = Math.exp(-e2 * dt);
       const g0 = e0 > 1e-12 ? (1 - st0) / e0 : dt, g1 = ec1 > 1e-12 ? (1 - st1) / ec1 : dt, g2 = e2 > 1e-12 ? (1 - st2) / e2 : dt;
       L0 += T0 * s0 * tS[0] * INV_4PI * g0; L1 += T1 * s1 * tS[1] * INV_4PI * g1; L2 += T2 * s2 * tS[2] * INV_4PI * g2;
@@ -641,6 +899,9 @@ export function marchAir(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps, s
   const c = dx * lx + dy * ly + dz * lz;
   const pR = rayleighPhase(c), pM = miePhase(c, g);
   const gl = gains ? gains.limb : 1, gt = gains ? gains.twilight : 1;
+  // (pass 2, wave 6) the smoke and ash and the glow from below, summed after the rest where the record carries them
+  const smoke = hasSmoke(rec);
+  const pS = smoke ? miePhase(c, rec[F.smokeG]) : 0;
   let L0 = 0, L1 = 0, L2 = 0, T0 = 1, T1 = 1, T2 = 1;
   let sA = map(0);
   for (let i = 0; i < steps; i++) {
@@ -653,16 +914,28 @@ export function marchAir(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps, s
     densities(rec, r - bottom, mS);
     const sR0 = rec[F.rayR] * mS[0], sR1 = rec[F.rayG] * mS[0], sR2 = rec[F.rayB] * mS[0];
     const sM0 = mS0 * mS[1], sM1 = mS1 * mS[1], sM2 = mS2 * mS[1];
-    const e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
-    const e1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
-    const e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
+    let e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
+    let e1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
+    let e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
     const muS = (xx * lx + xy * ly + xz * lz) / r;
     transmittanceAt(rec, tabs, r, muS, tS);
     multiScatterAt(rec, tabs, r, muS, msS);
     const tw = 1 + (gt - 1) * twilightWeight(muS);
-    const S0 = (tS[0] * (sR0 * pR + sM0 * pM) + msS[0] * (sR0 + sM0)) * tw;
-    const S1 = (tS[1] * (sR1 * pR + sM1 * pM) + msS[1] * (sR1 + sM1)) * tw;
-    const S2 = (tS[2] * (sR2 * pR + sM2 * pM) + msS[2] * (sR2 + sM2)) * tw;
+    let S0 = (tS[0] * (sR0 * pR + sM0 * pM) + msS[0] * (sR0 + sM0)) * tw;
+    let S1 = (tS[1] * (sR1 * pR + sM1 * pM) + msS[1] * (sR1 + sM1)) * tw;
+    let S2 = (tS[2] * (sR2 * pR + sM2 * pM) + msS[2] * (sR2 + sM2)) * tw;
+    if (smoke) {
+      const dS = mS[3];
+      const sS0 = rec[F.smokeSR] * dS, sS1 = rec[F.smokeSG] * dS, sS2 = rec[F.smokeSB] * dS;
+      e0 += rec[F.smokeER] * dS; e1 += rec[F.smokeEG] * dS; e2 += rec[F.smokeEB] * dS;
+      S0 += (tS[0] * sS0 * pS + msS[0] * sS0) * tw;
+      S1 += (tS[1] * sS1 * pS + msS[1] * sS1) * tw;
+      S2 += (tS[2] * sS2 * pS + msS[2] * sS2) * tw;
+      glowUp(rec, r - bottom, gU);
+      S0 += (sR0 + sM0 + sS0) * gU[0] * GLOW_PHASE;
+      S1 += (sR1 + sM1 + sS1) * gU[1] * GLOW_PHASE;
+      S2 += (sR2 + sM2 + sS2) * gU[2] * GLOW_PHASE;
+    }
     const st0 = Math.exp(-e0 * dt), st1 = Math.exp(-e1 * dt), st2 = Math.exp(-e2 * dt);
     L0 += T0 * S0 * (e0 > 1e-12 ? (1 - st0) / e0 : dt);
     L1 += T1 * S1 * (e1 > 1e-12 ? (1 - st1) / e1 : dt);
@@ -699,6 +972,10 @@ export function marchDirect(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps
   const k0 = rec.length > F.mieTintB ? rec[F.mieTintR] : 1, k1 = rec.length > F.mieTintB ? rec[F.mieTintG] : 1, k2 = rec.length > F.mieTintB ? rec[F.mieTintB] : 1;
   const c = dx * lx + dy * ly + dz * lz;
   const pR = rayleighPhase(c), pM = miePhase(c, g);
+  // (pass 2, wave 6) the smoke and ash and the glow, summed where the record carries them (no shared step with the march)
+  const smoke = hasSmoke(rec);
+  const pS = smoke ? miePhase(c, rec[F.smokeG]) : 0;
+  const gD = [0, 0, 0];
   const dt = len / steps;
   let L0 = 0, L1 = 0, L2 = 0, O0 = 0, O1 = 0, O2 = 0;
   const td = [0, 0, 0];
@@ -709,17 +986,30 @@ export function marchDirect(rec, tabs, ox, oy, oz, dx, dy, dz, lx, ly, lz, steps
     densities(rec, r - bottom, mS);
     const sR0 = rec[F.rayR] * mS[0], sR1 = rec[F.rayG] * mS[0], sR2 = rec[F.rayB] * mS[0];
     const sM0 = mieS * k0 * mS[1], sM1 = mieS * k1 * mS[1], sM2 = mieS * k2 * mS[1];
-    const e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
-    const e1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
-    const e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
+    let e0 = sR0 + mieT * mS[1] + rec[F.ozR] * mS[2];
+    let e1 = sR1 + mieT * mS[1] + rec[F.ozG] * mS[2];
+    let e2 = sR2 + mieT * mS[1] + rec[F.ozB] * mS[2];
+    // (the layer's density read here: the direct transmittance below sums its own densities into the same scratch)
+    const dS = mS[3];
     const muS = (xx * lx + xy * ly + xz * lz) / r;
     transmittanceDirect(rec, r, muS, sunSteps, td);
     if (withMs) multiScatterAt(rec, tabs, r, muS, msS); else msS[0] = msS[1] = msS[2] = 0;
+    let J0 = td[0] * (sR0 * pR + sM0 * pM) + msS[0] * (sR0 + sM0);
+    let J1 = td[1] * (sR1 * pR + sM1 * pM) + msS[1] * (sR1 + sM1);
+    let J2 = td[2] * (sR2 * pR + sM2 * pM) + msS[2] * (sR2 + sM2);
+    if (smoke) {
+      const sS0 = rec[F.smokeSR] * dS, sS1 = rec[F.smokeSG] * dS, sS2 = rec[F.smokeSB] * dS;
+      e0 += rec[F.smokeER] * dS; e1 += rec[F.smokeEG] * dS; e2 += rec[F.smokeEB] * dS;
+      glowUp(rec, r - bottom, gD);
+      J0 += td[0] * sS0 * pS + msS[0] * sS0 + (sR0 + sM0 + sS0) * gD[0] * GLOW_PHASE;
+      J1 += td[1] * sS1 * pS + msS[1] * sS1 + (sR1 + sM1 + sS1) * gD[1] * GLOW_PHASE;
+      J2 += td[2] * sS2 * pS + msS[2] * sS2 + (sR2 + sM2 + sS2) * gD[2] * GLOW_PHASE;
+    }
     // the view's transmittance to the middle of this step
     const v0 = Math.exp(-(O0 + 0.5 * e0 * dt)), v1 = Math.exp(-(O1 + 0.5 * e1 * dt)), v2 = Math.exp(-(O2 + 0.5 * e2 * dt));
-    L0 += v0 * (td[0] * (sR0 * pR + sM0 * pM) + msS[0] * (sR0 + sM0)) * dt;
-    L1 += v1 * (td[1] * (sR1 * pR + sM1 * pM) + msS[1] * (sR1 + sM1)) * dt;
-    L2 += v2 * (td[2] * (sR2 * pR + sM2 * pM) + msS[2] * (sR2 + sM2)) * dt;
+    L0 += v0 * J0 * dt;
+    L1 += v1 * J1 * dt;
+    L2 += v2 * J2 * dt;
     O0 += e0 * dt; O1 += e1 * dt; O2 += e2 * dt;
   }
   out[0] = L0; out[1] = L1; out[2] = L2;
@@ -753,7 +1043,7 @@ export function lightAt(rec, tabs, r, muS, out) {
  * (the viewer's, and the start: its graph as it always was), or 1.5 (the game's bodies', u times its square root).
  */
 export function airShader(T, U, tex, steps, lay = 2) {
-  const { float, vec2, vec3, dot, sqrt, max, min, clamp, exp, abs, mix, select, smoothstep, texture, Loop } = T;
+  const { float, vec2, vec3, dot, sqrt, max, min, clamp, exp, abs, mix, select, smoothstep, texture, Loop, If } = T;
   const TW = TABLES.transmittance.width, TH = TABLES.transmittance.height;
   const MW = TABLES.multiScatter.width, MH = TABLES.multiScatter.height;
   const EW = TABLES.irradiance.width;
@@ -817,6 +1107,14 @@ export function airShader(T, U, tex, steps, lay = 2) {
     const den = g2.add(1.0).sub(g.mul(2.0).mul(c));
     const pM = float(MK).mul(float(1).sub(g2)).mul(c.mul(c).add(1.0)).div(g2.add(2.0).mul(den).mul(sqrt(den)));
     const mieT = U.mieS.add(U.mieA);
+    // (pass 2, wave 6) the smoke and ash and the glow from below, where the caller hands their uniforms (`smokeE` and the
+    // rest): the graph of a caller that hands none is the one it always was
+    const smoke = !!U.smokeE;
+    const pS = smoke ? (() => {
+      const gS = U.smokeG, gS2 = gS.mul(gS);
+      const denS = gS2.add(1.0).sub(gS.mul(2.0).mul(c));
+      return float(MK).mul(float(1).sub(gS2)).mul(c.mul(c).add(1.0)).div(gS2.add(2.0).mul(denS).mul(sqrt(denS)));
+    })() : null;
     const L = vec3(0).toVar();
     const Tv = vec3(1).toVar();
     const sA = map(float(0)).toVar();
@@ -836,10 +1134,39 @@ export function airShader(T, U, tex, steps, lay = 2) {
       const sR = U.ray.mul(dR);
       // (wave B) the haze's scattering by channel (its colour); the extinction below stays grey
       const sM = U.mieTint ? U.mieTint.mul(U.mieS.mul(dM)) : U.mieS.mul(dM);
-      const ext = sR.add(mieT.mul(dM)).add(U.oz.mul(dO));
+      let ext = sR.add(mieT.mul(dM)).add(U.oz.mul(dO));
       const muS = dot(x, Ls).div(r);
       const tw = mix(float(1), U.twilight, float(1).sub(smoothstep(-0.08, 0.15, muS)));
-      const S = transmit(r, muS).mul(sR.mul(pR).add(sM.mul(pM))).add(multi(r, muS).mul(sR.add(sM))).mul(tw);
+      const tT = transmit(r, muS), mT = multi(r, muS);
+      let S = tT.mul(sR.mul(pR).add(sM.mul(pM))).add(mT.mul(sR.add(sM))).mul(tw);
+      if (smoke) {
+        // the layer's tent, its extinction and scattering, its light by its own phase and the multiple scattering's share,
+        // and the glow from below dimmed on its way up (`glowUp`), every scatterer sending `GLOW_PHASE` of it; all of it
+        // behind a branch on the uniforms (a layer or a glow at all: the red channel of either), so a body whose record has
+        // none pays nothing for it (measured: Naboo from Rori at High, 11% of the screen, +0.011 ms with the sums always run)
+        const extV = ext.toVar();
+        const SV = S.toVar();
+        If(U.smokeE.x.add(U.glow.x).greaterThan(0.0), () => {
+          const dS = max(float(1).sub(abs(h.sub(U.smokeC)).div(max(U.smokeW, 1e-6))), 0.0);
+          const sS = U.smokeS.mul(dS);
+          extV.addAssign(U.smokeE.mul(dS));
+          SV.addAssign(tT.mul(sS.mul(pS)).add(mT.mul(sS)).mul(tw));
+          const col = (z) => {
+            const w = max(U.smokeW, 1e-6);
+            const a = clamp(z.sub(U.smokeC).add(w), 0.0, w);
+            const bb = clamp(z.sub(U.smokeC), 0.0, w);
+            return a.mul(a).div(w.mul(2.0)).add(bb).sub(bb.mul(bb).div(w.mul(2.0)));
+          };
+          const cR = U.rayH.mul(float(1).sub(exp(h.negate().div(max(U.rayH, 1e-4)))));
+          const cM = U.mieH.mul(float(1).sub(exp(h.negate().div(max(U.mieH, 1e-4)))));
+          const cS = col(h).sub(col(float(0)));
+          const tauUp = U.ray.mul(cR).add(mieT.mul(cM)).add(U.smokeE.mul(cS));
+          const up = U.glow.mul(exp(tauUp.mul(-DIFFUSIVITY)));
+          SV.addAssign(sR.add(sM).add(sS).mul(up).mul(GLOW_PHASE));
+        });
+        ext = extV;
+        S = SV;
+      }
       const st = exp(ext.mul(dt).negate());
       const gain = select(ext.greaterThan(vec3(1e-9)), float(1).sub(st).div(max(ext, vec3(1e-9))), vec3(dt));
       L.addAssign(Tv.mul(S).mul(gain));
@@ -866,6 +1193,25 @@ export function airUniformValues(rec, a) {
     limb: a.limbBright, twilight: a.twilightBright,
     // (wave B) the haze's colour (1, 1, 1 for a record without one)
     mieTint: hazeTintOf(rec, [1, 1, 1]),
+    // (pass 2, wave 6) the smoke and ash (none for a record without) and the glow from below over the record's sun
+    ...smokeUniformValues(rec),
+  };
+}
+
+/**
+ * (pass 2, wave 6) The smoke and ash's uniforms' values for a record (none for a record of 28 numbers or fewer): its
+ * extinction and scattering at its peak, its middle and half depth, its phase, and its glow per unit of the record's sun.
+ */
+export function smokeUniformValues(rec) {
+  const has = rec.length > F.glowB;
+  const k = has && rec[F.sunStrength] > 1e-9 ? 1 / rec[F.sunStrength] : 0;
+  return {
+    smokeE: has ? [rec[F.smokeER], rec[F.smokeEG], rec[F.smokeEB]] : [0, 0, 0],
+    smokeS: has ? [rec[F.smokeSR], rec[F.smokeSG], rec[F.smokeSB]] : [0, 0, 0],
+    smokeC: has ? rec[F.smokeC] : SMOKE_NONE.c,
+    smokeW: has ? rec[F.smokeW] : SMOKE_NONE.w,
+    smokeG: has ? rec[F.smokeG] : SMOKE_NONE.g,
+    glow: has ? [rec[F.glowR] * k, rec[F.glowG] * k, rec[F.glowB] * k] : [0, 0, 0],
   };
 }
 

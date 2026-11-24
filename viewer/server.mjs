@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gameBodiesFile, gamePictureName, shippedPictures } from './gameBodies.mjs';
+import { firstRunCopy, keepOrder, keyPictures, resolvePictures } from './choices.mjs';
 
 /**
  * The viewer's paths and switches, from `env` (the process environment over the repo's `.env`; the names are the old
@@ -26,8 +27,11 @@ import { gameBodiesFile, gamePictureName, shippedPictures } from './gameBodies.m
  *   SBV_PORT      the port (5194 by default: the old viewer keeps 5195 while the owner compares them)
  *   SBV_SHARE     "lan" to open it to the home network (the owner's Mac), as the old viewer did; unset, this PC alone
  *   SBV_NAMES     more names it may be opened by while shared, comma separated
- *   SBV_SAVE      his file of choices (default: the old viewer's own, `../Feature-requests/space-body-viewer/space-bodies.json`
- *                 beside the repo); the one before it is kept beside it as <name>.prev.json
+ *   SBV_SAVE      a file of choices of this machine's own, written with its picture names (unset since pass 2, wave 6: the
+ *                 repo's `viewer/choices/space-bodies.json`, its pictures by their keys, `choices.mjs`; its first run copies in
+ *                 the old viewer's own, `../Feature-requests/space-body-viewer/space-bodies.json` beside the repo, never
+ *                 changing it); the one before it is kept beside it as <name>.prev.json
+ *   SBV_CHOICES, SBV_OLD_CHOICES   the repo's file and the old one it first copies, moved (a test's scratch "machine")
  *   SBV_IMPORTED  his folder of .fbx, .png and .jpg files (default: `../Feature-requests/WebGPU Port - Imported Textures`)
  *   SBV_SURVEY    the survey folder holding textures.json and game-side/skybodies.txt (default: `../../imported`)
  *   SBV_PACKS     the converted packs, read only (default: the repo's own `assets-private`)
@@ -49,7 +53,15 @@ export function viewerPaths(env, root, home = mainCheckoutOf(root)) {
     port = Number(rawPort);
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`SBV_PORT must be a whole number from 1024 to 65535, not "${rawPort}"`);
   }
-  const save = at(env.SBV_SAVE, path.resolve(home, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json'));
+  // Pass 2, wave 6 (maker K): the file of choices is the repo's own, `viewer/choices/space-bodies.json` in the running
+  // checkout (he commits it as he does his maps), its imported picture names written as their keys (`choices.mjs`); the
+  // first run copies his old file in from beside the main checkout (`firstFrom`), never changing it. `SBV_SAVE` still names
+  // another file, written with its names as before (`keyed` false).
+  // (`SBV_CHOICES` and `SBV_OLD_CHOICES` move the repo's file and the old one it is first copied from, for a test's scratch
+  // "machine" or a checkout laid out otherwise; unset, the two places above)
+  const oldSave = at(env.SBV_OLD_CHOICES, path.resolve(home, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json'));
+  const own = env.SBV_SAVE !== undefined && env.SBV_SAVE !== '';
+  const save = own ? path.resolve(root, env.SBV_SAVE) : at(env.SBV_CHOICES, path.resolve(root, 'viewer', 'choices', 'space-bodies.json'));
   const imported = at(env.SBV_IMPORTED, path.resolve(home, '..', 'Feature-requests', 'WebGPU Port - Imported Textures'));
   return {
     root,
@@ -58,10 +70,13 @@ export function viewerPaths(env, root, home = mainCheckoutOf(root)) {
     names: String(env.SBV_NAMES || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     save,
     prev: save.replace(/\.json$/i, '') + '.prev.json',
+    keyed: !own,
+    firstFrom: own ? null : oldSave,
     imported,
     survey: at(env.SBV_SURVEY, path.resolve(home, '..', '..', 'imported')),
     packs: at(env.SBV_PACKS, path.resolve(root, 'assets-private')),
-    looks: env.SBV_LOOKS ? [path.resolve(root, env.SBV_LOOKS)] : [path.resolve(root, 'imports-private', 'sky', 'looks-private.json'), path.join(imported, 'looks-private.json'), path.join(path.dirname(save), 'looks.js')],
+    // (the old viewer's looks.js stands beside his old file of choices, wherever the file now is)
+    looks: env.SBV_LOOKS ? [path.resolve(root, env.SBV_LOOKS)] : [path.resolve(root, 'imports-private', 'sky', 'looks-private.json'), path.join(imported, 'looks-private.json'), path.join(path.dirname(own ? save : oldSave), 'looks.js')],
     game: at(env.SBV_GAME, path.resolve(root, 'public', 'sky', 'bodies.json')),
     credit: typeof env.SBV_CREDIT === 'string' && env.SBV_CREDIT.trim() ? env.SBV_CREDIT.trim() : null,
   };
@@ -210,6 +225,9 @@ export function privateTableOf(mod) {
  * server's console line (the old server's words).
  */
 export function viewerMiddleware(P, log = (s) => console.log(s)) {
+  // Pass 2, wave 6 (maker K): his old file of choices copied into the repo's at the first start (never changed or deleted).
+  const first = firstRunCopy(P);
+  if (first) log(first);
   const HOST = '127.0.0.1';
   const HOSTS = new Set([`${HOST}:${P.port}`, `localhost:${P.port}`, ...lanNames(P).map((n) => `${n}:${P.port}`)]);
   const knownHost = (req) => HOSTS.has(String(req.headers.host || '').toLowerCase());
@@ -309,8 +327,20 @@ export function viewerMiddleware(P, log = (s) => console.log(s)) {
     const own = data.places ? Object.keys(data.places).length : 0;
     const zones = data.zones ? Object.keys(data.zones).length : 0;
     const pictures = data.pictures ? Object.keys(data.pictures).length : 0;
-    const text = JSON.stringify(data, null, 2) + '\n';
+    // Pass 2, wave 6 (maker K): the repo's file keeps his imported pictures by their keys alone, its records in the order the
+    // file already has them, so a save on another machine changes only what changed (`choices.mjs`).
+    let before = null;
+    if (P.keyed && fs.existsSync(P.save)) {
+      try {
+        before = JSON.parse(await fsp.readFile(P.save, 'utf8'));
+      } catch {
+        before = null;
+      }
+    }
+    // (the fixer of wave 6: his meshes keyed too, and his files' names in a look's note, against this machine's folder)
+    const text = JSON.stringify(P.keyed ? keepOrder(keyPictures(data, (await listImported()).map((f) => f.name)), before) : data, null, 2) + '\n';
     const tmp = P.save + '.tmp';
+    await fsp.mkdir(path.dirname(P.save), { recursive: true });
     await fsp.writeFile(tmp, text, 'utf8');
     if (fs.existsSync(P.save)) await fsp.copyFile(P.save, P.prev);
     await fsp.rename(tmp, P.save);
@@ -415,7 +445,13 @@ export function viewerMiddleware(P, log = (s) => console.log(s)) {
       if (p === '/api/files') return sendJSON(res, 200, { folder: P.imported, files: await listImported() });
       if (p === '/space-bodies.json') {
         if (!fs.existsSync(P.save)) return send(res, 204, '');
-        return await sendFile(res, P.save, false);
+        if (!P.keyed) return await sendFile(res, P.save, false);
+        // Pass 2, wave 6 (maker K): each key made this machine's picture of that name; a key with none here stays a key.
+        const got = resolvePictures(JSON.parse(await fsp.readFile(P.save, 'utf8')), (await listImported()).map((f) => f.name));
+        if (got.leftPictures) log(`[choices] ${got.leftPictures} of the file's pictures are not in this machine's imported folder: their looks show their generated twins`);
+        // (the fixer of wave 6) and his meshes, kept by key too
+        if (got.leftMeshes) log(`[choices] ${got.leftMeshes} of the file's meshes are not in this machine's imported folder: kept as their keys`);
+        return sendJSON(res, 200, got.file);
       }
       if (p === '/private/looks.json') {
         const got = await readPrivateLooks(P);
@@ -468,11 +504,12 @@ export function startWords(P) {
   lines.push(`  imported folder (read; pictures you add from the page are written here, never over a file): ${P.imported}${fs.existsSync(P.imported) ? '' : '  (NOT FOUND)'}`);
   lines.push(`  survey (read only): ${P.survey}${fs.existsSync(P.survey) ? '' : '  (NOT FOUND)'}`);
   lines.push(`  converted packs (read only): ${P.packs}${fs.existsSync(P.packs) ? '' : "  (NOT FOUND: every zone's sun is white, and the game's air has no world to read)"}`);
-  lines.push(`  choices saved to: ${P.save}${fs.existsSync(P.save) ? '' : '  (NOT FOUND)'}`);
+  lines.push(`  choices saved to: ${P.save}${fs.existsSync(P.save) ? '' : '  (NOT FOUND)'}${P.keyed ? " (the repo's file: commit it as you do your maps; your pictures' names are kept out of it as keys)" : ''}`);
   // Said loudly (the fixer of pass 2, wave 4a): a viewer opened on the wrong file shows none of his looks and saves apart.
   if (!fs.existsSync(P.save)) {
     lines.push('  ** NO FILE OF CHOICES THERE: the page starts from its defaults, and its first Save writes a new file there.');
-    lines.push('  ** If you have saved choices before, they are elsewhere: set SBV_SAVE (and SBV_IMPORTED) in .env to their folder.');
+    if (P.keyed) lines.push(`  ** Your older choices are copied in at the first start from ${P.firstFrom} where that file is there (it was not); or set SBV_SAVE in .env to their file.`);
+    else lines.push('  ** If you have saved choices before, they are elsewhere: set SBV_SAVE (and SBV_IMPORTED) in .env to their folder.');
   }
   const looks = P.looks.find((f) => fs.existsSync(f));
   lines.push(`  his looks' private table: ${looks ?? 'none (every look of his pictures shows its generated twin)'}`);

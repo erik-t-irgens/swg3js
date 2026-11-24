@@ -163,33 +163,38 @@ export const TWIN_PAST_PRINTS = {
   'generated:twin-scarif': ['d7130927', 'a97b4e40', '97047408', '0a3ab5b1'],
   'generated:twin-fondor-moon': ['dcdce1bd', 'd213153a', 'b67d16bf', '55dde20e'],
   'generated:twin-ryloth-moon': ['fd16316b', '52d4130a', '78991d3a', '3c49abbd'],
-  'generated:twin-sullust': ['bfe76a43', '6773d1e2', '63decc63', '7d1e4496', '71b4a398'],
+  // (pass 2, wave 6, maker C: then moved to recipe version 4 with wave 6's parts) and that table's look, with its air and without it
+  'generated:twin-sullust': ['bfe76a43', '6773d1e2', '63decc63', '7d1e4496', '71b4a398', '6686ab11', '73073665'],
   'generated:twin-paintball': ['43e76ce0', 'ab871b0b', '312b8052', '8fdf3d5d', 'f0498a8a', 'c0312a19'],
   'generated:twin-fondor': ['da88d860', 'a6cda1c0', '07b74be4', '5989df04'],
   // (wave B, the air builder) wave A's look with its air, then looks run 2's without it
-  'generated:twin-tatooine': ['d3bea3b5', 'fabcc185'],
-  'generated:twin-jakku': ['ed0e0657', 'c1aed085'],
+  // (pass 2, wave 6, its critic J: then moved to wave 6's recipe version with its parts) and that table's look, with its air and
+  // without it: the last two prints of tatooine, jakku, and below geonosis, bespin, kashyyyk, kamino and pillio
+  'generated:twin-tatooine': ['d3bea3b5', 'fabcc185', 'f887d80c', 'd8b0cb90'],
+  'generated:twin-jakku': ['ed0e0657', 'c1aed085', 'c0ad2ae5', '34fd4707'],
   'generated:twin-jakku-map': ['364b049c', '0dbe9393', '18028458'],
-  'generated:twin-geonosis': ['d28b83d9', '38f0350a'],
+  'generated:twin-geonosis': ['d28b83d9', '38f0350a', '3bfba92f', '0053cd9a'],
   'generated:twin-hoth': ['ac94d640', '9bf59bcc', '7a15df2e', '6725f1f2'],
   'generated:twin-crait': ['3aa6e704', '09428010'],
   'generated:twin-endor-giant': ['1a1bc37d', 'b5e8555f', '887eaacd', '99e8ec0f'],
-  'generated:twin-bespin': ['0e6b34f0', 'a7303f21', '6301e3d5', '056464d0'],
+  'generated:twin-bespin': ['0e6b34f0', 'a7303f21', '6301e3d5', '056464d0', 'ce934236', '937650f3'],
   'generated:twin-yavin-prime': ['52437990', '1cf83796', '5f0fa58c', 'f2b76e36'],
-  'generated:twin-kashyyyk': ['d9035c6f', 'cfe9883e'],
+  'generated:twin-kashyyyk': ['d9035c6f', 'cfe9883e', 'bbe420b3', 'f72195a6'],
   'generated:twin-endor': ['9391ae9d', '4cb26213'],
-  'generated:twin-yavin4': ['54d78ee7', '505e4f9e'],
+  // (pass 2, wave 6, maker C: then moved to recipe version 5 with wave 6's parts) and that table's look, with its air and without it
+  'generated:twin-yavin4': ['54d78ee7', '505e4f9e', '77546fc1', '5e18bbe6'],
   'generated:twin-felucia': ['1d6690ba', '510cf4a8'],
   'generated:twin-dqar': ['0d6e83cf', '23d30ddf'],
   'generated:twin-takodana': ['ff5b693a', '56e93de2'],
-  'generated:twin-kamino': ['4c227404', 'a0240041', 'c0aa4135', 'a1229a5c'],
-  'generated:twin-rori': ['c3905578', 'e5c8346c'],
+  'generated:twin-kamino': ['4c227404', 'a0240041', 'c0aa4135', 'a1229a5c', '7ff1f510', '237459e0'],
+  // (pass 2, wave 6, maker C: then moved to recipe version 5 with wave 6's parts) and that table's look, with its air and without it
+  'generated:twin-rori': ['c3905578', 'e5c8346c', '43536945', '3f1cedf9'],
   // (wave B, its critic: re-tuned under their air) the table's look as this critic found it, with its air and without it
   'generated:twin-bespin-map': ['5535740e', '9c623d14'],
   'generated:twin-fondor-moon-4': ['c7db6637', '4c7da530'],
   'generated:twin-kamino-map': ['8b395475', '1fb4d673'],
   'generated:twin-athulla': ['08f869aa', '648930b6'],
-  'generated:twin-pillio': ['13baab1d', 'faac2e59'],
+  'generated:twin-pillio': ['13baab1d', 'faac2e59', '2e1e28ab', '7803870c'],
   'generated:twin-planet': ['550b6311', 'e90dd85b'],
   'generated:twin-vardos': ['d4c6da69', '57e8aa83'],
   'generated:twin-vardos-dead': ['9da21592', '1f9d065b'],
@@ -832,7 +837,9 @@ export const TWIN_OF_LOOK = {
 /** The generated twin a look falls back to for a player without his imported pictures: by its id, else by the picture its surface wears (null: none, or not one of his pictures). */
 export function twinOfLook(id, look) {
   const tex = look?.layers?.surface?.tex;
-  return TWIN_OF_LOOK[id] || (typeof tex === 'string' && tex ? TWIN_OF_PICTURE[pictureKey(tex)] : null) || null;
+  // (pass 2, wave 6, maker K) the repo's file of choices keeps a picture this machine lacks as `#` and its key (viewer/choices.mjs)
+  const key = typeof tex === 'string' && /^#[0-9a-f]{8}$/.test(tex) ? tex.slice(1) : null;
+  return TWIN_OF_LOOK[id] || (key ? TWIN_OF_PICTURE[key] : null) || (typeof tex === 'string' && tex ? TWIN_OF_PICTURE[pictureKey(tex)] : null) || null;
 }
 /** The generated twin of what a place wears by his choice (`uses` place to look id, `looks` id to look), or null. */
 export function twinOfPlace(placeId, uses, looks) {

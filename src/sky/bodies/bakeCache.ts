@@ -154,9 +154,11 @@ export class BakeCache {
    * made now where the screen's budget has room (its awaited time counted against the budget, so a slow card's first bake
    * puts the next look off), kept in the memo and the store; else nothing, and the look waits for the next screen (its caller
    * draws SWG's picture). `make` is never called once the budget is spent; a `make` that answers null (no card, a bake
-   * refused) leaves nothing kept and the look not waiting.
+   * refused) leaves nothing kept and the look not waiting. `budgetMs` the screen's budget for this bake (the fixer of pass 2,
+   * wave 6: a look the arrival shows is given the screen's kit wait, `LOOK_BODY_TUNE.kitWaitMs`, by its caller; the map's globes
+   * keep `BAKE_TUNE.budgetMs`).
    */
-  async takeBytes(key: string, make: () => Promise<Uint8Array[] | null>): Promise<{ parts: Uint8Array[] | null; how: BakeHow }> {
+  async takeBytes(key: string, make: () => Promise<Uint8Array[] | null>, budgetMs: number = BAKE_TUNE.budgetMs): Promise<{ parts: Uint8Array[] | null; how: BakeHow }> {
     const m = this.bytes.get(key);
     if (m) {
       // (read from the storage ahead by `holds`: it is the storage's)
@@ -184,7 +186,7 @@ export class BakeCache {
         return { parts, how: 'stored' };
       }
     }
-    if (this.stats.screenMs >= BAKE_TUNE.budgetMs) {
+    if (this.stats.screenMs >= budgetMs) {
       this.waiting.add(key);
       this.stats.fallback++;
       this.stats.waiting = [...this.waiting];

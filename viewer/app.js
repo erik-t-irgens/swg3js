@@ -20,6 +20,8 @@ import { GRADE_DIALS, CLOUD_SPOT_DIALS, recipeVersion } from '../src/sky/look/ge
 import { CLOUD_STREAK_DIALS } from '../src/sky/look/generate.js';
 // (the atmosphere brief's wave B) the planet features, a new version of every recipe
 import { PART_DIALS, partsVersion } from '../src/sky/look/generate.js';
+// (pass 2, wave 6, maker C) recipe version 4 (the living world's 5): ring cities and their glint, soft cloud, soft edges, the colour pick
+import { RING_CITY_DIALS, CITY_GLINT_DIALS, CLOUD_SOFT_DIALS, SOFT_DIALS, GRADE4_DIALS, ringsVersion, sinceOf } from '../src/sky/look/generate.js';
 import { discStats, gradeToward, statsWords, compareStats } from '../src/sky/look/colourmatch.js';
 import { SHAPE_KINDS, BELT_KINDS, RING_STYLES, shapeDialsOf, BELT_DIALS, RING_DIALS, newPart, startsOf, RING_STYLE_DIALS } from '../src/sky/look/partdials.js';
 import { FIELD_TUNE } from '../src/sky/look/shapes.js';
@@ -1774,6 +1776,8 @@ function generatedSection(look) {
   // (wave B) the planet features' version: 3, the living world's 4
   const verText = (v) => (v === 1 ? '1: the first' : v === 2 ? `2: spots${g.recipe === 'living' ? '' : ' (living worlds)'}, cloud flecks, colour grade`
     : v === partsVersion(g.recipe) ? `${v}: planet features (atolls, long lines, a fracture star, a great trench, glow specks, lace, smoky mottle, fine detail, a great cyclone)${g.recipe === 'living' ? '' : ', cirrus streaks'}`
+    // (pass 2, wave 6, maker C) version 4, the living world's 5
+    : v === ringsVersion(g.recipe) ? `${v}: ${RECIPES[g.recipe]?.lights ? 'ring cities and their glint, ' : ''}${g.recipe === 'gasgiant' ? 'softer bands, ' : ''}soft cloud, soft edges, colour picked by hue, two-tone lace, rimmed smoke, halos, cracks that keep their colour`
     : `${v}: fine fray, lakes, cirrus streaks`);
   for (let v = 1; v <= recipeVersion(g.recipe); v++) verSel.append(el('option', { value: v, text: verText(v) }));
   verSel.value = g.version || 1;
@@ -1846,14 +1850,25 @@ function generatedSection(look) {
   // (wave B) the planet features, each its own group (closed until opened), at the version that has them
   if ((g.version || 1) >= partsVersion(g.recipe)) {
     const byPart = new Map();
-    for (const d of PART_DIALS) { if (!byPart.has(d.group)) byPart.set(d.group, []); byPart.get(d.group).push(d); }
+    // (pass 2, wave 6, maker C) only the dials the look's version has (version 4 adds a few to the parts)
+    for (const d of PART_DIALS.filter((x) => !(sinceOf(x, g.recipe) > (g.version || 1)))) { if (!byPart.has(d.group)) byPart.set(d.group, []); byPart.get(d.group).push(d); }
     for (const [t, list] of byPart) out.push(group(`Feature: ${t.toLowerCase()}`, list, list[0].groupNote, g.dials, true));
   } else out.push(el('p', { class: 'note', text: `Atolls, long lines, a fracture star, a great trench, glow specks, lace, a smoky mottle, fine detail and a great cyclone come with recipe version ${partsVersion(g.recipe)} (the Recipe version above).` }));
+  // (pass 2, wave 6, maker C) the ring cities and the cities' glint, on the recipes that grow cities, at version 4 (the living world's 5)
+  const v4 = (g.version || 1) >= ringsVersion(g.recipe);
+  if (v4 && r.lights) {
+    out.push(group('Ring cities', RING_CITY_DIALS, RING_CITY_DIALS[0].groupNote));
+    out.push(group('City glint', CITY_GLINT_DIALS, CITY_GLINT_DIALS[0].groupNote));
+  } else if (r.lights) out.push(el('p', { class: 'note', text: `Ring cities and the cities' own glint come with recipe version ${ringsVersion(g.recipe)} (the Recipe version above).` }));
   out.push(group('Clouds', CLOUD_DIALS, look.layers.clouds.on ? 'The generated cloud layer (the Clouds layer below draws it).' : 'Tick the Clouds layer below to draw them.'));
   if ((g.version || 1) >= 2) {
     out.push(group('Clouds: flecks', CLOUD_SPOT_DIALS, 'Many small flecks and wisps of cloud between the masses (version 2): none at 0.'));
     if ((g.version || 1) >= 3) out.push(group('Clouds: streaks', CLOUD_STREAK_DIALS, 'Long thin streaks of high cloud combed along the winds (version 3): none at 0.'));
-    const cg = group('Colour', GRADE_DIALS, 'The colour grade over the ground (version 2): calmer or stronger colours, lighter or darker, a hue turn, and a wash that pulls every colour toward one. Baked. "Match colours" below sets them all from a reference.');
+    // (pass 2, wave 6, maker C) soft cloud and soft edges at version 4
+    if (v4) out.push(group('Clouds: softness', CLOUD_SOFT_DIALS, CLOUD_SOFT_DIALS[0].groupNote));
+    if (v4) out.push(group('Soft edges', SOFT_DIALS, SOFT_DIALS[0].groupNote));
+    // (pass 2, wave 6, maker C) and the colour picked by its hue, after the grade's own dials
+    const cg = group('Colour', v4 ? [...GRADE_DIALS, ...GRADE4_DIALS] : GRADE_DIALS, 'The colour grade over the ground (version 2): calmer or stronger colours, lighter or darker, a hue turn, and a wash that pulls every colour toward one. Baked. "Match colours" below sets them all from a reference.');
     cg.append(...colourMatchBox(look));
     out.push(cg);
   }

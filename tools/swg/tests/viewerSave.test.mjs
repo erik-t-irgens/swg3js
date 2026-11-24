@@ -38,16 +38,18 @@ function png(w, h, rgb) {
   ok(P.port === 5194 && !P.shared, `the port is 5194 by default, this PC alone (${P.port})`);
   // (the fixer of pass 2, wave 4a) beside the repo's main checkout, so a linked worktree (where he tests the port) finds them too
   const HOME = mainCheckoutOf(ROOT);
-  ok(P.save === path.resolve(HOME, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json') && P.imported === path.resolve(HOME, '..', 'Feature-requests', 'WebGPU Port - Imported Textures'), `his file of choices where the old viewer keeps it, beside the repo's main checkout (${HOME})`);
+  // (pass 2, wave 6) his file of choices is the repo's own, `viewer/choices/`, keyed; the old one beside the main checkout is
+  // what its first run copies in
+  ok(P.save === path.resolve(ROOT, 'viewer', 'choices', 'space-bodies.json') && P.keyed === true && P.firstFrom === path.resolve(HOME, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json') && P.imported === path.resolve(HOME, '..', 'Feature-requests', 'WebGPU Port - Imported Textures'), `his file of choices the repo's own, its first copy from where the old viewer keeps it, beside the repo's main checkout (${HOME})`);
   const W = viewerPaths({}, path.resolve(ROOT, '..', 'a-worktree'), path.resolve(ROOT, '..', 'main-checkout'));
-  ok(W.save === path.resolve(ROOT, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json') && W.survey === path.resolve(ROOT, '..', '..', 'imported') && W.packs === path.resolve(ROOT, '..', 'a-worktree', 'assets-private') && W.game === path.resolve(ROOT, '..', 'a-worktree', 'public', 'sky', 'bodies.json'), 'from a worktree: his things beside the main checkout, the packs and the bodies file the worktree\'s own');
+  ok(W.save === path.resolve(ROOT, '..', 'a-worktree', 'viewer', 'choices', 'space-bodies.json') && W.firstFrom === path.resolve(ROOT, '..', 'Feature-requests', 'space-body-viewer', 'space-bodies.json') && W.survey === path.resolve(ROOT, '..', '..', 'imported') && W.packs === path.resolve(ROOT, '..', 'a-worktree', 'assets-private') && W.game === path.resolve(ROOT, '..', 'a-worktree', 'public', 'sky', 'bodies.json'), 'from a worktree: the file of choices, the packs and the bodies file the worktree\'s own, his older things beside the main checkout');
   const gitHome = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: ROOT, encoding: 'utf8' });
   ok(gitHome.status !== 0 || HOME === path.dirname(path.resolve(gitHome.stdout.trim())), 'the main checkout is the folder of git\'s common folder');
   ok(mainCheckoutOf(os.tmpdir()) === os.tmpdir() || spawnSync('git', ['rev-parse'], { cwd: os.tmpdir() }).status === 0, 'outside a checkout the root stands for itself');
   ok(P.game === path.resolve(ROOT, 'public', 'sky', 'bodies.json'), 'Save to game writes the game\'s own public/sky/bodies.json by default');
   ok(P.looks[0] === path.resolve(ROOT, 'imports-private', 'sky', 'looks-private.json') && P.looks[2].endsWith(path.join('space-body-viewer', 'looks.js')), 'the private table from imports-private/, then his imported folder, then the old viewer\'s looks.js beside his file');
   const Q = viewerPaths({ SBV_PORT: '5196', SBV_SAVE: 'x/a.json', SBV_GAME: 'y/b.json', SBV_LOOKS: 'z/t.json' }, ROOT);
-  ok(Q.port === 5196 && Q.save === path.resolve(ROOT, 'x/a.json') && Q.prev === path.resolve(ROOT, 'x/a.prev.json') && Q.game === path.resolve(ROOT, 'y/b.json') && Q.looks.length === 1, 'each path and the port from the environment');
+  ok(Q.port === 5196 && Q.save === path.resolve(ROOT, 'x/a.json') && Q.prev === path.resolve(ROOT, 'x/a.prev.json') && Q.keyed === false && Q.firstFrom === null && Q.game === path.resolve(ROOT, 'y/b.json') && Q.looks.length === 1, 'each path and the port from the environment (a file of SBV_SAVE keeps its names, and nothing is copied into it)');
   let threw = 0;
   for (const env of [{ SBV_PORT: '80' }, { SBV_PORT: 'x' }, { SBV_SHARE: 'wan' }]) { try { viewerPaths(env, ROOT); } catch { threw++; } }
   ok(threw === 3, 'a port out of range, not a number, or a share other than lan is refused');

@@ -1,5 +1,6 @@
 // The night sky makes nothing a frame (the GPU port's pass 2, wave 3, maker A): `nightAllocOwn.ts` (a real night's frame, the
-// sun round the day and the camera walking past towns, and the flare's sources from the air) run in twelve processes at once,
+// sun round the day and the camera walking past towns, half its frames under an applied system's turn, and the flare's sources
+// from the air) run in twelve processes, two waves of six,
 // each the least of three clean windows of 60,000 frames, every process asserted under 0.05 bytes a frame with no collection in
 // its window (`testing.md`). One copy of this suite at a time: it starts its own dozen.
 //
@@ -22,6 +23,7 @@ interface Answer {
   drawn: boolean;
   towns: number;
   stars: number;
+  appliedFrames: number;
 }
 const run = () =>
   new Promise<Answer>((resolve, reject) => {
@@ -44,11 +46,15 @@ const run = () =>
       }
     });
   });
-const all = await Promise.all(Array.from({ length: 12 }, () => run()));
+// (the fixer of pass 2, wave 6) two waves of six, so the suite keeps to six node processes at once on the owner's machine
+const all: Answer[] = [];
+for (let wave = 0; wave < 2; wave++) all.push(...(await Promise.all(Array.from({ length: 6 }, () => run()))));
 ok(all.every((a) => a.towns === 3 && a.stars === 8000), "each child stood a real night: three towns and the default tier's 8,000 stars");
+// (the fixer of pass 2, wave 6) and half its frames under an applied system, the stars turned about the world's own axis
+ok(all.every((a) => a.appliedFrames > 0), "each child turned the stars about an applied system's own axis in some of its frames (the Tatoo draft's celestial frame turning about its pole)");
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   const per = Math.max(0, a.made) / a.frames;
-  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the night's frame and the flare's sources make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
+  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: the night's frame (SWG's turn and an applied system's) and the flare's sources make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
 }
 console.log(`\nnightAlloc: ${checks} checks passed`);
