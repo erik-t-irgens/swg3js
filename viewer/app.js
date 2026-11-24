@@ -78,8 +78,24 @@ import { pictureUrl } from '../src/sky/look/build.js';
 // (the atmosphere brief's wave A) a copy in his file from before the air came (no `air`) that is the table's look but
 // for its air is untouched too (sameAsTable), so the table's twin, air and all, reaches him
 // (wave B) or a twin as an earlier table had it, saved unchanged before the twin was re-tuned (TWIN_PAST_PRINTS)
+// (pass 2, wave 6's lead, the owner's word of 23 November: "if the tool had applied any defaults ... I'll take them")
+// and any generated preset saved unchanged from the table's: not written, read as the table's, so the next round's
+// better preset reaches him as the twins' do (one he edits stays his)
 const isUntouchedDefault = (id, look, tableLook) => isUntouchedPlaceholder(id, look, tableLook)
-  || (!!look && !!tableLook && PRESETS[tableLook.generated?.preset]?.group === TWINS && (sameAsTable(look, tableLook) || isPastTwin(id, look)));
+  || (!!look && !!tableLook && PRESETS[tableLook.generated?.preset]?.group === TWINS && (sameAsTable(look, tableLook) || isPastTwin(id, look)))
+  || (!!look && !!tableLook?.generated && sameAsTable(look, tableLook));
+
+// (pass 2, wave 6's lead, the owner's word of 23 November) the looks the latest round made or improved, listed first in
+// every list of looks under a group of their own; each round's lead replaces the list with that round's
+const NEW_LOOKS_GROUP = 'New this round (pass 2, wave 6)';
+const NEW_LOOKS = new Set([
+  'generated:w-coruscant-rings',
+  'generated:twin-tatooine', 'generated:twin-geonosis', 'generated:twin-kashyyyk', 'generated:twin-kamino', 'generated:twin-rori',
+  'generated:twin-bespin', 'generated:twin-jakku', 'generated:twin-pillio', 'generated:twin-yavin4', 'generated:twin-sullust',
+]);
+const LIST_GROUPS = [NEW_LOOKS_GROUP, ...GROUPS];
+/** The group a look is listed under in the library and the look pickers. */
+const listGroupOf = (id, l) => (NEW_LOOKS.has(id) ? NEW_LOOKS_GROUP : GROUPS.includes(l.group) ? l.group : 'Your own');
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -861,11 +877,11 @@ function renderCompareSelect() {
   sel.append(el('option', { value: '', text: '(nothing)' }));
   const groups = new Map();
   for (const [id, l] of Object.entries(state.looks)) {
-    const g = GROUPS.includes(l.group) ? l.group : 'Your own';
+    const g = listGroupOf(id, l);
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push([id, l.name]);
   }
-  for (const g of GROUPS) {
+  for (const g of LIST_GROUPS) {
     if (!groups.has(g)) continue;
     const og = el('optgroup', { label: g });
     for (const [id, name] of groups.get(g)) og.append(el('option', { value: id, text: name }));
@@ -1119,9 +1135,9 @@ function renderLibrary() {
   const lib = $('lib');
   lib.textContent = '';
   const used = new Set(Object.values(state.uses).filter(Boolean));
-  const groups = new Map(GROUPS.map((g) => [g, []]));
+  const groups = new Map(LIST_GROUPS.map((g) => [g, []]));
   for (const [id, l] of Object.entries(state.looks)) {
-    const g = groups.has(l.group) ? l.group : 'Your own';
+    const g = listGroupOf(id, l);
     if (lookMatches(id, l, q)) groups.get(g).push([id, l]);
   }
   let total = 0;
@@ -2143,11 +2159,11 @@ function lookSelect(value, onPick) {
   sel.append(el('option', { value: '', text: '(unassigned)' }));
   const groups = new Map();
   for (const [id, l] of Object.entries(state.looks)) {
-    const g = GROUPS.includes(l.group) ? l.group : 'Your own';
+    const g = listGroupOf(id, l);
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push([id, l.name]);
   }
-  for (const g of GROUPS) {
+  for (const g of LIST_GROUPS) {
     if (!groups.has(g)) continue;
     const og = el('optgroup', { label: g });
     for (const [id, name] of groups.get(g)) og.append(el('option', { value: id, text: name }));
