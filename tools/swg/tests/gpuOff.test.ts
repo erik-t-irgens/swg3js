@@ -52,6 +52,14 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * `import.meta.env.DEV` alone.
  */
 const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/night/dither.ts', 'src/sky/bodies/skyBody.ts', 'src/sky/bodies/lookBody.ts', 'src/space/spaceRims.ts', 'src/space/spaceVolumes.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts', 'lookBake.ts'].map((f) => `src/sky/look/${f}`)]);
+// Pass 3, wave 1 (maker V): the clouds' march, composite and noise, reached only through the chain's spine (`gpuChainPasses.ts`)
+// and the clouds' run on the runtime (`start.ts`); their switch and dials (`cloudTune.ts`, `cloudShape.ts`, `cloudLight.ts`)
+// are pure and loaded by the WebGL boot as plain numbers.
+for (const f of ['cloudMarch.ts', 'cloudNoise.ts']) GPU_SIDE_FILES.add(`src/sky/clouds/${f}`);
+// Pass 3, wave 1 (maker M): the cloud map on compute (`cloudMapGpu.ts`) and the clouds' run that dispatches it (`cloudRun.ts`),
+// reached only through the runtime (`start.ts`); the layers, the climates, the twin, the file's reader and the console's edits
+// (`cloudLayers.ts`, `cloudClimate.ts`, `cloudMap.ts`, `cloudsFile.ts`, `cloudEdit.ts`) are pure.
+for (const f of ['cloudMapGpu.ts', 'cloudRun.ts']) GPU_SIDE_FILES.add(`src/sky/clouds/${f}`);
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;
@@ -886,8 +894,11 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const sky = once('if (GPU.webgpu && this.skyAir) {');
     const els = w.indexOf('} else this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);', sky);
     // (pass 2, wave 4a: the bodies' frame, two lines, joins the WebGPU branch after the night's; pass 2, wave 5, maker L: the
-    // bodies drawn whole in their looks, five lines, after it)
-    ok(els > sky && els - sky < 19, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
+    // bodies drawn whole in their looks, five lines, after it; pass 3, wave 1, maker V: the storm fade's rule where the clouds'
+    // march draws, four lines more, before the twin's frame)
+    ok(els > sky && els - sky < 23, "world.ts: the twin writes the lighting in the WebGPU branch, WebGL's the line 8a7de51 had");
+    const fade = once('this.skyAir.overcast = wst.enabled ? stormFadeOf(wfx.overcast, wfx.dust, wst.kind === \'fog\' ? wfx.overcast : 0, cloudsMarching()) : 0;');
+    ok(fade > sky && fade < els, "world.ts: the storm fade's rule where the clouds' march draws (pass 3, wave 1) is the WebGPU branch's alone");
     const m = lines('src/main.ts');
     const frame = m.flatMap((x, i) => (x === 'if (GPU.webgpu) this.world.airFrame(cam);' ? [i] : []));
     ok(frame.length === 1 && m[frame[0] - 2] === 'this.feedClouds();' && m[frame[0] + 4] === 'if (GPU.webgpu && postfx) GPU.rt!.taa.begin(cam, postfx);', "main.ts: the air's tables are drawn for the camera on WebGPU alone, after the clouds are fed and before the smoothing's nudge");

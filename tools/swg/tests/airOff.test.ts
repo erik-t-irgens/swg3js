@@ -139,7 +139,11 @@ const store = new Map<string, string>();
   // pass, under no master of the volumetrics' and on with the chain alone, as the haze is.
   const eyeDef = newDefs.find((d) => d.id === 'exposure');
   ok(!!eyeDef && !eyeDef.requires?.length && eyeDef.toggles.length === 1 && eyeDef.toggles[0] === 'effects' && !eyeDef.typical, 'the eye is new too, requiring no master, on with the chain, not typical');
-  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 5 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newPasses.includes('haze') && newPasses.includes('exposure') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing, the fourth our sky\'s haze, the fifth the eye)');
+  // The GPU port's pass 3, wave 1 added our sky's clouds (`clouds`), which WebGL never registers and nor does SWG's sky: the
+  // sixth new pass, under no master of the volumetrics' and on with the chain alone (its own switch is the pass's `enabled`).
+  const cloudDef = newDefs.find((d) => d.id === 'clouds');
+  ok(!!cloudDef && !cloudDef.requires?.length && cloudDef.toggles.length === 1 && cloudDef.toggles[0] === 'effects' && !cloudDef.typical, "our sky's clouds are new too, requiring no master, on with the chain, not typical");
+  ok(!!air && air.requires?.includes('volumetrics') === true && newPasses.length === 6 && newPasses.includes('airVolume') && newPasses.includes('airClouds') && newPasses.includes('taa') && newPasses.includes('haze') && newPasses.includes('exposure') && newPasses.includes('clouds') && newDefs.find((d) => d.id === 'airClouds')!.requires?.includes('volumetrics') === true, 'the volume and the clouds are the two new passes of the volumetrics, and each requires the master (the third new one the port\'s smoothing, the fourth our sky\'s haze, the fifth the eye, the sixth our sky\'s clouds)');
   // W7b's `yieldsTo` (the design's §4.1 item 6c): the September row alone names it, it names the clouds alone, and the
   // decision over every combination of the September switch, the clouds' switch, the master and the effects -- with the
   // registry's own answer for whether the clouds are wanted, so nothing is stood in -- is the old chain's wherever the
@@ -1033,7 +1037,8 @@ const physical = () => ({ vertexShader: THREE.ShaderLib.physical.vertexShader, f
       .split('\n')
       .filter((l) => !l.trim().startsWith('//'))
       .join('\n');
-  ok(ob.length > 0 && nb.includes("if (this.postfx?.passWanted('airClouds')) {\n      this.feedAirClouds(this.postfx.pass<AirCloudsPass>('airClouds')!);\n      return;\n    }\n    if (WIND_STATE.decks) this.letGoDecks();\n") && tail(nb) === tail(ob).replace('on ? w.windSpeed : 0', 'on ? w.windMean : 0'), "feedClouds feeds the volumetrics' clouds first and returns, lets the decks go only once they were set, and every line after is today's (the mean where it read the speed, W7a's)");
+  // The GPU port's pass 3, wave 1 (maker V): SWG's sheets stand down on WebGPU while our sky's clouds march; WebGL's word is `true` as it was.
+  ok(ob.length > 0 && nb.includes("if (this.postfx?.passWanted('airClouds')) {\n      this.feedAirClouds(this.postfx.pass<AirCloudsPass>('airClouds')!);\n      return;\n    }\n    if (WIND_STATE.decks) this.letGoDecks();\n") && tail(nb) === tail(ob).replace('on ? w.windSpeed : 0', 'on ? w.windMean : 0').replace('if (sky) sky.sheets = true;', 'if (sky) sky.sheets = GPU.webgpu ? !cloudsMarching() : true;'), "feedClouds feeds the volumetrics' clouds first and returns, lets the decks go only once they were set, and every line after is today's (the mean where it read the speed, W7a's; on WebGPU the sheets down while our sky's clouds march, pass 3's)");
 }
 
 // --- 5b. the particles' picture accessor (the fourth wave's): it answers a held picture and starts nothing ---

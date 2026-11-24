@@ -47,6 +47,10 @@ const BASE_GPU = new Set(['bundles.ts', 'carries.ts', 'consoleWords.ts', 'drawCo
 const PASS1_FILES: string[] = [
   // Wave 6: the effects chain's walk on WebGPU in two sizes (`PostFX`'s WebGPU branch calls it).
   'src/core/fx/chainWalkGpu.ts',
+  // Pass 3, wave 1 (maker M): the cloud map on compute and its face, and the clouds' run that plans its rings from the camera
+  // (every place the card is handed is the camera's own offset in a ring, or a lattice's wrapped integer and fraction).
+  'src/sky/clouds/cloudMapGpu.ts',
+  'src/sky/clouds/cloudRun.ts',
 ];
 
 /**

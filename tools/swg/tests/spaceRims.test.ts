@@ -204,7 +204,9 @@ const near = (a: number, b: number, tol: number): boolean => Math.abs(a - b) <= 
   for (const m of mine) ok(lines.some((l) => l.startsWith(m)), `world.ts: "${m}" is a guard of WebGPU's alone`);
   ok(/import type \{ GpuSpaceRimSet, GpuSpaceVolumeSet \} from '\.\.\/core\/gpuSwitch\.ts';/.test(w), "world.ts takes the runtime's types alone");
   const air = w.indexOf('airFrame(camera: THREE.PerspectiveCamera): void {');
-  ok(air > 0 && w.slice(air, air + 600).includes('if (v && v.shown) v.draw(camera, GPU.rt!.taa.sceneSize(this.volumeSize));'), "the volumes' half-size march is drawn only where they stand and are shown (never on WebGL, which makes none), the scene's size handed in a kept vector");
+  // Read in the method's own body (pass 3 wave 1's clouds hook stands before it in `airFrame`, past a window of 600 characters).
+  const airBody = air > 0 ? w.slice(air, w.indexOf('\n  }\n', air)) : '';
+  ok(airBody.includes('if (v && v.shown) v.draw(camera, GPU.rt!.taa.sceneSize(this.volumeSize));'), "the volumes' half-size march is drawn only where they stand and are shown (never on WebGL, which makes none), the scene's size handed in a kept vector");
   const menu = readFileSync(join(ROOT, 'src/main.ts'), 'utf8');
   ok(menu.includes("if (key === 'nebulaForm' && !GPU.webgpu) return { hide: true };"), 'the Nebulae row is left off the page on WebGL');
 }

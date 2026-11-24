@@ -44,6 +44,7 @@ import { JITTER } from './taa/taaJitter.ts';
 import { skyOurs } from '../../sky/skyMode.ts';
 import { markSeeTarget } from '../../sky/air/airSee.ts';
 import { GpuHazePass } from '../../sky/air/airHaze.ts';
+import { GpuCloudPass } from '../../sky/clouds/cloudMarch.ts';
 import { GpuEyePass } from '../../sky/exposure/eyeGpu.ts';
 import { markSceneTarget } from '../../sky/exposure/preExpose.ts';
 import { GpuLensFlarePass } from '../../sky/night/gpuFlare.ts';
@@ -386,6 +387,8 @@ export const CHAIN_PASSES: ReadonlyMap<FxPassId, keyof typeof LOOKS_AT_LOAD | nu
   ['ssao', 'ssao'],
   // Pass 2, wave 1: our sky's haze (`src/sky/air/airHaze.ts`), the spine's own under our sky (the Sky row, read at load).
   ['haze', null],
+  // Pass 3, wave 1 (maker V): our sky's clouds (`src/sky/clouds/cloudMarch.ts`), the spine's own under our sky, on only while its switch is.
+  ['clouds', null],
   // Pass 1, wave 6: the edge smoothing (`taa/`), the spine's own once the motion buffer is: no switch at load of its own.
   ['taa', null],
   // Pass 2, wave 2: the eye (`src/sky/exposure/eyeGpu.ts`), the spine's own under our sky (the Sky row, read at load).
@@ -419,7 +422,8 @@ export const CHAIN_BINDS = {
   colorGrade: '1 texture (the chain buffer) and its sampler',
   taa: "each resolve 5 textures (this frame's picture, the history's colour and its distance, the scene's depth, the motion buffer), the history's two with a sampler (read at level 0), the others loaded; then the colour copied into the chain buffer",
   output: "1 texture (the chain buffer) and its sampler, drawn straight onto the canvas under the inline output (the start); with it left out, three's own output pass 1 more (its frame-buffer target)",
-  lensFlare: "under our sky alone (pass 2, wave 3): the occlusion 6 (the scene's depth loaded, last frame's visibility loaded, the four cloud sheets sampled at their mip), the elements 1 (the visibility, loaded in the vertex stage), the composite 2 (the chain buffer and the flare's half-size target)",
+  clouds: "under our sky alone, while its switch is on (pass 3, wave 1): the march 8 and the map's (the scene's depth loaded, the shape and detail volumes and the curl picture at level 0, the air's transmittance, multiple scattering and sky view at level 0, and the map's rings), into its two-output trace; the composite 5 and the haze's (the picture sampled, the trace's two loaded, the scene's depth and the see-through layer loaded, the haze volume and the sky view)",
+  lensFlare: "under our sky alone (pass 2, wave 3): the occlusion 7 (the scene's depth loaded, last frame's visibility loaded, the four cloud sheets sampled at their mip, and since pass 3, wave 1 the clouds' trace sampled at level 0, read in their place on a frame the march drew), the elements 1 (the visibility, loaded in the vertex stage), the composite 2 (the chain buffer and the flare's half-size target)",
 };
 
 export function chainRuntime(renderer: Any): GpuChain {
@@ -459,6 +463,9 @@ export function chainRuntime(renderer: Any): GpuChain {
       // Pass 2, wave 1: our sky's haze, after the surfaces and before the edge smoothing (the registry's place), over this chain's
       // scene target and its see-through layer; SWG's sky registers none, and its chain is the one it was.
       if (skyOurs()) fx.registerPass(new GpuHazePass(renderer, fx.sceneTarget, settings));
+      // Pass 3, wave 1 (maker V): our sky's clouds, after the haze and before the edge smoothing (the registry's place); never on
+      // while their switch is off, so the chain draws as it did; SWG's sky registers none.
+      if (skyOurs()) fx.registerPass(new GpuCloudPass(renderer, fx.sceneTarget));
       // Pass 1, wave 6: the edge smoothing, after the occlusion and before the bloom (the registry's place), over this chain's scene target.
       fx.registerPass(new GpuTaaPass(renderer, fx.sceneTarget, settings));
       // Pass 2, wave 2: the eye, after everything that adds light and before the bloom (the registry's place); SWG's sky

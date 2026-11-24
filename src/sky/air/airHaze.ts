@@ -107,9 +107,10 @@ function rayLength(z: Any, ndc: Any, p1: Any): Any {
 /**
  * The air between the eye and a point at `ndc` and `dist` metres (`hazeBeyondIn`'s rule past the reach): what gets through
  * (`t`, the air's mean) and what the air adds (`l`), each taken into a variable named `tag`. Reads the haze volume and the sky
- * view, so it is called at the top of a fragment, before anything branches.
+ * view, so it is called at the top of a fragment, before anything branches. Pass 3, wave 1 (maker V): exported, so the clouds'
+ * composite hazes a cloud at its mean distance by this very rule.
  */
-function airTerms(tables: NonNullable<typeof AIR.tables>, ndc: Any, dist: Any, p1: Any, turn: Any, tag: string): { t: Any; l: Any } {
+export function airTerms(tables: NonNullable<typeof AIR.tables>, ndc: Any, dist: Any, p1: Any, turn: Any, tag: string): { t: Any; l: Any } {
   const dirW = normalize(turn.mul(vec3(ndc.x.mul(p1.x), ndc.y.mul(p1.y), -1))).toVar(`swgHaze${tag}Dir`);
   const h = vec4(tables.hazeAt(ndc, min(dist, HAZE_REACH_M))).toVar(`swgHaze${tag}H`);
   const skyL = vec3(tables.skyRadiance(dirW)).toVar(`swgHaze${tag}Sky`);

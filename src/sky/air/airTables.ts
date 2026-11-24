@@ -213,6 +213,15 @@ class Tables implements AirTables {
     return this.reads.hazeAt(ndc, distanceM);
   }
 
+  // Pass 3, wave 1 (maker V): the two tables at any height, for the clouds' light.
+  transmittanceAt(heightKm: AirNode, mu: AirNode): AirNode {
+    return this.reads.transmittanceAt(heightKm, mu);
+  }
+
+  multiScatterAt(heightKm: AirNode, muS: AirNode): AirNode {
+    return this.reads.multiScatterAt(heightKm, muS);
+  }
+
   // ---------------------------------------------------------------- the frame
 
   /** The record's numbers into the uniforms' vectors. */
@@ -485,6 +494,9 @@ interface GraphReads {
   skyRadiance(dir: AirNode): AirNode;
   transmittanceToSpace(dir: AirNode): AirNode;
   hazeAt(ndc: AirNode, distanceM: AirNode): AirNode;
+  // Pass 3, wave 1 (maker V): the transmittance and the multiple scattering at any height (km over the surface).
+  transmittanceAt(heightKm: AirNode, mu: AirNode): AirNode;
+  multiScatterAt(heightKm: AirNode, muS: AirNode): AirNode;
 }
 
 /** The node graphs: the four passes and the readers, over the tables' uniform objects and targets. */
@@ -869,6 +881,13 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const w = sqrt(clamp(distanceM.div(HAZE_REACH_M), 0, 1));
       const h = texture3D(U.volume, vec3(ndc.x.mul(0.5).add(0.5), ndc.y.mul(0.5).add(0.5), w)).level(0);
       return vec4(h.rgb.div(storeK), h.a);
+    },
+    // Pass 3, wave 1 (maker V): the clouds' light reads the two slow tables at each sample's own height (held inside the air).
+    transmittanceAt(heightKm: Any, mu: Any): Any {
+      return transmittanceTo(bottom.add(clamp(heightKm, 0.001, top.sub(bottom).sub(0.001))), clamp(mu, -1, 1));
+    },
+    multiScatterAt(heightKm: Any, muS: Any): Any {
+      return psiAt(bottom.add(clamp(heightKm, 0.001, top.sub(bottom).sub(0.001))), clamp(muS, -1, 1));
     },
   };
 

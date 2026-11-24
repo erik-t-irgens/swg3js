@@ -29,6 +29,8 @@ import { singleSampled } from '../../core/gpu/gpuSsao.ts';
 import { eyeExposureNode } from '../exposure/eyeBuffer.ts';
 import { FLARE_SEEN } from './flareSources.ts';
 import { FLARE_AIR } from './nightTune.ts';
+import { CLOUD_TRACE } from '../clouds/cloudMarch.ts';
+import { CLOUD_DRAW } from '../clouds/cloudTune.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -98,6 +100,10 @@ export function occlusionGraph(u: Record<string, { value: Any }>, reversed: bool
   const fade = refEach(u.uCloudFade);
   const radiance = uniform(SEEN.radiance).setGroup(renderGroup);
   const band = uniform(SEEN.band).setGroup(renderGroup);
+  // Pass 3, wave 1 (maker V): the clouds' trace (its alpha what gets through the cloud), read at the source's pixel on a frame
+  // the march drew, in place of the four sheets (which the march hides); with the clouds off, the sheets as before.
+  const trace = liveTexture(CLOUD_TRACE, traceFallback());
+  const marching = cloudsMarchingNode();
   const N = GPU_FLARE.taps;
   m.fragmentNode = Fn(() => {
     const slot = int(floor(uv().x.mul(MAX_FLARE_SOURCES))).toVar('swgFlareSlot');
@@ -118,6 +124,8 @@ export function occlusionGraph(u: Record<string, { value: Any }>, reversed: bool
       const on = layer.z.greaterThan(0).and(sd.y.greaterThan(0.01)).and(t.greaterThan(0));
       covers.push(select(on, clamp(a.mul(layer.z).mul(f), 0, 1), float(0)));
     }
+    // The trace's transmittance at the source's place (the WebGL pass's y up made a WebGPU picture's row from the top).
+    const cloudT = float(trace.sample(vec2(clamp(s.x, 0, 1), clamp(float(1).sub(s.y), 0, 1))).level(0).w).toVar('swgFlareCloudT');
     const open = float(0).toVar('swgFlareOpen');
     const clear = float(1).toVar('swgFlareClear');
     If(s.w.greaterThan(0.5), () => {
@@ -142,7 +150,8 @@ export function occlusionGraph(u: Record<string, { value: Any }>, reversed: bool
         open.addAssign(select(inside, hit, float(0)));
       });
       open.divAssign(N);
-      clear.assign(float(1).sub(covers[0]).mul(float(1).sub(covers[1])).mul(float(1).sub(covers[2])).mul(float(1).sub(covers[3])));
+      const sheets = float(1).sub(covers[0]).mul(float(1).sub(covers[1])).mul(float(1).sub(covers[2])).mul(float(1).sub(covers[3]));
+      clear.assign(select(marching.greaterThan(0.5), clamp(cloudT, 0, 1), sheets));
     });
     // How bright the source looks on the screen: its light a steradian times the eye's exposure and the player's (`band.z`).
     const shown = pick(slot, [radiance.x, radiance.y]).mul(eyeExposureNode()).mul(band.z);
@@ -151,7 +160,23 @@ export function occlusionGraph(u: Record<string, { value: Any }>, reversed: bool
     const k = select(raw.greaterThan(was), rate.x, rate.y);
     return vec4(clamp(mix(was, raw, k), 0, 1), open, clear, 1);
   })();
-  return graph(m, 6, { uniforms: { uViewport: viewport, uNearFar: nearFar, uTanHalfFov: tanHalf, uRate: rate, uCameraPos: cam }, textures: { tDepth: depth, tPrev: prev, tCloud0: clouds[0], tCloud1: clouds[1], tCloud2: clouds[2], tCloud3: clouds[3] } });
+  return graph(m, 7, { uniforms: { uViewport: viewport, uNearFar: nearFar, uTanHalfFov: tanHalf, uRate: rate, uCameraPos: cam, marching }, textures: { tDepth: depth, tPrev: prev, tCloud0: clouds[0], tCloud1: clouds[1], tCloud2: clouds[2], tCloud3: clouds[3], tCloudTrace: trace } });
+}
+
+/** The clouds' trace slot's own fallback: one half-float texel all through (alpha one), the trace's own kind. */
+function traceFallback(): THREE.DataTexture {
+  const one = 0x3c00;
+  const t = new THREE.DataTexture(new Uint16Array([one, one, one, one]), 1, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+  t.minFilter = t.magFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+}
+
+/** 1 on a frame the clouds' march drew (it stands before the flare in the chain), read once a render; a small whole number, never boxed. */
+let MARCHING: Any = null;
+function cloudsMarchingNode(): Any {
+  if (!MARCHING) MARCHING = uniform(0).setGroup(renderGroup).onRenderUpdate(() => (CLOUD_DRAW.drew ? 1 : 0));
+  return MARCHING;
 }
 
 /**

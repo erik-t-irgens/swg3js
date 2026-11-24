@@ -587,6 +587,18 @@ export interface GpuRuntime {
    * pass sees the sun (`src/core/gpu/patchWarm.ts`): listed at once, built on its own clock; answers when it is built.
    */
   compile(scene: THREE.Object3D, camera: THREE.Camera, target?: THREE.Scene | null): Promise<void>;
+  /**
+   * Pass 3, wave 1 (maker M): the clouds' model (`src/sky/clouds/cloudRun.ts`): a world's stack of layers, the shared level
+   * and drift in closed form, the frame's packing, the map's dispatch, `__debug.clouds(...)` and the debug menu's dials.
+   */
+  clouds: {
+    run: import('../sky/clouds/cloudRun.ts').CloudRun;
+    input: import('../sky/clouds/cloudRun.ts').CloudInput;
+    debug(o: unknown): unknown;
+    dials(helper: string): import('../ui/dials.ts').DialSet | null;
+    groundMedianOf(heightAt: (x: number, z: number) => number | null | undefined): number;
+    regionsOf(idx: Parameters<typeof import('../sky/clouds/cloudRun.ts').regionsOfPlaces>[0]): import('../sky/clouds/cloudRun.ts').CloudRegion[];
+  };
 }
 
 export interface GpuSunOptions {

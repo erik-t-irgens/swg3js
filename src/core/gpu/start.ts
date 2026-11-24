@@ -81,6 +81,8 @@ import { NEBULA_NOW, SPACE_VOLUME_IN, SpaceVolumes, nebulaFormNow } from '../../
 import { LOOK_BODY_IN, LookBodies, presetFor } from '../../sky/bodies/lookBody.ts';
 // Pass 2, wave 5 (maker M): the viewer's ring profile handed to the galaxy map's opened system as bytes (`src/ui/galaxySystemView.ts`).
 import { ringProfile, ringScatter } from '../../sky/look/shapes.js';
+// Pass 3, wave 1 (maker M): the clouds' model, the map's dispatch, `__debug.clouds` and its dials (`src/sky/clouds/cloudRun.ts`).
+import { CLOUD_IN, CLOUD_RUN, cloudDialsFor, cloudsDebug, groundMedianOf, regionsOfPlaces } from '../../sky/clouds/cloudRun.ts';
 // The sky and light fix round (maker L): the lights the player carries, their nodes registered with three as this module
 // loads, before any material is built (`carriedLights.ts`).
 import { CARRIED_LIGHTS } from './carriedLights.ts';
@@ -558,6 +560,11 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     async compile(scene: THREE.Object3D, camera: THREE.Camera, target: THREE.Scene | null = null) {
       if (RT_HOOKS.compile) await RT_HOOKS.compile(renderer, scene, camera, target);
     },
+    // Pass 3, wave 1 (maker M): the clouds' model and the map's dispatch (`src/sky/clouds/cloudRun.ts`), on the game's renderer.
+    clouds: (() => {
+      CLOUD_RUN.renderer = renderer;
+      return { run: CLOUD_RUN, input: CLOUD_IN, debug: cloudsDebug, dials: cloudDialsFor, groundMedianOf: (h: (x: number, z: number) => number | null | undefined) => groundMedianOf(h), regionsOf: regionsOfPlaces };
+    })(),
     endFrame(loading: boolean, traveling = false) {
       loadingNow = loading;
       frame.ended++;

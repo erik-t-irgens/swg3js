@@ -26,6 +26,8 @@ import { SKY_CARD_REACH, lookPlaces, markLookDrawn, placeSpaceBody, skyLookPlans
 import { spacePlaceOf } from '../sky/look/bodiesFile.ts';
 import { spacePlaceIds } from '../space/spaceAir.ts';
 import { tierIndexOf } from '../sky/night/nightTier.ts';
+// Pass 3, wave 1 (maker V): the clouds' switch, pure (the storm fades retire where the march draws).
+import { cloudsMarching, stormFadeOf } from '../sky/clouds/cloudTune.ts';
 import type { GpuLookBodySet } from '../core/gpuSwitch.ts';
 import { markEnd, markStart, ST_FLORA, ST_TERRAIN } from '../core/loadTimes.ts';
 import { PMREMGenerator185, type Pmrem185 } from '../core/pmrem185.ts';
@@ -4040,6 +4042,10 @@ export class World {
     // the card's tables -- made, fitted and warmed here, behind the loading screen (`src/sky/air/airRun.ts`).
     if (GPU.webgpu && skyOurs() && !sky.data.space) await this.loadAir(sky, pack, token);
     if (token !== this.loadToken) return;
+    // Pass 3, wave 1 (maker M): the clouds' model for this world behind the screen (its stack from its start and the clouds
+    // file, its ground, the shared level and drift summed), and the map's computes compiled when the clouds are on.
+    if (GPU.webgpu && skyOurs() && !sky.data.space) await this.loadClouds(token);
+    if (token !== this.loadToken) return;
     // Pass 2, wave 1 (maker B): the air's tables made, the scene's fog nodes become the haze's the first time (once a session,
     // behind this screen and before its sweep: three keys every render object on them), and our sky is built as it is hung.
     if (airSky) {
@@ -4140,8 +4146,50 @@ export class World {
     return token === this.loadToken;
   }
 
+  /**
+   * Pass 3, wave 1 (maker M): the clouds' model for this world (`src/sky/clouds/cloudRun.ts`): the clouds file read (none is
+   * nothing: every world takes its start), the world's ground worked out as the median of its heights, the schedule's seed and
+   * weights and the wind's aloft speeds handed over and the drift summed from its epoch; the map warmed when the clouds are on.
+   */
+  private async loadClouds(token: number): Promise<void> {
+    const cl = GPU.rt!.clouds;
+    cl.run.detach();
+    let json: unknown = null;
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}sky/clouds.json`, { cache: 'no-store' });
+      if (res.ok) json = await res.json();
+    } catch {
+      json = null;
+    }
+    if (token !== this.loadToken) return;
+    cl.run.readFile(json);
+    const terrain = this.terrain;
+    const ground = cl.groundMedianOf((x, z) => terrain.heightAt(x, z));
+    cl.input.tau = this.weather.windClock > 1e6 ? this.weather.windClock : sharedClock.walkSeconds();
+    // A world of his own takes the decks of the world whose ground rules it borrows, else whose sky (the fixer's: Granyon's
+    // ground is Lok's, Rainier's sky Dantooine's); a world of the game's is found by its own id or pack first.
+    const borrowId = this.planet.ground?.pack ?? this.planet.borrowSky ?? null;
+    cl.run.attach({ planetId: this.planet.id, packId: this.packId, borrowId, weights: this.weather.climateNow().weights, groundY: ground, renderer: this.renderer });
+    await cl.run.warmBehindScreen();
+  }
+
   /** Once a game frame on WebGPU, after the camera is placed and before the scene's passes: the air's sky view and haze drawn for it. */
   airFrame(camera: THREE.PerspectiveCamera): void {
+    // Pass 3, wave 1 (maker M): the clouds' model for this camera, while the clouds are on (field by field: nothing made).
+    const cl = GPU.rt?.clouds;
+    if (cl && cl.run.attached && cl.run.wanted()) {
+      const I = cl.input;
+      const e = camera.matrixWorld.elements;
+      const ws = this.weather.state;
+      I.tau = this.weather.windClock;
+      I.dayTime = this.day.time;
+      I.camX = e[12];
+      I.camY = e[13];
+      I.camZ = e[14];
+      I.wLevel = ws.level;
+      I.wFollow = ws.enabled && ws.forced === null && ws.target === ws.scheduled ? 1 : 0;
+      cl.run.frame();
+    }
     this.skyAir?.drawTables(camera);
     // Pass 2, wave 4b (maker C): the zone's volumes marched at half the scene's size for this camera, before its nudge.
     const v = this.spaceVolumes;
@@ -4398,6 +4446,8 @@ export class World {
     }
     // Pass 2, wave 1 (maker A): the air goes with its sky.
     if (GPU.webgpu && this.skyAir) this.skyAir = this.skyAir.dispose();
+    // Pass 3, wave 1 (maker M): and the clouds' model lets go of its world (nothing packed or dispatched until the next).
+    if (GPU.webgpu) GPU.rt!.clouds.run.detach();
     // Pass 2, wave 2 (maker B): and the reflections' capture lets go of its scene, whose copies went with it.
     if (GPU.webgpu) GPU.rt!.environment.sky?.detach();
     this.skyPack = null;
@@ -12242,7 +12292,11 @@ export class World {
         const L = this.swgSky.update(this.day, camPos, dt);
         // Its two numbers written into its fields first (a number handed across a call is a number made).
         this.skyAir.heightM = camPos.y;
-        this.skyAir.overcast = this.weather.state.enabled ? this.weather.fx.overcast : 0;
+        // Pass 3, wave 1 (maker V): where the clouds' march draws, the storm fades of the discs, the stars, the Milky Way and the
+        // bodies retire (the clouds hide the sky by covering it); a dust storm's and a fog's stay (`stormFadeOf`).
+        const wst = this.weather.state;
+        const wfx = this.weather.fx;
+        this.skyAir.overcast = wst.enabled ? stormFadeOf(wfx.overcast, wfx.dust, wst.kind === 'fog' ? wfx.overcast : 0, cloudsMarching()) : 0;
         this.skyAir.frame(this.day, this.swgSky, L);
         // Pass 2, wave 3 (maker A): the night sky after the air (its turn read off the air's sun).
         this.nightFrame(camPos);

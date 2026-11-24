@@ -284,6 +284,18 @@ export interface AirTables {
    * takes the sky view and the transmittance beyond.
    */
   hazeAt(ndc: AirNode, distanceM: AirNode): AirNode;
+  /**
+   * Pass 3, wave 1 (maker V, the clouds' light): the transmittance (vec3) from a point `heightKm` km over the surface (a float
+   * node) through the air to space along a ray whose zenith cosine there is `mu` (a float node), 0 into the ground: the same
+   * table as `transmittanceToSpace`, read at any height (pass 2's design, section 4: "the sun on the clouds"). Reads its picture
+   * at a named level, so it may be called inside a loop.
+   */
+  transmittanceAt(heightKm: AirNode, mu: AirNode): AirNode;
+  /**
+   * Pass 3, wave 1 (maker V): the multiple scattering's share (vec3) at a height (km over the surface, a float node) and the
+   * sun's zenith cosine there (a float node), as the tables' own marches read it; at a named level.
+   */
+  multiScatterAt(heightKm: AirNode, muS: AirNode): AirNode;
   /** The air's uniform nodes, for a drawer's own arithmetic (each written once a frame from `AIR.frame`). */
   readonly nodes: AirNodes;
   /**

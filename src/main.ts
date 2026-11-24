@@ -461,6 +461,8 @@ import { SERVER_WORLD_DAYS } from './sky/system/worldDays.ts';
 import { LOOKS_WORN } from './sky/look/lookPictures.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
 import { AIR } from './sky/air/airApi.ts';
+// Pass 3, wave 1 (maker V): the clouds' switch, pure (SWG's sheets stand down on WebGPU while the march is on).
+import { cloudsMarching } from './sky/clouds/cloudTune.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -5990,6 +5992,10 @@ class App {
        * from an upsample that threw it away.
        */
       clouds: (opts?: Partial<typeof CLOUD_MARCH> & { coverage?: number | null; brightness?: number | null; drift?: number | null; standDownDust?: number | null } & { tune?: Record<string, unknown>; view?: string | null; hole?: { radius?: number; here?: boolean } | true; low?: boolean | null; probe?: 'hole'; bench?: boolean | { draws?: number } }) => {
+        // Pass 3, wave 1 (makers M and V): on WebGPU `__debug.clouds` is the new clouds' helper (`src/sky/clouds/cloudRun.ts`'s
+        // `cloudsDebug`: the switch, the layers, the level, the views, the tune, the proofs' reads and the report, the march's
+        // own keys handed to its side); on WebGL it is the old clouds' helper below, as before.
+        if (GPU.webgpu && GPU.rt) return GPU.rt.clouds.debug(opts as unknown);
         // The volumetrics' clouds with the master on (the seventh wave's second half): their own report and knobs whenever
         // they stand in for these, or when one of their own options is asked; otherwise the September's helper, today's.
         const own = !!opts && ('tune' in opts || 'view' in opts || 'hole' in opts || 'low' in opts || 'probe' in opts);
@@ -12823,7 +12829,7 @@ class App {
       // the world's own dials (Restuss's state) when theirs is, and the moving air's numbers of feel when `air` is.
       // The world editor's dials once it is loaded (the dev server's alone; `editor()` loads it).
       // (The landmarks' switch dial is handed the app's own curtain just below, `LANDMARK_SWITCH`.)
-      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? eyeDialsFor(helper) ?? starsDialsFor(helper) ?? (GPU.webgpu ? captureDialsFor(helper) : null) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
+      dials: (helper) => vehicleDialsFor(helper) ?? shipDialsFor(helper) ?? animDialsFor(helper) ?? locoDialsFor(helper) ?? climbDialsFor(helper) ?? moveDialsFor(helper) ?? crowdDialsFor(helper) ?? shadowDialsFor(helper) ?? roomLightDialsFor(helper) ?? worldDialsFor(helper) ?? airDialsFor(helper) ?? skyDialsFor(helper) ?? eyeDialsFor(helper) ?? starsDialsFor(helper) ?? (GPU.webgpu ? captureDialsFor(helper) : null) ?? windDialsFor(helper) ?? horizonDialsFor(helper) ?? landmarkDialsFor(helper) ?? lodDialsFor(helper, (tune) => (window as unknown as { __debug: { lod(o: { tune: Partial<LodLevelTune> }): unknown } }).__debug.lod({ tune })) ?? (GPU.webgpu ? GPU.rt!.clouds.dials(helper) : null) ?? hudDialsFor(helper) ?? this.editor?.dials(helper) ?? (GPU.webgpu ? GPU.rt!.taa.dials(helper) : null) ?? null,
       // And on the dev server the track editor's list of gates, when `track` is picked.
       list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
@@ -23897,7 +23903,9 @@ class App {
     if (WIND_STATE.decks) this.letGoDecks();
     const pass = this.settings.volumetricClouds ? this.postfx?.pass<CloudsPass>('volumetricClouds') : undefined;
     if (!pass) {
-      if (sky) sky.sheets = true;
+      // Pass 3, wave 1 (maker V): on WebGPU SWG's sheets stand down while the clouds' march is on and ready (both at once are
+      // the cloud twice over); WebGL, and WebGPU with the switch off, keep the line as it was.
+      if (sky) sky.sheets = GPU.webgpu ? !cloudsMarching() : true;
       return;
     }
     if (!pass.hasNoise) {
@@ -25627,6 +25635,13 @@ class App {
     // places moved (at once behind a loading screen, crossfaded otherwise).
     this.applyWorldSky(packIdOf(this.world.planet, this.zone), this.placesSky(f));
     this.world.weather.placesMoved(this.traveling);
+    // Pass 3, wave 1 (the fixer): WebGPU's clouds take the places that force their weather (the map's regional term) from this
+    // index, now and at each arrival (`CloudRun.regionsMoved`); on WebGL nothing.
+    if (GPU.webgpu && GPU.rt) {
+      const cl = GPU.rt.clouds;
+      cl.run.regionSource ??= () => cl.regionsOf(this.placesNow());
+      cl.run.regionsMoved();
+    }
     if (!f) {
       this.minimap.setPlaces(null);
       return;
