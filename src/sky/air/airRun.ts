@@ -505,6 +505,11 @@ export class AirRun {
       fh[1] = 0;
       fh[2] = 0;
     }
+    // Pass 3, wave 2 (maker B): the floor handed on for the clouds' night ambient (field by field: nothing made)
+    const ff = f.floor;
+    ff.r = fh[0];
+    ff.g = fh[1];
+    ff.b = fh[2];
     f.on = true;
     f.sunDir.copy(s);
     f.moonDir.copy(m);

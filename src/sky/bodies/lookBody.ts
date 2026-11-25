@@ -48,6 +48,7 @@ import { setVolumeQuality } from '../look/volume.js';
 import { AIR } from '../air/airApi.ts';
 import { eyeExposureNode } from '../exposure/eyeBuffer.ts';
 import { markMotion } from '../../core/gpu/motion.ts';
+import { markSkyBehind } from '../air/airHazeMath.ts';
 import { BODY_TUNE } from './bodyTier.ts';
 import { nearOrder } from '../system/skyMotion.ts';
 import { poseQuatInto } from '../system/bodyPose.ts';
@@ -642,7 +643,8 @@ function premultipliedCard(name: string): Any {
   m.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
   // the alpha is the graph's own (three multiplies a node material's alpha by its opacity)
   m.opacityNode = float(1);
-  return m;
+  // Pass 3, wave 2 (maker B): drawn at infinity, so into the colour behind the clouds, never the see-through layer.
+  return markSkyBehind(m);
 }
 
 export type LookBodiesReport = Record<string, unknown>;

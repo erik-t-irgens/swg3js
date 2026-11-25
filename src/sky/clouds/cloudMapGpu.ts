@@ -23,7 +23,7 @@ import {
   CLOUD_TYPE_VEC4,
   type CloudMapFace,
 } from './cloudLayers.ts';
-import { CLOUD_REGION_MAX, MAP_TUNE_FLOATS, MIX_OCTAVES, PLAN_FLOATS, REGION_DUST, RING_VEC4, SHEET_OCTAVES } from './cloudMap.ts';
+import { CLOUD_MAP_PARTS, CLOUD_REGION_MAX, MAP_TUNE_FLOATS, MIX_OCTAVES, PLAN_FLOATS, REGION_DUST, RING_VEC4, SHEET_OCTAVES } from './cloudMap.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -83,6 +83,12 @@ function fbmN(iwx: Any, gx: Any, iwz: Any, gz: Any, octaves: number, seed: Any, 
 }
 const rankedN = (n: Any, contrast: Any): Any => n.sub(0.5).mul(contrast).add(0.5).clamp(0, 1);
 
+// Pass 3, wave 2 (maker B): each ring's half size in texels and its texel in metres, for the face's offsets (`faceOffsetOf`).
+const HALF_N = CLOUD_MAP_RINGS.near.size / 2;
+const HALF_F = CLOUD_MAP_RINGS.far.size / 2;
+const TEXEL_N = CLOUD_MAP_RINGS.near.span / CLOUD_MAP_RINGS.near.size;
+const TEXEL_F = CLOUD_MAP_RINGS.far.span / CLOUD_MAP_RINGS.far.size;
+
 /**
  * The map's card side: its two array pictures, its uniform arrays (each `Vector4` written in place), its two computes and
  * the face. Made once a session (`cloudMapGpu()`), dispatched each frame while the clouds are on.
@@ -100,15 +106,23 @@ export class CloudMapGpu {
   /** Each layer's (near offX, offZ, far offX, offZ): the face's own, from the plan. */
   private readonly offV: THREE.Vector4[] = [];
   private readonly frameV = new THREE.Vector4();
-  /** (groundY, regionCount, layers, 0). */
+  /** (groundY, regionCount, layers, the parts' turn: 0 to `CLOUD_MAP_PARTS.far` − 1, the near ring's its remainder by `near`). */
   private readonly extraV = new THREE.Vector4();
   readonly nearNode: Any;
   readonly farNode: Any;
+  /** Pass 3, wave 2 (maker B): each ring's computes for one part of its rows (`CLOUD_MAP_PARTS`), the turn in `extra.w`. */
+  readonly nearPartNode: Any;
+  readonly farPartNode: Any;
   /** Both computes, handed to three as one list (one pass, one submission), kept so a frame makes no array. */
   private readonly both: Any[];
+  private readonly bothParts: Any[];
   readonly face: CloudMapFace;
   /** Frames dispatched, and whether the computes were compiled behind a screen. */
   dispatches = 0;
+  /** Pass 3, wave 2 (maker B): dispatches of the whole rings and of a part of them, and the parts' turn (0 to far − 1). */
+  fullDispatches = 0;
+  partDispatches = 0;
+  private turn = 0;
   warmed = false;
 
   constructor() {
@@ -140,42 +154,47 @@ export class CloudMapGpu {
     const NN = CLOUD_MAP_RINGS.near.size;
     const NF = CLOUD_MAP_RINGS.far.size;
     const layersN = int(extra.z);
-    this.nearNode = Fn(() => {
-      const idx = instanceIndex;
-      const i = int(idx.mod(uint(NN)));
-      const j = int(idx.div(uint(NN)));
-      const tx = float(i).sub(NN / 2);
-      const tz = float(j).sub(NN / 2);
-      Loop({ start: int(0), end: layersN, type: 'int', condition: '<' }, ({ i: l }: Any) => {
-        // A slot of count 0 (off, or clear now with no place forcing its weather) is skipped and left as it was: nothing reads
-        // a slot of count 0 (the fixer's, pass 3 wave 1; a starting deck at a level that holds none of it costs nothing).
-        If(stack.element(l.mul(CLOUD_LAYER_VEC4).add(1)).w.greaterThan(0.5), () => {
-          const v = texelN(l, 0, tx, tz);
-          const st = storageTexture(near, ivec2(i, j), v).depth(l);
-          st.toWriteOnly();
-          st.toStack();
+    // Pass 3, wave 2 (maker B): one ring's compute over every `parts`-th row from the turn (`parts` 1: the whole ring). Each
+    // storage texel holds the lattice index it keeps modulo the ring's size (the wrapped ring, `cloudMap.ts`' `ringStoreOf`),
+    // so its offset from the ring's centre corner is `relOfStore` of the layer's base (r5), line for line.
+    const ringNode = (ring: 0 | 1, parts: number): Any => {
+      const N = ring === 0 ? NN : NF;
+      const target = ring === 0 ? near : far;
+      return Fn(() => {
+        const idx = instanceIndex;
+        const i = int(idx.mod(uint(N)));
+        const jp = int(idx.div(uint(N)));
+        // The row: every `parts`-th from the turn (the near ring's turn the far's remainder by its own parts).
+        const j = parts > 1 ? jp.mul(int(parts)).add(int(extra.w).mod(int(parts))) : jp;
+        Loop({ start: int(0), end: layersN, type: 'int', condition: '<' }, ({ i: l }: Any) => {
+          // A slot of count 0 (off, or clear now with no place forcing its weather) is skipped and left as it was: nothing reads
+          // a slot of count 0 (the fixer's, pass 3 wave 1; a starting deck at a level that holds none of it costs nothing).
+          If(stack.element(l.mul(CLOUD_LAYER_VEC4).add(1)).w.greaterThan(0.5), () => {
+            const r5 = plan.element(l.mul(2).add(ring).mul(RING_VEC4).add(5));
+            // relOfStore: ((s − base + n/2) mod n) − n/2, in whole numbers (both terms under n, so one add of n keeps it positive).
+            const tx = float(i.sub(int(r5.x)).add(int(N / 2 + N)).mod(int(N)).sub(int(N / 2)));
+            const tz = float(j.sub(int(r5.y)).add(int(N / 2 + N)).mod(int(N)).sub(int(N / 2)));
+            let v: Any;
+            if (ring === 0) v = texelN(l, 0, tx, tz);
+            else {
+              // Two samples on the texel's diagonal, as `evalRing` takes the far ring (`FAR_SAMPLES`).
+              const a = texelN(l, 1, tx.sub(0.25), tz.add(0.25));
+              const b = texelN(l, 1, tx.add(0.25), tz.sub(0.25));
+              v = a.add(b).mul(0.5);
+            }
+            const st = storageTexture(target, ivec2(i, j), v).depth(l);
+            st.toWriteOnly();
+            st.toStack();
+          });
         });
-      });
-    })().compute(NN * NN, [64]);
-    this.farNode = Fn(() => {
-      const idx = instanceIndex;
-      const i = int(idx.mod(uint(NF)));
-      const j = int(idx.div(uint(NF)));
-      const tx = float(i).sub(NF / 2);
-      const tz = float(j).sub(NF / 2);
-      Loop({ start: int(0), end: layersN, type: 'int', condition: '<' }, ({ i: l }: Any) => {
-        If(stack.element(l.mul(CLOUD_LAYER_VEC4).add(1)).w.greaterThan(0.5), () => {
-          // Two samples on the texel's diagonal, as `evalRing` takes the far ring (`FAR_SAMPLES`).
-          const a = texelN(l, 1, tx.sub(0.25), tz.add(0.25));
-          const b = texelN(l, 1, tx.add(0.25), tz.sub(0.25));
-          const v = a.add(b).mul(0.5);
-          const st = storageTexture(far, ivec2(i, j), v).depth(l);
-          st.toWriteOnly();
-          st.toStack();
-        });
-      });
-    })().compute(NF * NF, [64]);
+      })().compute((N * N) / parts, [64]);
+    };
+    this.nearNode = ringNode(0, 1);
+    this.farNode = ringNode(1, 1);
+    this.nearPartNode = ringNode(0, CLOUD_MAP_PARTS.near);
+    this.farPartNode = ringNode(1, CLOUD_MAP_PARTS.far);
     this.both = [this.nearNode, this.farNode];
+    this.bothParts = [this.nearPartNode, this.farPartNode];
 
     // ------------------------------------------------------------------ the face
     const halfN = CLOUD_MAP_RINGS.near.span / 2;
@@ -247,8 +266,9 @@ export class CloudMapGpu {
     t.type = THREE.UnsignedByteType;
     t.magFilter = THREE.LinearFilter;
     t.minFilter = THREE.LinearFilter;
-    t.wrapS = THREE.ClampToEdgeWrapping;
-    t.wrapT = THREE.ClampToEdgeWrapping;
+    // Pass 3, wave 2 (maker B): repeating, since each ring is kept wrapped in its layer's frame (`cloudMap.ts`' `ringStoreOf`).
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
     t.generateMipmaps = false;
     return t;
   }
@@ -416,13 +436,18 @@ export class CloudMapGpu {
     copyInto(this.bandsV, bands, CLOUD_BAND_FLOATS);
     copyInto(this.tuneV, tune, MAP_TUNE_FLOATS);
     copyInto(this.regionsV, regions, CLOUD_REGION_MAX * 4);
+    // Pass 3, wave 2 (maker B): the face's offsets into the wrapped rings (`faceOffsetOf`: the camera past its centre corner
+    // plus where the ring keeps that corner, less half the ring), each under a ring's span, so nothing far reaches the card.
+    // Written out here (a number handed back from a helper the compiler leaves out is a number made a frame).
     const RF = RING_VEC4 * 4;
     for (let l = 0; l < CLOUD_LAYER_MAX; l++) {
       const v = this.offV[l];
-      v.x = plan[l * 2 * RF];
-      v.y = plan[l * 2 * RF + 1];
-      v.z = plan[(l * 2 + 1) * RF];
-      v.w = plan[(l * 2 + 1) * RF + 1];
+      const on = l * 2 * RF;
+      const of = (l * 2 + 1) * RF;
+      v.x = plan[on] + (plan[on + 20] - HALF_N) * TEXEL_N;
+      v.y = plan[on + 1] + (plan[on + 21] - HALF_N) * TEXEL_N;
+      v.z = plan[of] + (plan[of + 20] - HALF_F) * TEXEL_F;
+      v.w = plan[of + 1] + (plan[of + 21] - HALF_F) * TEXEL_F;
     }
     const f = this.frameV;
     f.x = frame[0];
@@ -435,24 +460,36 @@ export class CloudMapGpu {
     e.z = src.count;
   }
 
-  /** Both rings rewritten (the run's `frame` calls it once the numbers are written). */
-  compute(renderer: Any): void {
+  /**
+   * Both rings rewritten (the run's `frame` calls it once the numbers are written): whole (`full`), or one part of each
+   * (pass 3, wave 2, maker B: every `CLOUD_MAP_PARTS.near`-th row of the near ring and `far`-th of the far from the turn,
+   * the turn moved on after).
+   */
+  compute(renderer: Any, full: boolean): void {
     const timing = this.timing;
     const part = this.timePart;
     if (timing) this.timer ??= new GPUTimer(renderer);
+    // The parts' turn into the uniform (a small whole number, never boxed) before the dispatch reads it.
+    this.extraV.w = this.turn;
+    const both = full ? this.both : this.bothParts;
     if (part === 0) {
       // Both rings in one compute pass, one submission (two calls were two submissions with the card idle between them).
       if (timing) this.timer.begin();
-      renderer.compute(this.both);
+      renderer.compute(both);
       if (timing) this.spans.push(this.timer.end());
     } else {
       // The console's split timing: each ring in a pass of its own.
       if (timing && part === 1) this.timer.begin();
-      renderer.compute(this.nearNode);
+      renderer.compute(both[0]);
       if (timing && part === 1) this.spans.push(this.timer.end());
       if (timing && part === 2) this.timer.begin();
-      renderer.compute(this.farNode);
+      renderer.compute(both[1]);
       if (timing && part === 2) this.spans.push(this.timer.end());
+    }
+    if (full) this.fullDispatches++;
+    else {
+      this.partDispatches++;
+      this.turn = this.turn + 1 < CLOUD_MAP_PARTS.far ? this.turn + 1 : 0;
     }
     this.dispatches++;
   }
@@ -486,7 +523,8 @@ export class CloudMapGpu {
   /** Both computes compiled, behind the loading screen. */
   async warm(renderer: Any): Promise<void> {
     if (this.warmed) return;
-    await renderer.compileComputeAsync([this.nearNode, this.farNode]);
+    // Pass 3, wave 2 (maker B): the parts' computes with the whole rings' (four compute pipelines, none built in play).
+    await renderer.compileComputeAsync([this.nearNode, this.farNode, this.nearPartNode, this.farPartNode]);
     this.warmed = true;
   }
 

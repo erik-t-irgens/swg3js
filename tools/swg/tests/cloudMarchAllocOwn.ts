@@ -11,7 +11,9 @@ import { AIR } from '../../../src/sky/air/airApi.ts';
 import { markSeeTarget } from '../../../src/sky/air/airSee.ts';
 import { markMotionTarget } from '../../../src/core/gpu/motion.ts';
 import { CLOUD_FACE, GpuCloudPass } from '../../../src/sky/clouds/cloudMarch.ts';
-import { CLOUD_FEED, cloudsMarching, setCloudsOn, stormFadeOf } from '../../../src/sky/clouds/cloudTune.ts';
+import { CLOUD_FEED, CLOUD_FLIGHT, cloudsMarching, setCloudsOn, stormFadeOf } from '../../../src/sky/clouds/cloudTune.ts';
+import { GpuTaaPass } from '../../../src/core/gpu/taa/taaPass.ts';
+import { CLOUD_REUSE_STATS } from '../../../src/sky/clouds/cloudResolve.ts';
 import { CLOUD_LAYER_MAX, CLOUD_STACK_FLOATS, newCloudLayer, newStackFrame, packStack } from '../../../src/sky/clouds/cloudLayers.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -42,7 +44,10 @@ camera.matrixWorld.elements[2] = 0.5;
 camera.matrixWorld.elements[8] = 0.5;
 camera.matrixWorld.elements[10] = 0.5;
 camera.position.set(1_234_567.5, 40.5, -2_345_678.5);
-const ctx: Any = { renderer: r, near: 0.05, far: 9000.5, space: false, cameraUnderwater: false, cameraSubmerged: false, frame: 0, tanHalfFov: new THREE.Vector2(1.1, 0.6), camera };
+// Pass 3, wave 2 (maker T): the frame's seconds and its cut, and an edge smoothing drawing (so the clouds lay their motion and
+// the smoothing reads it), as the chain hands them.
+const ctx: Any = { renderer: r, near: 0.05, far: 9000.5, space: false, cameraUnderwater: false, cameraSubmerged: false, frame: 0, tanHalfFov: new THREE.Vector2(1.1, 0.6), camera, dt: 0.0166, cameraCut: false };
+const taa = new GpuTaaPass(r, target, { smoothing: 1 } as Any);
 const input: Any = { width: 64, height: 36, texture: new THREE.Texture() };
 const output: Any = { width: 64, height: 36, texture: new THREE.Texture() };
 
@@ -59,7 +64,9 @@ CLOUD_FEED.count = n;
 CLOUD_FEED.drift = drift;
 CLOUD_FEED.layers = layers;
 CLOUD_FEED.version = 1;
-const fade = { overcast: 0.5, dust: 0.25, kept: 0.5, sheets: 0.5 };
+/** Pass 3, wave 2 (maker T): the middle of the first layer's band, where a ship is in flight mode. */
+const inBand = (stack[0] + stack[1]) / 2 + 0.5;
+const fade ={ overcast: 0.5, dust: 0.25, kept: 0.5, sheets: 0.5 };
 const st = new Float64Array(4);
 
 /** One frame: the camera turned and moved, the drift moved, the fade and the sheets' word, the pass as the chain runs it. */
@@ -81,10 +88,17 @@ function frame(): void {
   ctx.frame = st[0];
   fade.kept = stormFadeOf(fade.overcast, fade.dust, 0, cloudsMarching());
   fade.sheets = cloudsMarching() ? 0 : 1;
+  // Pass 3, wave 2 (maker T): a ship flown into the low layer's band and out again every 300 frames (flight mode in and out,
+  // its hold run out), and a cut every 500 (the history's reset).
+  const k = st[0] % 600;
+  CLOUD_FLIGHT.ship = k < 300;
+  camera.position.y = k < 300 ? inBand : 40.5;
+  ctx.cameraCut = st[0] % 500 === 0;
   if (pass.enabled(ctx)) {
     pass.prepare(ctx);
     pass.render(ctx, input, output);
   }
+  taa.prepare(ctx);
 }
 function frames(k: number): void {
   for (let i = 0; i < k; i++) frame();
@@ -127,5 +141,5 @@ for (let i = 0; i < 40; i++) {
 }
 const drew = pass.drewLast;
 const on = await measure(20_000);
-console.log(JSON.stringify({ frames: N, offMade: off.made, offScavenges: off.scavenges, onMade: on.made, onScavenges: on.scavenges, drew, kept: fade.kept }));
+console.log(JSON.stringify({ frames: N, offMade: off.made, offScavenges: off.scavenges, onMade: on.made, onScavenges: on.scavenges, drew, kept: fade.kept, reuse: { ...CLOUD_REUSE_STATS } }));
 process.exit(0);

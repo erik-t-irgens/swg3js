@@ -11,6 +11,7 @@
 // a graph's change, not a pipeline's).
 import * as THREE from 'three';
 import type { BodyAir } from './bodyAir.ts';
+import { markSkyBehind } from '../air/airHazeMath.ts';
 
 /** The two forms' text: never compiled (WebGPU draws the stand-in; WebGL never makes a card), apart so three keys them apart. */
 const CARD_VERT = 'void main() { gl_Position = vec4(0.0); }';
@@ -33,7 +34,8 @@ export function bodyCardMaterial(map: THREE.Texture, form: 'painted' | 'scattere
   // Unlit: kept out of the shadow cascades (whose defines are in a program's key) and the wetness, as the flat pictures were.
   m.userData.unlit = true;
   m.userData.swgBodyMap = map;
-  return m;
+  // Pass 3, wave 2 (maker B): drawn at infinity, so into the colour behind the clouds, never the see-through layer.
+  return markSkyBehind(m);
 }
 
 /** One body of a sky (the sky makes it; the drawing reads it): its card, SWG's glow picture beside it, what it shows. */

@@ -433,7 +433,7 @@ import { remoteRopes } from './net/remoteRopes.ts';
 import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
 import { DEFAULT_SETTINGS, HUD_BLOCK_ALIGNS, HUD_DPR_RANGE, HUD_FORCE_EDGES, HUD_FORCE_LOOKS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, HUD_SLOT_LINES, loadSettings, saveSettings, settingsSaved, type Settings } from './core/settings';
-import { TIER_KEYS, TIER_LABELS, isNewPlayer, screenScale, startOnTier, tierValues, type TierName } from './ui/qualityTiers.ts';
+import { TIER_KEYS, TIER_LABELS, isNewPlayer, screenScale, startOnTier, tierNearest, tierValues, type TierName } from './ui/qualityTiers.ts';
 import { readSkyMode, skyRowState, SKY_AT_LOAD } from './sky/skyMode.ts';
 import { isSkyHour, skyHourTime, sunSineAt, SKY_HOURS } from './sky/skyHours.ts';
 import { DISC_TUNE, skyDialsFor, tuneSky } from './sky/skyDials.ts';
@@ -464,7 +464,7 @@ import { LOOKS_WORN } from './sky/look/lookPictures.ts';
 import { PAIR_TUNE } from './sky/stars.ts';
 import { AIR } from './sky/air/airApi.ts';
 // Pass 3, wave 1 (maker V): the clouds' switch, pure (SWG's sheets stand down on WebGPU while the march is on).
-import { cloudsMarching } from './sky/clouds/cloudTune.ts';
+import { CLOUD_FLIGHT, cloudsMarching, setCloudTier } from './sky/clouds/cloudTune.ts';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, mendPlace, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -13285,6 +13285,8 @@ class App {
     this.menu.onSetting = (key) => this.applySetting(key);
     // The quality slider's tier, written and applied behind the Effects switch's notice (pass 1, wave 6): WebGPU's, whose row it is.
     if (GPU.webgpu) this.menu.onTier = (tier) => this.applyQualityTier(tier);
+    // Pass 3, wave 2 (maker T): the clouds' steps start at the tier the settings stand nearest (2.6: Ultra's, else High's).
+    if (GPU.webgpu) setCloudTier(tierNearest(this.settings, screenScale()));
     // The volumetrics master's word beside its knob: "from the next arrival", or greyed with the hatch.
     this.menu.knobState = (key) => this.volKnobState(key);
     // Escape: in the world it opens the menu (the browser drops the pointer lock on it, which is
@@ -25085,6 +25087,8 @@ class App {
       f.cameraInHull = this.cameraInHull();
       f.inside = this.world.inside;
       f.aboard = !!this.player.aboard;
+      // Pass 3, wave 2 (maker T): the clouds' flight mode asks whether a ship is flown or boarded (a pod or a speeder never is).
+      CLOUD_FLIGHT.ship = !!(this.player.mounted ?? this.player.piloting)?.spec.ship || !!this.player.aboard;
       f.space = !!this.world.planet?.space;
       f.fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
       f.daylight = this.world.day.daylight;
@@ -25370,6 +25374,8 @@ class App {
    */
   private applyQualityTier(tier: TierName): void {
     if (!GPU.webgpu) return;
+    // Pass 3, wave 2 (maker T): the clouds' march takes the tier's steps (the design's 2.6).
+    setCloudTier(tier);
     const values = tierValues(tier, screenScale()) as Record<string, unknown>;
     const moved: (keyof Settings)[] = [];
     for (const k of TIER_KEYS) {

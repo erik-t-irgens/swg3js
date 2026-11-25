@@ -142,6 +142,15 @@ export const CLOUD_LOOK = {
   belly: 0.45,
   /** The light march's cone, its widest share of the distance stepped: 0.35 (the light reads a soft cone, not a line). */
   cone: 0.35,
+  /**
+   * Pass 3, wave 2 (maker B): the night's drama, the owner's option ("real nights, drama an option: a night-floor dial he
+   * sets"): the share of the sky round's night floor (`SHADE_TUNE.floor`'s light from the whole sky, which lights the land) the
+   * clouds take in their ambient, eased in as the sun goes 0 to 6 degrees down. 0 to start, a real night: the clouds are lit by
+   * the moons and the sky they hide alone, so on a moonless night in the wild a cloud shows only as stars missing, and under a
+   * moon its edges silver. 1: the clouds lit by the floor as the land is (a readable night, the two agreeing); above it, drama.
+   * Where no star system is applied there is no floor, and the clouds keep SWG's moon.
+   */
+  nightDrama: 0,
 };
 
 /** The look's dials' ranges (the debug menu's sliders and the console's clamps). */
@@ -174,6 +183,7 @@ export const CLOUD_LOOK_RANGE: Readonly<Record<keyof typeof CLOUD_LOOK, readonly
   ambient: [0, 4],
   belly: [0, 1.5],
   cone: [0, 1.5],
+  nightDrama: [0, 4],
 };
 
 /** A type's profile blended over a layer's types by their weights at a point (the shape's inputs from the contract's slots). */

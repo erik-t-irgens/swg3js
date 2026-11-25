@@ -197,8 +197,16 @@ const smooth01 = (a: number, b: number, x: number): number => {
  *  r2 = (sheetIwX, sheetFX, sheetIwZ, sheetFZ)
  *  r3 = (mixIwX, mixFX, mixIwZ, mixFZ)
  *  r4 = (mixStep, ringHalf, texel, 0)
+ *  r5 = (baseX, baseZ, 0, 0)                 pass 3, wave 2 (maker B): the centre corner's lattice index modulo the ring's
+ *                                            size on each axis, where the card's wrapped ring keeps it (`ringStoreOf`)
+ *
+ * Pass 3, wave 2 (maker B): the card keeps each ring WRAPPED in the layer's drifting frame: the texel of lattice index K (on
+ * each axis) is stored at K modulo the ring's size, so a texel keeps its place in the world while the ring's centre snaps
+ * on (nothing is moved when the camera or the drift crosses a texel), and the ring can be refreshed in parts (`CLOUD_MAP_PARTS`)
+ * with no texel ever read from the wrong place but the strip just come into the ring. The twin keeps the ring as it always
+ * did, centred (canonical index i is the texel `i − size/2` from the centre corner); `unwrapRing` turns the card's into it.
  */
-export const RING_VEC4 = 5;
+export const RING_VEC4 = 6;
 export const RING_FLOATS = RING_VEC4 * 4;
 /** The plan's layout: layer l's near ring at l·2·RING_FLOATS, its far ring after it. */
 export const PLAN_FLOATS = CLOUD_LAYER_MAX * 2 * RING_FLOATS;
@@ -221,7 +229,7 @@ export class CloudMapFrame {
  * the full drift in metres, never wrapped), from the packed stack (cell size, mix scale), into `out` (`PLAN_FLOATS`).
  * Allocates nothing.
  */
-export function planRings(stack: Float32Array, layers: number, cam: { readonly camX: number; readonly camZ: number }, drift: Float64Array, T: { readonly sheetScale: number }, out: Float64Array): void {
+export function planRings(stack: Float32Array, layers: number, cam: { readonly camX: number; readonly camZ: number }, drift: Float64Array, T: { readonly sheetScale: number }, out: Float64Array, idx?: Float64Array): void {
   const V = CLOUD_LAYER_VEC4 * 4;
   // The camera and the sheet's scale read off their records (doubles handed to a call the compiler leaves out are made).
   const camX = cam.camX;
@@ -260,7 +268,103 @@ export function planRings(stack: Float32Array, layers: number, cam: { readonly c
       out[o + 17] = R.span / 2;
       out[o + 18] = texel;
       out[o + 19] = 0;
+      // Pass 3, wave 2 (maker B): where the wrapped ring keeps the centre corner (its lattice index modulo the size), and the
+      // index itself into `idx` (never to the card: it is measured from far away) for the run's jump check.
+      const N = R.size;
+      const kx = Math.floor(qx / texel);
+      const kz = Math.floor(qz / texel);
+      out[o + 20] = ((kx % N) + N) % N;
+      out[o + 21] = ((kz % N) + N) % N;
+      out[o + 22] = 0;
+      out[o + 23] = 0;
+      if (idx) {
+        idx[(l * 2 + ring) * 2] = kx;
+        idx[(l * 2 + ring) * 2 + 1] = kz;
+      }
     }
+  }
+}
+
+/**
+ * Pass 3, wave 2 (maker B): the map refreshed in parts, a budget and not a look: the card rewrites every `near`-th row of the
+ * near ring and every `far`-th of the far ring a frame (a quarter and an eighth: up to three quarters of the map's time saved),
+ * each row's turn coming round in as many frames. A texel's content is a function of the world and the moment alone, and the
+ * wrapped ring keeps it in place, so a part a few frames old differs only by those frames' change (a cell's life, the level's
+ * ease): nothing jumps. The whole ring is written at once where a part would leave too much behind (an arrival, the stack or
+ * the places changed, the ring jumping more than a texel, a read-back). Read when the map is made (the computes' sizes).
+ */
+export const CLOUD_MAP_PARTS = { near: 4, far: 8 } as const;
+
+/**
+ * The storage index (0 to `n` − 1, on one axis) of a ring's canonical index `i` (the texel `i − n/2` from the centre corner)
+ * where the centre corner's lattice index modulo `n` is `base`. The card's compute is its inverse line for line (`relOfStore`).
+ */
+export function ringStoreOf(i: number, base: number, n: number): number {
+  return (((i - n / 2 + base) % n) + n) % n;
+}
+
+/** The texel's offset from the centre corner (−n/2 to n/2 − 1) of storage index `s` on one axis (`ringStoreOf`'s inverse). */
+export function relOfStore(s: number, base: number, n: number): number {
+  return ((((s - base + n / 2) % n) + n) % n) - n / 2;
+}
+
+/**
+ * The offset the card's face adds to a place relative to the camera before it reads a ring (`cloudMapGpu.ts`' `offV`), on one
+ * axis: the camera's place past the centre corner plus where the wrapped ring keeps that corner, less half the ring (the
+ * face's `+ 0.5`). With the sampler repeating, `(rel + this) / span + 0.5` lands on the stored texel of the place. `axis` 0 x, 1 z.
+ */
+export function faceOffsetOf(plan: Float64Array, layer: number, ring: number, axis: number): number {
+  const o = (layer * 2 + ring) * RING_FLOATS;
+  const R = ring === 0 ? CLOUD_MAP_RINGS.near : CLOUD_MAP_RINGS.far;
+  const texel = R.span / R.size;
+  return plan[o + axis] + (plan[o + 20 + axis] - R.size / 2) * texel;
+}
+
+/** One layer's ring as the card keeps it (wrapped: `ringStoreOf`) turned into the twin's centred layout. Allocates its output. */
+export function unwrapRing(stored: Uint8Array, plan: Float64Array, layer: number, ring: number): Uint8Array {
+  const N = ring === 0 ? CLOUD_MAP_RINGS.near.size : CLOUD_MAP_RINGS.far.size;
+  const o = (layer * 2 + ring) * RING_FLOATS;
+  const bx = plan[o + 20];
+  const bz = plan[o + 21];
+  const out = new Uint8Array(N * N * 4);
+  for (let j = 0; j < N; j++) {
+    const sj = ringStoreOf(j, bz, N);
+    for (let i = 0; i < N; i++) {
+      const si = ringStoreOf(i, bx, N);
+      const a = (sj * N + si) * 4;
+      const b = (j * N + i) * 4;
+      out[b] = stored[a];
+      out[b + 1] = stored[a + 1];
+      out[b + 2] = stored[a + 2];
+      out[b + 3] = stored[a + 3];
+    }
+  }
+  return out;
+}
+
+/**
+ * A wrapped ring read as the card's face reads it (bilinear, the sampler repeating), at a place relative to the camera, into
+ * `out`: the test's mirror of the face's near read through `faceOffsetOf`. Nought past the ring's half.
+ */
+export function sampleWrapped(stored: Uint8Array, plan: Float64Array, layer: number, ring: number, relX: number, relZ: number, out: Float64Array): void {
+  const R = ring === 0 ? CLOUD_MAP_RINGS.near : CLOUD_MAP_RINGS.far;
+  const N = R.size;
+  for (let c = 0; c < 4; c++) out[c] = 0;
+  if (Math.abs(relX) > R.span / 2 || Math.abs(relZ) > R.span / 2) return;
+  const u = ((relX + faceOffsetOf(plan, layer, ring, 0)) / R.span + 0.5) * N - 0.5;
+  const v = ((relZ + faceOffsetOf(plan, layer, ring, 1)) / R.span + 0.5) * N - 0.5;
+  const i0 = Math.floor(u);
+  const j0 = Math.floor(v);
+  const fu = u - i0;
+  const fv = v - j0;
+  const w = (k: number): number => ((k % N) + N) % N;
+  for (let c = 0; c < 4; c++) {
+    const at = (i: number, j: number): number => stored[(w(j) * N + w(i)) * 4 + c] / 255;
+    const a = at(i0, j0);
+    const b = at(i0 + 1, j0);
+    const d = at(i0, j0 + 1);
+    const e = at(i0 + 1, j0 + 1);
+    out[c] = (a + (b - a) * fu) * (1 - fv) + (d + (e - d) * fu) * fv;
   }
 }
 

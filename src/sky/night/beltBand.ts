@@ -24,6 +24,7 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { AIR, AIR_UNITS, type AirTables } from '../air/airApi.ts';
+import { markSkyBehind } from '../air/airHazeMath.ts';
 import { SUN_LUX } from './galaxyDensity.ts';
 import { SKY_BODIES } from '../look/bodiesFile.ts';
 import { BELT_MOST, BELT_STRIDE, BELT_TUNE, type BeltKit } from '../system/beltSky.ts';
@@ -112,6 +113,8 @@ function beltMaterial(tables: AirTables, u: BeltUniforms, clip: Any): MeshBasicN
   m.side = THREE.BackSide;
   m.userData.unlit = true;
   m.userData.dry = true;
+  // Pass 3, wave 2 (maker B): drawn at infinity, so into the colour behind the clouds, never the see-through layer.
+  markSkyBehind(m);
   m.vertexNode = clip;
   const N = u.n.map((x) => uniform(x).setGroup(renderGroup));
   const C = u.c.map((x) => uniform(x).setGroup(renderGroup));

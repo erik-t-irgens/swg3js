@@ -51,6 +51,9 @@ const PASS1_FILES: string[] = [
   // (every place the card is handed is the camera's own offset in a ring, or a lattice's wrapped integer and fraction).
   'src/sky/clouds/cloudMapGpu.ts',
   'src/sky/clouds/cloudRun.ts',
+  // Pass 3, wave 2 (maker T): the clouds' resolve and motion, every place the card is handed the camera's own move since last
+  // frame or a ray from the camera (`cloudResolve.ts`).
+  'src/sky/clouds/cloudResolve.ts',
 ];
 
 /**

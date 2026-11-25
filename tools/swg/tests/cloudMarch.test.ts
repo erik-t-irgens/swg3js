@@ -291,8 +291,9 @@ const keepTables = AIR.tables;
 AIR.tables = { nodes: {}, ready: true } as Any;
 {
   // 1. A full-screen pass writes its target outright: the composite is opaque, never blended, and writes its alpha as one.
+  // Pass 3, wave 2 (maker T): the composite reads the trace by `{ value }` (the resolved history, or flight mode's whole trace).
   const trace = new THREE.RenderTarget(8, 8, { type: THREE.HalfFloatType, count: 2 });
-  const g = compositeGraph(CLOUD_U, { input: { value: null }, trace, depth, see: target.textures[2], reversed: true });
+  const g = compositeGraph(CLOUD_U, { input: { value: null }, trace: { light: { value: trace.textures[0] }, dist: { value: trace.textures[1] } }, depth, see: target.textures[2], reversed: true });
   ok(g.material.blending === THREE.NoBlending && g.material.transparent === false, "1. the composite is opaque and never blended (an alpha read as coverage drew nothing where the scene's alpha was nought)");
   const march = src('sky/clouds/cloudMarch.ts');
   ok(/return vec4\(clamp\(select\(bad, c\.rgb, outC\), vec3\(0\), vec3\(CHAIN_NUMBERS\.sanitize\.stored\)\), 1\);/.test(march), '1. and its every pixel is written with an alpha of one');
@@ -305,7 +306,10 @@ AIR.tables = { nodes: {}, ready: true } as Any;
     const w = Math.ceil(1600 * share);
     ok(near(traceTexelOf(0.5, w), w / 2 - 0.5, 1e-9) && near(traceTexelOf(0, w), -0.5, 1e-9), `3. at a trace share of ${share} the screen's middle reads the trace's middle (its own ${w} texels)`);
   }
-  ok(march.includes('const tc = st.mul(TR.xy).sub(0.5);') && /CLOUD_U\.tr\.x = tw;\s*\n\s*CLOUD_U\.tr\.y = th;/.test(march), "3. the composite's taps are the trace's own size, written from the trace as it is sized");
+  // Pass 3, wave 2 (maker T): the taps moved into `cloudResolve.ts`' `traceTapsOf` (the composite's and the motion's one read),
+  // handed the size of the very picture read this frame (`CLOUD_RU.ct`: the resolved history's, or flight mode's whole trace's).
+  const resolve = src('sky/clouds/cloudResolve.ts');
+  ok(resolve.includes('const tc = st.mul(size).sub(0.5);') && march.includes("traceTapsOf(tl, td, CT.xy, st, dist, T2.y, 'C')") && march.includes('R.ct.x = next.width;') && march.includes('R.ct.x = this.whole.width;') && /CLOUD_U\.tr\.x = tw;\s*\n\s*CLOUD_U\.tr\.y = th;/.test(march), "3. the composite's taps are the trace's own size, written from the trace as it is sized and read");
   // 4. Nothing to draw draws nothing and says why.
   const r: Any = { reversedDepthBuffer: true, getRenderTarget: () => null, setRenderTarget() {}, render() {}, compileAsync: () => Promise.resolve(), compileComputeAsync: () => Promise.resolve(), compute() {} };
   const pass = new GpuCloudPass(r, target);

@@ -65,6 +65,8 @@ import {
   unit,
   type CloudMapTune,
 } from './cloudMap.ts';
+// Pass 3, wave 2 (maker B): the card's rings kept wrapped, refreshed in parts.
+import { CLOUD_MAP_PARTS, unwrapRing } from './cloudMap.ts';
 import { cloudMapGpu, type CloudMapGpu } from './cloudMapGpu.ts';
 import { LEVEL_RATE, seedOf } from '../../world/weatherSchedule.ts';
 import { WIND_PROFILES, WIND_TUNE, windEntryNow, windWorldOf, windWorldTable } from '../../world/wind.ts';
@@ -72,6 +74,9 @@ import { PACK_FLOATS, WindPattern, defaultWindTable } from '../../world/windMath
 import type { DialGroup, DialSet, Dial } from '../../ui/dials.ts';
 import { readDials } from '../../ui/dials.ts';
 import { PALETTE_FALLBACK } from '../../core/palette.ts';
+// Pass 3, wave 2 (maker B): the ships' ceiling follows the low deck; the map refreshed in parts in each layer's wrapped frame.
+import { fairDeckTopOf } from './cloudCeiling.ts';
+import { SHIP_CEILING, SHIP_CEILING_RANGE, setDeckTop, tuneShipCeiling } from '../../vehicles/shipCeiling.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -172,6 +177,19 @@ export class CloudRun {
   version = 0;
   /** The map held as it stands (a read-back's check under way: the card's map must be the frame the twin is handed). */
   held = false;
+  /**
+   * Pass 3, wave 2 (maker B): the map refreshed in parts (`CLOUD_MAP_PARTS`), the whole rings written at the next dispatch
+   * where `fullWant` is set (an arrival, the places moved, the map's tune, a read-back), where the stack's still parts were
+   * packed anew, where a dispatch was missed (the switch off and on), or where a drawn layer's ring jumped past a texel; each
+   * ring's centre corner's lattice index (x, z; never to the card), this frame's and the last dispatch's.
+   */
+  fullWant = true;
+  /** The console's timing of the whole map every frame (`{ time: { full: true } }`), against the parts. */
+  timeFull = false;
+  private fullVersion = -1;
+  private lastDispatchFrame = -2;
+  readonly ringIdx = new Float64Array(CLOUD_LAYER_MAX * 4);
+  private readonly lastIdx = new Float64Array(CLOUD_LAYER_MAX * 4);
 
   // ---------------------------------------------------------------- the world
 
@@ -242,6 +260,8 @@ export class CloudRun {
     this.regionsN = 0;
     CLOUD_FEED.stack = null;
     CLOUD_FEED.count = 0;
+    // Pass 3, wave 2 (maker B): no deck known between worlds, so the ships' ceiling is its least.
+    setDeckTop(Number.NaN);
   }
 
   /** The clouds file's text read at the loading screen (null: none), kept for every world until the next screen. */
@@ -281,6 +301,8 @@ export class CloudRun {
       this.regionsW[i * 4 + 3] = r.kind === 'dust' ? REGION_DUST : r.kind === 'snow' ? REGION_SNOW : REGION_RAIN;
     }
     this.regionsN = n;
+    // Pass 3, wave 2 (maker B): the places moved, so the whole map at the next dispatch (and at an arrival, which sets them).
+    this.fullWant = true;
   }
 
   // ---------------------------------------------------------------- the stack
@@ -331,6 +353,8 @@ export class CloudRun {
     this.layers = next;
     this.version++;
     this.publish();
+    // Pass 3, wave 2 (maker B): the ships' ceiling follows the low deck's fair-weather top as he sets it.
+    setDeckTop(fairDeckTopOf(next));
     return words;
   }
 
@@ -478,7 +502,7 @@ export class CloudRun {
     fr[1] = this.bands;
     fr[2] = lv;
     fr[3] = sec;
-    planRings(this.stackF, this.count, I, fd, T, this.planF);
+    planRings(this.stackF, this.count, I, fd, T, this.planF, this.ringIdx);
     // The cells' life as a wrapped whole number and a fraction of the shared seconds over it.
     const mf = this.mf;
     mf.groundY = this.groundY + 0;
@@ -514,7 +538,20 @@ export class CloudRun {
     const map = this.map;
     if (!map || !map.warmed || !this.attached || !this.renderer || this.held) return;
     map.write(this);
-    map.compute(this.renderer);
+    // Pass 3, wave 2 (maker B): a part of each ring, or the whole where a part would leave too much behind (`fullWant`).
+    let full = this.fullWant || this.timeFull || this.fullVersion !== this.version || this.frames - this.lastDispatchFrame > 1;
+    const idx = this.ringIdx;
+    const last = this.lastIdx;
+    const n = this.count * 4;
+    for (let k = 0; k < n; k++) {
+      const d = idx[k] - last[k];
+      if (d > 1 || d < -1) full = true;
+    }
+    for (let k = 0; k < CLOUD_LAYER_MAX * 4; k++) last[k] = idx[k];
+    map.compute(this.renderer, full);
+    this.fullWant = false;
+    this.fullVersion = this.version;
+    this.lastDispatchFrame = this.frames;
   }
 
   /** The map made and its computes compiled (off the frame); the march's face handed over. True once ready. */
@@ -604,6 +641,8 @@ function tuneClouds(o: Record<string, unknown>): string[] {
       }
       (CLOUD_MAP_TUNE as Record<string, number>)[k] = Math.min(range[1], Math.max(range[0], n));
     }
+    // Pass 3, wave 2 (maker B): the map's tune moved, so the whole map at the next dispatch.
+    CLOUD_RUN.fullWant = true;
   }
   const types = o.types as Record<string, Record<string, unknown>> | undefined;
   if (types && typeof types === 'object') {
@@ -691,7 +730,7 @@ export function cloudsDebug(o: unknown): unknown {
   if (typeof o !== 'object') return { said: [`clouds(${JSON.stringify(o)}): give an object, e.g. { on: true }, { layer: { name: 'cumulus', base: 1500 } }, { level: 3 }`] };
   const a = o as Record<string, unknown>;
   const said: string[] = [];
-  if (a.check) return checkMap(r);
+  if (a.check) return checkMap(r, a.check);
   // The map's card time by three's timer spans (`{ time: { frames } }`), at the stack drawn now.
   if (a.time) {
     const n = typeof a.time === 'object' && a.time && Number.isFinite((a.time as { frames?: number }).frames) ? Math.max(10, Math.min(2000, Math.round((a.time as { frames: number }).frames))) : 120;
@@ -702,7 +741,13 @@ export function cloudsDebug(o: unknown): unknown {
     const c0 = performance.now();
     for (let i = 0; i < 2000; i++) r.frame();
     r.cpuUs = ((performance.now() - c0) * 1000) / 2000;
-    return r.map.time(n).then((x) => ({ map: x, mainThreadUs: Number(r.cpuUs.toFixed(2)), part: part === 'near' || part === 'far' ? part : 'both', layers: r.count, on: r.layers.filter((l) => l.on).length, rings: '512² and 256² (2×2 supersampled)', note: 'three GPUTimer spans of the two compute passes a frame' }));
+    // Pass 3, wave 2 (maker B): `full: true` times the whole map every frame, else the parts as they run.
+    r.timeFull = (a.time as { full?: boolean }).full === true;
+    const whole = r.timeFull;
+    return r.map.time(n).then((x) => {
+      r.timeFull = false;
+      return { map: x, mainThreadUs: Number(r.cpuUs.toFixed(2)), part: part === 'near' || part === 'far' ? part : 'both', refresh: whole ? 'the whole map every frame' : `in parts (a ${CLOUD_MAP_PARTS.near}th of the near ring, an ${CLOUD_MAP_PARTS.far}th of the far a frame; the whole at a jump)`, layers: r.count, on: r.layers.filter((l) => l.on).length, rings: '512² and 256² (2×2 supersampled)', note: 'three GPUTimer spans of the two compute passes a frame' };
+    });
   }
   if (a.picture) return pictureOf(r, a.picture as string, a);
   if (a.cells) return cellsNear(r, a);
@@ -729,11 +774,16 @@ export function cloudsDebug(o: unknown): unknown {
     else said.push(`level ${String(lv)}: a number 0 to 4 holds, null follows`);
   }
   if (a.tune && typeof a.tune === 'object') said.push(...tuneClouds(a.tune as Record<string, unknown>));
+  // Pass 3, wave 2 (maker B): the ships' ceiling's dials (`{ ship: { above, least } }`), and the night's drama in `tune.look`.
+  if (a.ship && typeof a.ship === 'object') said.push(...tuneShipCeiling(a.ship as { above?: number; least?: number }));
   if ('view' in a) said.push(setView(r, a.view as string | null, a));
   // The report after a change is the change's: the stack packed now (its heights, covers and bands), not the last frame's.
   if (r.attached && (a.layers || a.layer || a.set || a.reset || a.tune || 'level' in a)) r.frame();
   const rep = cloudsReport(r);
-  return said.length ? { said, ...rep } : rep;
+  // Pass 3, wave 2 (maker B): the ships' ceiling now, from the low deck he set, and the map's parts.
+  const ship = { ceilingM: Math.round(SHIP_CEILING.now), deckTopM: Number.isFinite(SHIP_CEILING.deckTop) ? Math.round(SHIP_CEILING.deckTop) : null, above: SHIP_CEILING.above, least: SHIP_CEILING.least };
+  const parts = r.map ? { near: CLOUD_MAP_PARTS.near, far: CLOUD_MAP_PARTS.far, full: r.map.fullDispatches, inParts: r.map.partDispatches } : null;
+  return said.length ? { said, ...rep, ship, parts } : { ...rep, ship, parts };
 }
 
 // ------------------------------------------------------------------------------------------------ the proofs' reads
@@ -755,13 +805,44 @@ function snapshot(r: CloudRun): { stack: Float32Array; types: Float32Array; plan
  * texel and channel is the tolerance (the card's float32 against the twin's doubles, each rounded to eight bits: the wave's
  * read-backs met it at 1/255 over six layers' twelve rings). Asynchronous.
  */
-async function checkMap(r: CloudRun): Promise<unknown> {
+async function checkMap(r: CloudRun, spec?: unknown): Promise<unknown> {
   const map = r.map;
   if (!map || !map.warmed || !r.renderer) return { check: 'the map has not landed: turn the clouds on first ({ on: true })' };
+  // Pass 3, wave 2 (maker B): `{ check: { snap: [dx, dz], parts: k } }` writes the whole map where the camera stands, then
+  // moves the camera by (dx, dz) metres at the same moment (crossing a texel or more: a snap), and writes only k parts of each
+  // ring (0 to `CLOUD_MAP_PARTS.far`) before the read: every texel the ring kept across the snap must still be its twin's (no
+  // jump), and only the strip just come into the ring may differ until its part comes round.
+  const opt = spec && typeof spec === 'object' ? (spec as { snap?: [number, number]; parts?: number }) : null;
+  const I = CLOUD_IN;
+  let before: Float64Array | null = null;
+  let after: Float64Array | null = null;
+  let partsRun = 0;
+  let snapM: number[] | null = null;
   // The numbers handed this frame, the dispatch, then the reads with the map held (no frame rewrites it until they are done):
   // the map read back is the very frame the twin is handed.
   r.frame();
+  r.fullWant = true;
   r.dispatch();
+  if (opt) {
+    before = r.ringIdx.slice();
+    const sx = Array.isArray(opt.snap) && Number.isFinite(opt.snap[0]) ? opt.snap[0] : 130;
+    const sz = Array.isArray(opt.snap) && Number.isFinite(opt.snap[1]) ? opt.snap[1] : -260;
+    const kx = I.camX;
+    const kz = I.camZ;
+    I.camX = kx + sx;
+    I.camZ = kz + sz;
+    r.frame();
+    // Kept now: the world's own frames run on while the reads are awaited, and write the run's indices again.
+    after = r.ringIdx.slice();
+    I.camX = kx;
+    I.camZ = kz;
+    partsRun = Math.max(0, Math.min(CLOUD_MAP_PARTS.far, Math.round(Number(opt.parts ?? 0)) || 0));
+    for (let k = 0; k < partsRun; k++) {
+      map.write(r);
+      map.compute(r.renderer, false);
+    }
+    snapM = [sx, sz];
+  }
   r.held = true;
   const snap = snapshot(r);
   const out: Record<string, unknown>[] = [];
@@ -770,33 +851,55 @@ async function checkMap(r: CloudRun): Promise<unknown> {
     for (let l = 0; l < r.count; l++) {
       if (!(snap.stack[l * CLOUD_LAYER_VEC4 * 4 + 7] > 0)) continue;
       for (const ring of [0, 1] as const) {
-        const card = await map.readBack(r.renderer, l, ring);
+        // The card's ring is kept wrapped in the layer's frame: turned into the twin's centred layout first.
+        const card = unwrapRing(await map.readBack(r.renderer, l, ring), snap.plan, l, ring);
         const twin = evalRing(snap.stack, snap.types, snap.plan, snap.mf, snap.tune, l, ring);
         let worst = 0;
         let over2 = 0;
         const hist = [0, 0, 0, 0, 0];
         const odd: number[][] = [];
         const N = ring === 0 ? CLOUD_MAP_RINGS.near.size : CLOUD_MAP_RINGS.far.size;
+        // After a snap: the strip whose lattice places were not in the ring before (each axis's new index against the old).
+        const ki = (l * 2 + ring) * 2;
+        const nx = after ? after[ki] : 0;
+        const nz = after ? after[ki + 1] : 0;
+        const ox = before ? before[ki] : nx;
+        const oz = before ? before[ki + 1] : nz;
+        // (with no snap asked, nothing is counted as come into the ring: both indices nought)
+        let entering = 0;
+        let enteringOff = 0;
         for (let i = 0; i < card.length; i++) {
+          const t = i >> 2;
+          const kx = nx + (t % N) - N / 2;
+          const kz = nz + Math.floor(t / N) - N / 2;
+          const isNew = kx < ox - N / 2 || kx >= ox + N / 2 || kz < oz - N / 2 || kz >= oz + N / 2;
           const d = Math.abs(card[i] - twin[i]);
+          if (isNew) {
+            if ((i & 3) === 0) entering++;
+            if (d > 2) enteringOff++;
+            continue;
+          }
           if (d > worst) worst = d;
           if (d > 2) {
             over2++;
             // The first few texels past the tolerance, as [i, j, channel, card, twin].
-            if (odd.length < 6) odd.push([(i >> 2) % N, Math.floor((i >> 2) / N), i & 3, card[i], twin[i]]);
+            if (odd.length < 6) odd.push([t % N, Math.floor(t / N), i & 3, card[i], twin[i]]);
           }
           hist[d > 3 ? 4 : d]++;
         }
         const share = over2 / card.length;
         const ok = worst <= 2;
         allOk &&= ok;
-        out.push({ layer: l, name: r.layers[l]?.name, ring: ring === 0 ? 'near' : 'far', ok, worst255: worst, over2Share: Number(share.toExponential(2)), byDiff: { 0: hist[0], 1: hist[1], 2: hist[2], 3: hist[3], more: hist[4] }, ...(odd.length ? { past: odd } : {}) });
+        out.push({ layer: l, name: r.layers[l]?.name, ring: ring === 0 ? 'near' : 'far', ok, worst255: worst, over2Share: Number(share.toExponential(2)), byDiff: { 0: hist[0], 1: hist[1], 2: hist[2], 3: hist[3], more: hist[4] }, ...(odd.length ? { past: odd } : {}), ...(before ? { moved: [nx - ox, nz - oz], entering, enteringOff } : {}) });
       }
     }
   } finally {
     r.held = false;
+    // The check's own snap left a strip written for a place the camera is not: the whole map at the next dispatch.
+    r.fullWant = true;
   }
-  return { check: allOk ? 'the map is its twin within 2/255 at every texel' : 'NOT within tolerance', tolerance: '2/255 at every texel and channel', rings: out };
+  const what = opt ? `after a snap of ${JSON.stringify(snapM)} m and ${partsRun} of ${CLOUD_MAP_PARTS.far} parts, every texel the ring kept` : 'the map';
+  return { check: allOk ? `${what} is its twin within 2/255 at every texel` : 'NOT within tolerance', tolerance: '2/255 at every texel and channel (the strip just come into the ring counted apart)', rings: out };
 }
 
 /**
@@ -816,6 +919,8 @@ async function cellsNear(r: CloudRun, a: Record<string, unknown>): Promise<unkno
   if (typeof spec.tau === 'number' && Number.isFinite(spec.tau)) I.tau = spec.tau;
   if (typeof spec.dayTime === 'number' && Number.isFinite(spec.dayTime)) I.dayTime = spec.dayTime;
   r.frame();
+  // Pass 3, wave 2 (maker B): the whole map for the moment asked (a part would hold the moments before it).
+  r.fullWant = true;
   if (map && map.warmed) r.dispatch();
   const snap = snapshot(r);
   const tauAt = I.tau;
@@ -828,7 +933,8 @@ async function cellsNear(r: CloudRun, a: Record<string, unknown>): Promise<unkno
   r.held = true;
   let card: Uint8Array | null = null;
   try {
-    card = map && map.warmed && r.renderer ? await map.readBack(r.renderer, layer, 0) : null;
+    // Pass 3, wave 2 (maker B): the card's ring kept wrapped, turned into the twin's centred layout for the sampler.
+    card = map && map.warmed && r.renderer ? unwrapRing(await map.readBack(r.renderer, layer, 0), snap.plan, layer, 0) : null;
   } finally {
     r.held = false;
   }
@@ -897,6 +1003,8 @@ async function pictureOf(r: CloudRun, view: string, a: Record<string, unknown>):
   r.frame();
   const map = r.map;
   const fromCard = !!(map && map.warmed && r.renderer);
+  // Pass 3, wave 2 (maker B): the whole map for the picture's frame.
+  r.fullWant = true;
   if (fromCard) r.dispatch();
   const snap = snapshot(r);
   const slices: Uint8Array[] = [];
@@ -910,7 +1018,8 @@ async function pictureOf(r: CloudRun, view: string, a: Record<string, unknown>):
         slices.push(new Uint8Array(0));
         continue;
       }
-      slices.push(fromCard ? await map!.readBack(r.renderer, l, ring) : evalRing(snap.stack, snap.types, snap.plan, snap.mf, snap.tune, l, ring));
+      // Pass 3, wave 2 (maker B): the card's ring unwrapped into the centred layout the picture lays out.
+      slices.push(fromCard ? unwrapRing(await map!.readBack(r.renderer, l, ring), snap.plan, l, ring) : evalRing(snap.stack, snap.types, snap.plan, snap.mf, snap.tune, l, ring));
     }
   } finally {
     r.held = false;
@@ -1096,6 +1205,15 @@ export function cloudDialSet(): DialSet {
     });
     // Pass 3, wave 1 (maker V): the march's and the look's sliders (CLOUD_TUNE, CLOUD_LOOK), set through their own setters.
     groups.push(...marchDialGroups());
+    // Pass 3, wave 2 (maker B): the ships' ceiling over the low deck (`src/vehicles/shipCeiling.ts`), his to set.
+    groups.push({
+      title: "Ships' ceiling",
+      note: "How high a ship may climb over the ground: the low deck's fair-weather top plus 'above', never under 'least'. Speeders keep their own; space is still offered above 1,100 m.",
+      dials: (['above', 'least'] as const).map((k) => {
+        const [min, max] = SHIP_CEILING_RANGE[k];
+        return { kind: 'number' as const, key: `ship.${k}`, label: k, note: k === 'above' ? "metres over the low deck's fair-weather top (1,000 to start)" : 'the least ceiling, metres over the ground (1,500 to start, the old fixed one)', min, max, step: 50, unit: 'm', get: () => SHIP_CEILING[k], set: (v: number) => tuneShipCeiling({ [k]: v }) };
+      }),
+    });
     DIALS = { helper: 'clouds', groups, shipped: readDials(groups) };
   }
   return DIALS;

@@ -44,6 +44,11 @@ const six = [
 run.setLayers(six.map((l) => cleanLayer(l, null)));
 // The map's card side made as the game makes it (its pictures and graphs are three's objects; nothing is drawn here).
 const map = new CloudMapGpu();
+// Pass 3, wave 2 (maker B): the run's own dispatch measured (the upload, its whole-or-part choice by the rings' jump and the
+// parts' turn), the card's compute a stand-in renderer that takes the list and draws nothing.
+(map as unknown as { warmed: boolean }).warmed = true;
+run.map = map;
+run.renderer = { compute(_list: unknown): void {} };
 const st = new Float64Array(2);
 
 /** One frame: the clock a second on, the camera along, the day on, the weather's own level now and then, the run, the upload. */
@@ -56,7 +61,8 @@ function frame(): void {
   I.wLevel = 1.5 + Math.sin(st[0] * 0.001);
   I.wFollow = (st[0] & 1023) < 900 ? 1 : 0;
   run.frame();
-  map.write(run);
+  // The upload and the dispatch's choice (pass 3, wave 2, maker B: `dispatch` writes the map's numbers, as `map.write` did here).
+  run.dispatch();
 }
 function frames(n: number): void {
   for (let i = 0; i < n; i++) frame();

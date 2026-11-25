@@ -19,8 +19,18 @@ export const CLOUD_TUNE = {
    * display's half (2.07 million) is held down to it, its trace shrunk evenly both ways.
    */
   rayBudget: 1_100_000,
-  /** The most primary steps a ray takes: 128 (the design's High 64 overhead and 128 toward the horizon, one count for now). */
-  steps: 128,
+  /**
+   * The most primary steps a ray looking straight up takes: 64, the design's High (2.6; Ultra's 96 set by the tier,
+   * `setCloudTier`). A ray between takes a share between this and `stepsHorizon` by how high it looks (wave 2, maker T).
+   */
+  steps: 64,
+  /** The most a ray along the horizon takes, where rays are longest: 128, the design's High (Ultra's 192 set by the tier). */
+  stepsHorizon: 128,
+  /**
+   * One more light step in the cone toward the light (1) or not (0): the design's Ultra takes eight light steps, High its six
+   * and the far one. Set by the tier; a dial so either look can be seen on any tier.
+   */
+  lightExtra: 0,
   /** The step over the first kilometre from the lens, metres (the design's "finely stepped for the first kilometre"): 30. */
   nearStep: 30,
   nearReach: 1000,
@@ -37,12 +47,75 @@ export const CLOUD_TUNE = {
   /** Over clear map a step grows by this factor until cloud is met again (the design's "skips clear map"): 2. */
   clearGrow: 2,
   /**
-   * Each step's sample jittered within its stretch by a pixel's own fraction that moves every frame (the edge smoothing gathers
-   * it, with no history of the march's own until wave 2): 1 on; 0 samples each step's middle (steady, and sliced into bands).
+   * Each step's sample jittered within its stretch by a pixel's own fraction that moves every frame, far clouds included (the
+   * fill-in's history gathers it, wave 2): 1 on; 0 samples each step's middle (steady, and sliced into bands).
    */
   jitter: 1,
   /** How far apart (a share of a pixel's distance) two depths still count as one surface when the trace is laid on the picture: 0.08. */
   depthMatch: 0.08,
+  // ---- wave 2 (maker T): the fill-in, flight, the storm reach and the fade (the design's 2.2; the plan's ranks 3 and 5)
+  /**
+   * The fill-in (1): a quarter of the trace marched a frame, one pixel of each two by two, the rest reprojected from the history
+   * and held to the new rays round it (Red Dead Redemption 2's way); 0 marches every trace pixel every frame, as wave 1 did (for
+   * a side by side, and the bench's own "every pixel" line).
+   */
+  reuse: 1,
+  /**
+   * How much of its history a freshly marched pixel keeps, the rest its new ray: 0.8 averages about nine of its rays (each pixel
+   * is marched every fourth frame: about half a second at 60 fps), enough to gather a moving jitter's grain and far slices away
+   * while a drifting heap's edge still follows within a few frames.
+   */
+  history: 0.8,
+  /**
+   * How far past the spread of the new rays round a pixel its history may stand, a share of that spread each side: 0.25, so the
+   * average the history holds (inside the jittered rays' spread) passes while a cloud gone from under it is cut back.
+   */
+  clampWiden: 0.25,
+  /** The history's weight starts to fall once its point moves this many trace pixels a frame (the design's "over a trace pixel"): 1. */
+  motionFrom: 1,
+  /** ...and is down to `motionKeep` by this many: 8, a fast turn, where a reprojected history is blurred by its own resampling. */
+  motionTo: 8,
+  /** The history's weight left at `motionTo` and past it: 0.35, so a turning view keeps some of its averaging rather than its grain. */
+  motionKeep: 0.35,
+  /** A history whose cloud distance changed by more than this share is thrown away (the design's 10%): 0.1. */
+  distChange: 0.1,
+  /**
+   * How hard a cloud tells the edge smoothing to trust the new frame where it covers the picture (the motion buffer's reactive
+   * mark, times what the cloud covers), only where the trace is marched whole with no history of its own (flight mode): 0.05,
+   * which with the smoothing's own reactive share (0.8) takes its new frame from 5% to 9%, so a deck flown through follows the
+   * hull within a few frames more; at 0.25 the smoothing averaged only seven frames and flight mode's grain stood out whole.
+   * Under the fill-in no mark is laid (a mark there stopped the smoothing gathering what the fill-in left).
+   */
+  reactive: 0.05,
+  /**
+   * The trace's share of the display each way in flight mode, where the whole trace is marched each frame: 0.3, so a climb
+   * through a deck marches about 1.4 times the fill-in's rays (0.3 squared against a quarter of 0.5 squared), the soft inside
+   * of a cloud needing no finer trace and the frame keeping near the fill-in's cost.
+   */
+  flightTrace: 0.3,
+  /**
+   * How much of its history each pixel keeps in flight mode, where the whole trace is marched new each frame: 0.5, about three
+   * frames, so a climb at speed lets go of where the cloud was within a few frames (no smear) while the smaller trace's grain,
+   * which the edge smoothing cannot gather once a trace texel spans three screen pixels, is halved. 0 is the design's flight
+   * mode with nothing reused at all.
+   */
+  flightHistory: 0.5,
+  /** Flight mode within this many metres of a deck's band while climbing or falling fast (the design's 300): 300. */
+  flightNear: 300,
+  /** ...faster than this many metres a second up or down (the design's 30): 30. */
+  flightClimb: 30,
+  /** Seconds flight mode holds after its reason has gone, so a climb that pauses at a band's edge does not flip the trace back and forth: 1. */
+  flightHold: 1,
+  /**
+   * The reach of a layer holding storm towers (towering cumulus or cumulonimbus at the level now), metres: 80 km, the owner's
+   * start (24 November), since storms are mostly seen from far away; every other layer reaches `reach`.
+   */
+  stormReach: 80_000,
+  /**
+   * The share of each layer's reach over which its clouds fade out before it (the plan's rank 5): 0.2, ten kilometres at 50 km,
+   * so the march's end is no hard line across the sky.
+   */
+  fade: 0.2,
 };
 
 /** The dials' ranges (the menu's sliders and the console's clamps). */
@@ -60,10 +133,58 @@ export const CLOUD_TUNE_RANGE: Readonly<Record<keyof typeof CLOUD_TUNE, readonly
   clearGrow: [1, 8],
   jitter: [0, 1],
   depthMatch: [0.005, 1],
+  stepsHorizon: [8, 256],
+  lightExtra: [0, 1],
+  reuse: [0, 1],
+  history: [0, 0.97],
+  clampWiden: [0, 2],
+  motionFrom: [0, 16],
+  motionTo: [0.5, 64],
+  motionKeep: [0, 1],
+  distChange: [0.01, 1],
+  reactive: [0, 1],
+  flightTrace: [0.15, 1],
+  flightHistory: [0, 0.97],
+  flightNear: [0, 3000],
+  flightClimb: [0, 400],
+  flightHold: [0, 10],
+  stormReach: [2000, 120_000],
+  fade: [0, 0.9],
 };
 
 /** The loop bound the card's march is built with: `CLOUD_TUNE.steps` moves under it with nothing built. */
 export const CLOUD_STEPS_MOST = 256;
+
+/**
+ * The tiers' steps (the design's 2.6, "within Volumetric"): Ultra 96 steps (192 toward the horizon) and eight light steps, High
+ * 64 (128) and six plus the far one. Medium and Low march as High until wave 5's flat tiers take them. Written into
+ * `CLOUD_TUNE` by `setCloudTier` when the quality tier is applied, so the dials then move from the tier's start.
+ */
+export const CLOUD_TIER_STEPS = {
+  low: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
+  medium: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
+  high: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
+  ultra: { steps: 96, stepsHorizon: 192, lightExtra: 1 },
+};
+
+/** The tier the steps were last set for (the report's word). */
+export const CLOUD_TIER = { name: 'high' as string };
+
+/** The quality tier's steps into the march's dials (`App.applyQualityTier` and the boot): answers the tier taken. */
+export function setCloudTier(name: string): string {
+  const row = (CLOUD_TIER_STEPS as Record<string, { steps: number; stepsHorizon: number; lightExtra: number }>)[name] ?? CLOUD_TIER_STEPS.high;
+  CLOUD_TIER.name = name in CLOUD_TIER_STEPS ? name : 'high';
+  CLOUD_TUNE.steps = row.steps;
+  CLOUD_TUNE.stepsHorizon = row.stepsHorizon;
+  CLOUD_TUNE.lightExtra = row.lightExtra;
+  return CLOUD_TIER.name;
+}
+
+/**
+ * What the app tells the clouds of the flight each frame (`main.ts`, beside the effects' input): whether the player is flying a
+ * ship or aboard one (a pod or a speeder never is: pods never enter flight mode), and what the pass decided (the report's).
+ */
+export const CLOUD_FLIGHT = { ship: false, on: false, why: 'not flying' as string };
 
 /**
  * The switch's draw side: whether the clouds are wanted (the console's `on`), whether everything they need has landed
@@ -198,7 +319,11 @@ export function tuneMarch(o: Record<string, unknown>): string[] {
  * ray budget, so neither a Retina pixel ratio nor Ultra's render scale multiplies it"), into `out` as [width, height].
  */
 export function traceSizeOf(cssW: number, cssH: number, out: Int32Array | number[]): void {
-  const s = CLOUD_TUNE.trace;
+  traceSizeAt(cssW, cssH, CLOUD_TUNE.trace, out);
+}
+
+/** The trace's size at a share `s` of the display each way (flight mode's smaller trace), capped by the same ray budget. */
+export function traceSizeAt(cssW: number, cssH: number, s: number, out: Int32Array | number[]): void {
   let w = Math.max(1, Math.ceil(cssW * s));
   let h = Math.max(1, Math.ceil(cssH * s));
   const budget = CLOUD_TUNE.rayBudget;

@@ -33,15 +33,19 @@ import { AIR } from '../air/airApi.ts';
 import { airTerms } from '../air/airHaze.ts';
 import { seeTextureOf } from '../air/airSee.ts';
 import { PRE_FIXED } from '../exposure/preExpose.ts';
-import { CLOUD_LAYER_MAX, CLOUD_LAYER_VEC4, CLOUD_TYPE_TUNE, type CloudMapFace, type CloudTypeId } from './cloudLayers.ts';
+import { CLOUD_LAYER_MAX, CLOUD_LAYER_VEC4, CLOUD_TYPES, CLOUD_TYPE_TUNE, type CloudMapFace, type CloudTypeId } from './cloudLayers.ts';
 import { CLOUD_LOOK, shapeOf, type ShapeOps } from './cloudShape.ts';
 import { LIGHT_STEPS, ambientShareOf, octavesOf, powderOf, stepLightOf, type LightOps } from './cloudLight.ts';
-import { CLOUD_DRAW, CLOUD_FEED, CLOUD_STEPS_MOST, CLOUD_TUNE, cloudsWhyNot, cloudsWouldDraw, traceSizeOf } from './cloudTune.ts';
+import { CLOUD_DRAW, CLOUD_FEED, CLOUD_FLIGHT, CLOUD_STEPS_MOST, CLOUD_TIER, CLOUD_TUNE, cloudsWhyNot, cloudsWouldDraw, traceSizeAt, traceSizeOf } from './cloudTune.ts';
 import { cloudNoise, type CloudNoise } from './cloudNoise.ts';
+// Pass 3, wave 2 (maker T): the fill-in over frames, the flight mode and the clouds' motion.
+import { CLOUD_REUSE_STATS, CLOUD_RU, DIST_UNIT, TAA_MOTION_IN, flightForget, flightStep, motionGraph, newFlightState, resolveGraph, traceTapsOf, writeReuseDials, type MarchNodes } from './cloudResolve.ts';
+import { motionTextureOf } from '../../core/gpu/motion.ts';
+import { taaPassNow } from '../../core/gpu/taa/taaPass.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Break, Fn, If, Loop, abs, clamp, dot, exp, float, floatBitsToUint, floor, fract, int, interleavedGradientNoise, ivec2, max, min, mix, normalize, outputStruct, pow, renderGroup, select, smoothstep, sqrt, struct, texture, texture3D, uint, uniform, uniformArray, uv, vec2, vec3, vec4 } = TSL as Any;
+const { Break, Fn, If, Loop, abs, clamp, dot, exp, float, floatBitsToUint, floor, fract, int, interleavedGradientNoise, ivec2, length, max, min, mix, normalize, outputStruct, pow, renderGroup, select, smoothstep, sqrt, struct, texture, texture3D, uint, uniform, uniformArray, uv, vec2, vec3, vec4 } = TSL as Any;
 
 /** What the march has done, for `__debug.clouds()` and the tests. */
 export const CLOUD_MARCH_STATS = { built: 0, drawn: 0, skipped: 0, compiles: 0, landed: 0 };
@@ -108,6 +112,12 @@ export interface CloudMarchUniforms {
   /** The light march's way (the air's `lightDir`: the sun by day, the moon by night), w 0. */
   light: THREE.Vector4;
   /**
+   * Pass 3, wave 2 (maker B, the night): (the night's floor as a sky radiance, rgb: `AIR.frame.floor` over pi, the light from the
+   * whole sky the land's hemisphere takes beside the sky's own, times the drama's share of it, `CLOUD_LOOK.nightDrama` eased in
+   * as the sun goes 0 to 6 degrees down; 0).
+   */
+  night: THREE.Vector4;
+  /**
    * Each layer's noise frame: (the shape tile's offset along its streak axis, across it, the detail tile's along, across), each
    * a share of its tile, worked on the main thread in double precision from the camera and the layer's full drift, so nothing
    * measured from the world's middle reaches the card; (the vertical offsets of the shape and the detail, the streak axis's
@@ -116,6 +126,13 @@ export interface CloudMarchUniforms {
   off: THREE.Vector4[];
   off2: THREE.Vector4[];
   streak: THREE.Vector4[];
+  /** Pass 3, wave 2 (maker T): (the steps looking straight up, along the horizon, the extra light step on 1, 0). */
+  st: THREE.Vector4;
+  /**
+   * Pass 3, wave 2 (maker T): each layer's reach (metres: the storm reach where it holds towers now, the reach otherwise), where
+   * its fade begins, and its band's world y, low and high (the low past the high where the layer is not drawn).
+   */
+  rch: THREE.Vector4[];
 }
 
 function newUniforms(): CloudMarchUniforms {
@@ -137,9 +154,13 @@ function newUniforms(): CloudMarchUniforms {
     l5: v(),
     l6: v(),
     light: v(),
+    // Pass 3, wave 2 (maker B): nought until the first frame writes it (no floor, no drama).
+    night: new THREE.Vector4(0, 0, 0, 0),
     off: each(),
     off2: each(),
     streak: each(),
+    st: v(),
+    rch: each(),
   };
 }
 
@@ -200,6 +221,47 @@ export function writeDials(u: CloudMarchUniforms): void {
   l6.y = L.anvilTo;
   l6.z = L.bite;
   l6.w = L.softBite;
+}
+
+/** The types whose layers reach the storm reach (pass 3, wave 2, maker T): towering cumulus and cumulonimbus, by index. */
+export const STORM_TYPES: readonly number[] = [CLOUD_TYPES.indexOf('towering'), CLOUD_TYPES.indexOf('cumulonimbus')];
+
+/**
+ * Pass 3, wave 2 (maker T): the tier's steps (`u.st`) and each layer's reach and band (`u.rch`) from the packed stack (`count`
+ * slots): a drawn layer holding towers now (a storm type's share over a thousandth at the level, from its cuts) reaches
+ * `stormReach`, every other `reach`, its fade beginning `fade` of its reach before it. Answers the farthest a drawn layer reaches
+ * (the plain reach when none is drawn): the ray's end. Allocates nothing.
+ */
+export function writeReach(u: CloudMarchUniforms, stack: Float32Array | null, count: number): number {
+  const T = CLOUD_TUNE;
+  const st = u.st;
+  st.x = T.steps;
+  st.y = T.stepsHorizon;
+  st.z = T.lightExtra;
+  const V = CLOUD_LAYER_VEC4 * 4;
+  let most = 0;
+  for (let i = 0; i < CLOUD_LAYER_MAX; i++) {
+    const r = u.rch[i];
+    const o = i * V;
+    const drawn = stack !== null && i < count && stack[o + 7] > 0 && stack[o + 2] > 0;
+    let storm = false;
+    if (drawn) {
+      const c0 = stack[o + 8];
+      const c1 = stack[o + 9];
+      for (let k = 0; k < 3; k++) {
+        const share = k === 0 ? c0 : k === 1 ? c1 - c0 : 1 - c1;
+        const ty = stack[o + 4 + k];
+        if (share > 1e-3 && (ty === STORM_TYPES[0] || ty === STORM_TYPES[1])) storm = true;
+      }
+    }
+    const reach = storm ? T.stormReach : T.reach;
+    r.x = reach;
+    r.y = reach * (1 - T.fade) - 1;
+    r.z = drawn ? stack[o] : 1e9;
+    r.w = drawn ? stack[o + 1] : -1e9;
+    if (drawn && reach > most) most = reach;
+  }
+  return most > 0 ? most : T.reach;
 }
 
 /**
@@ -326,13 +388,18 @@ interface Reads {
   l1: Any;
   l5: Any;
   l6: Any;
+  /** Pass 3, wave 2 (maker T): each layer's reach and where its fade begins (`CLOUD_U.rch`). */
+  rch: Any;
 }
 
 /**
  * The cloud at a point `p` (metres from the camera, vec3) whose world height is `y`, as a function of the program: every layer
  * whose band holds it read from the map and shaped, their extinctions summed. Answers vec4(extinction per metre, the height
- * share it was weighed at, the most map cover met, 0). `detail` false leaves the detail volume unread (the light march's cheap
+ * share it was weighed at, the most map cover met, the layer that gave the most). `detail` false leaves the detail volume unread (the light march's cheap
  * samples, the erosion at its middle). Every picture is read at a named level, so it may run inside the march's loops.
+ * Pass 3, wave 2 (maker T): a layer is read only within its own reach and fades out over the last `fade` of it (the storm
+ * reach for a layer holding towers), so the march's end is no line; and the layer that gave the most is said, so the ray's
+ * drift is its own layer's.
  */
 function densityFn(R: Reads, detail: boolean): Any {
   const face = R.face;
@@ -341,11 +408,16 @@ function densityFn(R: Reads, detail: boolean): Any {
     const sigma = float(0).toVar(`swgCloud${tag}Sig`);
     const hw = float(0).toVar(`swgCloud${tag}Hw`);
     const cov = float(0).toVar(`swgCloud${tag}Cov`);
+    // Pass 3, wave 2 (maker T): how far the point is, the most a layer gave and which.
+    const far = length(p).toVar(`swgCloud${tag}Far`);
+    const most = float(0).toVar(`swgCloud${tag}Most`);
+    const mostL = float(0).toVar(`swgCloud${tag}MostL`);
     const layers = int(face.frame.x);
     Loop({ start: int(0), end: layers, type: 'int', condition: '<', name: 'li' }, ({ li }: Any) => {
       const s0 = vec4(face.slot(li, 0)).toVar(`swgCloud${tag}S0`);
       const s1 = vec4(face.slot(li, 1)).toVar(`swgCloud${tag}S1`);
-      If(s1.w.greaterThan(0.5).and(y.greaterThan(s0.x)).and(y.lessThan(s0.y)), () => {
+      const rc = vec4(R.rch.element(li)).toVar(`swgCloud${tag}Rc`);
+      If(s1.w.greaterThan(0.5).and(y.greaterThan(s0.x)).and(y.lessThan(s0.y)).and(far.lessThan(rc.x)), () => {
         const m = vec4(face.sample(li, p)).toVar(`swgCloud${tag}M`);
         cov.assign(max(cov, m.x));
         If(m.x.greaterThan(1e-3), () => {
@@ -389,13 +461,18 @@ function densityFn(R: Reads, detail: boolean): Any {
             { rise: q0.x, fallFrom: q0.y, fallTo: q0.z, anvil: q0.w, billow: q1.y, erosion: q1.z, taper: q2.z, density: q2.x, reach },
             { sigma: R.l0.x, erosion: R.l0.y, edgeHard: R.l0.z, edgeSoft: R.l0.w, wispyBand: R.l1.x, carve: R.l5.x, taperFrom: R.l5.z, anvilFrom: R.l6.x, anvilTo: R.l6.y, anvilPower: R.l5.w, bite: R.l6.z, softBite: R.l6.w },
           );
-          const dd = float(d).toVar(`swgCloud${tag}D`);
+          // Pass 3, wave 2 (maker T): faded out over the last of its reach.
+          const dd = float(d).mul(float(1).sub(smoothstep(rc.y, rc.x, far))).toVar(`swgCloud${tag}D`);
           sigma.addAssign(dd);
           hw.addAssign(dd.mul(h));
+          If(dd.greaterThan(most), () => {
+            most.assign(dd);
+            mostL.assign(float(li));
+          });
         });
       });
     });
-    return vec4(sigma, hw.div(max(sigma, 1e-9)), cov, 0);
+    return vec4(sigma, hw.div(max(sigma, 1e-9)), cov, mostL);
   }).setLayout({ name: detail ? 'swgCloudDensity' : 'swgCloudDensityLight', type: 'vec4', inputs: [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }] });
 }
 
@@ -426,8 +503,12 @@ function rayLengthOf(z: Any, ndc: Any, p1: Any): Any {
   return z.mul(sqrt(float(1).add(vx.mul(vx)).add(vy.mul(vy))));
 }
 
-/** The march's two outputs: the light and what gets through (rgba), and the distances (mean cloud, ray end). */
-const TRACE_OUT = struct({ light: 'vec4', dist: 'vec4' });
+/**
+ * The march's three outputs: the light and what gets through (rgba); the distances in kilometres (mean cloud, ray end) and the
+ * ray's drift (m/s, x and z, its clouds' own layer's, weighed by what each step took); and which pixel of its two by two it
+ * marched (pass 3, wave 2, maker T: the resolve reads it).
+ */
+const TRACE_OUT = struct({ light: 'vec4', dist: 'vec4', pick: 'vec4' });
 
 /** A value that is not a number or is infinite (the f32's exponent field filled: WGSL has no `isnan` that holds). */
 const notFinite = (x: Any): Any => floatBitsToUint(x).bitAnd(uint(0x7f800000)).equal(uint(0x7f800000));
@@ -440,8 +521,13 @@ export interface MarchSources {
   face: CloudMapFace;
 }
 
-/** The farthest distance a half float of the trace's distance output keeps, metres. */
-const FAR_KEPT = 60000;
+/**
+ * Ultra's eighth light step (pass 3, wave 2, maker T; the design's 2.6): its end as a share of the light's reach, past the sixth
+ * cone step's 0.38, and its cone kernel (a unit vector, out of the six's way). Not a look number: where the extra sample stands.
+ */
+export const LIGHT_EXTRA = { end: 0.52, kernel: [-0.55, 0.7, -0.45] as const };
+/** Pass 3, wave 2 (maker B): one over pi, the floor's light into a sky radiance. */
+const INV_PI = 1 / Math.PI;
 
 /**
  * The march (the full-screen draw into the trace). Every picture read inside its loops is at a named level; its loop is built
@@ -470,21 +556,64 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
   const L5 = g(u.l5);
   const L6 = g(u.l6);
   const LIGHT = g(u.light);
+  // Pass 3, wave 2 (maker B, the night): the floor's sky radiance and the drama now.
+  const NIGHT = g(u.night);
   const OFF = uniformArray(u.off, 'vec4').setGroup(renderGroup);
   const OFF2 = uniformArray(u.off2, 'vec4').setGroup(renderGroup);
   const STREAK = uniformArray(u.streak, 'vec4').setGroup(renderGroup);
+  // Pass 3, wave 2 (maker T): the tier's steps, each layer's reach and band, the fill-in's frame (`CLOUD_RU.ru`, `qs`).
+  const ST = g(u.st);
+  const RCH = uniformArray(u.rch, 'vec4').setGroup(renderGroup);
+  const RU = g(CLOUD_RU.ru);
+  const QS = g(CLOUD_RU.qs);
   const depth = texture(s.depth);
   const shape = texture3D(s.noise.shape);
   const detail = texture3D(s.noise.detail);
   const curl = texture(s.noise.curl);
-  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6 };
+  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6, rch: RCH };
   const dens = densityFn(R, true);
   const densL = densityFn(R, false);
   const n = tables.nodes;
   const look = { forward: L2.x, back: L2.y, forwardShare: L2.z, octaveExtinction: L3.x, octaveLight: L3.y, octavePhase: L3.z, powder: L3.w, powderDepth: L4.x };
   const face = s.face;
   const out = Fn(() => {
-    const st = uv();
+    // Pass 3, wave 2 (maker T): which trace pixel this one marches. Under the fill-in (`RU.x` 1) each texel of the quarter
+    // target is a two by two of the trace and marches one of its four (`subPixelOf`'s rule: the frame's order, a checkerboard
+    // between tiles, and across a depth edge the near and the far side in turn); else each texel is its own trace pixel.
+    const quarter = RU.x.greaterThan(0.5);
+    const tq = floor(uv().mul(select(quarter, QS.xy, TR.xy))).toVar('swgCloudTq');
+    const sd: Any[] = [];
+    for (let k = 0; k < 4; k++) {
+      const sub = tq.mul(2).add(vec2(k & 1, k >> 1)).add(0.5).div(TR.xy);
+      const at = ivec2(clamp(floor(sub.mul(P1.zw)), vec2(0), P1.zw.sub(1)));
+      const dz = float(depth.load(at).x);
+      sd.push(select(skyDepth(dz, s.reversed), float(1e9), viewZ(dz, P0.x, P0.y, s.reversed)).toVar(`swgCloudSd${k}`));
+    }
+    const phase = RU.y;
+    const checker = tq.x.add(tq.y).mod(2).toVar('swgCloudChk');
+    const lo = min(min(sd[0], sd[1]), min(sd[2], sd[3]));
+    const hi = max(max(sd[0], sd[1]), max(sd[2], sd[3]));
+    const edge = hi.sub(lo).greaterThan(lo.mul(T2.y).add(2));
+    const midD = lo.add(hi).mul(0.5).toVar('swgCloudMidD');
+    const wantFar = select(phase.add(checker).mod(2).lessThan(0.5), float(1), float(0)).toVar('swgCloudWantFar');
+    const cand = sd.map((dk, k) => select(abs(select(dk.greaterThan(midD), float(1), float(0)).sub(wantFar)).lessThan(0.5), float(1), float(0)).toVar(`swgCloudCand${k}`));
+    const nC = max(cand[0].add(cand[1]).add(cand[2]).add(cand[3]), 1).toVar('swgCloudNC');
+    const kk = floor(phase.mul(0.5)).add(checker);
+    const mm = kk.sub(nC.mul(floor(kk.div(nC)))).toVar('swgCloudMm');
+    const seen = float(0).toVar('swgCloudSeen');
+    const pick = float(0).toVar('swgCloudPick');
+    for (let k = 0; k < 4; k++) {
+      If(cand[k].greaterThan(0.5).and(abs(seen.sub(mm)).lessThan(0.5)), () => {
+        pick.assign(k);
+      });
+      seen.addAssign(cand[k]);
+    }
+    const o4 = phase.add(checker.mul(2)).mod(4);
+    const inOrder = select(o4.lessThan(0.5), float(0), select(o4.lessThan(1.5), float(3), select(o4.lessThan(2.5), float(1), float(2))));
+    const subPx = select(quarter, select(edge, pick, inOrder), float(0)).toVar('swgCloudSub');
+    const subY = floor(subPx.mul(0.5));
+    const tp = select(quarter, tq.mul(2).add(vec2(subPx.sub(subY.mul(2)), subY)), tq);
+    const st = tp.add(0.5).div(TR.xy).toVar('swgCloudSt');
     // The ray: its way in the world (the camera's turn of its view direction), from the lens.
     const ndc = ndcOf(st).toVar('swgCloudNdc');
     const dir = normalize(TURN.mul(vec3(ndc.x.mul(P1.x), ndc.y.mul(P1.y), -1))).toVar('swgCloudDir');
@@ -513,7 +642,14 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
       const ta = band.x.sub(camY).div(dy);
       const tb = band.y.sub(camY).div(dy);
       const a0 = max(min(ta, tb), 0);
-      const a1 = min(max(ta, tb), maxT);
+      // Pass 3, wave 2 (maker T): a band reaches as far as the farthest-reaching layer standing in it (a storm deck's 80 km,
+      // the rest 50), so a sky with towers in its low deck walks no farther through its high one.
+      let rb: Any = float(0);
+      for (let l = 0; l < CLOUD_LAYER_MAX; l++) {
+        const rl = vec4(RCH.element(l));
+        rb = max(rb, select(rl.z.lessThanEqual(band.y).and(rl.w.greaterThanEqual(band.x)), rl.x, float(0)));
+      }
+      const a1 = min(max(ta, tb), min(maxT, rb));
       const ok = int(b).lessThan(bands).and(a1.greaterThan(a0));
       const v = vec2(select(ok, a0, float(1e9)), select(ok, a1, float(-1))).toVar(`swgCloudIv${b}`);
       iv.push(v);
@@ -529,8 +665,13 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
       .add(vec3(tables.skyRadiance(normalize(sunAz.add(vec3(0, 0.15, 0))))))
       .add(vec3(tables.skyRadiance(normalize(sunAz.negate().add(vec3(0, 0.15, 0))))))
       .mul(1 / 3)
+      // Pass 3, wave 2 (maker B, the night): the drama's share of the night's floor beside the sky's own light (at 1, as the land's
+      // hemisphere takes it; at the 0 start, none).
+      .add(NIGHT.xyz)
       .toVar('swgCloudAmb');
-    const msCamL = dot(vec3(tables.multiScatterAt(P0.w, n.sunDir.y)), vec3(1 / 3)).toVar('swgCloudMsCam');
+    // Pass 3, wave 2 (maker B, the night): the height ratio read along the night light's way (the sun by day, to the bit; the
+    // moon by night), never the sun's under the horizon, whose multiple scattering is nought at night (the read-back's).
+    const msCamL = dot(vec3(tables.multiScatterAt(P0.w, Ldir.y)), vec3(1 / 3)).toVar('swgCloudMsCam');
     const stored = storedOf().toVar('swgCloudStored');
     const T = float(1).toVar('swgCloudT');
     const L = vec3(0).toVar('swgCloudL');
@@ -538,7 +679,9 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     const wSum = float(0).toVar('swgCloudWSum');
     const grow = float(1).toVar('swgCloudGrow');
     const t = float(tEnter).toVar('swgCloudTT');
-    const steps = int(T0.x);
+    // Pass 3, wave 2 (maker T): the tier's steps, the most looking up and the most along the horizon, by how high the ray looks.
+    const vSum = vec2(0).toVar('swgCloudVSum');
+    const steps = int(mix(ST.y, ST.x, clamp(abs(dir.y).mul(2), 0, 1)));
     If(tEnter.lessThan(tExit), () => {
       Loop({ start: int(0), end: int(CLOUD_STEPS_MOST), type: 'int', condition: '<', name: 'cs' }, ({ cs }: Any) => {
         If(cs.greaterThanEqual(steps).or(t.greaterThanEqual(tExit)).or(T.lessThan(T1.w)), () => {
@@ -584,7 +727,8 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
           // The light march: six steps in a cone toward the light and one far, the cheap density (no detail) at each.
           const tau = float(0).toVar('swgCloudTau');
           let prevEnd = 0;
-          for (let k = 0; k < LIGHT_STEPS.ends.length; k++) {
+          const cone = LIGHT_STEPS.ends.length - 1;
+          for (let k = 0; k < cone; k++) {
             const e = LIGHT_STEPS.ends[k];
             const mid = (prevEnd + e) * 0.5;
             const len = e - prevEnd;
@@ -594,6 +738,22 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
             const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar(`swgCloudLp${k}`);
             tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(len)));
           }
+          // Pass 3, wave 2 (maker T): Ultra's eighth light step (`ST.z`), in the cone past the sixth, the far one then shorter.
+          const xOn = ST.z.greaterThan(0.5);
+          If(xOn, () => {
+            const xm = (prevEnd + LIGHT_EXTRA.end) * 0.5;
+            const kv = LIGHT_EXTRA.kernel;
+            const dist = T1.z.mul(xm);
+            const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar('swgCloudLpX');
+            tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(LIGHT_EXTRA.end - prevEnd)));
+          });
+          {
+            // The far step, on the light's own axis, from the cone's end to the reach.
+            const from = select(xOn, float(LIGHT_EXTRA.end), float(prevEnd));
+            const fm = from.add(1).mul(0.5);
+            const lp = p.add(Ldir.mul(T1.z.mul(fm))).toVar(`swgCloudLp${cone}`);
+            tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(float(1).sub(from))));
+          }
           // Each body's light at the sample's own height through the air, through the cloud by the light march's depth.
           const hKm = max(y.mul(0.001), 0.001).toVar('swgCloudHKm');
           const lit = (dirB: Any, top: Any, tag: string): Any => {
@@ -602,7 +762,8 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
           };
           const Ls = lit(n.sunDir, n.sunTop, 'S').add(lit(n.sun2Dir, n.sun2Top, 'S2')).add(lit(n.moonDir, n.moonTop, 'M')).toVar('swgCloudLs');
           const powder = powderOf(LIGHT_NODE, look, sig, dot(dir, Ldir));
-          const ms = dot(vec3(tables.multiScatterAt(hKm, n.sunDir.y)), vec3(1 / 3));
+          // Pass 3, wave 2 (maker B, the night): along the night light's way, as at the camera.
+          const ms = dot(vec3(tables.multiScatterAt(hKm, Ldir.y)), vec3(1 / 3));
           const amb = ambTop.mul(ambientShareOf(LIGHT_NODE, ms, msCamL, d.y, L4.z)).mul(L4.y);
           const S = Ls.mul(powder).add(amb).mul(L2.w).toVar('swgCloudS');
           const add = stepLightOf(LIGHT_NODE, S, sig, ds);
@@ -610,6 +771,8 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
           L.addAssign(add.mul(T));
           dSum.addAssign(tm.mul(T.sub(Tn)));
           wSum.addAssign(T.sub(Tn));
+          // Pass 3, wave 2 (maker T): the drift of the layer that gave this sample the most (the contract's s3.zw, m/s).
+          vSum.addAssign(vec4(face.slot(int(d.w), 3)).zw.mul(T.sub(Tn)));
           T.assign(Tn);
         }).Else(() => {
           // Over clear map the step grows (where a band holds the point and its map has no cover at all), up to the longest.
@@ -622,18 +785,23 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     const meanD = select(wSum.greaterThan(1e-4), dSum.div(max(wSum, 1e-9)), endD);
     const light = min(L.mul(stored), vec3(PRE_FIXED.cap));
     const bad = notFinite(light.x).or(notFinite(light.y)).or(notFinite(light.z)).or(notFinite(T));
-    return TRACE_OUT(select(bad, vec4(0, 0, 0, 1), vec4(light, clamp(T, 0, 1))), vec4(min(meanD, FAR_KEPT), min(endD, FAR_KEPT), 0, 1));
+    // Pass 3, wave 2 (maker T): the distances in kilometres (a storm's reach is past a half float's metres), the drift beside them.
+    const vel = select(wSum.greaterThan(1e-4), vSum.div(max(wSum, 1e-9)), vec2(0));
+    return TRACE_OUT(select(bad, vec4(0, 0, 0, 1), vec4(light, clamp(T, 0, 1))), vec4(meanD.mul(DIST_UNIT), endD.mul(DIST_UNIT), vel.x, vel.y), vec4(subPx, 0, 0, 1));
   })().toConst();
-  m.fragmentNode = outputStruct(out.get('light'), out.get('dist'));
-  return graph(m, 8, { uniforms: { p0: P0, p1: P1, turn: TURN, tr: TR, t0: T0, t1: T1, t2: T2, l0: L0, l1: L1, l2: L2, l3: L3, l4: L4, light: LIGHT }, textures: { depth, shape, detail, curl } });
+  m.fragmentNode = outputStruct(out.get('light'), out.get('dist'), out.get('pick'));
+  return graph(m, 8, { uniforms: { p0: P0, p1: P1, turn: TURN, tr: TR, t0: T0, t1: T1, t2: T2, l0: L0, l1: L1, l2: L2, l3: L3, l4: L4, light: LIGHT, st: ST, ru: RU, qs: QS }, textures: { depth, shape, detail, curl } });
 }
 
 // ---------------------------------------------------------------- the composite's graph
 
-/** What the composite reads: the picture coming in, the trace's two pictures, the scene's depth and its see-through layer. */
+/**
+ * What the composite reads: the picture coming in, the trace's two pictures (pass 3, wave 2, maker T: by `{ value }`, the
+ * resolved history this frame or the whole trace marched in flight mode), the scene's depth and its see-through layer.
+ */
 export interface CompositeSources {
   input: { value: THREE.Texture | null };
-  trace: THREE.RenderTarget;
+  trace: { light: { value: THREE.Texture | null }; dist: { value: THREE.Texture | null } };
   depth: THREE.Texture;
   see: THREE.Texture;
   reversed: boolean;
@@ -664,12 +832,13 @@ export function compositeGraph(u: CloudMarchUniforms, s: CompositeSources): Chai
   const P0 = g(u.p0);
   const P1 = g(u.p1);
   const TURN = g(u.turn);
-  const TR = g(u.tr);
+  // Pass 3, wave 2 (maker T): the size of the trace read this frame (`CLOUD_RU.ct`: the history's, or flight mode's smaller one).
+  const CT = g(CLOUD_RU.ct);
   const T1 = g(u.t1);
   const T2 = g(u.t2);
   const input = liveTexture(s.input, halfFallback());
-  const tl = texture(s.trace.textures[0]);
-  const td = texture(s.trace.textures[1]);
+  const tl = liveTexture(s.trace.light, halfFallback());
+  const td = liveTexture(s.trace.dist, halfFallback());
   const depth = texture(s.depth);
   const see = texture(s.see);
   // The march's view, read once a render (a small whole number written, never boxed).
@@ -686,40 +855,12 @@ export function compositeGraph(u: CloudMarchUniforms, s: CompositeSources): Chai
     const dz = float(depth.load(px).x).toVar('swgCloudCD');
     const ndc = ndcOf(st).toVar('swgCloudCNdc');
     const dist = min(select(skyDepth(dz, s.reversed), T1.y, rayLengthOf(viewZ(dz, P0.x, P0.y, s.reversed), ndc, P1)), T1.y).toVar('swgCloudCDist');
-    // The trace is sampled at its own size: its coordinates are the pixel's share of the screen times the trace's texels (the
-    // September march's third bug read a half-size product's taps at every size).
-    const tc = st.mul(TR.xy).sub(0.5);
-    const q = floor(tc);
-    const f = tc.sub(q);
-    const acc = vec4(0).toVar('swgCloudCAcc');
-    const accD = float(0).toVar('swgCloudCAccD');
-    const wsum = float(0).toVar('swgCloudCW');
-    const best = float(1e30).toVar('swgCloudCBest');
-    const bestL = vec4(0, 0, 0, 1).toVar('swgCloudCBL');
-    const bestD = float(0).toVar('swgCloudCBD');
-    const tol = dist.mul(T2.y).add(2).toVar('swgCloudCTol');
-    for (let j = 0; j <= 1; j++) {
-      for (let i = 0; i <= 1; i++) {
-        const at = ivec2(clamp(q.add(vec2(i, j)), vec2(0), TR.xy.sub(1)));
-        const a = vec4(tl.load(at)).toVar(`swgCloudCA${i}${j}`);
-        const b = vec4(td.load(at)).toVar(`swgCloudCB${i}${j}`);
-        const bw = (i === 0 ? float(1).sub(f.x) : f.x).mul(j === 0 ? float(1).sub(f.y) : f.y);
-        const gap = abs(b.y.sub(dist));
-        const k = gap.div(tol);
-        const w = bw.div(float(1).add(k.mul(k).mul(16))).add(1e-6).toVar(`swgCloudCWt${i}${j}`);
-        acc.addAssign(a.mul(w));
-        accD.addAssign(b.x.mul(w));
-        wsum.addAssign(w);
-        If(gap.lessThan(best), () => {
-          best.assign(gap);
-          bestL.assign(a);
-          bestD.assign(b.x);
-        });
-      }
-    }
-    const matched = best.lessThan(tol);
-    const tr = select(matched, acc.div(max(wsum, 1e-6)), bestL).toVar('swgCloudCTr');
-    const meanD = select(matched, accD.div(max(wsum, 1e-6)), bestD).toVar('swgCloudCMean');
+    // The trace is sampled at its own size (`CT`, the picture read this frame): its coordinates are the pixel's share of the
+    // screen times the trace's texels (the September march's third bug read a half-size product's taps at every size); its
+    // four nearest texels weighed by how near each ray's end is to this pixel's distance (`traceTapsOf`, the motion's read too).
+    const taps = traceTapsOf(tl, td, CT.xy, st, dist, T2.y, 'C');
+    const tr = taps.tr;
+    const meanD = taps.meanD.toVar('swgCloudCMean');
     // The cloud hazed at its mean distance by the haze pass's own rule (the volume to 24 km, the sky view and the far rule
     // past it), the air's light stood in the stored picture's units; what the air adds laid in the share the cloud covers.
     const a = airTerms(tables, ndc, max(meanD, 1), P1, TURN, 'Cloud');
@@ -738,7 +879,7 @@ export function compositeGraph(u: CloudMarchUniforms, s: CompositeSources): Chai
     const bad = notFinite(outC.x).or(notFinite(outC.y)).or(notFinite(outC.z));
     return vec4(clamp(select(bad, c.rgb, outC), vec3(0), vec3(CHAIN_NUMBERS.sanitize.stored)), 1);
   })();
-  return graph(m, 5, { uniforms: { p0: P0, p1: P1, turn: TURN, tr: TR, t1: T1, t2: T2 }, textures: { input, traceLight: tl, traceDist: td, depth, see } });
+  return graph(m, 5, { uniforms: { p0: P0, p1: P1, turn: TURN, ct: CT, t1: T1, t2: T2 }, textures: { input, traceLight: tl, traceDist: td, depth, see } });
 }
 
 // ---------------------------------------------------------------- the pass
@@ -769,6 +910,13 @@ export const CLOUD_TRACE: { value: THREE.Texture | null } = { value: null };
 /** A target of a chain buffer's own kind (half floats, no depth, no stencil): the composite is compiled against it in play. */
 const WARM_BUFFER = new THREE.RenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, samples: 0 });
 
+/** Pass 3, wave 2 (maker T): the motion's stand-in where the scene carries no motion buffer (the motion is then never drawn). */
+const MOTION_STAND_IN = (() => {
+  const t = new THREE.DataTexture(new Uint16Array(4), 1, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+  t.needsUpdate = true;
+  return t;
+})();
+
 /**
  * The clouds' pass (the registry's `clouds`, after the haze and before the edge smoothing), registered by the WebGPU chain's
  * spine under our sky alone. With the switch off it makes nothing and is never on, so the frame and its pipelines are the
@@ -782,8 +930,35 @@ export class GpuCloudPass implements FxPass {
   private readonly sceneTarget: THREE.RenderTarget;
   private readonly see: THREE.Texture | null;
   private readonly input = { value: null as THREE.Texture | null };
-  /** The trace: the cloud's light and transmittance, and its distances (two half-float outputs). */
-  readonly trace: THREE.RenderTarget;
+  /**
+   * Pass 3, wave 2 (maker T): the march draws into `quarter` under the fill-in (a quarter of the trace's pixels, three outputs:
+   * the light and what gets through, the distances and drift, which pixel of its two by two), or into `whole` (the whole trace
+   * marched, in flight mode at its smaller size, or with the fill-in off at the trace's); the resolve into one of `hist` (the
+   * trace's size, two taken in turn), which the composite then reads; the clouds' motion into `motionRT` (the scene's size).
+   */
+  readonly quarter: THREE.RenderTarget;
+  readonly whole: THREE.RenderTarget;
+  private readonly hist: [THREE.RenderTarget, THREE.RenderTarget];
+  private hLast = 0;
+  readonly motionRT: THREE.RenderTarget;
+  /** The trace the composite and the motion read this frame, and last frame's history the resolve reads. */
+  private readonly traceIn = { light: { value: null as THREE.Texture | null }, dist: { value: null as THREE.Texture | null } };
+  private readonly histIn = { light: { value: null as THREE.Texture | null }, dist: { value: null as THREE.Texture | null } };
+  /** What the resolve reads of this frame's march: the quarter's three pictures, or flight mode's whole trace's. */
+  private readonly marchIn = { light: { value: null as THREE.Texture | null }, dist: { value: null as THREE.Texture | null }, pick: { value: null as THREE.Texture | null } };
+  private readonly sceneMotion: THREE.Texture | null;
+  private resolveG: ChainGraph | null = null;
+  private motionG: ChainGraph | null = null;
+  /** The next resolve takes nothing from the history (made, resized, flight mode left, a frame not drawn). */
+  private fresh = true;
+  private lastFrame = -10;
+  private layersVersion = -1;
+  private wholeNow = false;
+  private readonly flight = newFlightState();
+  /** Last drawn frame's camera: its place (metres, doubles), its tangents and its turn's nine elements. */
+  private readonly pc = new Float64Array(14);
+  private hasPrev = false;
+  private readonly wsize = new Int32Array(2);
   private marchG: ChainGraph | null = null;
   private compG: ChainGraph | null = null;
   private building: Promise<void> | null = null;
@@ -801,26 +976,32 @@ export class GpuCloudPass implements FxPass {
     this.renderer = renderer;
     this.sceneTarget = sceneTarget;
     this.see = seeTextureOf(sceneTarget.texture);
-    const t = new THREE.RenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, samples: 0, count: 2 });
-    t.textures[0].name = 'fx.gpu.clouds.trace';
-    t.textures[1].name = 'fx.gpu.clouds.traceDistance';
-    for (const x of t.textures) {
-      x.minFilter = THREE.NearestFilter;
-      x.magFilter = THREE.NearestFilter;
-      x.generateMipmaps = false;
-    }
-    this.trace = t;
+    this.sceneMotion = motionTextureOf(sceneTarget.texture);
+    const target = (name: string, count: number, filter: THREE.MagnificationTextureFilter): THREE.RenderTarget => {
+      const t = new THREE.RenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false, stencilBuffer: false, samples: 0, count });
+      t.textures.forEach((x, i) => {
+        x.name = `fx.gpu.clouds.${name}.${i}`;
+        x.minFilter = filter;
+        x.magFilter = filter;
+        x.generateMipmaps = false;
+      });
+      return t;
+    };
+    this.quarter = target('quarter', 3, THREE.NearestFilter);
+    this.whole = target('trace', 3, THREE.NearestFilter);
+    this.hist = [target('history0', 2, THREE.LinearFilter), target('history1', 2, THREE.LinearFilter)];
+    this.motionRT = target('motion', 1, THREE.NearestFilter);
     LIVE.push(this);
   }
 
-  /** The trace's colour picture (its alpha what gets through the cloud: the flare reads it at the sun's pixel). */
+  /** The trace's picture the composite read last (its alpha what gets through the cloud: the flare reads it at the sun's pixel). */
   get traceTexture(): THREE.Texture {
-    return this.trace.textures[0];
+    return this.traceIn.light.value ?? this.hist[0].textures[0];
   }
 
   /** Whether the graphs are made (a warm-up item there to hand). */
   get built(): boolean {
-    return this.marchG !== null && this.compG !== null;
+    return this.marchG !== null && this.compG !== null && this.resolveG !== null && this.motionG !== null;
   }
 
   /**
@@ -835,12 +1016,20 @@ export class GpuCloudPass implements FxPass {
     const reversed = r.reversedDepthBuffer === true;
     const depth = this.sceneTarget.depthTexture as THREE.Texture;
     this.marchG = marchGraph(CLOUD_U, { depth, reversed, noise: this.noise, face: CLOUD_FACE.face });
-    this.compG = compositeGraph(CLOUD_U, { input: this.input, trace: this.trace, depth, see: this.see, reversed });
+    this.compG = compositeGraph(CLOUD_U, { input: this.input, trace: this.traceIn, depth, see: this.see, reversed });
+    // Pass 3, wave 2 (maker T): the resolve against a history target, the motion against a chain buffer's kind (one half-float
+    // output, no depth), the march against both of its targets (one kind: entering flight mode builds nothing).
+    const mn: MarchNodes = this.marchNodes();
+    this.resolveG = resolveGraph(mn, CLOUD_RU, { quarter: this.marchIn, history: this.histIn, depth, reversed });
+    this.motionG = motionGraph(mn, CLOUD_RU, { motion: this.sceneMotion ?? MOTION_STAND_IN, depth, light: this.traceIn.light, dist: this.traceIn.dist, reversed });
     const jobs: Promise<unknown>[] = [this.noise.compile()];
     const prev = r.getRenderTarget();
     try {
       for (const [into, g] of [
-        [this.trace, this.marchG],
+        [this.quarter, this.marchG],
+        [this.whole, this.marchG],
+        [this.hist[0], this.resolveG],
+        [WARM_BUFFER, this.motionG],
         [WARM_BUFFER, this.compG],
       ] as const) {
         r.setRenderTarget(into);
@@ -943,6 +1132,18 @@ export class GpuCloudPass implements FxPass {
     u.light.x = ld.x;
     u.light.y = ld.y;
     u.light.z = ld.z;
+    // Pass 3, wave 2 (maker B, the night): the share of the night's floor the clouds take (the drama, eased in as the sun goes 0
+    // to 6 degrees down: its sine 0 to -0.1) times the floor as a sky radiance (an even hemisphere giving its light on a level
+    // surface is that light over pi), field by field. At the drama's 0 start the clouds are lit by the moons and the sky they
+    // hide alone (a real night: dark gaps in the stars); at 1 by the floor as the land is.
+    const fl = AIR.frame.floor;
+    const nv = u.night;
+    const sunDown = -AIR.frame.sunDir.y * 10;
+    const share = CLOUD_LOOK.nightDrama * Math.min(1, Math.max(0, sunDown)) * INV_PI;
+    nv.x = fl.r * share;
+    nv.y = fl.g * share;
+    nv.z = fl.b * share;
+    nv.w = 0;
     writeDials(u);
     this.frameNo++;
     // A golden-ratio walk of the jitter's phase, frame by frame (the edge smoothing gathers it).
@@ -960,25 +1161,159 @@ export class GpuCloudPass implements FxPass {
       }
       writeOffsets(u, F.stack, F.count, F.drift, this.streaks, cam);
     }
+    this.prepareReuse(ctx);
+  }
+
+  /**
+   * Pass 3, wave 2 (maker T): the tier's steps and each layer's reach (the ray's end the farthest a drawn layer reaches); flight
+   * mode (`flightStep`); whether this frame resets the history (a cut, a frame not drawn, flight mode left, the layers changed);
+   * last frame's camera against this one's (the move in doubles, its turn and tangents); the fill-in's dials. Allocates nothing.
+   */
+  private prepareReuse(ctx: FxFrameContext): void {
+    const u = CLOUD_U;
+    const R = CLOUD_RU;
+    const F = CLOUD_FEED;
+    const cam = ctx.camera.position;
+    u.t1.y = writeReach(u, F.stack, F.count);
+    const dt = ctx.dt > 0 ? ctx.dt : 0;
+    const cut = ctx.cameraCut === true;
+    if (cut) flightForget(this.flight);
+    const flying = flightStep(this.flight, CLOUD_FLIGHT.ship, cam.y, dt, F.stack, F.count);
+    if (flying && !CLOUD_FLIGHT.on) CLOUD_REUSE_STATS.flightEntered++;
+    CLOUD_FLIGHT.on = flying;
+    const whole = flying || CLOUD_TUNE.reuse < 0.5;
+    this.wholeNow = whole;
+    const missed = ctx.frame !== this.lastFrame + 1;
+    this.lastFrame = ctx.frame;
+    const moved = F.version !== this.layersVersion;
+    this.layersVersion = F.version;
+    const reset = cut || missed || moved || this.fresh || !this.hasPrev;
+    const ru = R.ru;
+    ru.x = whole ? 0 : 1;
+    // The phase walks twelve frames: four for the tile's order, and three turns of each side of a depth edge (one to three pixels).
+    ru.y = this.frameNo % 12;
+    ru.z = reset ? 1 : 0;
+    ru.w = dt;
+    // Last frame's camera against this one's: the move worked in doubles (nothing measured from the world's middle reaches the
+    // card), last frame's turn and tangents; at a reset, this frame's own (the history is not read).
+    const pc = this.pc;
+    const mw = ctx.camera.matrixWorld.elements;
+    const pt = R.prevTurn.elements;
+    const dc = R.dc;
+    if (reset) {
+      dc.x = 0;
+      dc.y = 0;
+      dc.z = 0;
+      R.pt.x = ctx.tanHalfFov.x;
+      R.pt.y = ctx.tanHalfFov.y;
+      pt[0] = mw[0];
+      pt[1] = mw[1];
+      pt[2] = mw[2];
+      pt[3] = mw[4];
+      pt[4] = mw[5];
+      pt[5] = mw[6];
+      pt[6] = mw[8];
+      pt[7] = mw[9];
+      pt[8] = mw[10];
+    } else {
+      dc.x = cam.x - pc[0];
+      dc.y = cam.y - pc[1];
+      dc.z = cam.z - pc[2];
+      R.pt.x = pc[3];
+      R.pt.y = pc[4];
+      for (let i = 0; i < 9; i++) pt[i] = pc[5 + i];
+    }
+    pc[0] = cam.x;
+    pc[1] = cam.y;
+    pc[2] = cam.z;
+    pc[3] = ctx.tanHalfFov.x;
+    pc[4] = ctx.tanHalfFov.y;
+    pc[5] = mw[0];
+    pc[6] = mw[1];
+    pc[7] = mw[2];
+    pc[8] = mw[4];
+    pc[9] = mw[5];
+    pc[10] = mw[6];
+    pc[11] = mw[8];
+    pc[12] = mw[9];
+    pc[13] = mw[10];
+    this.hasPrev = true;
+    writeReuseDials(R);
   }
 
   render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {
-    if (output === null || !this.marchG || !this.compG) return false;
+    if (output === null || !this.marchG || !this.compG || !this.resolveG || !this.motionG) return false;
     const r = ctx.renderer as Any;
     const u = CLOUD_U;
+    const R = CLOUD_RU;
     if (u.p1.z !== input.width || u.p1.w !== input.height) {
       u.p1.z = input.width;
       u.p1.w = input.height;
     }
-    this.sizeTrace();
-    // The map rewritten for this camera first (the map's maker's frame), then the march, then the composite.
+    const whole = this.wholeNow;
+    this.sizeTrace(whole);
+    // The map rewritten for this camera first (the map's maker's frame), then the march, then the resolve, the composite and
+    // the clouds' motion.
     CLOUD_FACE.frame?.(ctx.camera);
-    r.setRenderTarget(this.trace);
+    let readL: THREE.Texture;
+    let readD: THREE.Texture;
+    // Pass 3, wave 2 (maker T): the march into the quarter (the fill-in) or into the whole trace (flight mode, the fill-in off).
+    const into = whole ? this.whole : this.quarter;
+    r.setRenderTarget(into);
     r.render(this.marchG.mesh, FX_CAMERA);
-    CLOUD_TRACE.value = this.trace.textures[0];
+    if (whole) CLOUD_REUSE_STATS.fullFrames++;
+    if (whole && !CLOUD_FLIGHT.on) {
+      // The fill-in off: the whole trace read as it is (wave 1's way, every pixel each frame); the history waits.
+      readL = this.whole.textures[0];
+      readD = this.whole.textures[1];
+      R.ct.x = this.whole.width;
+      R.ct.y = this.whole.height;
+      this.fresh = true;
+    } else {
+      // Resolved into the history not read, from the one read: the quarter's new rays, or in flight mode the whole trace at its
+      // smaller size, every texel new and keeping flight's short history. The resolve reads the march's target's own size and
+      // writes the history's (the trace's).
+      const last = this.hist[this.hLast];
+      const next = this.hist[1 - this.hLast];
+      this.histIn.light.value = last.textures[0];
+      this.histIn.dist.value = last.textures[1];
+      this.marchIn.light.value = into.textures[0];
+      this.marchIn.dist.value = into.textures[1];
+      this.marchIn.pick.value = into.textures[2];
+      R.qs.x = into.width;
+      R.qs.y = into.height;
+      if (CLOUD_U.tr.x !== next.width || CLOUD_U.tr.y !== next.height) {
+        CLOUD_U.tr.x = next.width;
+        CLOUD_U.tr.y = next.height;
+      }
+      r.setRenderTarget(next);
+      r.render(this.resolveG.mesh, FX_CAMERA);
+      this.hLast = 1 - this.hLast;
+      readL = next.textures[0];
+      readD = next.textures[1];
+      R.ct.x = next.width;
+      R.ct.y = next.height;
+      if (R.ru.z > 0.5) CLOUD_REUSE_STATS.resets++;
+      CLOUD_REUSE_STATS.resolved++;
+      if (CLOUD_FLIGHT.on) CLOUD_REUSE_STATS.flightFrames++;
+      this.fresh = false;
+    }
+    this.traceIn.light.value = readL;
+    this.traceIn.dist.value = readD;
+    CLOUD_TRACE.value = readL;
     this.input.value = input.texture;
     r.setRenderTarget(output);
     r.render(this.compG.mesh, FX_CAMERA);
+    // The clouds' motion for the edge smoothing, where it draws this frame (it stands after this pass in the chain).
+    const taa = taaPassNow();
+    if (this.sceneMotion && taa && taa.canDraw()) {
+      if (this.motionRT.width !== input.width || this.motionRT.height !== input.height) this.motionRT.setSize(input.width, input.height);
+      r.setRenderTarget(this.motionRT);
+      r.render(this.motionG.mesh, FX_CAMERA);
+      TAA_MOTION_IN.value = this.motionRT.texture;
+      TAA_MOTION_IN.frame = ctx.frame;
+      CLOUD_REUSE_STATS.motionDrawn++;
+    }
     this.drewLast = true;
     this.whyNot = null;
     CLOUD_DRAW.drew = true;
@@ -987,32 +1322,66 @@ export class GpuCloudPass implements FxPass {
     return true;
   }
 
-  /** The trace sized to the display (its CSS pixels: neither the pixel ratio nor the render scale multiplies it), capped by the budget. */
-  private sizeTrace(): void {
+  /**
+   * The trace sized to the display (its CSS pixels: neither the pixel ratio nor the render scale multiplies it), capped by the
+   * budget: the history at the trace's size and the quarter at half of it each way; the whole trace at flight mode's share
+   * under the fill-in, at the trace's with it off (a dial moved, never a mode entered, resizes it). `whole` says which the march
+   * draws into this frame, whose size its `tr` takes.
+   */
+  private sizeTrace(whole: boolean): void {
     const el = this.renderer.domElement as HTMLCanvasElement | undefined;
     // Whole numbers (a canvas's client size is; the scene's held as one), so nothing is boxed across the call.
     const w = el && el.clientWidth > 0 ? el.clientWidth | 0 : CLOUD_U.p1.z | 0;
     const h = el && el.clientHeight > 0 ? el.clientHeight | 0 : CLOUD_U.p1.w | 0;
     traceSizeOf(w, h, this.size);
-    const tw = this.size[0];
-    const th = this.size[1];
-    if (this.trace.width !== tw || this.trace.height !== th) this.trace.setSize(tw, th);
+    traceSizeAt(w, h, CLOUD_TUNE.reuse < 0.5 ? CLOUD_TUNE.trace : CLOUD_TUNE.flightTrace, this.wsize);
+    const hw = this.size[0];
+    const hh = this.size[1];
+    for (const t of this.hist) {
+      if (t.width !== hw || t.height !== hh) {
+        t.setSize(hw, hh);
+        this.fresh = true;
+      }
+    }
+    const qw = (hw + 1) >> 1;
+    const qh = (hh + 1) >> 1;
+    if (this.quarter.width !== qw || this.quarter.height !== qh) this.quarter.setSize(qw, qh);
+    if (this.whole.width !== this.wsize[0] || this.whole.height !== this.wsize[1]) this.whole.setSize(this.wsize[0], this.wsize[1]);
+    const qs = CLOUD_RU.qs;
+    qs.x = qw;
+    qs.y = qh;
+    qs.z = hw;
+    qs.w = hh;
+    const tw = whole ? this.wsize[0] : hw;
+    const th = whole ? this.wsize[1] : hh;
     if (CLOUD_U.tr.x !== tw || CLOUD_U.tr.y !== th) {
       CLOUD_U.tr.x = tw;
       CLOUD_U.tr.y = th;
     }
   }
 
+  /** The march's kept vectors the resolve and the motion read too, as nodes of their own (made once a build). */
+  private marchNodes(): MarchNodes {
+    const g = (v: unknown): Any => uniform(v as never).setGroup(renderGroup);
+    return { p0: g(CLOUD_U.p0), p1: g(CLOUD_U.p1), turn: g(CLOUD_U.turn), tr: g(CLOUD_U.tr), t1: g(CLOUD_U.t1) };
+  }
+
   setSize(_width: number, _height: number, _settings: FxSettings): void {}
 
-  /** Off: nothing (the base's pipelines exactly); on: the march against its trace and the composite against a chain buffer. */
+  /**
+   * Off: nothing (the base's pipelines exactly); on: the march against both its targets (one kind), the resolve against a
+   * history target, the composite and the motion against a chain buffer's kind.
+   */
   materials(): FxWarmItem[] {
     if (!CLOUD_DRAW.want) return [];
     this.build();
     // The noise baked whole while the warm-up's screen is up (its computes compiled first, off the frame).
     if (this.noise && !this.noise.baked) void this.bakeBehindScreen();
     const out: FxWarmItem[] = [];
-    if (this.marchG) out.push({ material: this.marchG.material, object: this.marchG.mesh, where: 'target', into: this.trace });
+    if (this.marchG) out.push({ material: this.marchG.material, object: this.marchG.mesh, where: 'target', into: this.quarter });
+    if (this.marchG) out.push({ material: this.marchG.material, object: this.marchG.mesh, where: 'target', into: this.whole });
+    if (this.resolveG) out.push({ material: this.resolveG.material, object: this.resolveG.mesh, where: 'target', into: this.hist[0] });
+    if (this.motionG) out.push({ material: this.motionG.material, object: this.motionG.mesh, where: 'target' });
     if (this.compG) out.push({ material: this.compG.material, object: this.compG.mesh, where: 'target' });
     return out;
   }
@@ -1022,8 +1391,19 @@ export class GpuCloudPass implements FxPass {
     return {
       drewLast: this.drewLast,
       whyNot: this.drewLast ? null : cloudsWhyNot(false, false, AIR.frame.on && AIR.tables !== null && AIR.tables.ready),
-      trace: [this.trace.width, this.trace.height],
-      graphs: { march: this.marchG !== null, composite: this.compG !== null, landed: this.landed },
+      trace: [this.hist[0].width, this.hist[0].height],
+      // Pass 3, wave 2 (maker T): the fill-in, flight mode and the tier's steps.
+      reuse: {
+        // The fixer: with the fill-in off the whole trace is marched at the trace's own size even in flight (`sizeTrace`).
+        mode: this.wholeNow ? (CLOUD_FLIGHT.on && CLOUD_TUNE.reuse >= 0.5 ? 'flight: the whole trace each frame at its smaller size' : 'every pixel each frame (the fill-in off)') : 'the fill-in: a quarter a frame',
+        quarter: [this.quarter.width, this.quarter.height],
+        whole: [this.whole.width, this.whole.height],
+        flight: { on: CLOUD_FLIGHT.on, ship: CLOUD_FLIGHT.ship, climb: +this.flight.vy.toFixed(1) },
+        tier: CLOUD_TIER.name,
+        reach: +CLOUD_U.t1.y.toFixed(0),
+        ...CLOUD_REUSE_STATS,
+      },
+      graphs: { march: this.marchG !== null, composite: this.compG !== null, resolve: this.resolveG !== null, motion: this.motionG !== null, landed: this.landed },
       noise: this.noise ? this.noise.report() : 'not made (the switch has not been on)',
       ...CLOUD_MARCH_STATS,
     };
@@ -1032,7 +1412,13 @@ export class GpuCloudPass implements FxPass {
   dispose(): void {
     this.marchG?.material.dispose();
     this.compG?.material.dispose();
-    this.trace.dispose();
+    this.resolveG?.material.dispose();
+    this.motionG?.material.dispose();
+    this.quarter.dispose();
+    this.whole.dispose();
+    this.hist[0].dispose();
+    this.hist[1].dispose();
+    this.motionRT.dispose();
     const at = LIVE.indexOf(this);
     if (at >= 0) LIVE.splice(at, 1);
   }

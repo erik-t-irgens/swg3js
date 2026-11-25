@@ -61,6 +61,8 @@ for (const f of ['cloudMarch.ts', 'cloudNoise.ts']) GPU_SIDE_FILES.add(`src/sky/
 // reached only through the runtime (`start.ts`); the layers, the climates, the twin, the file's reader and the console's edits
 // (`cloudLayers.ts`, `cloudClimate.ts`, `cloudMap.ts`, `cloudsFile.ts`, `cloudEdit.ts`) are pure.
 for (const f of ['cloudMapGpu.ts', 'cloudRun.ts']) GPU_SIDE_FILES.add(`src/sky/clouds/${f}`);
+// Pass 3, wave 2 (maker T): the clouds' fill-in, flight mode and motion graphs, reached only through the march (`cloudMarch.ts`).
+GPU_SIDE_FILES.add('src/sky/clouds/cloudResolve.ts');
 const inGpuDir = (f: string): boolean => rel(f).startsWith('src/core/gpu/') || GPU_SIDE_FILES.has(rel(f));
 /** A bare specifier of three's WebGPU build or its node shadows. */
 const WEBGPU_BARE = /^three\/(webgpu|tsl)(\/|$)|CSMShadowNode|three\.webgpu|three\.tsl/;

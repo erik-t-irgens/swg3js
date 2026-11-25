@@ -17,7 +17,7 @@ function stepOf(min: number, max: number): number {
 const MARCH_NOTES: Record<keyof typeof CLOUD_TUNE, string> = {
   trace: "the trace's share of the display each way (a half: a quarter of the pixels marched)",
   rayBudget: 'the most rays a frame; a larger display shrinks its trace to it',
-  steps: 'the most steps a ray takes',
+  steps: 'the most steps a ray looking straight up takes (the tier sets it)',
   nearStep: 'metres a step over the first stretch from the lens',
   nearReach: 'metres from the lens stepped finely',
   grow: "past that, a step is its distance's share",
@@ -28,6 +28,24 @@ const MARCH_NOTES: Record<keyof typeof CLOUD_TUNE, string> = {
   clearGrow: 'how fast steps grow over clear map',
   jitter: "the first step's jitter moves each frame (1) or holds (0)",
   depthMatch: "how near a trace texel's depth must be a pixel's, a share of its distance",
+  // Pass 3, wave 2 (maker T): the tier's steps, the fill-in, flight mode, the storm reach and the fade.
+  stepsHorizon: 'the most steps a ray along the horizon takes (the tier sets it)',
+  lightExtra: "Ultra's eighth light step on (1) or off (0) (the tier sets it)",
+  reuse: 'the fill-in: a quarter of the trace marched a frame, the rest from history (1), or every pixel every frame (0)',
+  history: 'how much of its history a freshly marched pixel keeps',
+  clampWiden: "how far past the new rays' spread a history may stand, a share of that spread",
+  motionFrom: 'trace pixels a frame a point moves before its history counts for less',
+  motionTo: '...and by which it counts for only the keep below',
+  motionKeep: "the history's weight left for a fast-moving point",
+  distChange: 'a history whose cloud distance changed by more than this share is dropped',
+  reactive: 'how hard a cloud tells the edge smoothing to trust the new frame',
+  flightTrace: "flight mode's trace, a share of the display each way (the whole of it marched each frame)",
+  flightHistory: 'how much of its history each pixel keeps in flight mode (0: nothing reused)',
+  flightNear: 'metres from a deck within which a fast climb enters flight mode',
+  flightClimb: 'metres a second up or down that counts as a fast climb',
+  flightHold: 'seconds flight mode holds after its reason has gone',
+  stormReach: 'metres a layer holding towers or storms reaches',
+  fade: "the share of each layer's reach over which its clouds fade out",
 };
 
 const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
@@ -59,6 +77,7 @@ const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
   ambient: "the sky's light on the clouds",
   belly: "a layer's base's ambient against its top's",
   cone: "the light march's cone, a share of the distance",
+  nightDrama: "the share of the night's floor (the land's light from the whole sky) the clouds take: 0 a real night (clouds only as stars missing), 1 lit as the land is",
 };
 
 /** The march's and the look's groups (made once a call; the menu asks once). */

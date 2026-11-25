@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { markSkyBehind } from '../sky/air/airHazeMath.ts';
 
 /**
  * A planet's sun, moons and other sky pictures, drawn as flat quads rather than THREE.Sprites.
@@ -23,6 +24,9 @@ export function makeSkyBody(map: THREE.Texture, width: number, additive: boolean
   // Unlit: kept out of the shadow cascades (whose defines are in a program's key) and the wetness, as
   // a space zone's star quads are.
   mat.userData.unlit = true;
+  // Pass 3, wave 2 (maker B): SWG's pictures and painted halos hang at infinity, so into the colour behind the clouds (an own
+  // field three's WebGPU key reads, `airHazeMath.ts`' `SKY_BEHIND`; WebGL's program key never reads it).
+  markSkyBehind(mat);
   const body: SkyBody = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
   body.scale.set(width, width, 1);
   return body;

@@ -242,6 +242,13 @@ export interface AirFrame {
   ringIn: number;
   ringOut: number;
   readonly ringTop: THREE.Color;
+  /**
+   * Pass 3, wave 2 (maker B): the night's floor under an applied system (the sky round's `floorHere`: starlight, airglow and the
+   * Milky Way as light from the whole sky, and the ring's light at a totality), the light it lays on a level surface here
+   * (scene units, beside the sky's own on the land's hemisphere); black with no applied system. The clouds' night ambient takes
+   * the same light, so the floor he sets lights the clouds as it lights the land.
+   */
+  readonly floor: THREE.Color;
 }
 
 /** The frame record, made once: the air's maker writes it, everything else reads it. */
@@ -274,6 +281,7 @@ export function makeAirFrame(): AirFrame {
     ringIn: 0.5,
     ringOut: 0.5,
     ringTop: new THREE.Color(0, 0, 0),
+    floor: new THREE.Color(0, 0, 0),
   };
 }
 

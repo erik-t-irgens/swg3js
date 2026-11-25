@@ -12,6 +12,7 @@ import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor
 import { cellIndexOf } from './cells.ts';
 import { letGoDrawn } from '../world/letGo.ts';
 import { RACE_TUNE } from './raceTune.ts';
+import { SHIP_CEILING } from './shipCeiling.ts';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -103,7 +104,8 @@ export interface VehicleSpec {
   boost: 'none' | 'burst' | 'heat';
   hop: boolean;
   /** Flyers: vertical speed, the most height above the ground, and the least. */
-  fly: { climb: number; ceiling: number; floor: number } | null;
+  /** Pass 3, wave 2 (maker B): `deck` true, the ceiling is the ships' dial (`SHIP_CEILING.now`, `shipCeiling.ts`) in place of `ceiling`. */
+  fly: { climb: number; ceiling: number; floor: number; deck?: boolean } | null;
   /** A living mount: it swims chest-deep rather than floating, and kicks up no dust. */
   animal: boolean;
   /** A starship: flies free of the ground once it has speed (a first flight model), lands as a flyer. */
@@ -235,7 +237,8 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         boost: 'burst',
         hop: false,
         // Hovering, the ship rises and sinks on the keys at a VTOL's pace; in flight the stick has it.
-        fly: { climb: big ? 6 : 10, ceiling: 1500, floor: 1.5 },
+        // Pass 3, wave 2 (maker B): its ceiling the ships' dial over the low deck's fair-weather top (`deck`), never under 1,500 m.
+        fly: { climb: big ? 6 : 10, ceiling: 1500, floor: 1.5, deck: true },
       };
     }
   }
@@ -2294,7 +2297,7 @@ export class Vehicle {
       }
       if (s.fly) {
         const rate = (drive.up ? 1 : 0) - (drive.down ? 1 : 0) + (drive.vertical ?? 0);
-        this.altitude = THREE.MathUtils.clamp(this.altitude + s.fly.climb * THREE.MathUtils.clamp(rate, -1, 1) * dt, s.fly.floor, s.fly.ceiling);
+        this.altitude = THREE.MathUtils.clamp(this.altitude + s.fly.climb * THREE.MathUtils.clamp(rate, -1, 1) * dt, s.fly.floor, s.fly.deck === true ? SHIP_CEILING.now : s.fly.ceiling);
       }
     } else if (s.fly && !drive) this.altitude = Math.max(s.fly.floor, this.altitude - s.fly.climb * 0.5 * dt);
     // Torque = inertia × acceleration, about the body's own axes.
@@ -2480,7 +2483,8 @@ export class Vehicle {
         if (gAhead + minH > belly) toGround = Math.min(toGround, THREE.MathUtils.clamp(((belly - gAhead) / minH) * 2.5, 0, 2.5));
       }
       const tooLow = !this.space && (hw < minH || toGround < 2.5);
-      const tooHigh = !this.space && h > s.fly!.ceiling;
+      // Pass 3, wave 2 (maker B): a ship's ceiling is the dial over the low deck (`SHIP_CEILING.now`), read as a field.
+      const tooHigh = !this.space && h > (s.fly!.deck === true ? SHIP_CEILING.now : s.fly!.ceiling);
       const slack = Math.abs(stick.y) < 0.15;
       if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
         const want = tooLow ? 0.1 : -0.05;

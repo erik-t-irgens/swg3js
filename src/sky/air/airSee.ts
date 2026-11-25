@@ -16,7 +16,7 @@
 import * as THREE from 'three';
 import { BlendMode, Node } from 'three/webgpu';
 import * as TSL from 'three/tsl';
-import { intoLayer, seeKindOf, timesAlpha, type SeeKind } from './airHazeMath.ts';
+import { intoLayer, layerKindOf, timesAlpha, type SeeKind } from './airHazeMath.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -58,7 +58,8 @@ class SeeColourNode extends Node {
   }
   setup(builder: Any): Any {
     if (!buildsLayer(builder)) return output;
-    const k = seeKindOf(builder.material);
+    // Pass 3, wave 2 (maker B): a draw at infinity (`SKY_BEHIND`) keeps its colour, behind the clouds.
+    const k = layerKindOf(builder.material);
     if (!intoLayer(k)) return output;
     return vec4(0, 0, 0, vec4(output).a);
   }
@@ -73,7 +74,7 @@ class SeeLayerNode extends Node {
     super('vec4');
   }
   setup(builder: Any): Any {
-    const k = seeKindOf(builder.material);
+    const k = layerKindOf(builder.material);
     SEE_STATS.built[k]++;
     if (k === 'solid') return vec4(0, 0, 0, roomSign());
     if (!intoLayer(k)) return vec4(0, 0, 0, 0);

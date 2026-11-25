@@ -21,7 +21,7 @@ import { motionTextureOf } from '../motion.ts';
 import type { ChainGraph } from '../gpuChain.ts';
 import { JITTER } from './taaJitter.ts';
 import { SMOOTHING, TAA_TUNE } from './taaTune.ts';
-import { taauGraph, traaGraph, type TaaInputs } from './taaGraphs.ts';
+import { TAA_MOTION_IN, taauGraph, traaGraph, type TaaInputs } from './taaGraphs.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -101,6 +101,8 @@ export class GpuTaaPass implements FxPass {
       p1: new THREE.Vector4(0.05, 0.1, 128.5, 0.5),
       size: new THREE.Vector4(1.5, 1.5, 1.5, 1.5),
       jitter: new THREE.Vector2(0.25, 0.25),
+      // Pass 3, wave 2 (maker T): the clouds' motion over the scene's on a frame they drew (`TAA_MOTION_IN`), the scene's otherwise.
+      motionIn: { value: null },
     };
     this.full = history('fx.gpu.taa.full', THREE.RedFormat);
     this.up = history('fx.gpu.taa.upscaled', THREE.RGFormat);
@@ -151,6 +153,8 @@ export class GpuTaaPass implements FxPass {
     if (reset) TAA_STATS.resets++;
     u.jitter.x = JITTER.on ? JITTER.x : 0;
     u.jitter.y = JITTER.on ? JITTER.y : 0;
+    // Pass 3, wave 2 (maker T): the clouds' motion where they drew this frame (they stand before this pass in the chain).
+    u.motionIn!.value = TAA_MOTION_IN.frame === ctx.frame ? TAA_MOTION_IN.value : null;
   }
 
   render(ctx: FxFrameContext, input: THREE.WebGLRenderTarget, output: THREE.WebGLRenderTarget | null): boolean {

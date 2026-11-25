@@ -204,7 +204,12 @@ export function installWarm(renderer: Any, nativeCompileAsync: (scene: Any, came
           // What it was drawn as either way (its pass, scene, lights and key), so a body never handed over says which pass
           // met it unwarmed: a clone of a look the warm-up built drawn where its prototype was not, or keyed otherwise.
           const warmed = was ? `warmed as ${builtHow.get(ro.object) ?? '?'}, drawn as ${howOf(ro)}` : `never warmed, drawn as ${howOf(ro)}`;
-          const name = `${m?.isShadowPassMaterial ? 'shadow of ' : ''}${m?.name || m?.type || '?'}#${m?.id ?? '?'} on ${ro?.object?.name || ro?.object?.type || '?'}#${ro?.object?.id ?? '?'} (${warmed})`;
+          // Pass 3, wave 2 (its fixer): an unnamed mesh made in play says what it is by its geometry and what it hangs under
+          // (three parents up), ahead of the words above so the bound below never cuts them. Only where a draw built a pipeline.
+          const o = ro?.object;
+          let up = '';
+          for (let p = o?.parent, n = 0; p && n < 3; p = p.parent, n++) up += ` < ${p.name || p.type}#${p.id}`;
+          const name = `${m?.isShadowPassMaterial ? 'shadow of ' : ''}${m?.name || m?.type || '?'}#${m?.id ?? '?'} on ${o?.name || o?.type || '?'}#${o?.id ?? '?'} ${o?.geometry?.type ?? '-'}${up || ' (not in the scene)'} (${warmed})`;
           WARM_STATS.lastInPlay.push(name.slice(0, 320));
           if (WARM_STATS.lastInPlay.length > 12) WARM_STATS.lastInPlay.shift();
         }

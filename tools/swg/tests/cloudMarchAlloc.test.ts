@@ -23,6 +23,8 @@ interface Answer {
   onMade: number;
   onScavenges: number;
   drew: boolean;
+  /** Pass 3, wave 2 (maker T): what the fill-in did over the windows (`CLOUD_REUSE_STATS`). */
+  reuse: { resolved: number; flightFrames: number; motionDrawn: number; flightEntered: number };
 }
 const run = () =>
   new Promise<Answer>((resolve, reject) => {
@@ -53,5 +55,7 @@ for (let i = 0; i < all.length; i++) {
   ok(a.drew, `process ${i + 1} of 12: the stand-in pass came to draw (its build answered, its noise baked a slab a frame)`);
   ok(a.offScavenges === 0 && Math.max(0, a.offMade) / a.frames < 0.05, `process ${i + 1} of 12: with the switch off the pass's frame makes ${word(a.offMade, a.offScavenges, a.frames)}`);
   ok(a.onScavenges === 0 && Math.max(0, a.onMade) / a.frames < 0.05, `process ${i + 1} of 12: drawing, the march's frame, the feed's drift, the fade and the sheets' word make ${word(a.onMade, a.onScavenges, a.frames)}`);
+  // Pass 3, wave 2 (maker T): the windows walked the fill-in, flight mode in and out, and the motion the smoothing reads.
+  ok(a.reuse.resolved > 0 && a.reuse.flightFrames > 0 && a.reuse.flightEntered > 1 && a.reuse.motionDrawn > 0, `process ${i + 1} of 12: the frames measured resolved the fill-in (${a.reuse.resolved}), flew in flight mode (${a.reuse.flightFrames}, entered ${a.reuse.flightEntered} times) and laid the clouds' motion (${a.reuse.motionDrawn})`);
 }
 console.log(`\ncloudMarchAlloc: ${checks} checks passed`);

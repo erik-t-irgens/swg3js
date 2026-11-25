@@ -69,6 +69,32 @@ export function seeKindOf(m: SeeFields): SeeKind {
   return 'keep';
 }
 
+/**
+ * Pass 3, wave 2 (maker B): the own field of a material that draws at infinity (a star, the Milky Way's band, a belt, a sky
+ * body's card, SWG's painted halo beside it). Its light goes into the colour as three blends it and never into the see-through
+ * layer, so it is part of the sky BEHIND the clouds, which the clouds' composite dims by what gets through the cloud (wave 1
+ * laid the layer back over the cloud undimmed: bodies, stars and belts showed through a full overcast). An own field, never
+ * `userData`: three's render-object key walks a material's own keys (`RenderObject.getMaterialCacheKey`, `userData` left out),
+ * so a flagged draw keys its graph and pipeline apart from an unflagged one of the same fields.
+ */
+export const SKY_BEHIND = 'swgSkyBehind';
+
+/** Marks a material as drawn at infinity, behind the clouds (`SKY_BEHIND`). Returns it. */
+export function markSkyBehind<M extends object>(m: M): M {
+  (m as Record<string, unknown>)[SKY_BEHIND] = true;
+  return m;
+}
+
+/**
+ * How a material's draw goes into the see-through layer (what `airSee.ts`' outputs and the layer's blend read): its blend's
+ * kind (`seeKindOf`), save that a blended draw marked at infinity (`SKY_BEHIND`) is `keep` (its colour as three blends it,
+ * nothing into the layer). The haze's own rule for a see-through thing still reads its blend's kind (`seeKindOf`).
+ */
+export function layerKindOf(m: SeeFields): SeeKind {
+  const k = seeKindOf(m);
+  return k !== 'solid' && (m as { swgSkyBehind?: unknown }).swgSkyBehind === true ? 'keep' : k;
+}
+
 /** Whether a kind's own light goes into the layer (and nought into the colour), or into the colour as ever. */
 export function intoLayer(k: SeeKind): boolean {
   return k === 'over' || k === 'overPremultiplied' || k === 'add' || k === 'addPremultiplied';

@@ -151,7 +151,19 @@ export const LIGHT_STEPS = {
  * glow with it), held to a quarter and four times, times the belly's share at the sample's height share `h` of its layer.
  */
 export function ambientShareOf<N>(o: LightOps<N>, msHere: N, msCamera: N, h: N, belly: N): N {
-  const r = o.div(msHere, o.max(msCamera, o.k(1e-12)));
+  const r0 = o.div(msHere, o.max(msCamera, o.k(1e-12)));
+  // Pass 3, wave 2 (maker B, the night): where the light's way carries no multiple scattering at the camera (every body under
+  // the horizon: the read-back's nought), the ratio says nothing, so it is one, not the quarter it was held to; the ambient
+  // is then the sky's own and the night's floor, as the land takes them. The weight is one, and the ratio its old self, for
+  // any light over `MS_KNOWN` (every lit hour).
+  const known = o.sub(o.k(1), o.max(o.k(0), o.sub(o.k(1), o.mul(msCamera, o.k(1 / MS_KNOWN)))));
+  const r = o.mix(o.k(1), r0, known);
   const held = o.max(o.k(0.25), o.mul(o.k(-1), o.max(o.mul(r, o.k(-1)), o.k(-4))));
   return o.mul(held, o.mix(belly, o.k(1), h));
 }
+
+/**
+ * Pass 3, wave 2 (maker B): the multiple scattering at the camera under which the ambient's height ratio is let go toward one
+ * (not a look: a number's floor; the table's lit values are four orders and more over it).
+ */
+export const MS_KNOWN = 1e-7;

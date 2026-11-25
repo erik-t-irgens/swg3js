@@ -17,7 +17,7 @@
 //    blends: two draws three would take for one pipeline never want the motion output blended two ways.
 
 import { MOTION, MOTION_STATS, PIPELINE_NOW, isMotionTarget, motionMrt, seeThrough } from './motion.ts';
-import { seeKindOf } from '../../sky/air/airHazeMath.ts';
+import { layerKindOf } from '../../sky/air/airHazeMath.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -50,7 +50,8 @@ export function installMotionPatch(renderer: Any): void {
     }
     PIPELINE_NOW.seeThrough = see;
     // Pass 2, wave 1: how the draw goes into our sky's see-through layer, which the layer's blend reads (`airSee.ts`).
-    PIPELINE_NOW.see = seeKindOf(m);
+    // Pass 3, wave 2 (maker B): a draw at infinity (`SKY_BEHIND`, in three's key) keeps the layer as it is (`keep`).
+    PIPELINE_NOW.see = layerKindOf(m);
     try {
       return make.call(this, renderObject, promises);
     } finally {

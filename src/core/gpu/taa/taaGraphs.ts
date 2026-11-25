@@ -72,7 +72,19 @@ export interface TaaInputs {
   size: THREE.Vector4;
   /** The frame's jitter in the scene's pixels (`taaJitter.ts`'s x and y). */
   jitter: THREE.Vector2;
+  /**
+   * The motion read in place of `motion` on a frame another pass laid its own over the scene's (pass 3, wave 2: the clouds'
+   * motion, `TAA_MOTION_IN`); null reads the scene's own. Absent, the graph reads `motion` alone.
+   */
+  motionIn?: { value: THREE.Texture | null };
 }
+
+/**
+ * A motion picture the scene's size another pass laid over the scene's own for one frame (pass 3, wave 2, maker T: the clouds'
+ * motion, `cloudResolve.ts`' `motionGraph`), and the frame it is for: the pass reads it in its `prepare`, which the chain walks
+ * after the clouds have drawn, and reads the scene's own motion on any other frame.
+ */
+export const TAA_MOTION_IN = { value: null as THREE.Texture | null, frame: -1 };
 
 /** A linear half-float texel of its own (each slot its own, or two slots holding one texture would be one binding). */
 function halfFallback(): THREE.DataTexture {
@@ -101,7 +113,7 @@ function parts(u: TaaInputs): Parts {
     history: liveTexture(u.history, halfFallback()),
     aux: liveTexture(u.aux, halfFallback()),
     depth: texture(u.depth),
-    motion: texture(u.motion),
+    motion: u.motionIn ? liveTexture(u.motionIn, u.motion) : texture(u.motion),
     p0: uniform(u.p0).setGroup(renderGroup),
     p1: uniform(u.p1).setGroup(renderGroup),
     size: uniform(u.size).setGroup(renderGroup),

@@ -26,6 +26,7 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { AIR, AIR_UNITS, type AirTables } from '../air/airApi.ts';
+import { markSkyBehind } from '../air/airHazeMath.ts';
 import { chainMaterial, GPU_FX_TRIANGLE } from '../../core/gpu/gpuChain.ts';
 import { FX_CAMERA } from '../../core/fx/pass.ts';
 import { BAND_RAY, BAND_SIZE, MILKY_STATE, SUN_LUX, bandUnit, densityOf, numberParams, type DensityOps, type DensityOut, type DensityParams } from './galaxyDensity.ts';
@@ -257,7 +258,8 @@ function nightMaterial(name: string): MeshBasicNodeMaterial {
   m.fog = false;
   m.userData.unlit = true;
   m.userData.dry = true;
-  return m;
+  // Pass 3, wave 2 (maker B): the stars and the band are drawn at infinity, so into the colour behind the clouds.
+  return markSkyBehind(m);
 }
 
 /**
