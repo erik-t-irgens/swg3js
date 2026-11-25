@@ -169,7 +169,7 @@ export function skyPlacesOf(world: string, d: SkyPlaceSource | null): Map<string
 
 // ---------------------------------------------------------------- which sky a world follows, and its day
 
-export { appliedSystemOf, worldDayOf, worldHourAt, worldDaysOf, type SystemsRecord, type WorldDay } from './worldDays.ts';
+export { appliedSystemOf, systemWorldOf, worldDayOf, worldHourAt, worldDaysOf, type SystemsRecord, type WorldDay } from './worldDays.ts';
 // ---------------------------------------------------------------- one world's sky in motion
 
 /** What one item is (made once at an arrival; never written in play). */
@@ -296,6 +296,12 @@ export class SkyMotion {
   /** The sky's world (its pack, as the places name it) and the game's planet it stands for. */
   readonly world: string;
   readonly planet: string;
+  /**
+   * (Skies of his own worlds) the converted sky this world borrows where the system is its own (a world of his, `world` its own
+   * id: `systemWorldOf`), else null. Over a lent sky none of the lender's places is the system's: its sun card follows the
+   * caster, its second sun the pair's second, and every other card of the lender stands down (`SwgSky.useMotion`, `skyLookPlans`).
+   */
+  readonly lent: string | null;
   readonly version: 1 | 2;
   readonly items: readonly MotionItem[];
   readonly m: number;
@@ -400,12 +406,13 @@ export class SkyMotion {
    */
   readonly shade: SkyShade | null;
 
-  constructor(rule: 'system' | 'one-world', id: string, sys: Record<string, unknown>, world: string, planet: string, places: Map<string, SkyPlace>) {
+  constructor(rule: 'system' | 'one-world', id: string, sys: Record<string, unknown>, world: string, planet: string, places: Map<string, SkyPlace>, lent: string | null = null) {
     this.rule = rule;
     this.id = id;
     this.name = typeof sys.name === 'string' ? sys.name : id;
     this.world = world;
     this.planet = planet;
+    this.lent = lent && lent !== world ? lent : null;
     const sizeOf = (pid: string): number | null => places.get(pid)?.sizeDeg ?? null;
     const sheetOf = (pid: string): boolean => places.get(pid)?.sheet === true;
     const model = compileSystem(sys, sizeOf, sheetOf, { world, placeExists: (pid: string) => places.has(pid) }) as unknown as Model;
@@ -831,6 +838,7 @@ export class SkyMotion {
       system: this.id,
       name: this.name,
       world: this.world,
+      ...(this.lent ? { lent: this.lent } : {}),
       version: this.version,
       T: Number(this.T.toFixed(6)),
       at: Number.isFinite(this.T) && this.version === 2 ? new Date(EPOCH_MS + this.T * DAY_MS).toISOString() : null,
@@ -871,13 +879,14 @@ export class SkyMotion {
 /**
  * The motion for a world from the bodies file's `systems`, or null where none applies (today's sky exactly). `world` is the
  * sky's world as the places name it (its pack), `planet` the game's planet (its star table), `sky` its converted sky (the
- * places' sizes). Made once at an arrival.
+ * places' sizes). Made once at an arrival. (Skies of his own worlds) `lent`: the sky's pack where `world` is a world of his under
+ * its own system over that borrowed sky (`systemWorldOf`), else null.
  */
-export function skyMotionFor(systems: SystemsRecord | null | undefined, world: string, planet: string, sky: SkyPlaceSource | null): SkyMotion | null {
+export function skyMotionFor(systems: SystemsRecord | null | undefined, world: string, planet: string, sky: SkyPlaceSource | null, lent: string | null = null): SkyMotion | null {
   const a = appliedSystemOf(systems, world);
   if (!a) return null;
   try {
-    return new SkyMotion(a.rule, a.id, a.sys, world, planet, skyPlacesOf(world, sky));
+    return new SkyMotion(a.rule, a.id, a.sys, world, planet, skyPlacesOf(world, sky), lent);
   } catch {
     return null;
   }

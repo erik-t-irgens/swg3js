@@ -146,7 +146,7 @@ import { laterRows, standingList } from './ngeOverlay.ts';
 import { RESTUSS_KEY, RESTUSS_ROSTER_TUNE, RESTUSS_TUNE, brigadeBodies, personDormant, rosterRows, ruinsOf, type RosterRow, type RuinsCircle } from './restuss.ts';
 import { releaseWorldStates, stateNow, standsIn, statesInForce, takeWorldStates } from './worldState.ts';
 import { POST_CLEAR_TUNE, furnishLayout, type InteriorsFile } from './interiors.ts';
-import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, importPackFor, importsAsks, knownAbsent, packBytes, packJson, sharedJson, shippedAsk } from './packFiles.ts';
+import { IMPORTS_PRIVATE, IMPORTS_SHIPPED, importPackFor, importsAsks, knownAbsent, packBytes, packJson, sharedJson, shippedAsk, worldOfPack } from './packFiles.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { conversationPack } from './conversationPack.ts';
@@ -188,7 +188,7 @@ import { DISTANT_TUNE, DistantSet, installDistantDebug, setDistantCurrent } from
 import { heldPictureOf, heldPlanOf, type HeldPlan } from '../sky/bodies/heldBodies.ts';
 import { PLUME_TUNE, groundDistantOf, installPlumeDebug, plumeReach, setPlumesCurrent } from '../sky/bodies/groundDistant.ts';
 import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
-import { SKY_MOTION, skyMotionFor, type SkyMotion, type SystemsRecord } from '../sky/system/skyMotion.ts';
+import { SKY_MOTION, skyMotionFor, systemWorldOf, type SkyMotion, type SystemsRecord } from '../sky/system/skyMotion.ts';
 import { pairDialsFrom } from '../sky/stars.ts';
 // (the sky round's maker L, H) the sun's colour, brightness and size from the applied system, set before anything reads a sun
 import { clearSystemSuns, useSystemSuns } from '../sky/system/systemSuns.ts';
@@ -4030,13 +4030,22 @@ export class World {
     if (GPU.webgpu && this.bodiesRead) {
       await this.bodiesRead;
       if (token !== this.loadToken) return;
-      applyFileAir();
+      // (Skies of his own worlds) a world whose sky is another pack's (one of his) takes its saved air by its own id first and
+      // the lender's second (`applyFileAir`'s `lends`); a world of the game's lends nothing, its air as before.
+      // Under SWG's sky (the Graphics page's Sky row) none of this: today's sky exactly.
+      const airLender = worldOfPack(basePack)?.id ?? basePack;
+      applyFileAir(SKY_BODIES.file, skyOurs() && airLender !== this.planet.id ? { [this.planet.id]: airLender } : null);
       // Pass 2, wave 5 (maker S): the star system the file applies for this world (`src/sky/system/skyMotion.ts`): its own day,
       // its sun's path, its bodies' places and phases, its eclipses and its night light, moved by the day from here on; none
       // (null) for a world the file does not apply and in space, which keep today's sky exactly.
       // (the sky round's maker L, H) the applied system's suns for this world before the motion, the air and the disc read one
-      useSystemSuns(sky.data.space ? null : (SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems, basePack, this.planet.id, sky.data);
-      this.followMotion(sky.data.space ? null : skyMotionFor((SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems, basePack, this.planet.id, sky.data), sky);
+      // (Skies of his own worlds) a world of his that an applied system names by its own id stands under that system over the
+      // sky it borrows (`systemWorldOf`: its own day, sun and bodies, the lender's cards standing down); any other world under
+      // its sky's pack, as before.
+      const systems = sky.data.space ? null : (SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems;
+      const stand = skyOurs() ? systemWorldOf(systems, this.editKey, basePack) : { world: basePack, lent: null };
+      useSystemSuns(systems, stand.world, this.planet.id, sky.data);
+      this.followMotion(sky.data.space ? null : skyMotionFor(systems, stand.world, this.planet.id, sky.data, stand.lent), sky);
       // (the sky round's fixer) the applied system's bodies' bake kits asked now, never awaited, so they compile beside the
       // world's loading (the air's fit, the clouds, the night) rather than after it: the screen's start warms the looks of SWG's
       // places alone, and Mustafar's giants' kits were asked only once the bodies were planned, near the screen's end
@@ -4358,7 +4367,9 @@ export class World {
     this.heldPlans = [];
     if (this.bodiesRead) await this.bodiesRead;
     if (token !== this.loadToken) return;
-    const plans = heldPlanOf(this.planet.id, sky.data.held, (SKY_BODIES.file as { held?: unknown } | null)?.held);
+    // (Skies of his own worlds) a world of his under its own system holds none of its lender's still bodies (they are SWG's
+    // places of the lent sky, which stand down there)
+    const plans = SKY_MOTION.now?.lent ? [] : heldPlanOf(this.planet.id, sky.data.held, (SKY_BODIES.file as { held?: unknown } | null)?.held);
     if (!plans.length) return;
     const base = import.meta.env.BASE_URL;
     let shared: Record<string, { file?: unknown }> | null = null;

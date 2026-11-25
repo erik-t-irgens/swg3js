@@ -453,12 +453,13 @@ export class GameLook {
   setFile(file: BodiesFile | null): Record<string, unknown> {
     this.file = file;
     this.fileRev++;
-    // the air laid only when the file's air moved (a dial set again is a fit asked again)
-    const airKey = JSON.stringify(file?.air ?? null);
-    const laid = airKey !== this.airLaid ? applyFileAir(file) : { unchanged: true };
+    // the air laid only when the file's air moved (a dial set again is a fit asked again); (skies of his own worlds) a world of
+    // his takes its own saved air first and its lender's second, as the game's screen lays it (`applyFileAir`'s `lends`)
+    const airKey = JSON.stringify(file?.air ?? null) + JSON.stringify([...this.lends]);
+    const laid = airKey !== this.airLaid ? applyFileAir(file, this.lendsRecord()) : { unchanged: true };
     this.airLaid = airKey;
     for (const a of [...this.airs.values()]) {
-      const key = JSON.stringify(file?.air?.[gamePlanetOf(a.world)] ?? null);
+      const key = JSON.stringify(this.savedAirOf(file, a.world));
       if (this.airKeys.has(a.world) && this.airKeys.get(a.world) !== key) {
         // its saved air moved: the world's air is made again (its rows fitted with the new dials and fields)
         this.airs.delete(a.world);
@@ -477,16 +478,46 @@ export class GameLook {
       // (the sky round's fixer, I) made over the world's places as the game lays them (`World.loadSky`: his Place tab's sizes over
       // SWG's sky, and an extra place's), its suns the applied system's first (`sunsOf`), so its sizes and eclipses are the game's
       this.sunsOf(a);
-      a.motion = skyMotionFor(this.file.systems as Any, a.world, gamePlanetOf(a.world), this.laidData(a));
+      // (skies of his own worlds) a world of his under its own system over the sky it borrows, as the game's screen makes it
+      a.motion = skyMotionFor(this.file.systems as Any, a.world, gamePlanetOf(a.world), this.laidData(a), this.lends.get(a.world) ?? null);
       a.view = a.motion ? skyViewOf(a.motion, this.dayView) : null;
     }
     return a.motion;
   }
 
+  // ---------------------------------------------------------------- (skies of his own worlds) a world of his over a borrowed sky
+
+  /** Each world of his "draw as the game does" draws over a sky it borrows, by its own id: the converted sky it borrows. */
+  private readonly lends = new Map<string, string>();
+  /**
+   * A world of his (its own id, as the System tab stands it) drawn over the converted sky it borrows (`from`, a pack), as the
+   * game draws it: the air's rows and pictures the lender's, its own air and its own system by its own id. Before `useWorld`.
+   */
+  lend(world: string, from: string | null): void {
+    if (!/^[a-z0-9_]+$/.test(world)) return;
+    if (from && /^[a-z0-9_]+$/.test(from) && from !== world) this.lends.set(world, from);
+    else this.lends.delete(world);
+  }
+  /** The lends as `applyFileAir` takes them: each world of his against its lender's planet. */
+  private lendsRecord(): Record<string, string> | null {
+    if (!this.lends.size) return null;
+    const out: Record<string, string> = {};
+    for (const [w, from] of this.lends) out[gamePlanetOf(w)] = gamePlanetOf(from);
+    return out;
+  }
+  /** A world's saved air as the game reads it: its own, else (a world of his) its lender's. */
+  private savedAirOf(file: BodiesFile | null, world: string): unknown {
+    const own = file?.air?.[gamePlanetOf(world)];
+    if (own) return own;
+    const from = this.lends.get(world);
+    return (from ? file?.air?.[gamePlanetOf(from)] : null) ?? null;
+  }
+
   /** (The sky round's fixer, I) a world's converted sky with the file's ground places laid over it, as the game's screen lays them. */
   private laidData(a: WorldAir): SkyPlaceSource | null {
     if (!a.data) return null;
-    const laid = groundPlacesMix(a.world, (this.file as Any)?.places ?? null);
+    // (skies of his own worlds) a world of his: the places he edited of the sky it borrows, as the game's screen lays them
+    const laid = groundPlacesMix(this.lends.get(a.world) ?? a.world, (this.file as Any)?.places ?? null);
     return laid ? (laid(a.data as Any) as unknown as SkyPlaceSource) : a.data;
   }
 
@@ -529,7 +560,7 @@ export class GameLook {
     const read = new Promise<void>((r) => (done = r));
     a = { world, run: null, blocks: [], clear: 0, ready: false, failed: '', dome: null, data: null, centre: null, motion: null, motionAt: -1, view: null, read, readDone: done };
     this.airs.set(world, a);
-    if (!this.airKeys.has(world)) this.airKeys.set(world, JSON.stringify(this.file?.air?.[gamePlanetOf(world)] ?? null));
+    if (!this.airKeys.has(world)) this.airKeys.set(world, JSON.stringify(this.savedAirOf(this.file, world)));
     void this.loadWorld(a);
     return a;
   }
@@ -552,9 +583,11 @@ export class GameLook {
 
   private async loadWorld(a: WorldAir): Promise<void> {
     const planet = gamePlanetOf(a.world);
+    // (skies of his own worlds) a world of his reads the converted sky it borrows; every other world its own, as before
+    const src = this.lends.get(a.world) ?? a.world;
     try {
-      const r = await fetch(`/assets-private/${encodeURIComponent(a.world)}/sky.json`, { cache: 'no-store' });
-      if (!r.ok) throw new Error(`no converted sky for ${a.world} (${r.status})`);
+      const r = await fetch(`/assets-private/${encodeURIComponent(src)}/sky.json`, { cache: 'no-store' });
+      if (!r.ok) throw new Error(`no converted sky for ${src} (${r.status})`);
       const data = await r.json();
       if (!Array.isArray(data?.blocks) || !data.blocks.length || data.space) throw new Error(`${a.world}'s sky has no ground rows`);
       a.blocks = data.blocks;
@@ -564,7 +597,7 @@ export class GameLook {
       a.clear = c >= 0 ? c : 0;
       // (the sky round's fixer, H) the applied system's suns before the air is made and fitted, as the game's screen sets them
       this.sunsOf(a);
-      const run = new AirRun(planet, { sunElevationDegrees: +data.sunElevationDegrees || 0, blocks: data.blocks }, (file) => `/assets-private/${encodeURIComponent(a.world)}/${file}`);
+      const run = new AirRun(planet, { sunElevationDegrees: +data.sunElevationDegrees || 0, blocks: data.blocks }, (file) => `/assets-private/${encodeURIComponent(src)}/${file}`);
       a.run = run;
       run.ask();
       await run.ready();
@@ -584,7 +617,7 @@ export class GameLook {
       console.log(`[viewer] the game's air for ${a.world} (${planet}): ${a.blocks.length} rows fitted, the clear row ${a.clear}`);
       // The towns' middle (the night's glow reads the camera against it where no match says where the player stood).
       try {
-        const p = await fetch(`/assets-private/${encodeURIComponent(a.world)}/pois.json`, { cache: 'no-store' });
+        const p = await fetch(`/assets-private/${encodeURIComponent(src)}/pois.json`, { cache: 'no-store' });
         if (p.ok) {
           const pj = await p.json();
           a.centre = pj?.center && Number.isFinite(pj.center.x) && Number.isFinite(pj.center.z) ? { x: pj.center.x, z: pj.center.z } : null;

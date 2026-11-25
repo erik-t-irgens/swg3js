@@ -34,8 +34,11 @@ import {
 } from '../src/sky/look/looks.js';
 import {
   parseSkies, buildPlaces as buildPlaceList, unknownPlace, effective, cleanPlaceEdits, cleanZoneEdits, zoneSunDefaults, lightSourcesFor,
-  placeDirection, placeLight, dayAt, clockText, directionWords, phaseOf, worldName,
+  placeDirection, placeLight, dayAt, clockText, directionWords, phaseOf, worldName as swgWorldName,
 } from '../src/sky/system/places.js';
+// (skies of his own worlds) the owner's own worlds as grounds: the game's built-in ones with no pack, and his worlds file's rows
+import { PLANETS } from '../src/data/planets.ts';
+import { ourWorldsOf } from './ourWorlds.mjs';
 import { PlaceView, PLACEHOLDER } from '../src/sky/look/placeview.js';
 // (the atmosphere brief's wave B) the day wash's starting numbers, for its sliders' starts and resets
 import { WASH } from '../src/sky/look/skywash.js';
@@ -244,10 +247,10 @@ function snapshot() {
   // `at`: the look on show, to go back to when an undo takes away the one on show (a copy, say)
   // (the owner's own zones and places are in each step too: left out, an undo back to the saved step
   // called the page saved while a place added since was not, and undid its look or sun without it)
-  return { looks, uses: JSON.stringify(state.uses), places: JSON.stringify(state.placeEdits), zones: JSON.stringify(state.zoneEdits), added: JSON.stringify(state.added || null), systems: JSON.stringify(state.systems), starSystems: JSON.stringify(state.starSystems), viewer: JSON.stringify(state.viewer), held: JSON.stringify(state.held || {}), at: state.currentId };
+  return { looks, uses: JSON.stringify(state.uses), places: JSON.stringify(state.placeEdits), zones: JSON.stringify(state.zoneEdits), added: JSON.stringify(state.added || null), systems: JSON.stringify(state.systems), starSystems: JSON.stringify(state.starSystems), viewer: JSON.stringify(state.viewer), held: JSON.stringify(state.held || {}), worldAir: JSON.stringify(state.worldAir || {}), at: state.currentId };
 }
 function sameSnap(a, b) {
-  if (a.uses !== b.uses || a.places !== b.places || a.zones !== b.zones || a.added !== b.added || a.systems !== b.systems || a.starSystems !== b.starSystems || a.viewer !== b.viewer || a.held !== b.held || a.looks.size !== b.looks.size) return false;
+  if (a.uses !== b.uses || a.places !== b.places || a.zones !== b.zones || a.added !== b.added || a.systems !== b.systems || a.starSystems !== b.starSystems || a.viewer !== b.viewer || a.held !== b.held || a.worldAir !== b.worldAir || a.looks.size !== b.looks.size) return false;
   for (const [id, s] of a.looks) if (b.looks.get(id) !== s) return false;
   return true;
 }
@@ -363,6 +366,8 @@ async function applySnap(to) {
     if (from.viewer !== to.viewer && to.viewer) { state.viewer = cleanViewer(JSON.parse(to.viewer)); applyViewer(); }
     // (the GPU port's pass 2, wave 4b) the bodies held still in a ground sky
     if (from.held !== to.held) { state.held = cleanHeldChoices(JSON.parse(to.held || '{}')); heldChanged(); }
+    // (skies of his own worlds) the air of his own worlds
+    if (from.worldAir !== to.worldAir) { state.worldAir = cleanWorldAir(JSON.parse(to.worldAir || '{}')); systemsChanged = true; }
     state.sysRev++;
     hist.cur = to;
     setDirty(to !== hist.savedCur);
@@ -485,6 +490,7 @@ async function init() {
   state.files = files.files;
   state.folder = files.folder;
   state.skies = parseSkies(sky);
+  await loadOurWorlds();
   await loadSaved();
   makePlaces();
 
@@ -492,6 +498,8 @@ async function init() {
   placeView.onView = () => updatePlaceBar();
   gameLook = new GameLook(S);
   placeView.gameLook = gameLook;
+  // (skies of his own worlds) each world of his drawn as the game does over the converted sky it borrows
+  for (const w of state.ourWorlds.values()) gameLook.lend(w.id, w.lender);
   wireWeather();
   wireStage();
   wireAddPicture();
@@ -518,6 +526,53 @@ async function init() {
   if (params.get('match')) console.log('[viewer] match on the address:', JSON.stringify(await holdMatch(params.get('match'))));
 }
 
+// ---------------------------------------------------------------------------------------------
+// (skies of his own worlds, 24 November) The owner's own worlds as grounds of a system: the game's built-in worlds with no pack
+// of their own (Monument and its kind) and his worlds file's rows, each drawing a sky it borrows (`lender`). None has a place
+// of SWG's: each has one place of the moment, its ground (`<world>:ground`, never drawn, never saved), so "See it from the
+// ground" opens its sky (only its system's bodies, a plain horizon) and its page holds its own air (`state.worldAir`).
+
+/** His worlds, by id (`ourWorlds.mjs`): the planet list's, then his worlds file's as the viewer's server reads it. */
+async function loadOurWorlds() {
+  let rows = [];
+  try {
+    rows = (await getJSON('/api/our-worlds'))?.rows || [];
+  } catch (e) {
+    console.log(`[viewer] his worlds file: none read (${e.message})`);
+  }
+  state.ourWorlds = new Map(ourWorldsOf(PLANETS, rows).map((w) => [w.id, w]));
+  console.log(`[viewer] his worlds as grounds: ${[...state.ourWorlds.values()].map((w) => `${w.name} (${w.id}, over ${w.lender || 'no sky'})`).join(', ') || 'none'}`);
+}
+/** A world of his, by id, or null. */
+const ourWorld = (id) => state.ourWorlds?.get(id) || null;
+/** A world's name: his world's own name (marked his), else SWG's (`places.js`). */
+function worldName(id) {
+  const w = ourWorld(id);
+  return w ? w.name : swgWorldName(id);
+}
+/** The ground place of a world of his (never drawn, never saved). */
+const groundPlaceOf = (world) => `${world}:ground`;
+function standPlace(w) {
+  return {
+    id: groundPlaceOf(w.id), zone: w.id, space: false, kind: 'ground', picture: null, label: `${w.name} (yours): its ground`, what: `your world, under ${w.lender ? swgWorldName(w.lender) + '\'s sky' : 'its own dome'}`,
+    invented: true, cycle: 0, pdir: 1, fields: [], from: {}, swg: { size: 1, yaw: 0, pitch: 0, distance: null, tilt: 0, spin: 0, light: { source: 'world-sun', azimuth: 150, elevation: 25 }, brightness: 1 }, stand: true,
+  };
+}
+/** His worlds' air the air box set (`{ <world>: air }`, each a look's air record, `cleanAir`'s), worlds of his alone. */
+function cleanWorldAir(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [w, a] of Object.entries(raw)) if (/^[a-z0-9_]{1,40}$/.test(w) && a && typeof a === 'object' && !Array.isArray(a)) out[w] = { ...cleanAir({ ...a, mode: 'scattered' }) };
+  return out;
+}
+/** The air a world of his starts from: the air its lender's planet wears in its space zone (the game's air of that world), else the start. */
+function lenderAirOf(world) {
+  const w = ourWorld(world);
+  const at = w?.lender ? worldPlaceOf(w.lender) : null;
+  const look = at ? state.looks[state.uses[at]] : null;
+  return cleanAir({ ...(look?.air || {}), mode: 'scattered' });
+}
+
 /** Every place of every sky and zone, the owner's extra ones, and any a saved file names that no sky lists. */
 function makePlaces() {
   // the owner's own zones as skies of their own (none from SWG's files), then his places with the extras
@@ -530,7 +585,9 @@ function makePlaces() {
   for (const id of [...Object.keys(state.uses), ...Object.keys(state.placeEdits)]) {
     if (!ids.has(id)) { places.push(unknownPlace(id)); ids.add(id); }
   }
-  for (const p of places) p.shortLabel = shortLabel(p);
+  // (skies of his own worlds) each world of his its ground, where its sky is seen from
+  for (const w of state.ourWorlds?.values() || []) if (!ids.has(groundPlaceOf(w.id))) { places.push(standPlace(w)); ids.add(groundPlaceOf(w.id)); }
+  for (const p of places) p.shortLabel = p.stand ? `${worldName(p.zone)}: its ground` : shortLabel(p);
   state.places = places;
   state.placesById = new Map(places.map((p) => [p.id, p]));
 }
@@ -619,6 +676,7 @@ async function loadSaved() {
   state.systems = {};
   state.starSystems = {};
   state.held = {};
+  state.worldAir = {};
   state.viewer = cleanViewer(null);
   state.preview = null;
   state.savedAt = null;
@@ -654,6 +712,8 @@ async function loadSaved() {
       state.viewer = cleanViewer(saved.viewer);
       // (the GPU port's pass 2, wave 4b) the bodies he held still in a ground sky (a file without them holds none)
       state.held = cleanHeldChoices(saved.held);
+      // (skies of his own worlds) the air he gave his own worlds (a file without it gives none)
+      state.worldAir = cleanWorldAir(saved.worldAir);
       state.loadedVersion = version;
       state.savedAt = saved.savedAt || 'earlier';
       console.log(`[viewer] loaded space-bodies.json version ${version}: ${Object.keys(saved.looks || {}).length} looks, ${Object.keys(saved.uses || {}).length} uses, ${Object.keys(state.placeEdits).length} places changed, ${Object.keys(state.zoneEdits).length} zone suns changed, ${Object.keys(state.pictures).length} added pictures`);
@@ -705,7 +765,8 @@ async function save() {
     // (wave A) its air, only when it has one (a look without it is written exactly as before)
     if (l.air) out.looks[id].air = l.air;
   }
-  for (const p of state.places) out.uses[p.id] = state.uses[p.id] ?? null;
+  // (a world of his's ground is a place of the moment: never written)
+  for (const p of state.places) if (!p.stand) out.uses[p.id] = state.uses[p.id] ?? null;
   for (const [k, v] of Object.entries(state.uses)) if (!(k in out.uses)) out.uses[k] = v ?? null;
   out.places = cleanPlaceEdits(state.placeEdits);
   out.zones = cleanZoneEdits(state.zoneEdits);
@@ -734,6 +795,9 @@ async function save() {
   // is as it was)
   const held = cleanHeldChoices(state.held);
   if (Object.keys(held).length) out.held = held;
+  // (skies of his own worlds) the air of his own worlds, only when one has any (a file without it is as it was)
+  const worldAir = cleanWorldAir(state.worldAir);
+  if (Object.keys(worldAir).length) out.worldAir = worldAir;
   try {
     const r = await fetch('/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(out) });
     if (!r.ok) throw new Error(await r.text());
@@ -2124,6 +2188,36 @@ function airSection(look, id) {
   return [det];
 }
 
+/**
+ * (Skies of his own worlds) A world of his's own air: none to start (the game then draws its lender's saved air, else the
+ * world's start), or, once given, the air box's dials, starting from its lender's numbers (the air its lender's planet wears in
+ * its space zone), which Save to game writes by the world's own id and the game reads before its lender's.
+ */
+let worldAirTimer = 0;
+/** A world's own air moved: drawn as the game does, the file the game would read laid again and the sky built again (a moment after a drag stops). */
+function worldAirMoved() {
+  clearTimeout(worldAirTimer);
+  worldAirTimer = setTimeout(() => { if (state.viewer.gameLook && gameLook && state.mode === 'place') { gameLook.setFile(gameFileNow()); rebuildAll(); } }, 250);
+}
+function worldAirBox(world) {
+  const box = el('div', { class: 'words' });
+  const w = ourWorld(world);
+  const lender = w?.lender ? swgWorldName(w.lender) : null;
+  box.append(el('h4', { text: 'This world\'s air' }));
+  const own = state.worldAir[world];
+  const redraw = () => { renderPlacePanel(); worldAirMoved(); };
+  if (!own) {
+    box.append(el('p', { class: 'note', text: `None of its own: the game draws ${lender ? `${lender}'s saved air (the air ${lender}'s planet wears in orbit)` : 'the start'} over it. Give it its own to set its haze, its thickness and the rest here; it starts from ${lender ? lender + '\'s numbers' : 'the start'}.` }));
+    box.append(el('div', { class: 'row' }, el('button', { type: 'button', class: 'small primary', title: `This world's own air, starting from ${lender ? lender + '\'s' : 'the start'} (Save to game writes it by its own id)`, onclick: () => { state.worldAir[world] = lenderAirOf(world); setDirty(true); redraw(); } }, 'Give it its own air')));
+    return box;
+  }
+  const base = lenderAirOf(world);
+  box.append(el('p', { class: 'note', text: `Its own, by its id (${world}): Save to game writes it, and the game reads it before ${lender ? lender + '\'s' : 'any other'}. ↺ goes back to ${lender ? lender + '\'s' : 'the start\'s'} number.` }));
+  for (const d of AIR_DIALS.filter((x) => x.group === 'air')) box.append(control({ ...d, k: d.k, unset: base[d.k], reset: base[d.k], resetFrom: lender ? `${lender}'s` : 'the start', struct: false, after: worldAirMoved }, own, null, ''));
+  box.append(el('div', { class: 'row' }, el('button', { type: 'button', class: 'small', title: `Drop this world's own air: the game draws ${lender ? lender + '\'s' : 'the start'} again`, onclick: () => { delete state.worldAir[world]; setDirty(true); redraw(); } }, `Back to ${lender ? lender + '\'s' : 'the start'}`)));
+  return box;
+}
+
 function duplicateLook() {
   const id = state.currentId;
   const src = state.looks[id];
@@ -2388,7 +2482,7 @@ function renderPlacesList(list) {
     if (!zones.has(z)) zones.set(z, []);
     zones.get(z).push(p);
   }
-  const zoneRank = (z) => (z.startsWith('space_') ? 0 : MAIN_WORLDS.includes(z) || EXTRA_PLACES.some((e) => e.zone === z) ? 1 : 2);
+  const zoneRank = (z) => (z.startsWith('space_') ? 0 : MAIN_WORLDS.includes(z) || ourWorld(z) || EXTRA_PLACES.some((e) => e.zone === z) ? 1 : 2);
   const ordered = [...zones.keys()].sort((a, b) => zoneRank(a) - zoneRank(b) || a.localeCompare(b));
   const heads = ['Space zones', 'Ground skies', 'Other skies (tests and sub-zones)'];
   let shown = -1;
@@ -2415,7 +2509,13 @@ function renderPlacesList(list) {
       const changed = !!state.placeEdits[p.id];
       const row = el('div', { class: 'place' + (cur ? '' : ' unassigned') + (p.id === state.placeId && state.mode === 'place' ? ' current' : '') });
       const ln = loreName(p.id);
-      row.append(el('span', { class: 'id' }, p.id, ln ? el('span', { class: 'lore-name', title: 'Its name in the lore (lore.js)', text: ln }) : null, el('span', { class: 'what', text: (p.what || '') + (changed ? ' · own settings changed' : '') + (p.invented ? ' · not in SWG\'s files' : '') })));
+      row.append(el('span', { class: 'id' }, p.id, ln ? el('span', { class: 'lore-name', title: 'Its name in the lore (lore.js)', text: ln }) : null, el('span', { class: 'what', text: (p.what || '') + (changed ? ' · own settings changed' : '') + (p.invented && !p.stand ? ' · not in SWG\'s files' : '') })));
+      // (skies of his own worlds) a world of his's ground wears no look: it is where its sky is seen from
+      if (p.stand) {
+        row.append(el('span'), el('button', { type: 'button', title: `${worldName(p.zone)}'s sky from its ground: its system's bodies, a plain horizon`, onclick: () => selectPlace(p.id) }, 'View'));
+        det.append(row);
+        continue;
+      }
       row.append(lookSelect(cur, (v) => {
         state.uses[p.id] = v;
         row.classList.toggle('unassigned', !v);
@@ -2615,7 +2715,7 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
   state.backdropHolder.visible = false;
   window.__viewerReady = null;
   delete document.documentElement.dataset.ready;
-  if (aim && !p.space && !skyFollows(p.zone)) {
+  if (aim && !p.space && !p.stand && !skyFollows(p.zone)) {
     // from the ground, choose an hour when the chosen body is in the sky if it is not now
     const now = placeDirection(p, effective(p, state.placeEdits), dayAt(state.hours));
     if (!now.shown) {
@@ -2667,7 +2767,8 @@ async function selectPlace(id, { rebuild = false, aim = true } = {}) {
     ctx.sky = () => gameLook.skyView(p.zone);
     ctx.count = () => gameCountOf(p.zone);
   }
-  const places = asGame ? gamePlacesOf(p) : [...state.places.filter((q) => q.zone === p.zone), ...(p.space ? [] : systemPlaces(p.zone))];
+  // (a world of his's ground is never drawn: it is where its sky is seen from)
+  const places = asGame ? gamePlacesOf(p) : [...state.places.filter((q) => q.zone === p.zone && !q.stand), ...(p.space ? [] : systemPlaces(p.zone))];
   state.skyItemsKey = p.space ? '' : skyItemsKey(p.zone);
   const lookOfPlace = ctx.lookOf;
   ctx.lookOf = (pid) => { const sp = places.find((q) => q.id === pid && q.systemBody); if (!sp) return lookOfPlace(pid); return sp.lookId && state.looks[sp.lookId] ? { id: sp.lookId, look: state.looks[sp.lookId] } : null; };
@@ -2803,6 +2904,18 @@ function renderPlacePanel() {
   const e = effective(p, state.placeEdits);
   const edits = state.placeEdits[p.id] || {};
   panel.append(el('div', { class: 'place-head' }, el('strong', { text: p.label }), el('code', { text: p.id })));
+  // (skies of his own worlds) a world of his: its ground, its sky's rule and its own air
+  if (p.stand) {
+    const w = ourWorld(p.zone);
+    panel.append(el('p', { class: 'note', text: w?.lender
+      ? `${w.name} is a world of yours. The game draws it under ${swgWorldName(w.lender)}'s sky; SWG's places there are ${swgWorldName(w.lender)}'s, never this world's. Stand it on a body of a system (the System tab's Ground world, "Stand one of your worlds here", or Make a system… below), apply that system and Save to game: the game then draws its own sun, bodies, day and stars, and the borrowed sky's sun, moons and celestials stand down.`
+      // (the wave's fixer) the game hangs a system only over a converted sky the world borrows: none on the procedural dome
+      : `${w?.name || p.zone} is a world of yours on its own dome, which borrows no world's sky: the game draws no system there. Give it a sky to borrow in the world editor (its sky's colours from a world of the game's) and it can stand in a system here.` }));
+    panel.append(skyRuleBox(p.zone));
+    panel.append(worldAirBox(p.zone));
+    panel.scrollTop = scroll;
+    return;
+  }
 
   const words = placeWords(p);
   const box = el('div', { class: 'words' });
@@ -3479,7 +3592,7 @@ function gameSaveBody() {
     const lid = state.uses[p.id];
     if (lid && state.looks[lid]) uses[p.id] = lid;
   }
-  return { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins, held: cleanHeldChoices(state.held), places: cleanPlaceEdits(state.placeEdits) };
+  return { looks: state.looks, uses, starSystems: state.starSystems, systems: state.systems, pictures: cleanPictures(state.pictures), worlds: MAIN_WORLDS, twins, held: cleanHeldChoices(state.held), places: cleanPlaceEdits(state.placeEdits), worldAir: cleanWorldAir(state.worldAir) };
 }
 
 /**
@@ -3728,7 +3841,7 @@ function gamePresetLookId(kind) {
  * chose one (the game in development wears it too), else the look the system names, else the place's, else its kind's preset.
  */
 function gamePlacesOf(p) {
-  const own = state.places.filter((q) => q.zone === p.zone && (!q.invented || q.id === p.id));
+  const own = state.places.filter((q) => q.zone === p.zone && !q.stand && (!q.invented || q.id === p.id));
   const mo = gameLook?.motionFor(p.zone);
   if (!mo) return own;
   const out = own.filter((q) => !mo.items.some((it) => it.place === q.id && it.drawn && !it.star && !it.sheet && (it.slot === 'extra' || it.slot === 'none')));
@@ -3928,6 +4041,37 @@ function startOwn(world) {
   state.sysStand[id] = world;
   systemEdited(true);
   return id;
+}
+/**
+ * (Skies of his own worlds) A world of his stood in a system as a ground world like any other: on the body the world shown now
+ * stands on, at its latitude, longitude, day and time of year (the same sky until he moves them; the body is his to change,
+ * any planet, moon or giant of the system). It leaves any other system of his that holds it, where that system keeps a ground
+ * of its own; one it stands alone in is not changed, and he is told.
+ */
+function addOurGround(id, w, fromWorld) {
+  const s = editableStar(id);
+  const at = groundOf(s, fromWorld) || groundOf(s, s.grounds.find((g) => !g.copy)?.world);
+  if (!at || !ourWorld(w) || s.grounds.some((g) => g.world === w)) { renderSystemPanel(); return; }
+  for (const [oid, e] of Object.entries(state.starSystems)) {
+    if (oid === id || !e.system || e.system.future || !e.system.grounds.some((g) => g.world === w)) continue;
+    if (!e.system.grounds.some((g) => g.world !== w && !g.copy)) { setStatus(`${worldName(w)} is the only ground world of ${e.system.name}: stand another world there first, or take it from there by hand`, true); renderSystemPanel(); return; }
+    e.system.grounds = e.system.grounds.filter((g) => g.world !== w && g.copy !== w);
+  }
+  s.grounds.push({ world: w, body: at.body, copy: null, lat: at.lat, lon: at.lon, dayHours: at.dayHours, season: at.season, note: '' });
+  state.sysStand[id] = w;
+  state.sysWorld = w;
+  systemEdited(true);
+  setStatus(`${worldName(w)} now stands in ${s.name}, on ${s.bodies.find((b) => b.id === at.body)?.name}: set its body, latitude, longitude and day under Where you stand${starApplied(id) ? '' : '; Apply makes it its sky'}`);
+  statusTimer = setTimeout(() => setStatus(''), 6000);
+  if (state.mode === 'system') openSystemView(id, w);
+}
+/** (Skies of his own worlds) A world of his taken out of a system (where the system keeps a ground world of its own). */
+function removeOurGround(id, w) {
+  const s = editableStar(id);
+  if (!s.grounds.some((g) => g.world !== w && !g.copy)) return;
+  s.grounds = s.grounds.filter((g) => g.world !== w && g.copy !== w);
+  delete state.sysStand[id];
+  systemEdited(true);
 }
 function previewStar(id, on) {
   const was = state.preview;
@@ -4249,9 +4393,20 @@ function renderSystemPanel() {
 
   // where you stand
   const standSel = el('select', { 'aria-label': 'Where you stand' });
-  for (const g of sys.grounds) standSel.append(el('option', { value: g.world, text: `${worldName(g.world)}${g.copy ? ` (a copy of ${worldName(g.copy)}'s sky)` : ` · on ${sys.bodies.find((b) => b.id === g.body)?.name}`}` }));
+  for (const g of sys.grounds) standSel.append(el('option', { value: g.world, text: `${worldName(g.world)}${ourWorld(g.world) ? ' (yours)' : ''}${g.copy ? ` (a copy of ${worldName(g.copy)}'s sky)` : ` · on ${sys.bodies.find((b) => b.id === g.body)?.name}`}` }));
+  // (skies of his own worlds) his worlds beside the game's: choosing one this system does not hold stands it here
+  // (the wave's fixer) a world on its own dome is left out: the game hangs a system only over a converted sky a world borrows
+  const mine = [...(state.ourWorlds?.values() || [])].filter((w) => w.lender && !sys.grounds.some((g) => g.world === w.id));
+  if (mine.length) {
+    const og = el('optgroup', { label: 'Stand one of your worlds here' });
+    for (const w of mine) { const other = systemIdOf(w.id); og.append(el('option', { value: 'add:' + w.id, text: `${w.name} (yours${other ? `, now in ${starOf(other)?.name || other}` : ''})` })); }
+    standSel.append(og);
+  }
   standSel.value = world;
-  standSel.addEventListener('change', () => { state.sysStand[id] = standSel.value; state.sysWorld = standSel.value; if (state.mode === 'system') openSystemView(id, standSel.value); else renderSystemPanel(); });
+  standSel.addEventListener('change', () => {
+    if (standSel.value.startsWith('add:')) { addOurGround(id, standSel.value.slice(4), world); return; }
+    state.sysStand[id] = standSel.value; state.sysWorld = standSel.value; if (state.mode === 'system') openSystemView(id, standSel.value); else renderSystemPanel();
+  });
   panel.append(el('h3', { text: 'Where you stand' }));
   panel.append(el('div', { class: 'ctl' }, el('span', { text: 'Ground world' }), standSel, el('span'), el('span')));
   panel.append(groundEditor(id, sys, world, c));
@@ -4287,7 +4442,7 @@ function renderSystemPanel() {
 
   // the places of this world it does not name
   const linked = new Set(M.items.map((it) => it.place).filter(Boolean));
-  const free = state.places.filter((q) => q.zone === world && !linked.has(q.id));
+  const free = state.places.filter((q) => q.zone === world && !q.stand && !linked.has(q.id));
   if (free.length) {
     panel.append(el('h3', { text: `${possessiveName(world)} places it does not name` }));
     panel.append(el('p', { class: 'note', text: 'While the system applies, these keep SWG\'s rule, unless hidden here (a sheet of moons the system stands for, say).' }));
@@ -4319,6 +4474,18 @@ function groundEditor(id, sys, world, c) {
   const RG = (w, k) => sysResetValue(id, (s) => s.grounds.find((x) => x.world === w), k);
   const RB = (k) => sysResetValue(id, (s) => s.bodies.find((x) => x.id === g.body), k);
   box.append(el('h4', { text: `${worldName(world)}, on ${body.name}` }));
+  // (skies of his own worlds) a world of his: the body it stands on is his to choose (any planet, moon or giant here), and it
+  // can leave the system again; it has no place in SWG's skies, so every body here is hung as the system's own
+  if (ourWorld(world) && !raw.copy) {
+    const onSel = el('select', { 'aria-label': 'Stands on' });
+    for (const b of sys.bodies) if (GROUND_KINDS.includes(b.kind)) onSel.append(el('option', { value: b.id, text: `${b.name} (${b.kind})` }));
+    onSel.value = raw.body;
+    onSel.addEventListener('change', () => { const s = editableStar(id); const t = s.grounds.find((x) => x.world === world); if (t) { t.body = onSel.value; systemEdited(true); } });
+    const keeps = sys.grounds.some((x) => x.world !== world && !x.copy);
+    box.append(el('div', { class: 'ctl', title: 'The body this world of yours stands on: its sky is seen from there' }, el('span', { text: 'Stands on' }), onSel, el('span'),
+      keeps ? el('button', { type: 'button', class: 'small', title: `Take ${worldName(world)} out of ${sys.name} (the game draws its borrowed sky again)`, onclick: () => removeOurGround(id, world) }, 'Take it out') : el('span')));
+    box.append(el('p', { class: 'note', text: `A world of yours: no place of SWG's stands for any body here, so the system hangs them all as its own, and the sky it borrows (${ourWorld(world).lender ? swgWorldName(ourWorld(world).lender) + '\'s' : 'its dome'}) keeps only its colours, its sun card following this star.` }));
+  }
   if (raw.copy) box.append(el('p', { class: 'note', text: `A copy of ${worldName(raw.copy)}'s sky: it stands on ${body.name} on ${worldName(raw.copy)}'s day and time of year. Its latitude and longitude follow ${worldName(raw.copy)}'s unless you set its own here.` }));
   if (raw.note || base.note) box.append(el('p', { class: 'note', text: raw.note || base.note }));
   box.append(globeCanvas(id, sys, world, c));
@@ -4494,7 +4661,7 @@ function bodyEditor(id, sys, b, M, world) {
   };
   // a list of places with this world's entry swapped
   const withPlace = (list, pid) => [...list.filter((q) => !q.startsWith(world + ':')), ...(pid ? [pid] : [])];
-  const worldPlaces = state.places.filter((q) => q.zone === world);
+  const worldPlaces = state.places.filter((q) => q.zone === world && !q.stand);
   const placeOptions = [['', `(none in ${worldName(world)}'s sky: drawn with a look)`], ...worldPlaces.map((q) => [q.id, q.shortLabel || q.label])];
 
   if (b.note) body.append(el('p', { class: 'note', text: b.note }));
@@ -4616,6 +4783,14 @@ function pairEditor(id, b, body, world, placeOptions, withPlace, here) {
 window.addEventListener('error', (e) => console.error('[viewer] error:', e.message));
 window.addEventListener('unhandledrejection', (e) => console.error('[viewer] unhandled:', e.reason?.message || e.reason));
 window.__viewer = {
+  // (skies of his own worlds) for checks: his worlds as the page lists them, and a world's sky as its system (applied or
+  // previewed) draws it at a real moment `T` (days since the epoch; now if left out), each body's size and direction
+  ourWorlds: () => [...(state.ourWorlds?.values() || [])],
+  ourSkyAt: (world, T) => {
+    const r = skyRule(world);
+    const c = r.rule === 'system' ? starAt(r.id, world, Number.isFinite(T) ? T : v2Time()) : null;
+    return c ? { system: c.id, world: c.world, T: c.out.T, hour: localHour(c.model, c.out.T), items: c.model.items.map((it, j) => ({ name: it.name, size: c.model.itemSize[j], dir: [c.out.dir[3 * j], c.out.dir[3 * j + 1], c.out.dir[3 * j + 2]] })) } : null;
+  },
   // generated looks, for checks: the last bake, a rebake, a hash of every texel, the bake counter
   genInfo: (id) => generatedInfo(state.looks[id]),
   rebake: (id) => rebakeGenerated(state.looks[id]),

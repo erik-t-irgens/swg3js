@@ -49,10 +49,10 @@ const run = () =>
 // Twelve fresh processes in two waves of six, the machine's cap on node processes at once (the fixer of wave 5).
 const all: Awaited<ReturnType<typeof run>>[] = [];
 for (let wave = 0; wave < 2; wave++) all.push(...(await Promise.all(Array.from({ length: 6 }, () => run()))));
-ok(all.every((a) => a.worlds === 3 && a.items.length === 3 && a.items.every((n) => n > 3) && a.eclipse && a.sum), 'each child ran three applied systems with their bodies, and read them back as numbers');
+ok(all.every((a) => a.worlds === 4 && a.items.length === 4 && a.items.every((n) => n > 3) && a.eclipse && a.sum), 'each child ran four applied systems with their bodies (the fourth a world of his under its own system over a lent sky), and read them back as numbers');
 for (let i = 0; i < all.length; i++) {
   const a = all[i];
   const per = Math.max(0, a.made) / a.frames;
-  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: three days following their systems make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
+  ok(a.scavenges === 0 && per < 0.05, `process ${i + 1} of 12: four days following their systems make ${Math.max(0, a.made)} bytes over ${a.frames} frames (${per.toFixed(3)} a frame)${a.scavenges ? `, ${a.scavenges} collections in the cleanest window` : ''}`);
 }
 console.log(`\nskyMotionAlloc: ${checks} checks passed`);

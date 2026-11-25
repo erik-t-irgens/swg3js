@@ -24,6 +24,8 @@ export interface PlanMotion {
   readonly items: readonly { readonly place: string | null; readonly look: string | null; readonly drawn: boolean; readonly slot: string; readonly sizeDeg: number; readonly kind: string; readonly name: string; readonly star: boolean; readonly sheet: boolean }[];
   /** (The sky round's maker P, C) the largest each item is ever drawn (degrees), its picture's size; absent, its setting. */
   readonly largestDeg?: Float64Array;
+  /** (Skies of his own worlds) the sky this world borrows under a system of its own (`SkyMotion.lent`), else null or absent. */
+  readonly lent?: string | null;
 }
 
 /** A look by its id in the file: a generated one, else none. */
@@ -79,7 +81,9 @@ export function skyLookPlans(sky: string, cards: readonly SkyBodyCard[], group: 
       plans.push({ place, id: hit.id, look: hit.look, record: card && card.air.kind === 'world' ? bodyRecord(card.air) : null, where: 'sky', card, item: j, byMotion: true, group, order: -5, halfRad: ((deg > 0 ? deg : 1) * Math.PI) / 360, fovDeg });
     }
   }
-  // SWG's cards the system does not draw by look (no system, or a place it does not name: SWG's rule there, as before)
+  // SWG's cards the system does not draw by look (no system, or a place it does not name: SWG's rule there, as before); over a
+  // lent sky (a world of his under its own system) none: every card of the lender stands down (`SwgSky.useMotion`)
+  if (motion?.lent) return plans;
   for (const [place, card] of cardAt) {
     if (used.has(place)) continue;
     let item = -1;

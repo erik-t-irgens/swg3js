@@ -163,6 +163,11 @@ export function gameBodiesFile(data, opts = {}) {
     const air = out.looks[id]?.air;
     if (world && isObj(air) && !out.air[world]) out.air[world] = JSON.parse(JSON.stringify(air));
   }
+  // (skies of his own worlds) the air he gave a world of his own in the air box (`worldAir`, by its own id: no space zone holds
+  // its planet), which the game reads before the air of the world whose sky it borrows; none set, the file as before
+  for (const [world, air] of Object.entries(isObj(data.worldAir) ? data.worldAir : {})) {
+    if (/^[a-z0-9_]{1,40}$/.test(world) && isObj(air) && !out.air[world]) out.air[world] = JSON.parse(JSON.stringify(air));
+  }
   // (pass 2, wave 4b) the bodies held still in a ground sky (the Death Star over Endor, any of SWG's sky sprites he places):
   // numbers and one picture of the sky pack each, by world and the body's own id; a world with none is left out (an older
   // game ignores the key, and a world absent from it keeps what SWG's environment says)

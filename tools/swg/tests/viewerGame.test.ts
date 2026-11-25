@@ -167,7 +167,7 @@ if (mg) {
   ok(APP.includes('ctx.sky = () => gameLook.skyView(p.zone);') && APP.includes('ctx.count = () => gameCountOf(p.zone);'), "the place view reads the game's motion and the day's count drawn as the game does");
   ok(PV.includes("const dayOfSky = (sky, hours) => (sky && (sky.game || sky.model.version === 2) ? sky.out.day : dayAt(hours));"), "under the game's motion the place view takes the game's own day");
   ok(/if \(!this\.space && G && G\.on && this\.airDrawn\) \{\s*b\.glow\.group\.visible = false;/.test(PV), "SWG's sun pictures are not drawn as the game does (the air's disc is the sun, as on WebGPU)");
-  ok(/function gameSaveBody\(\) \{[\s\S]*places: cleanPlaceEdits\(state\.placeEdits\) \};/.test(APP) && /async function saveToGame\(\) \{\s*const body = gameSaveBody\(\);/.test(APP), 'Save to game carries the places he moved (the writer keeps the space places)');
+  ok(/function gameSaveBody\(\) \{[\s\S]*places: cleanPlaceEdits\(state\.placeEdits\)(, worldAir: cleanWorldAir\(state\.worldAir\))? \};/.test(APP) && /async function saveToGame\(\) \{\s*const body = gameSaveBody\(\);/.test(APP), 'Save to game carries the places he moved (the writer keeps the space places), and (skies of his own worlds) his own worlds\' air');
   ok(/return cleanBodiesFile\(JSON\.parse\(JSON\.stringify\(gameBodiesFile\(gameSaveBody\(\), \{ at: 'now' \}\)\)\)\)\.file;/.test(APP), "drawn as the game does follows the very file Save to game would write, read by the game's own reader");
   ok(MAIN.includes('return { ...rec, air, eye, count: this.world.day.count };') && GA.includes("typeof m.count === 'number' && Number.isFinite(m.count) ? m.count"), "the game's match carries the day's count, and the viewer stands its day there");
 }

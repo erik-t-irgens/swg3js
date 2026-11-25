@@ -58,6 +58,16 @@ const table = worldDaysOf(systems);
   clock.setDay(3_600_000);
   ok(sw.hourOf('yavin4') === before && clock.dayMs === 3_600_000, "an admin's change of the game's day length leaves the worlds' own days as they were");
 }
+// (Skies of his own worlds) a world of his under a system of its own (the Utapau draft, standing on his Utapau world) keeps its
+// own day on the server and in the story's hour, by its own id, as every browser on it draws it
+const ownTable = worldDaysOf({ utapau: draftSystem('utapau') });
+{
+  const days = new WorldDays(ownTable);
+  ok(days.of('ours_race_map_2')?.lengthSeconds === 4.5 * 3600 && /ours_race_map_2 4\.50 h/.test(days.describe()), `a world of his keeps its own day by its own id (${days.describe()})`);
+  const at = Date.UTC(2026, 10, 24, 9, 15);
+  const sw = storyWorlds({ clock: new WorldClock({ now: () => at }), days: () => days });
+  ok(sw.hourOf('ours_race_map_2') === hourOfDay(ownDayFraction(at, days.of('ours_race_map_2'))), `and the story's hour there is that day's (${sw.hourOf('ours_race_map_2')})`);
+}
 
 if (typeof WebSocket === 'undefined') {
   console.log('     the relay round trip was skipped: this node has no WebSocket of its own');
@@ -68,7 +78,7 @@ if (typeof WebSocket === 'undefined') {
   const { join } = await import('node:path');
   const dir = mkdtempSync(join(tmpdir(), 'swg-own-days-'));
   const bodies = join(dir, 'bodies.json');
-  writeFileSync(bodies, JSON.stringify({ version: 1, made: '', credits: '', looks: {}, uses: {}, systems, air: {}, pictures: {} }));
+  writeFileSync(bodies, JSON.stringify({ version: 1, made: '', credits: '', looks: {}, uses: {}, systems: { ...systems, utapau: draftSystem('utapau') }, air: {}, pictures: {} }));
   // A port of the wave's own (8790 to 8794: never the owner's 8787).
   const port = 8793;
   process.env.PORT = String(port);
@@ -102,6 +112,9 @@ if (typeof WebSocket === 'undefined') {
     const serverHour = status.ownDays.hours.yavin4;
     ok(Math.abs(serverHour - browserHour) < 0.01, `the server's status and a browser on its clock put Yavin 4 at one hour (${serverHour} and ${browserHour.toFixed(4)}; ${status.ownDays.said})`);
     ok(status.ownDays.file === bodies, 'and it read the bodies file it was told to (`--bodies`)');
+    // (skies of his own worlds) his Utapau world's own day in the hail and on the status page, the browser's hour on its clock
+    const mine = t?.ours_race_map_2;
+    ok(!!mine && mine.lengthSeconds === ownTable.ours_race_map_2.lengthSeconds && Math.abs(status.ownDays.hours.ours_race_map_2 - 24 * sharedClock.ownTimeOfDay(mine)) < 0.01, `a world of his under its own system: the relay's hour and a browser's one (${status.ownDays.hours.ours_race_map_2} and ${mine ? (24 * sharedClock.ownTimeOfDay(mine)).toFixed(4) : '?'})`);
     // The file changed on disk (a Save to game): the relay reads it again within a few seconds and the hail of a new line says so.
     writeFileSync(bodies, JSON.stringify({ version: 1, systems: {} }));
     await wait(5200);

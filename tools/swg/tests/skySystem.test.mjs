@@ -320,7 +320,10 @@ section('the first round\'s drafts and every draft of version 2, as recorded fro
 {
   // Recorded on 22 November from the moved modules and from the live viewer's own copy (`sysdigests.mjs` in the wave's
   // scratch), which agreed: every version 1 draft cleaned and drawn at fifty moments, and every version 2 draft.
-  const RECORDED = { drafts1File: 'f19aaf65f179923b', v1Worlds: 14, v1: '1b6279c877787844', v2Systems: 12, v2: '8186d664ae0a1f14' };
+  // (Skies of his own worlds, 24 November) the twelve of the game's worlds as recorded then, and Utapau's, drafted for a world of
+  // his, beside them (its digest recorded from the module when it was added): the twelve unchanged by it. (The wave's fixer
+  // recorded Utapau's again after its orbit's radius was set by Kepler's law as every draft's, and its fourth moon unnamed.)
+  const RECORDED = { drafts1File: 'f19aaf65f179923b', v1Worlds: 14, v1: '1b6279c877787844', v2Systems: 12, v2: '8186d664ae0a1f14', added: { utapau: '02184085eea66c30' } };
   // Hashed with its line ends as git keeps them (LF): a checkout made with `core.autocrlf` has CRLF on disk.
   ok(hash(readFileSync(new URL('drafts1.js', SYS), 'utf8').replace(/\r\n/g, '\n')) === RECORDED.drafts1File, 'drafts1.js is the first round\'s drafts.js unchanged (its hash as recorded)');
   const v1 = createHash('sha256');
@@ -336,12 +339,14 @@ section('the first round\'s drafts and every draft of version 2, as recorded fro
   }
   ok(D1.DRAFT_WORLDS.length === RECORDED.v1Worlds && v1.digest('hex').slice(0, 16) === RECORDED.v1, `all ${D1.DRAFT_WORLDS.length} version 1 drafts clean and draw bit for bit as recorded`);
   const v2 = createHash('sha256');
+  const added = Object.keys(RECORDED.added);
   for (const id of Dr.DRAFT_SYSTEMS) {
     const sys = Dr.draftSystem(id);
     ok(!!sys && sys.version === 2 && sys.grounds.length >= 1, `${id}: a version 2 system with ${sys?.grounds.length} ground(s)`);
-    v2.update(id + JSON.stringify(sys));
+    if (added.includes(id)) ok(hash(id + JSON.stringify(sys)) === RECORDED.added[id], `${id}: the draft added for a world of his, as recorded`);
+    else v2.update(id + JSON.stringify(sys));
   }
-  ok(Dr.DRAFT_SYSTEMS.length === RECORDED.v2Systems && v2.digest('hex').slice(0, 16) === RECORDED.v2, `all ${Dr.DRAFT_SYSTEMS.length} version 2 drafts as recorded`);
+  ok(Dr.DRAFT_SYSTEMS.length === RECORDED.v2Systems + added.length && added.every((id) => Dr.DRAFT_SYSTEMS.includes(id)) && v2.digest('hex').slice(0, 16) === RECORDED.v2, `all ${RECORDED.v2Systems} version 2 drafts of the game's worlds as recorded, and ${added.join(', ')} beside them`);
   const fut = S.cleanSystem({ version: 7, name: 'x', bodies: [] });
   ok(fut && fut.future === true && fut.version === 7, 'a system from a newer viewer is kept as it is (future)');
   const holds = (w) => Dr.draftSystemOf(w);

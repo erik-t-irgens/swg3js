@@ -238,6 +238,32 @@ const D = {
       moon('m3', 'A third moon (ours)', 'taanab', ['taanab:celestial:cels_moon_earthy01'], 64, 0.007, { tilt: 3, node: 270, start: 330, locked: true, colour: '#8c7f74', note: 'Ours.' }),
     ],
   },
+
+  // (Skies of his own worlds, 24 November) A world of the owner's own, not of the game's: its ground is his Utapau world (his
+  // worlds file's `ours_race_map_2`), which borrows another world's sky, so no SWG place stands for any body here and every one
+  // is hung as the system's own. Lore of 24 November: the star's name is canon (Last Shot, 2018); the planet's day, year and
+  // size are SWAPI's (from the Revenge of the Sith reference books); nine moons is the count Wookieepedia's system page gives
+  // (canon's Databank says only that many moons ring it), none of them named. The "Fourth Moon of Utapau" of The Star Wars (the
+  // comic of the first draft) is a moon of another Utapau, the Kessil system's, with five moons: not this world's, so none here
+  // takes its name (the wave's fixer, 24 November). No other planet of the system is named in either.
+  utapau: {
+    name: 'Utapau system',
+    note: 'Utapau round its star, also called Utapau, in 351 days, ringed by nine moons, several of them seen in its sky in the films: four drawn by eye, the other five in the model and not drawn, none named in the lore. The lore names no other planet of the system and gives its star no colour.',
+    grounds: [
+      { world: 'ours_race_map_2', body: 'utapau', lat: 28, lon: 0, dayHours: defaultDayHours(27), season: 0, note: 'Arid, windy scrubland and savanna over its sinkholes (SWAPI): the dry belt near 28 degrees. His own Utapau world.' },
+    ],
+    bodies: [
+      star('sun', 'Utapau (the star)', [], { colour: '#fff1dc', size: 37, src: { name: 'canon (Last Shot): the star shares the planet\'s name' }, note: 'Lore gives it no colour or class: a sun like ours by eye. Its size 37 is the square of the borrowed sky\'s sun card his Utapau stands under (Lok\'s, 36.9 degrees), so the disc drawn is the plain star\'s, about our sun\'s.' }),
+      planet('utapau', 'Utapau', 'sun', [], 351, 0.9738, { spinHours: 27, axialTilt: 12, src: { period: SWAPI, spinHours: SWAPI }, note: 'Its orbit\'s radius from its year about a star like ours by Kepler\'s third law, as every draft\'s (ours); its tilt by eye.' }),
+      moon('m1', 'A moon of Utapau (unnamed)', 'utapau', [], 8.7, 0.0012, { tilt: 3, node: 20, start: 60, locked: true, size: 3, colour: '#b7ada0', src: { count: 'nine in all (Wookieepedia\'s system page)' }, note: 'The four drawn stand at the radii and periods a moon of a world of Earth\'s size would have (ours), their sizes by eye.' }),
+      moon('m2', 'A second moon of Utapau (unnamed)', 'utapau', [], 16, 0.0018, { tilt: 5, node: 140, start: 200, locked: true, size: 4.5, colour: '#c9c2b4' }),
+      moon('m3', 'A third moon of Utapau (unnamed)', 'utapau', [], 26, 0.0025, { tilt: 2, node: 260, start: 310, locked: true, size: 5, colour: '#a89f92' }),
+      moon('fourth', 'A fourth moon of Utapau (unnamed)', 'utapau', [], 40, 0.0033, { tilt: 6, node: 80, start: 140, locked: true, size: 4, colour: '#9a9a96', note: 'Grey by eye (ours). The "Fourth Moon of Utapau" of The Star Wars (the comic of the first draft) circles the Kessil system\'s Utapau, another world: not this one.' }),
+      { id: 'others', kind: 'group', name: 'Utapau\'s other five moons (unnamed)', parent: 'utapau', period: 70, radius: 0.005, drawn: false,
+        members: [{ name: 'Fifth of nine (unnamed)' }, { name: 'Sixth of nine (unnamed)', along: 1 }, { name: 'Seventh of nine (unnamed)', along: -1 }, { name: 'Eighth of nine (unnamed)', across: 1 }, { name: 'Ninth of nine (unnamed)', across: -1 }],
+        src: { count: 'nine in all (Wookieepedia\'s system page)' }, note: 'In the model, not drawn: the lore gives them nothing to draw.' },
+    ],
+  },
 };
 
 /** The systems with a draft, in the order the page lists them. */

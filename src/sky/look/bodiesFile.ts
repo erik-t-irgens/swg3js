@@ -542,10 +542,12 @@ const FILE_AIR: { set: Record<string, { before: FileAirDials; to: FileAirDials }
  * The file's saved air made each named world's air (behind a loading screen, before the world's air is made): its dials set
  * as the live dials set them (`tuneAirDials`) and its record fields laid (`setAirFileFields`). What an earlier screen set for a
  * world the file no longer names is put back first, where the owner has not moved it since. With no file, or a file naming no
- * world, nothing is touched: every sky as before.
+ * world, nothing is touched: every sky as before. (Skies of his own worlds) `lends`: a world of his and the world whose sky it
+ * borrows (`{ <its id>: <the lender's> }`): such a world takes its own saved air where the file names it, else its lender's.
  */
-export function applyFileAir(file: BodiesFile | null = SKY_BODIES.file): Record<string, unknown> {
-  const named = file ? file.air : {};
+export function applyFileAir(file: BodiesFile | null = SKY_BODIES.file, lends: Readonly<Record<string, string>> | null = null): Record<string, unknown> {
+  const named: Record<string, Record<string, Plain>> = file ? { ...file.air } : {};
+  if (lends) for (const [world, from] of Object.entries(lends)) if (!named[world] && named[from]) named[world] = named[from];
   // Undo what an earlier screen set, dial by dial, where the dial still stands where the file put it.
   for (const [world, was] of Object.entries(FILE_AIR.set)) {
     const now = airDialsOf(world) as unknown as Record<string, number>;

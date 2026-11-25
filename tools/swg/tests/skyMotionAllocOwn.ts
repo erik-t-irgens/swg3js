@@ -25,7 +25,8 @@ const SKY = {
   supplementalMoon: { size: 0.25 },
   celestials: [{ size: 0.45, image: { file: 'sky/cels_ice_moon.png' } }, { size: 1, image: { file: 'sky/cels_naboo.png' } }],
 };
-const systems = { yavin: draftSystem('yavin'), tatoo: draftSystem('tatoo'), naboo: draftSystem('naboo') };
+// (skies of his own worlds) and the Utapau draft, standing on his Utapau world, a world of his over the sky it borrows (Lok's)
+const systems = { yavin: draftSystem('yavin'), tatoo: draftSystem('tatoo'), naboo: draftSystem('naboo'), utapau: draftSystem('utapau') };
 const wallRec = { ms: Date.UTC(2026, 10, 23, 9, 0, 0) };
 sharedClock.wall = () => wallRec.ms;
 sharedClock.none();
@@ -34,8 +35,9 @@ for (const [world, planet] of [
   ['yavin4', 'yavin4'],
   ['tatooine', 'tatooine'],
   ['rori', 'rori'],
+  ['ours_race_map_2', 'ours_race_map_2'],
 ] as const) {
-  const m = skyMotionFor(systems, world, planet, SKY);
+  const m = skyMotionFor(systems, world, planet, SKY, world.startsWith('ours_') ? 'lok' : null);
   if (!m) throw new Error(`no motion for ${world}`);
   const d = new DayCycle(0, 1);
   d.swg = true;

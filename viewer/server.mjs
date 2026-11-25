@@ -20,6 +20,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gameBodiesFile, gamePictureName, shippedPictures } from './gameBodies.mjs';
 import { firstRunCopy, keepOrder, keyPictures, resolvePictures } from './choices.mjs';
+import { ourWorldRows } from './ourWorlds.mjs';
 
 /**
  * The viewer's paths and switches, from `env` (the process environment over the repo's `.env`; the names are the old
@@ -78,6 +79,8 @@ export function viewerPaths(env, root, home = mainCheckoutOf(root)) {
     // (the old viewer's looks.js stands beside his old file of choices, wherever the file now is)
     looks: env.SBV_LOOKS ? [path.resolve(root, env.SBV_LOOKS)] : [path.resolve(root, 'imports-private', 'sky', 'looks-private.json'), path.join(imported, 'looks-private.json'), path.join(path.dirname(own ? save : oldSave), 'looks.js')],
     game: at(env.SBV_GAME, path.resolve(root, 'public', 'sky', 'bodies.json')),
+    // (skies of his own worlds) his worlds file, read only, for the worlds of his the System tab can stand on
+    worlds: at(env.SBV_WORLDS, path.resolve(root, 'public', 'placements', 'worlds', 'all.json')),
     credit: typeof env.SBV_CREDIT === 'string' && env.SBV_CREDIT.trim() ? env.SBV_CREDIT.trim() : null,
   };
 }
@@ -434,7 +437,7 @@ export function viewerMiddleware(P, log = (s) => console.log(s)) {
     try {
       const url = new URL(req.url, `http://${HOST}:${P.port}`);
       const p = decodeURIComponent(url.pathname);
-      const ours = p === '/save' || p === '/save-game' || p === '/picture' || p === '/api/files' || p === '/space-bodies.json' || p === '/private/looks.json'
+      const ours = p === '/save' || p === '/save-game' || p === '/picture' || p === '/api/files' || p === '/api/our-worlds' || p === '/space-bodies.json' || p === '/private/looks.json'
         || p.startsWith('/assets/') || p.startsWith('/survey/') || p.startsWith('/pack/') || p.startsWith('/assets-private/');
       if (!ours) return next();
       if (!knownHost(req)) return send(res, 403, `Open the viewer as http://${HOST}:${P.port}/`);
@@ -443,6 +446,8 @@ export function viewerMiddleware(P, log = (s) => console.log(s)) {
       if (req.method === 'POST' && p === '/picture') return await addPicture(req, res, url);
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
       if (p === '/api/files') return sendJSON(res, 200, { folder: P.imported, files: await listImported() });
+      // (skies of his own worlds) his worlds file's rows (id, name, the sky each borrows), read as it stands; none without one
+      if (p === '/api/our-worlds') return sendJSON(res, 200, { rows: fs.existsSync(P.worlds) ? ourWorldRows(await fsp.readFile(P.worlds, 'utf8')) : [] });
       if (p === '/space-bodies.json') {
         if (!fs.existsSync(P.save)) return send(res, 204, '');
         if (!P.keyed) return await sendFile(res, P.save, false);

@@ -45,6 +45,20 @@ export function appliedSystemOf(systems: SystemsRecord | null | undefined, world
 }
 
 /**
+ * (Skies of his own worlds, 24 November) The world a sky's applied system is looked up under: a world of his (its own id, the
+ * edit key `editKeyOf`, which is never a pack of the game's) that an applied star system names among its grounds stands under
+ * that system of its own, over the converted sky it borrows its colours from (`lent`, the sky's pack); every other world, and
+ * one of his that no applied system names, under the sky's own pack exactly as before (`lent` null). Pure.
+ */
+export function systemWorldOf(systems: SystemsRecord | null | undefined, ownKey: string, skyPack: string): { world: string; lent: string | null } {
+  if (ownKey && ownKey !== skyPack) {
+    const a = appliedSystemOf(systems, ownKey);
+    if (a && a.rule === 'system') return { world: ownKey, lent: skyPack };
+  }
+  return { world: skyPack, lent: null };
+}
+
+/**
  * A world's own day under its applied star system (version 2): its length in real seconds (`dayHours` of it), its place in
  * the shared day as `DayCycle.phase` reads it (unwrapped: the day count `now / length + phase` is then the world's own count
  * since the system's epoch with its longitude, so the sky's time follows from it exactly), and the longitude's share of a

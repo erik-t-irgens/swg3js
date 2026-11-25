@@ -967,10 +967,25 @@ export class SwgSky {
     const world = motion.world;
     const byPlace = new Map<string, number>();
     for (const it of motion.items) if (it.place && !byPlace.has(it.place)) byPlace.set(it.place, it.index);
+    // (Skies of his own worlds) over a lent sky (a world of his under its own system, `SkyMotion.lent`) no place of the
+    // lender's is the system's: its sun card stands for the caster, its second sun for the pair's other where the system has a
+    // pair, and every other card of the lender (its moons, its celestials) stands down (`-1`: put away each frame).
+    const lent = motion.lent !== null;
+    const caster = motion.casterJ;
+    const partner = caster >= 0 ? (motion.secondJ >= 0 && motion.secondJ !== caster ? motion.secondJ : motion.items.findIndex((it) => it.star && it.index !== caster && it.pairOf === caster)) : -1;
+    const lentItem = (place: string): number => (place === `${world}:sun` ? caster : place === `${world}:sun2` ? partner : -1);
     const take = (sprites: SkyBody[], place: string, c: Celestial | null): void => {
       if (!sprites.length || !c) return;
-      const j = byPlace.get(place);
+      const j = lent ? lentItem(place) : byPlace.get(place);
       if (j === undefined) return;
+      if (j < 0) {
+        for (const s of sprites) {
+          s.userData.swgWidth ??= s.scale.x;
+          s.scale.set(1e-6, 1e-6, 1);
+        }
+        this.motionCards.push({ sprites, item: -1, star: false, place, perTan: 0 });
+        return;
+      }
       const it = motion.items[j];
       // A hidden or undrawn place stands at no width and no opacity; a drawn one at the system's size, its glow kept in step.
       const want = it.drawn ? (2 * SKY_RADIUS * Math.tan(((it.sizeDeg > 0 ? it.sizeDeg : 1) * Math.PI) / 360)) : 0;
@@ -987,6 +1002,10 @@ export class SwgSky {
     take(this.supplementalSun, `${world}:sun2`, this.data.supplementalSun);
     take(this.moon, `${world}:moon`, this.data.moon);
     take(this.supplementalMoon, `${world}:moon2`, this.data.supplementalMoon);
+    if (lent) {
+      for (const c of this.celestials) take(c.sprites, `${world}:celestial`, c.data);
+      return;
+    }
     for (const it of motion.items) {
       if (it.slot !== 'celestial' || it.celestial < 0) continue;
       const c = this.celestials.find((x) => x.data === this.data.celestials[it.celestial]);
