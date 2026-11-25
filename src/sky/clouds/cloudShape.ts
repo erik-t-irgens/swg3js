@@ -199,6 +199,76 @@ export const CLOUD_LOOK = {
    * sky on every side, as wave 2 drew.
    */
   skyBorrow: 0.5,
+  // ---- the look wave, round 2: shapes by type, lean and changing edges, the lit colours, the moon
+  /**
+   * How much a billowy type's cover swells and pinches up its column by the shape noise's coarsest Worley octave, a share
+   * either way: 0.35, so a tower billows in lobes (the talks' tower renders, his photo of a building cumulus) instead of
+   * standing as a cylinder with the map's outline. 0: wave 1's straight column.
+   */
+  towerBillow: 0.35,
+  /**
+   * A billowy type's cover band toward its top, a share of itself: 0.5, so its domes end crisp (cauliflower tops that read
+   * from the ground kilometres off) where its base stays soft. 1: one band all the way up.
+   */
+  topHard: 0.5,
+  /** A billowy type's cover band at its base, a share of itself: 1.6, a wispy, ragged bottom (the talks' wispy-to-billowy profile). 1: none. */
+  baseSoft: 1.6,
+  /**
+   * Cloud streets: the cover of a billowy type raised and lowered in rows along its layer's axis (one row a shape tile, about
+   * 2 km for a cumulus, warped by the shape noise so no row is straight), the mean held: 0.3. 0: no rows. The rows lie along
+   * the layer's own fixed axis (its seed and `turn`), never the wandering wind's heading, which would sweep the field.
+   */
+  streets: 0.3,
+  /**
+   * How far a cloud leans downwind, metres across per metre up at a wind aloft of 10 m/s (more in a stronger wind, held under
+   * twice): 0.25, so a 9 km tower's top stands some 2 km downwind of its foot (the shear aloft). 0: upright.
+   */
+  lean: 0.25,
+  /**
+   * How far an anvil spreads downwind of its tower's cell at its full anvil, metres: 6000, so a cumulonimbus's top fans out
+   * past its own cell as a flat, wind-blown plume (the talks' supercell renders, his far anvil photos). 0: in its cell alone.
+   */
+  anvilReach: 6000,
+  /**
+   * How far the map's read is warped sideways by the curl picture walked up each column, metres either way: 400, so a tower's
+   * wall bulges in lobes of about a kilometre up its height (his building cumulus, the talks' towers) instead of standing as its
+   * cell's cylinder, a heap's outline is no disc, and a sheet's gaps lose the straight edges of the map's axis lattice
+   * (Mustafar's ash lid). 0: the map read where the point stands.
+   */
+  warp: 400,
+  /**
+   * How fast the detail churns against the shape, m/s (the detail rising through the cloud on its own clock, its curl turning on
+   * another): 0.8, so an edge's frays change over a minute or two and a heap's billows climb (the 2023 talk's time-lapse
+   * frames). 0: the detail rides the shape unchanged.
+   */
+  evolve: 0.8,
+  /** The share of the finer detail laid over the edges within the tier's `fineNear` (`CLOUD_TUNE`): 0.4. 0: none. */
+  fine: 0.4,
+  /**
+   * Darker rain bellies: optical depth added to the cloud above a sample in the lowest third of a column some 8 km tall (eased
+   * in from 2.5 km), so a storm's or a nimbostratus's base takes less of the sky's light: 1.5. 0: the column alone.
+   */
+  rainBelly: 1.5,
+  /**
+   * Toward a neutral white, by day, the share the clouds' sunlight is taken at the same luminance (the eye's balance under sun
+   * and sky together: his noon photo's tops are white, not cream), eased out as the sun falls from 35 to 15 degrees so a
+   * mid-afternoon and dusk keep the sun's own colour (the window was 25 to 8 degrees in round 2, which greyed a 15 degree
+   * afternoon's two colours): 0.6. 0: the sun's colour through the air as it is.
+   */
+  sunNeutral: 0.6,
+  /**
+   * The clouds' ambient once the sun is low, a share of itself eased in from 12 degrees up to the horizon: 0.55, meant to let a
+   * lit side take the sun's orange rather than orange with the sky's blue over it. It does not: the skeptic measured Naboo's
+   * dusk lit warmth at 0.247, 0.238 and 0.240 with 0.55, 0.2 and 0, so the pink is not the ambient's and its cause is still to
+   * trace (the sun's colour through the air at the cloud's height, the air between eye and cloud). Kept at its start until
+   * then. 1: the ambient all day.
+   */
+  duskAmbient: 0.55,
+  /**
+   * The moon's light on the clouds, a factor (the long exposure his moonlit photo has, as the night floor lifts the land): 8,
+   * so a moonlit night silvers the edges round the moon through the rim and the glow. 1: the moon as the air gives it.
+   */
+  moonLight: 8,
 };
 
 /** The look's dials' ranges (the debug menu's sliders and the console's clamps). */
@@ -241,6 +311,19 @@ export const CLOUD_LOOK_RANGE: Readonly<Record<keyof typeof CLOUD_LOOK, readonly
   skyFill: [0, 1],
   skyLeast: [0, 1],
   skyBorrow: [0, 4],
+  towerBillow: [0, 0.9],
+  topHard: [0.1, 1],
+  baseSoft: [1, 4],
+  streets: [0, 0.9],
+  lean: [0, 1.5],
+  anvilReach: [0, 20_000],
+  warp: [0, 3000],
+  evolve: [0, 8],
+  fine: [0, 1],
+  rainBelly: [0, 6],
+  sunNeutral: [0, 1],
+  duskAmbient: [0, 1],
+  moonLight: [0, 40],
 };
 
 /** A type's profile blended over a layer's types by their weights at a point (the shape's inputs from the contract's slots). */
@@ -280,6 +363,8 @@ export interface ShapeIn<N> {
   det0: N;
   det1: N;
   det2: N;
+  /** The look wave, round 2: the street row's wave at the point, 0 between rows to 1 on one (absent: no rows). */
+  street?: N;
 }
 
 /** The look's numbers as the shape reads them, numbers or a graph's uniforms. */
@@ -296,11 +381,20 @@ export interface ShapeLook<N> {
   anvilPower: N;
   bite: N;
   softBite: N;
+  /** The look wave, round 2 (`CLOUD_LOOK`'s): the tower's billows, the band at the top and the base, the streets. */
+  towerBillow: N;
+  topHard: N;
+  baseSoft: N;
+  streets: N;
 }
 
 /** The look's dials as numbers (the twin's). */
 export function shapeLookNumbers(out?: ShapeLook<number>): ShapeLook<number> {
-  const o = out ?? { sigma: 0, erosion: 0, edgeHard: 0, edgeSoft: 0, wispyBand: 0, carve: 0, taperFrom: 0, anvilFrom: 0, anvilTo: 0, anvilPower: 0, bite: 0, softBite: 0 };
+  const o = out ?? { sigma: 0, erosion: 0, edgeHard: 0, edgeSoft: 0, wispyBand: 0, carve: 0, taperFrom: 0, anvilFrom: 0, anvilTo: 0, anvilPower: 0, bite: 0, softBite: 0, towerBillow: 0, topHard: 1, baseSoft: 1, streets: 0 };
+  o.towerBillow = CLOUD_LOOK.towerBillow;
+  o.topHard = CLOUD_LOOK.topHard;
+  o.baseSoft = CLOUD_LOOK.baseSoft;
+  o.streets = CLOUD_LOOK.streets;
   o.sigma = CLOUD_LOOK.sigma;
   o.erosion = CLOUD_LOOK.erosion;
   o.edgeHard = CLOUD_LOOK.edgeHard;
@@ -351,7 +445,15 @@ export function shapeOf<N>(o: ShapeOps<N>, s: ShapeIn<N>, p: ShapeProfile<N>, lo
   const env = o.mul(profileOf(o, p, hc), inside);
   // 3. The cover at this height: narrowed toward the top by the taper, spread near the top by the anvil (a power under one
   //    lifts a low cover toward one, so the anvil reaches out past the tower's own cell). Each window and power a dial.
-  const narrowed = o.mul(s.cover, o.mix(one, o.sub(one, p.taper), o.smoothstep(look.taperFrom, one, hc)));
+  //    The look wave, round 2: a billowy type's cover swells and pinches up its column by the shape noise's coarsest Worley
+  //    (`towerBillow`: a tower in lobes, not a cylinder), and a heap's rows (`streets`, the caller's wave), the mean held.
+  const two = o.k(2);
+  // A heap's billows or a tower's anvil: a cumulonimbus is no billowy type, but its column billows as a cumulus's does.
+  const heapy = o.max(p.billow, p.anvil);
+  const swell = o.add(one, o.mul(o.mul(look.towerBillow, o.mul(heapy, o.smoothstep(look.taperFrom, one, hc))), o.sub(o.mul(s.low1, two), one)));
+  const rows = s.street === undefined ? one : o.add(one, o.mul(o.mul(look.streets, o.mul(p.billow, o.sub(one, p.anvil))), o.sub(o.mul(s.street, two), one)));
+  const cov0 = o.min(o.mul(o.mul(s.cover, swell), rows), one);
+  const narrowed = o.mul(cov0, o.mix(one, o.sub(one, p.taper), o.smoothstep(look.taperFrom, one, hc)));
   const spread = o.mul(p.anvil, o.smoothstep(look.anvilFrom, o.max(look.anvilTo, o.add(look.anvilFrom, o.k(1e-3))), hc));
   const covH = o.pow(o.max(narrowed, o.k(1e-4)), o.mix(one, look.anvilPower, spread));
   // 4. The low-frequency shape: the billows dilated by the Worley octaves for a billowy type, the octaves alone for a wispy one.
@@ -362,7 +464,11 @@ export function shapeOf<N>(o: ShapeOps<N>, s: ShapeIn<N>, p: ShapeProfile<N>, lo
   //    fibrous one's (its erosion high: cirrus), never takes the whole cover, so its noise carves the heap to its heart and
   //    the streaks out of a wisp (`carve`); a sheet (both low) keeps its whole cover.
   const covC = o.mul(covH, o.sub(one, o.mul(look.carve, o.max(p.billow, p.erosion))));
-  const width = o.max(o.mul(covC, o.mix(look.edgeHard, look.edgeSoft, s.edge)), o.k(1e-3));
+  //    The look wave, round 2: a billowy type's band wide at its base (wispy, over the detail's own `wispyBand`) and narrow
+  //    from there toward its top (crisp domes).
+  const wb = o.max(look.wispyBand, o.k(1e-3));
+  const band = o.mix(o.mix(look.baseSoft, one, o.smoothstep(o.k(0), wb, hc)), look.topHard, o.smoothstep(wb, one, hc));
+  const width = o.max(o.mul(o.mul(covC, o.mix(look.edgeHard, look.edgeSoft, s.edge)), o.mix(one, band, heapy)), o.k(1e-3));
   const cut = o.mul(o.clamp01(o.div(o.sub(base, o.sub(one, covC)), width)), covH);
   // 6. The erosion: the detail's octaves, wispy at the base and billowy above, eat the edge.
   const df = o.add(o.add(o.mul(s.det0, o.k(0.625)), o.mul(s.det1, o.k(0.25))), o.mul(s.det2, o.k(0.125)));

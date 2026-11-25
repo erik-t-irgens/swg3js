@@ -37,7 +37,7 @@ import { CLOUD_LAYER_MAX, CLOUD_LAYER_VEC4, CLOUD_TYPES, CLOUD_TYPE_TUNE, type C
 import { CLOUD_LOOK, shapeOf, type ShapeOps } from './cloudShape.ts';
 import { LIGHT_STEPS, ambientShareOf, depthLightOf, octaveFallsOf, octavesWith, rayPhasesOf, skyLightOf, stepLightOf, sunLightsClouds, type LightOps } from './cloudLight.ts';
 import { CLOUD_DRAW, CLOUD_FEED, CLOUD_FLIGHT, CLOUD_STEPS_MOST, CLOUD_TIER, CLOUD_TUNE, cloudsWhyNot, cloudsWouldDraw, traceSizeAt, traceSizeOf } from './cloudTune.ts';
-import { cloudNoise, type CloudNoise } from './cloudNoise.ts';
+import { cloudNoise, pcg3Node, type CloudNoise } from './cloudNoise.ts';
 // Pass 3, wave 2 (maker T): the fill-in over frames, the flight mode and the clouds' motion.
 import { CLOUD_REUSE_STATS, CLOUD_RU, DIST_UNIT, TAA_MOTION_IN, flightForget, flightStep, motionGraph, newFlightState, resolveGraph, traceTapsOf, writeReuseDials, type MarchNodes } from './cloudResolve.ts';
 import { motionTextureOf } from '../../core/gpu/motion.ts';
@@ -45,7 +45,7 @@ import { taaPassNow } from '../../core/gpu/taa/taaPass.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Break, Fn, If, Loop, abs, clamp, dot, exp, float, floatBitsToUint, floor, fract, int, interleavedGradientNoise, ivec2, length, max, min, mix, normalize, outputStruct, pow, renderGroup, select, smoothstep, sqrt, struct, texture, texture3D, uint, uniform, uniformArray, uv, vec2, vec3, vec4 } = TSL as Any;
+const { Break, Fn, If, Loop, abs, clamp, cos, dot, exp, float, floatBitsToUint, floor, fract, int, interleavedGradientNoise, ivec2, length, max, min, mix, normalize, outputStruct, pow, renderGroup, select, smoothstep, sqrt, struct, texture, texture3D, uint, uniform, uniformArray, uv, vec2, vec3, vec4 } = TSL as Any;
 
 /** What the march has done, for `__debug.clouds()` and the tests. */
 export const CLOUD_MARCH_STATS = { built: 0, drawn: 0, skipped: 0, compiles: 0, landed: 0 };
@@ -142,6 +142,15 @@ export interface CloudMarchUniforms {
   l8: THREE.Vector4;
   t3: THREE.Vector4;
   t4: THREE.Vector4;
+  /**
+   * The look wave, round 2: (lean, anvil reach, warp, fine), (tower billow, top hard, base soft, streets), (rain belly, the sun's
+   * neutral share now, the ambient's share now, the moon's light), (the detail's own clock as an offset of its tile, xyz; the
+   * curl's, w). `t4.z` is the tier's `fineNear`.
+   */
+  l9: THREE.Vector4;
+  l10: THREE.Vector4;
+  l11: THREE.Vector4;
+  t5: THREE.Vector4;
 }
 
 function newUniforms(): CloudMarchUniforms {
@@ -174,7 +183,40 @@ function newUniforms(): CloudMarchUniforms {
     l8: v(),
     t3: v(),
     t4: v(),
+    l9: v(),
+    l10: v(),
+    l11: v(),
+    t5: new THREE.Vector4(0, 0, 0, 0),
   };
+}
+
+/**
+ * The look wave, round 2: the detail's and the curl's own clocks from the shared clock's seconds (`evolve` m/s), each a share
+ * of its tile worked in double precision and wrapped, the detail's along the up axis of its turned frame (minus: the billows
+ * rise); and the colour's shares now from the sun's height (`sunNeutral` by day, eased out from 35 to 15 degrees; the ambient's
+ * `duskAmbient` eased in from 12 degrees to the horizon). Field by field, allocating nothing.
+ */
+export function writeEvolve(u: CloudMarchUniforms, seconds: number, sunY: number): void {
+  const L = CLOUD_LOOK;
+  const R = DETAIL_TURN;
+  const k = -(seconds * L.evolve) / (L.detailTile > 1 ? L.detailTile : 1);
+  const a = R[1] * k;
+  const b = R[4] * k;
+  const c = R[7] * k;
+  const t5 = u.t5;
+  t5.x = a - Math.floor(a);
+  t5.y = b - Math.floor(b);
+  t5.z = c - Math.floor(c);
+  const w = (seconds * L.evolve * 0.5) / ((L.shapeTile > 1 ? L.shapeTile : 1) * 0.25);
+  t5.w = w - Math.floor(w);
+  // 35 and 15 degrees' sines (0.574, 0.259): the finisher moved the window up from 25 and 8 degrees, since at a 15 degree
+  // afternoon the neutral white took the sun's colour away (the skeptic's two-colour contrast 0.28 down to 0.16); 12 degrees' (0.208).
+  const d0 = (sunY - 0.259) / (0.574 - 0.259);
+  const d = d0 < 0 ? 0 : d0 > 1 ? 1 : d0;
+  u.l11.y = L.sunNeutral * d * d * (3 - 2 * d);
+  const e0 = 1 - sunY / 0.208;
+  const e = e0 < 0 ? 0 : e0 > 1 ? 1 : e0;
+  u.l11.z = 1 + (L.duskAmbient - 1) * e * e * (3 - 2 * e);
 }
 
 /**
@@ -266,6 +308,22 @@ export function writeDials(u: CloudMarchUniforms): void {
   t4.x = T.detailNear;
   const df = T.detailNear + 1;
   t4.y = T.detailFar > df ? T.detailFar : df;
+  // The look wave, round 2 (the colour's shares now are `writeEvolve`'s, from the sun).
+  t4.z = T.fineNear > 1 ? T.fineNear : 1;
+  // The finisher: where the hashed jitter takes over from the interleaved noise, metres.
+  t4.w = T.jitterHashFrom;
+  const l9 = u.l9;
+  l9.x = L.lean;
+  l9.y = L.anvilReach;
+  l9.z = L.warp;
+  l9.w = T.fineNear > 0 ? L.fine : 0;
+  const l10 = u.l10;
+  l10.x = L.towerBillow;
+  l10.y = L.topHard;
+  l10.z = L.baseSoft;
+  l10.w = L.streets;
+  u.l11.x = L.rainBelly;
+  u.l11.w = L.moonLight;
 }
 
 /** The types whose layers reach the storm reach (pass 3, wave 2, maker T): towering cumulus and cumulonimbus, by index. */
@@ -438,6 +496,11 @@ interface Reads {
   /** The look wave, round 1: the sky's light numbers (`CLOUD_U.l8`) and the detail's fade (`t4`). */
   l8: Any;
   t4: Any;
+  /** The look wave, round 2: the shape's and the motion's numbers (`CLOUD_U.l9`, `l10`, `l11`, `t5`). */
+  l9: Any;
+  l10: Any;
+  l11: Any;
+  t5: Any;
 }
 
 /**
@@ -461,7 +524,7 @@ function densityFn(R: Reads, form: DensityForm): Any {
   const face = R.face;
   const detail = form === 'full';
   const tag = form === 'full' ? 'V' : form === 'light' ? 'L' : 'Q';
-  return Fn(([p, y]: Any[]) => {
+  return Fn(([p, y, ym]: Any[]) => {
     const sigma = float(0).toVar(`swgCloud${tag}Sig`);
     const hw = float(0).toVar(`swgCloud${tag}Hw`);
     const cov = float(0).toVar(`swgCloud${tag}Cov`);
@@ -477,7 +540,40 @@ function densityFn(R: Reads, form: DensityForm): Any {
       const s1 = vec4(face.slot(li, 1)).toVar(`swgCloud${tag}S1`);
       const rc = vec4(R.rch.element(li)).toVar(`swgCloud${tag}Rc`);
       If(s1.w.greaterThan(0.5).and(y.greaterThan(s0.x)).and(y.lessThan(s0.y)).and(far.lessThan(rc.x)), () => {
-        const m = vec4(face.sample(li, p)).toVar(`swgCloud${tag}M`);
+        // The look wave, round 2: the cloud leans downwind (`lean`, by the layer's own drift, more in a stronger wind): the map is
+        // read upwind of the point by its height over the base, so a tower's top stands downwind of its foot.
+        const wv = vec4(face.slot(li, 3)).zw;
+        const wl = length(wv);
+        const wd = wv.div(max(wl, 1e-3)).toVar(`swgCloud${tag}Wd`);
+        const upM = y.sub(s0.x);
+        const lean = R.l9.x.mul(min(wl.mul(0.1), 2)).mul(upM);
+        // The look wave, round 2: the map's read warped sideways by the curl picture walked up the column (`warp`), so a tower's
+        // wall bulges in lobes up its height instead of standing as its cell's cylinder, and a sheet's lattice-aligned gaps lose
+        // their straight edges. The curl is read in the layer's own noise frame (its place a function of the world, as the shape's).
+        const oW = vec4(R.off.element(li));
+        const o2W = vec4(R.off2.element(li));
+        const skW = vec4(R.streak.element(li));
+        const wa = p.x.mul(o2W.z).add(p.z.mul(o2W.w)).div(skW.x).div(skW.y).add(oW.x);
+        const wc = p.z.mul(o2W.z).sub(p.x.mul(o2W.w)).div(skW.y).add(oW.y);
+        const wy = upM.div(skW.y.mul(R.l5.y)).add(o2W.x);
+        // A curl tile over four shape tiles (some 8 km for a cumulus) and walked about a third of a tile up a 9 km tower: at two
+        // tiles a shape tile its fine cells shredded the walls into streaks (a warp's change over a cell must stay under the cell).
+        const wq = vec4(R.curl.sample(vec2(wa, wc).mul(0.25).add(vec2(wy.mul(0.35), wy.mul(-0.27)))).level(0)).xy.mul(2).sub(1);
+        const mp = p.sub(vec3(wd.x, 0, wd.y).mul(lean)).add(vec3(wq.x, 0, wq.y).mul(R.l9.z)).toVar(`swgCloud${tag}Mp`);
+        const m = vec4(face.sample(li, mp)).toVar(`swgCloud${tag}M`);
+        const h0 = upM.div(max(s0.y.sub(s0.x), 1));
+        // The look wave, round 2: an anvil spreads past its tower's cell downwind (`anvilReach`): in its window the map is read
+        // again upwind by the reach eased up the window, and the more cover of the two taken (a layer whose types hold no anvil
+        // reads nothing more).
+        const ta0 = int(s1.x);
+        const anv = max(max(vec4(face.typeSlot(ta0, 0)).w, vec4(face.typeSlot(int(s1.y), 0)).w), vec4(face.typeSlot(int(s1.z), 0)).w);
+        const aw = smoothstep(R.l6.x.sub(0.15), R.l6.y, h0).mul(anv).toVar(`swgCloud${tag}Aw`);
+        If(aw.mul(R.l9.y).greaterThan(50), () => {
+          const m2 = vec4(face.sample(li, mp.sub(vec3(wd.x, 0, wd.y).mul(R.l9.y.mul(aw))))).toVar(`swgCloud${tag}M2`);
+          If(m2.x.greaterThan(m.x), () => {
+            m.assign(m2);
+          });
+        });
         cov.assign(max(cov, m.x));
         If(m.x.greaterThan(1e-3), () => {
           const h = y.sub(s0.x).div(max(s0.y.sub(s0.x), 1)).toVar(`swgCloud${tag}H`);
@@ -510,22 +606,33 @@ function densityFn(R: Reads, form: DensityForm): Any {
             If(dw.greaterThan(0), () => {
               // The curl turns the detail's samples about, most at the base, none at the top.
               const dTile = R.l1.z;
-              const cu = vec4(R.curl.sample(suv.xz.mul(4)).level(0)).xy.mul(2).sub(1);
+              // The look wave, round 2: the curl turns on its own clock (`t5.w`, a share of its tile), so the frays change. Its
+              // finisher: walked along the diagonal (w, -w), so each wrap of `t5.w` moves the read by whole tiles on both axes; a
+              // y of 0.618 w jumped every turned fray at once each wrap (every 1280 s at the starts).
+              const cu = vec4(R.curl.sample(suv.xz.mul(4).add(vec2(R.t5.w, R.t5.w.negate()))).level(0)).xy.mul(2).sub(1);
               const bend = R.l1.w.mul(float(1).sub(h));
               const da = along.add(cu.x.mul(bend)).div(dTile);
               const du = up.div(dTile);
               const dc = across.add(cu.y.mul(bend)).div(dTile);
               const T3 = DETAIL_TURN;
-              const duv = vec3(da.mul(T3[0]).add(du.mul(T3[1])).add(dc.mul(T3[2])).add(o.z), da.mul(T3[3]).add(du.mul(T3[4])).add(dc.mul(T3[5])).add(o2.y), da.mul(T3[6]).add(du.mul(T3[7])).add(dc.mul(T3[8])).add(o.w));
-              det.assign(mix(vec4(0.5, 0.5, 0.5, 1), vec4(R.detail.sample(duv).level(0)), dw));
+              // The look wave, round 2: the detail rises through the shape on its own clock (`t5.xyz`, `evolve`).
+              const duv = vec3(da.mul(T3[0]).add(du.mul(T3[1])).add(dc.mul(T3[2])).add(o.z), da.mul(T3[3]).add(du.mul(T3[4])).add(dc.mul(T3[5])).add(o2.y), da.mul(T3[6]).add(du.mul(T3[7])).add(dc.mul(T3[8])).add(o.w)).add(R.t5.xyz).toVar(`swgCloud${tag}Duv`);
+              const dv = vec4(R.detail.sample(duv).level(0)).toVar(`swgCloud${tag}Dv`);
+              // The look wave, round 2: within the tier's `fineNear` the detail at four times its frequency laid over (`fine`).
+              const fw = R.l9.w.mul(float(1).sub(smoothstep(R.t4.z.mul(0.5), R.t4.z, far)));
+              If(fw.greaterThan(0), () => {
+                dv.assign(mix(dv, vec4(R.detail.sample(duv.mul(4)).level(0)), fw));
+              });
+              det.assign(mix(vec4(0.5, 0.5, 0.5, 1), dv, dw));
             });
           } else det = vec4(0.5, 0.5, 0.5, 1);
           const d = shapeOf(
             SHAPE_NODE,
-            { h, cover: m.x, top: m.w, edge: s0.w, layerDensity: s0.z, low0: low.x, low1: low.y, low2: low.z, low3: low.w, det0: det.x, det1: det.y, det2: det.z },
+            // The look wave, round 2: the street rows across the layer's axis (one a shape tile, warped by the coarse Worley).
+            { h, cover: m.x, top: m.w, edge: s0.w, layerDensity: s0.z, low0: low.x, low1: low.y, low2: low.z, low3: low.w, det0: det.x, det1: det.y, det2: det.z, street: cos(suv.z.add(low.y.sub(0.5).mul(0.6)).mul(Math.PI * 2)).mul(0.5).add(0.5) },
             { rise: q0.x, fallFrom: q0.y, fallTo: q0.z, anvil: q0.w, billow: q1.y, erosion: q1.z, taper: q2.z, density: q2.x, reach },
             // The look wave, round 1: the cheap pass's shape has no erosion (never less than the full shape's).
-            { sigma: R.l0.x, erosion: form === 'probe' ? float(0) : R.l0.y, edgeHard: R.l0.z, edgeSoft: R.l0.w, wispyBand: R.l1.x, carve: R.l5.x, taperFrom: R.l5.z, anvilFrom: R.l6.x, anvilTo: R.l6.y, anvilPower: R.l5.w, bite: R.l6.z, softBite: R.l6.w },
+            { sigma: R.l0.x, erosion: form === 'probe' ? float(0) : R.l0.y, edgeHard: R.l0.z, edgeSoft: R.l0.w, wispyBand: R.l1.x, carve: R.l5.x, taperFrom: R.l5.z, anvilFrom: R.l6.x, anvilTo: R.l6.y, anvilPower: R.l5.w, bite: R.l6.z, softBite: R.l6.w, towerBillow: R.l10.x, topHard: R.l10.y, baseSoft: R.l10.z, streets: R.l10.w },
           );
           // Pass 3, wave 2 (maker T): faded out over the last of its reach.
           const dd = float(d).mul(float(1).sub(smoothstep(rc.y, rc.x, far))).toVar(`swgCloud${tag}D`);
@@ -537,8 +644,14 @@ function densityFn(R: Reads, form: DensityForm): Any {
             // column's top. The sky's light through it is `skyLightOf`'s.
             const span = max(s0.y.sub(s0.x), 1);
             const colTop = s0.x.add(max(m.w.mul(reach), 0.02).mul(span));
-            const above = max(colTop.sub(y), 0);
-            upTau.addAssign(m.x.mul(q2.x).mul(s0.z).mul(R.l0.x).mul(R.l8.y).mul(above).mul(float(1).sub(smoothstep(rc.y, rc.x, far))));
+            // The look wave, round 2 (the lattice): the column above from the step's unjittered middle (`ym`), never the
+            // sample's jittered height: on far steps of hundreds of metres the jitter moved the depth above by as much, and
+            // exp() of it printed the jitter's diagonal pattern on thin far cloud.
+            const above = max(colTop.sub(ym), 0);
+            // The look wave, round 2: darker rain bellies (`rainBelly`): optical depth added in the lowest third of a tall column.
+            const colM = max(m.w.mul(reach), 0.02).mul(span);
+            const belly = R.l11.x.mul(smoothstep(2500, 8000, colM)).mul(float(1).sub(smoothstep(0, 0.35, ym.sub(s0.x).div(colM))));
+            upTau.addAssign(m.x.mul(q2.x).mul(s0.z).mul(R.l0.x).mul(R.l8.y).mul(above).add(belly.mul(m.x)).mul(float(1).sub(smoothstep(rc.y, rc.x, far))));
           }
           If(dd.greaterThan(most), () => {
             most.assign(dd);
@@ -550,7 +663,7 @@ function densityFn(R: Reads, form: DensityForm): Any {
     // The look wave, round 1: the cloud above in z, the layer that gave the most and the most cover met packed in w (the layer
     // its whole part, the cover under one its fraction: `int(w)` the layer, `fract(w)` the cover).
     return vec4(sigma, hw.div(max(sigma, 1e-9)), upTau, mostL.add(min(cov, 0.999)));
-  }).setLayout({ name: form === 'full' ? 'swgCloudDensity' : form === 'light' ? 'swgCloudDensityLight' : 'swgCloudDensityProbe', type: 'vec4', inputs: [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }] });
+  }).setLayout({ name: form === 'full' ? 'swgCloudDensity' : form === 'light' ? 'swgCloudDensityLight' : 'swgCloudDensityProbe', type: 'vec4', inputs: detail ? [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }, { name: 'ym', type: 'float' }] : [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }] });
 }
 
 // ---------------------------------------------------------------- the march's graph
@@ -657,7 +770,12 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
   const L8 = g(u.l8);
   const T3 = g(u.t3);
   const T4 = g(u.t4);
-  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6, rch: RCH, l8: L8, t4: T4 };
+  // The look wave, round 2: the shape's, the motion's and the colour's numbers.
+  const L9 = g(u.l9);
+  const L10 = g(u.l10);
+  const L11 = g(u.l11);
+  const T5 = g(u.t5);
+  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6, rch: RCH, l8: L8, t4: T4, l9: L9, l10: L10, l11: L11, t5: T5 };
   const dens = densityFn(R, 'full');
   const densL = densityFn(R, 'light');
   const densP = densityFn(R, 'probe');
@@ -751,6 +869,9 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     }
     // Each step's jitter (interleaved gradient noise over the trace's pixels, its phase moving each frame; a step's middle with it off).
     const jit = select(TR.w.greaterThan(0.5), fract(interleavedGradientNoise(st.mul(TR.xy)).add(TR.z)), float(0.5)).toVar('swgCloudJit');
+    // The look wave, round 2's finisher: past `jitterHashFrom` (`T4.w`) a pixel's own hashed fraction with the same moving phase,
+    // so the far steps' residue the history cannot average is grain, not the interleaved noise's diagonal honeycomb.
+    const jitH = select(TR.w.greaterThan(0.5), fract(vec3(pcg3Node(uint(tp.x), uint(tp.y), uint(40503))).x.add(TR.z)), float(0.5)).toVar('swgCloudJitH');
     // The light: the air's numbers this frame, the ambient about the sky at the camera, the multiple scattering at the camera.
     const Ldir = normalize(LIGHT.xyz).toVar('swgCloudLDir');
     const sunAz = normalize(vec3(n.sunDir.x, 0, n.sunDir.z).add(vec3(1e-4, 0, 0))).toVar('swgCloudSunAz');
@@ -824,7 +945,7 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
         const ds = max(min(ds0, bandEnd.sub(t)), 0.5).toVar('swgCloudDs');
         // Each step's sample jittered within its own stretch (a pixel's own fraction, moving each frame): a sample at each step's
         // middle sliced an opaque tower into stacked discs a step apart, which no jitter of the first step alone broke up.
-        const tm = t.add(ds.mul(jit)).toVar('swgCloudTm');
+        const tm = t.add(ds.mul(select(t.greaterThan(T4.w), jitH, jit))).toVar('swgCloudTm');
         const p = dir.mul(tm).toVar('swgCloudP');
         const y = heightOf(p).toVar('swgCloudY');
         If(fine.lessThan(0.5), () => {
@@ -840,7 +961,11 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
             t.addAssign(ds);
           });
         }).Else(() => {
-          const d = vec4(dens(p, y)).toVar('swgCloudDen');
+          // The look wave, round 2: the step's unjittered middle height, for the column above (the skeptic's trace of the
+          // lattice). Taking the light march and the air's light from the middle too was tried and left the lattice as it was;
+          // with the jitter off the lattice goes (and the steps band): it is the jitter's own pattern on far steps.
+          const yMid = heightOf(dir.mul(t.add(ds.mul(0.5)))).toVar('swgCloudYMid');
+          const d = vec4(dens(p, y, yMid)).toVar('swgCloudDen');
           const sig = d.x;
           If(sig.greaterThan(1e-7), () => {
             grow.assign(1);
@@ -886,7 +1011,11 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
               const ta = vec3(tables.transmittanceAt(hKm, dirB.y)).toVar(`swgCloudTa${tag}`);
               return top.mul(ta).mul(octavesWith(LIGHT_NODE, falls, ph));
             };
-            const Ls = lit(n.sunDir, n.sunTop, phS, 'S').add(lit(n.sun2Dir, n.sun2Top, phS2, 'S2')).add(lit(n.moonDir, n.moonTop, phM, 'M')).toVar('swgCloudLs');
+            // The look wave, round 2: the sun's light taken toward a neutral white of its luminance by day (`sunNeutral` now,
+            // `L11.y`) and the moon's raised by `moonLight` (`L11.w`).
+            const lS = lit(n.sunDir, n.sunTop, phS, 'S').add(lit(n.sun2Dir, n.sun2Top, phS2, 'S2')).toVar('swgCloudLsun');
+            const lsY = dot(lS, vec3(0.2126, 0.7152, 0.0722));
+            const Ls = mix(lS, vec3(lsY), L11.y).add(lit(n.moonDir, n.moonTop, phM, 'M').mul(L11.w)).toVar('swgCloudLs');
             // The look wave, round 1: dark rims with the light behind and the inner glow with it ahead, by the depth toward the
             // light (`rimsByDepth` 1) or the sample's own density (0, wave 1's powder).
             const depthIn = mix(sig.mul(L4.x), tauN, L7.w);
@@ -896,7 +1025,7 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
             // The look wave, round 1: the sky's light taken by the cloud above (`skyAbove`, never under `skyLeast`), and its sunward
             // third by the light march's depth (`skyBorrow`), so a shaded side takes the zenith's and the far side's colour.
             const sky = skyLightOf(LIGHT_NODE, d.z, L8.x, L8.z);
-            const amb = ambUp.add(ambSun.mul(exp(tau.mul(L8.w).negate()))).mul(sky).mul(ambientShareOf(LIGHT_NODE, ms, msCamL, d.y, L4.z)).mul(L4.y);
+            const amb = ambUp.add(ambSun.mul(exp(tau.mul(L8.w).negate()))).mul(sky).mul(ambientShareOf(LIGHT_NODE, ms, msCamL, d.y, L4.z)).mul(L4.y).mul(L11.z);
             const S = Ls.mul(dl).add(amb).mul(L2.w).toVar('swgCloudS');
             const add = stepLightOf(LIGHT_NODE, S, sig, ds);
             const Tn = T.mul(exp(sig.mul(ds).negate())).toVar('swgCloudTn');
@@ -1256,9 +1385,12 @@ export class GpuCloudPass implements FxPass {
     let top = -1e9;
     if (st) {
       const V = CLOUD_LAYER_VEC4 * 4;
+      const bt = F.bandTop;
       for (let i = 0; i < F.count && i < CLOUD_LAYER_MAX; i++) {
         const o = i * V;
-        if (st[o + 7] > 0 && st[o + 2] > 0 && st[o + 1] > top) top = st[o + 1];
+        // The look wave, round 2: the band's top (the tallest type standing at the level), not the whole layer's thickness.
+        const ti = bt ? bt[i] : st[o + 1];
+        if (st[o + 7] > 0 && st[o + 2] > 0 && ti > top) top = ti;
       }
     }
     if (top < -1e8) return f.lightDir;
@@ -1312,6 +1444,7 @@ export class GpuCloudPass implements FxPass {
     nv.z = fl.b * share;
     nv.w = 0;
     writeDials(u);
+    writeEvolve(u, CLOUD_FEED.seconds, AIR.frame.sunDir.y);
     this.frameNo++;
     // A golden-ratio walk of the jitter's phase, frame by frame (the edge smoothing gathers it).
     u.tr.z = (this.frameNo * 0.6180339887) % 1;

@@ -344,7 +344,8 @@ AIR.tables = keepTables;
   const body = march.slice(march.indexOf('function densityFn('), march.indexOf("// ---------------------------------------------------------------- the march's graph"));
   const samples = body.match(/\.sample\([^;]*?\)\.level\(0\)/g) ?? [];
   const reads = (body.match(/(?<!face)\.sample\(/g) ?? []).length;
-  ok(body.length > 0 && reads === samples.length && samples.length === 3, `every picture the density reads inside the march's loops is read at a named level (${samples.length} of ${reads}, the map's face apart: WGSL refuses a plain read in a loop that differs per pixel)`);
+  // The look wave, round 2: five (the map read's warp by the curl picture, and the finer detail within the tier's `fineNear`).
+  ok(body.length > 0 && reads === samples.length && samples.length === 5, `every picture the density reads inside the march's loops is read at a named level (${samples.length} of ${reads}, the map's face apart: WGSL refuses a plain read in a loop that differs per pixel)`);
   ok(src('sky/clouds/cloudMapGpu.ts').includes('.depth(l).level(0)'), "and so is the map's face, which it calls there (the map's maker's)");
   ok(march.includes('Loop({ start: int(0), end: int(CLOUD_STEPS_MOST)') && march.includes('cs.greaterThanEqual(steps)'), "the march's loop is built to its most and walks the dial's steps (a change of steps builds nothing)");
   ok(march.includes('shapeOf(\n            SHAPE_NODE,'), "the march's density is the one shape function handed nodes");

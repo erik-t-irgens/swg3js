@@ -53,6 +53,8 @@ const MARCH_NOTES: Record<keyof typeof CLOUD_TUNE, string> = {
   detailNear: 'metres from the lens where the detail noise starts to fade out',
   detailFar: 'metres where it is gone (its reads skipped)',
   curveRadius: 'the decks curved as on a planet of this radius, km (0 flat)',
+  fineNear: 'metres within which a finer detail frays close edges (Ultra and High; 0 off)',
+  jitterHashFrom: "metres past which the steps' jitter is hashed grain, not the far honeycomb (120000: never)",
 };
 
 const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
@@ -95,6 +97,20 @@ const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
   skyFill: "the share of a cell's column above counted as cloud for the sky's light",
   skyLeast: "the least of the sky's light left under the thickest cloud",
   skyBorrow: "how the light march's depth takes the sunward sky away from a shaded side (two colours at dusk)",
+  // The look wave, round 2: shapes by type, lean and changing edges, the lit colours, the moon.
+  towerBillow: "how much a tower's cover swells and pinches up its column (lobes, not a cylinder)",
+  topHard: "a billowy type's cover band toward its top, a share (crisp domes)",
+  baseSoft: "a billowy type's cover band at its base, a share (wispy bottoms)",
+  streets: "how strongly heaps line up in rows along their layer's axis (cloud streets)",
+  lean: 'metres a cloud leans downwind per metre up, at a 10 m/s wind',
+  anvilReach: "metres an anvil spreads downwind past its tower's cell",
+  warp: "metres the map's read is warped sideways up each column (lobed towers, no straight-edged gaps)",
+  evolve: 'm/s the detail churns against the shape (edges that change over minutes)',
+  fine: 'the share of the finer detail laid over edges close in',
+  rainBelly: "optical depth added under a tall column's lowest third (darker rain bellies)",
+  sunNeutral: "by day, the share the clouds' sunlight is taken toward neutral white",
+  duskAmbient: "the clouds' ambient at a low sun, a share (measured: it does not turn the pink lit sides orange)",
+  moonLight: "the moon's light on the clouds, a factor (silver moonlit edges)",
 };
 
 /** The march's and the look's groups (made once a call; the menu asks once). */

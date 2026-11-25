@@ -382,6 +382,7 @@ export class CloudRun {
     CLOUD_FEED.drift = this.fullDrift;
     CLOUD_FEED.layers = this.layers;
     CLOUD_FEED.version = this.version;
+    CLOUD_FEED.bandTop = this.sf.bandTop;
   }
 
   // ---------------------------------------------------------------- the level
@@ -530,6 +531,10 @@ export class CloudRun {
     mf.regionCount = rn;
     packMapTune(T, mf, this.tuneF);
     CLOUD_FEED.count = this.count;
+    // The look wave, round 2: the shared clock for the detail's and the curl's own clocks (`writeEvolve`). Its finisher: the
+    // unwrapped seconds, since `writeEvolve` takes each clock's fraction of its tile itself; the 65536 s wrap above jumped the
+    // detail by a part of its tile every 18.2 hours.
+    CLOUD_FEED.seconds = tau;
     this.frames++;
   }
 

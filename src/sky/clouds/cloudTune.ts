@@ -143,6 +143,20 @@ export const CLOUD_TUNE = {
    * 420 brings a 3 km base down to the horizon within the reach, and every horizon ray it adds is a dear one.
    */
   curveRadius: 0,
+  /**
+   * The look wave, round 2: the reach (metres from the lens) within which a finer detail read (the detail volume at four times
+   * its frequency, cells of some 8 m) is laid over the edges, so a heap met close in flight or on a peak frays finely: 150 on
+   * Ultra and High (`CLOUD_TIER_STEPS`), 0 on Medium and Low (the read skipped). The owner's to move.
+   */
+  fineNear: 150,
+  /**
+   * The look wave, round 2's finisher: the distance, metres from the lens, past which each step's jitter is a pixel's own hashed
+   * fraction rather than the interleaved gradient noise (both with the same phase moving each frame): 3000, past the close heaps
+   * and the first fine steps, where steps of a hundred metres and more leave a residue the history cannot average, and the
+   * interleaved noise's residue is a diagonal honeycomb on thin far cloud while the hash's is grain. 0: the hash everywhere;
+   * 120000: the interleaved noise everywhere (round 2's march). The owner's to move.
+   */
+  jitterHashFrom: 3000,
 };
 
 /** The dials' ranges (the menu's sliders and the console's clamps). */
@@ -183,6 +197,8 @@ export const CLOUD_TUNE_RANGE: Readonly<Record<keyof typeof CLOUD_TUNE, readonly
   detailNear: [500, 120_000],
   detailFar: [1000, 120_000],
   curveRadius: [0, 20_000],
+  fineNear: [0, 2000],
+  jitterHashFrom: [0, 120_000],
 };
 
 /** The loop bound the card's march is built with: `CLOUD_TUNE.steps` moves under it with nothing built. */
@@ -194,10 +210,10 @@ export const CLOUD_STEPS_MOST = 256;
  * `CLOUD_TUNE` by `setCloudTier` when the quality tier is applied, so the dials then move from the tier's start.
  */
 export const CLOUD_TIER_STEPS = {
-  low: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
-  medium: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
-  high: { steps: 64, stepsHorizon: 128, lightExtra: 0 },
-  ultra: { steps: 96, stepsHorizon: 192, lightExtra: 1 },
+  low: { steps: 64, stepsHorizon: 128, lightExtra: 0, fineNear: 0 },
+  medium: { steps: 64, stepsHorizon: 128, lightExtra: 0, fineNear: 0 },
+  high: { steps: 64, stepsHorizon: 128, lightExtra: 0, fineNear: 150 },
+  ultra: { steps: 96, stepsHorizon: 192, lightExtra: 1, fineNear: 150 },
 };
 
 /** The tier the steps were last set for (the report's word). */
@@ -205,11 +221,12 @@ export const CLOUD_TIER = { name: 'high' as string };
 
 /** The quality tier's steps into the march's dials (`App.applyQualityTier` and the boot): answers the tier taken. */
 export function setCloudTier(name: string): string {
-  const row = (CLOUD_TIER_STEPS as Record<string, { steps: number; stepsHorizon: number; lightExtra: number }>)[name] ?? CLOUD_TIER_STEPS.high;
+  const row = (CLOUD_TIER_STEPS as Record<string, { steps: number; stepsHorizon: number; lightExtra: number; fineNear: number }>)[name] ?? CLOUD_TIER_STEPS.high;
   CLOUD_TIER.name = name in CLOUD_TIER_STEPS ? name : 'high';
   CLOUD_TUNE.steps = row.steps;
   CLOUD_TUNE.stepsHorizon = row.stepsHorizon;
   CLOUD_TUNE.lightExtra = row.lightExtra;
+  CLOUD_TUNE.fineNear = row.fineNear;
   return CLOUD_TIER.name;
 }
 
@@ -263,9 +280,16 @@ export interface CloudMarchFeed {
   drift: Float64Array | null;
   layers: readonly { types: readonly string[]; shares: readonly number[]; seed: number; turn: number }[];
   version: number;
+  /** The look wave, round 2: the shared clock's seconds this frame (the detail's and the curl's own clocks read it). */
+  seconds: number;
+  /**
+   * The look wave, round 2: each layer's band top now (`StackFrame.bandTop`, the tallest type standing at the level), so the
+   * clouds' light way reads the top that stands, never the whole layer's thickness.
+   */
+  bandTop: Float64Array | null;
 }
 
-export const CLOUD_FEED: CloudMarchFeed = { stack: null, count: 0, drift: null, layers: [], version: 0 };
+export const CLOUD_FEED: CloudMarchFeed = { stack: null, count: 0, drift: null, layers: [], version: 0, seconds: 0, bandTop: null };
 
 /** Set the switch (the console's `on`): answers what it now is. Turning it on asks the march to build; nothing draws until ready. */
 export function setCloudsOn(on: boolean): boolean {
