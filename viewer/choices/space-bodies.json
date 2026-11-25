@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "savedAt": "2026-11-24T18:22:00.535Z",
+  "savedAt": "2026-11-25T14:00:07.129Z",
   "looks": {
     "naboo": {
       "name": "Naboo",
@@ -26111,7 +26111,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -26142,7 +26142,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -26468,7 +26468,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.5,
           "height": 1.025,
           "sunSide": 0.75
@@ -26499,7 +26499,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -26875,7 +26875,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -26906,7 +26906,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -27276,7 +27276,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -27307,7 +27307,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -27687,7 +27687,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -27718,7 +27718,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -28098,7 +28098,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -28129,7 +28129,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -28552,7 +28552,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -28583,7 +28583,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -29010,7 +29010,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -29041,7 +29041,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -29459,7 +29459,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -29490,7 +29490,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -29870,7 +29870,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -29901,7 +29901,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -30270,7 +30270,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -30301,7 +30301,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -30670,7 +30670,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -30701,7 +30701,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -31070,7 +31070,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -31101,7 +31101,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -31497,7 +31497,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -31528,7 +31528,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -31924,7 +31924,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -31955,7 +31955,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -32336,7 +32336,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -32367,7 +32367,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -32785,7 +32785,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -32816,7 +32816,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -33197,7 +33197,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -33228,7 +33228,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -33597,7 +33597,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -33628,7 +33628,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -34044,7 +34044,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -34075,7 +34075,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -34444,7 +34444,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -34475,7 +34475,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -34893,7 +34893,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -34924,7 +34924,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -35293,7 +35293,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -35324,7 +35324,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -35740,7 +35740,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -35771,7 +35771,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -36188,7 +36188,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -36219,7 +36219,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -36600,7 +36600,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -36631,7 +36631,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -37048,7 +37048,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -37079,7 +37079,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -37495,7 +37495,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -37526,7 +37526,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -37895,7 +37895,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -37926,7 +37926,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -38307,7 +38307,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -38338,7 +38338,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -38755,7 +38755,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 2.5,
           "height": 1.035,
           "sunSide": 0.75
@@ -38786,7 +38786,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -39155,7 +39155,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -39186,7 +39186,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -39555,7 +39555,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -39586,7 +39586,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -40004,7 +40004,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -40035,7 +40035,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -40404,7 +40404,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -40435,7 +40435,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -40804,7 +40804,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -40835,7 +40835,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -41204,7 +41204,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -41235,7 +41235,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -41604,7 +41604,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -41635,7 +41635,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -42052,7 +42052,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -42083,7 +42083,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -42452,7 +42452,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.5,
           "height": 1.025,
           "sunSide": 0.75
@@ -42483,7 +42483,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -42859,7 +42859,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -42890,7 +42890,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -43312,7 +43312,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -43343,7 +43343,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -43760,7 +43760,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -43791,7 +43791,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -44209,7 +44209,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -44240,7 +44240,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -44609,7 +44609,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.5,
           "height": 1.025,
           "sunSide": 0.75
@@ -44640,7 +44640,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -45033,7 +45033,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -45064,7 +45064,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -45433,7 +45433,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -45464,7 +45464,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -45833,7 +45833,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -45864,7 +45864,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -46245,7 +46245,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -46276,7 +46276,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -46693,7 +46693,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.5,
           "height": 1.025,
           "sunSide": 0.75
@@ -46724,7 +46724,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -47100,7 +47100,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -47131,7 +47131,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -47520,7 +47520,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -47551,7 +47551,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -47920,7 +47920,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -47951,7 +47951,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -48320,7 +48320,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -48351,7 +48351,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -48720,7 +48720,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -48751,7 +48751,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -49168,7 +49168,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -49199,7 +49199,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -49579,7 +49579,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -49610,7 +49610,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -50030,7 +50030,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 4,
           "height": 1.03,
           "sunSide": 0.75
@@ -50061,7 +50061,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -50447,7 +50447,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -50478,7 +50478,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -50859,7 +50859,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.2,
           "height": 1.03,
           "sunSide": 0.75
@@ -50890,7 +50890,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -51270,7 +51270,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -51301,7 +51301,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -51670,7 +51670,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -51701,7 +51701,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -52070,7 +52070,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -52101,7 +52101,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -52482,7 +52482,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -52513,7 +52513,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -52902,7 +52902,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -52933,7 +52933,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -53349,7 +53349,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -53380,7 +53380,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -53765,7 +53765,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -53796,7 +53796,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -54165,7 +54165,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -54196,7 +54196,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -54565,7 +54565,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -54596,7 +54596,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -55013,7 +55013,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -55044,7 +55044,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -55434,7 +55434,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -55465,7 +55465,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -55870,7 +55870,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -55901,7 +55901,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -56288,7 +56288,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -56319,7 +56319,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -56701,7 +56701,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3.5,
           "height": 1.025,
           "sunSide": 0.75
@@ -56732,7 +56732,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -57133,7 +57133,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -57164,7 +57164,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -57566,7 +57566,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -57597,7 +57597,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -57999,7 +57999,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -58030,7 +58030,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -58432,7 +58432,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -58463,7 +58463,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -58865,7 +58865,7 @@
           ],
           "flipV": false,
           "form": "rim",
-          "mesh": "planetfrontendatmosphere_01_mesh",
+          "mesh": "#9478e4d5",
           "power": 3,
           "height": 1.035,
           "sunSide": 0.75
@@ -58896,7 +58896,7 @@
             1
           ],
           "flipV": false,
-          "mesh": "planetfrontendrings_01_mesh",
+          "mesh": "#eaf3e164",
           "tilt": 16,
           "scale": 1,
           "spin": 0.4,
@@ -59831,7 +59831,9 @@
             "members": [
               {
                 "name": "First of four (unnamed)",
-                "places": [],
+                "places": [
+                  "tatooine:moon"
+                ],
                 "look": null,
                 "along": 0,
                 "across": 0,
@@ -59839,7 +59841,9 @@
               },
               {
                 "name": "Second of four (unnamed)",
-                "places": [],
+                "places": [
+                  "tatooine:moon"
+                ],
                 "look": null,
                 "along": 1,
                 "across": 0,
@@ -59847,7 +59851,9 @@
               },
               {
                 "name": "Third of four (unnamed)",
-                "places": [],
+                "places": [
+                  "tatooine:moon"
+                ],
                 "look": null,
                 "along": -1,
                 "across": 0,
@@ -59855,7 +59861,9 @@
               },
               {
                 "name": "Fourth of four (unnamed)",
-                "places": [],
+                "places": [
+                  "tatooine:moon"
+                ],
                 "look": null,
                 "along": 0,
                 "across": 1,
@@ -60284,7 +60292,7 @@
           {
             "id": "gus",
             "kind": "moon",
-            "name": "Corellia's third moon (unnamed in Legends; canon: Gus)",
+            "name": "Gus",
             "parent": "corellia",
             "places": [
               "corellia:celestial:cels_moon_earthy01"
@@ -60411,7 +60419,7 @@
             "parent": "tralus",
             "places": [],
             "look": "ph:corell-centerpoint",
-            "drawn": false,
+            "drawn": true,
             "period": 0,
             "radius": 0.0015,
             "tilt": 0,
@@ -61546,7 +61554,7 @@
             "parent": "sun",
             "places": [],
             "look": "ph:karthakk-nodkartha",
-            "drawn": false,
+            "drawn": true,
             "period": 600,
             "radius": 1.4,
             "tilt": 0,
@@ -61574,7 +61582,7 @@
             "parent": "sun",
             "places": [],
             "look": "ph:karthakk-spine",
-            "drawn": false,
+            "drawn": true,
             "period": 330,
             "radius": 0.95,
             "tilt": 0,
@@ -62530,5 +62538,11 @@
         "hide": []
       }
     }
+  },
+  "viewer": {
+    "gameLook": true,
+    "thunder": false,
+    "thunderVolume": 0.5,
+    "volumes": "auto"
   }
 }
