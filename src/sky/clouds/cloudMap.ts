@@ -68,6 +68,23 @@ export const CLOUD_MAP_TUNE = {
   regionWet: 0.6,
   regionDustClear: 0.8,
   regionDustBelow: 3000,
+  // ---- the look wave, round 1: the map's two cheap shape lines (the plan's rank 7a, §1 items 1 and 2)
+  /**
+   * How far a cell's top falls from its middle to its rim, a share of its top: 0.6, a dome (at 1 a half sphere), so a heap's
+   * top is rounded rather than a flat lid; 0 one top over the whole cell, as wave 1 laid it.
+   */
+  cellDome: 0.6,
+  /**
+   * How much the turrets on a cell's top differ, a share of its top: 0.3, each turret (a value noise of four to a cell) at its
+   * own height, the cauliflower's; 0 none.
+   */
+  cellTurrets: 0.3,
+  /**
+   * Clusters and holes: how much a slow noise (two octaves on the mix's lattice, features of the layer's mix scale, 6 km to
+   * start, about four cumulus cells; stretched by `sheetContrast`) grows the cells in one place and shrinks them away in another, and thickens and thins a sheet's cover
+   * about its own: 0.5, heaps in groups with clear sky between; 0 an even field, as wave 1 laid it.
+   */
+  clusters: 0.5,
 };
 export type CloudMapTune = typeof CLOUD_MAP_TUNE;
 
@@ -94,7 +111,18 @@ export const CLOUD_MAP_TUNE_RANGE: Record<keyof CloudMapTune, [number, number]> 
   regionWet: [0, 1],
   regionDustClear: [0, 1],
   regionDustBelow: [0, 20000],
+  cellDome: [0, 1],
+  cellTurrets: [0, 0.9],
+  clusters: [0, 1],
 };
+
+/**
+ * The look wave, round 1: the turrets' lattice against the cells' (a power of two: the place stays exact, `fbm`'s way), and
+ * the salts of the turrets and of the clusters' two octaves. Not dials: the noise's frame.
+ */
+export const TURRET_SHIFT = 2;
+export const SALT_TURRETS = 7;
+export const SALT_CLUSTERS = 8;
 
 /** The sheet's octaves and the mix's: shader structure, not dials (a change would build another program). */
 export const SHEET_OCTAVES = 4;
@@ -434,13 +462,26 @@ export function evalTexel(
   const TV = CLOUD_TYPE_VEC4 * 4;
   const cells = wScratch[0] * types[t0 * TV + 4] + wScratch[1] * types[t1 * TV + 4] + wScratch[2] * types[t2 * TV + 4];
   const wetShare = wScratch[0] * types[t0 * TV + 9] + wScratch[1] * types[t1 * TV + 9] + wScratch[2] * types[t2 * TV + 9];
+  // The look wave, round 1: clusters and holes. A slow noise on the mix's lattice grows the cells' radius here and shrinks it
+  // away there (`kc`: smooth across the field, so no cell is cut), and moves a sheet's cover about its own (`covL`: by the
+  // nearer of its distances to none and to whole, so a clear sky and an overcast stay as they are and the mean holds).
+  let kc = 1;
+  let covL = cover;
+  if (T.clusters > 0) {
+    const step = plan[o + 16];
+    const nc = ranked(fbm(plan[o + 12], plan[o + 13] + tx * step, plan[o + 14], plan[o + 15] + tz * step, 2, seed, SALT_CLUSTERS), T.sheetContrast);
+    const sg = nc * 2 - 1;
+    kc = 1 + T.clusters * sg;
+    if (kc < 0) kc = 0;
+    covL = cover + T.clusters * sg * (cover < 1 - cover ? cover : 1 - cover);
+  }
   // The continuous sheet.
   let cs = 0;
   if (cells < 1) {
     const step = plan[o + 3];
     const n = ranked(fbm(plan[o + 8], plan[o + 9] + tx * step, plan[o + 10], plan[o + 11] + tz * step, SHEET_OCTAVES, seed, 1), T.sheetContrast);
     const w = T.edgeMin + T.edgeSpan * edge;
-    const th = (1 - cover) * (1 + 2 * w) - w;
+    const th = (1 - covL) * (1 + 2 * w) - w;
     cs = smooth01(th - w, th + w, n);
   }
   // The cells: the cover the highest dome over the place, the top every dome's own weighed by its square (so it is
@@ -485,7 +526,7 @@ export function evalTexel(
         const px = dx + 0.5 + ((a & 255) * (1 / 256) + 1 / 512 - 0.5) * T.cellJitter;
         const pz = dz + 0.5 + (((a >>> 8) & 255) * (1 / 256) + 1 / 512 - 0.5) * T.cellJitter;
         const e2 = pcg(a);
-        let rho = rho0 * (1 - T.cellSizeJitter * 0.5 + T.cellSizeJitter * ((a >>> 24) * (1 / 256) + 1 / 512)) * env;
+        let rho = rho0 * (1 - T.cellSizeJitter * 0.5 + T.cellSizeJitter * ((a >>> 24) * (1 / 256) + 1 / 512)) * env * kc;
         rho = rho > 1.1 ? 1.1 : rho;
         if (!(rho > 1e-4)) continue;
         const ddx = fx - px;
@@ -496,12 +537,23 @@ export function evalTexel(
         if (v > 0) {
           const w2 = v * v;
           tw += w2;
-          tsum += w2 * (T.cellTopMin + (1 - T.cellTopMin) * unit(e2) * Math.sqrt(env));
+          // The look wave, round 1: the dome, its top falling from the middle to `1 − cellDome` of itself at the rim.
+          tsum += w2 * (T.cellTopMin + (1 - T.cellTopMin) * unit(e2) * Math.sqrt(env)) * (1 - T.cellDome + T.cellDome * Math.sqrt(v));
         }
       }
     }
     // Toward the whole thickness where no dome stands, smoothly (a dome's last tenth of its height share).
     ctop = (tsum + 0.01) / (tw + 0.01);
+    // The look wave, round 1: the turrets, a value noise of four to a cell on the cells' own lattice, each at its own height.
+    if (T.cellTurrets > 0) {
+      const ux = gx * (1 << TURRET_SHIFT);
+      const uz = gz * (1 << TURRET_SHIFT);
+      const tfx = Math.floor(ux);
+      const tfz = Math.floor(uz);
+      const tix = ((plan[o + 4] << TURRET_SHIFT) + tfx) & 0xffff;
+      const tiz = ((plan[o + 6] << TURRET_SHIFT) + tfz) & 0xffff;
+      ctop = ctop * (1 - T.cellTurrets * valueNoise(tix, tiz, ux - tfx, uz - tfz, saltOf(seed, SALT_TURRETS)));
+    }
   }
   let cov = cs + (cc - cs) * cells;
   let top = 1 + (ctop - 1) * cells;
@@ -623,7 +675,7 @@ export function sampleRing(rgba: Uint8Array, plan: Float64Array, layer: number, 
 }
 
 /** The tune into the card's layout (`MAP_TUNE_FLOATS`): five vec4, in the order `cloudMapGpu.ts` reads them. */
-export const MAP_TUNE_FLOATS = 5 * 4;
+export const MAP_TUNE_FLOATS = 6 * 4;
 export function packMapTune(T: CloudMapTune, f: CloudMapFrame, out: Float32Array): void {
   out[0] = T.cellJitter;
   out[1] = T.cellPresence;
@@ -645,6 +697,11 @@ export function packMapTune(T: CloudMapTune, f: CloudMapFrame, out: Float32Array
   out[17] = T.cellLife > 0 ? 1 : 0;
   out[18] = f.lifeI;
   out[19] = f.lifeF;
+  // The look wave, round 1: the domes, the turrets, the clusters.
+  out[20] = T.cellDome;
+  out[21] = T.cellTurrets;
+  out[22] = T.clusters;
+  out[23] = 0;
 }
 
 // ------------------------------------------------------------------------------------------------ the level, in closed form

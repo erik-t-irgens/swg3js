@@ -116,6 +116,33 @@ export const CLOUD_TUNE = {
    * so the march's end is no hard line across the sky.
    */
   fade: 0.2,
+  // ---- the look wave, round 1: sampling (the plan's ranks 5 and 8)
+  /**
+   * The cheap first pass (Schneider 2015's): 1 marches with the shape alone (no detail and no erosion, so its density is never
+   * less than the full shape's) in `probeStep` times longer steps until it meets cloud, then steps back one step and takes the
+   * full shape and the light; 0 takes the full shape at every step, as wave 2 did. 0 to start, measured: on the NVIDIA
+   * Blackwell card at one moment the march cost more with it than without (Mos Eisley's street 0.137 against 0.122 ms, the
+   * open view at dusk under six layers 0.412 against 0.365, flight mode inside them 0.588 against 0.398), since the bands'
+   * jumps and the clear map's growing steps already skip the empty air it would skip, and each step back is a step more.
+   */
+  probe: 0,
+  /** The cheap pass's step against the full one's: 2, Schneider's, so empty air between heaps costs half the steps. */
+  probeStep: 2,
+  /** Empty full samples in a row after which the march goes back to the cheap pass: 3, past a heap's fraying edge. */
+  probeAfter: 3,
+  /**
+   * Where the detail noise starts to fade out, metres from the lens: 10 km, past which a trace pixel (half a 1600 by 900
+   * display) spans more than the detail's finest cells (some 20 to 30 m), so its frays are grain the fill-in must average.
+   */
+  detailNear: 10_000,
+  /** ...and where it is gone (its two reads skipped, the erosion its mean): 20 km, where the detail is under a pixel. */
+  detailFar: 20_000,
+  /**
+   * The decks curved down toward the horizon as on a planet of this radius, km (the plan's rank 5 "forced scale"): 0, flat,
+   * as before (at the air's own 6,360 km a deck drops only 0.2 km at 50 km, which shows nothing). An option only: about
+   * 420 brings a 3 km base down to the horizon within the reach, and every horizon ray it adds is a dear one.
+   */
+  curveRadius: 0,
 };
 
 /** The dials' ranges (the menu's sliders and the console's clamps). */
@@ -150,6 +177,12 @@ export const CLOUD_TUNE_RANGE: Readonly<Record<keyof typeof CLOUD_TUNE, readonly
   flightHold: [0, 10],
   stormReach: [2000, 120_000],
   fade: [0, 0.9],
+  probe: [0, 1],
+  probeStep: [1, 4],
+  probeAfter: [1, 12],
+  detailNear: [500, 120_000],
+  detailFar: [1000, 120_000],
+  curveRadius: [0, 20_000],
 };
 
 /** The loop bound the card's march is built with: `CLOUD_TUNE.steps` moves under it with nothing built. */

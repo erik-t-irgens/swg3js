@@ -23,7 +23,7 @@ import {
   CLOUD_TYPE_VEC4,
   type CloudMapFace,
 } from './cloudLayers.ts';
-import { CLOUD_MAP_PARTS, CLOUD_REGION_MAX, MAP_TUNE_FLOATS, MIX_OCTAVES, PLAN_FLOATS, REGION_DUST, RING_VEC4, SHEET_OCTAVES } from './cloudMap.ts';
+import { CLOUD_MAP_PARTS, CLOUD_REGION_MAX, MAP_TUNE_FLOATS, MIX_OCTAVES, PLAN_FLOATS, REGION_DUST, RING_VEC4, SALT_CLUSTERS, SALT_TURRETS, SHEET_OCTAVES, TURRET_SHIFT } from './cloudMap.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -315,13 +315,24 @@ export class CloudMapGpu {
         const qT2 = types.element(int(s1.z).mul(CLOUD_TYPE_VEC4).add(2));
         const cells = w.x.mul(pT0.x).add(w.y.mul(pT1.x)).add(w.z.mul(pT2.x)).toVar();
         const wetShare = w.x.mul(qT0.y).add(w.y.mul(qT1.y)).add(w.z.mul(qT2.y)).toVar();
+        // The look wave, round 1: clusters and holes (`evalTexel`'s `kc` and `covL`).
+        const t5v = tune.element(int(5));
+        const kc = float(1).toVar();
+        const covL = float(cover).toVar();
+        If(t5v.z.greaterThan(0), () => {
+          const step = r4.x;
+          const nc = rankedN(fbmN(r3.x, r3.y.add(tx.mul(step)), r3.z, r3.w.add(tz.mul(step)), 2, seed, SALT_CLUSTERS), t2v.x);
+          const sg = nc.mul(2).sub(1);
+          kc.assign(max(float(1).add(t5v.z.mul(sg)), 0));
+          covL.assign(cover.add(t5v.z.mul(sg).mul(cover.min(float(1).sub(cover)))));
+        });
         // The continuous sheet.
         const cs = float(0).toVar();
         If(cells.lessThan(1), () => {
           const step = r0.w;
           const n = rankedN(fbmN(r2.x, r2.y.add(tx.mul(step)), r2.z, r2.w.add(tz.mul(step)), SHEET_OCTAVES, seed, 1), t2v.x);
           const wd = t2v.z.add(t2v.w.mul(edge));
-          const th = float(1).sub(cover).mul(wd.mul(2).add(1)).sub(wd);
+          const th = float(1).sub(covL).mul(wd.mul(2).add(1)).sub(wd);
           cs.assign(smoothstep(th.sub(wd), th.add(wd), n));
         });
         // The cells.
@@ -364,7 +375,7 @@ export class CloudMapGpu {
                 const px = byteN(0).sub(0.5).mul(t0v.x).add(dx + 0.5);
                 const pz = byteN(8).sub(0.5).mul(t0v.x).add(dz + 0.5);
                 const e2 = pcgN(a);
-                const rho = rho0.mul(float(1).sub(t1v.x.mul(0.5)).add(t1v.x.mul(byteN(24)))).mul(env).min(1.1).toVar();
+                const rho = rho0.mul(float(1).sub(t1v.x.mul(0.5)).add(t1v.x.mul(byteN(24)))).mul(env).mul(kc).min(1.1).toVar();
                 If(rho.greaterThan(1e-4), () => {
                   const ddx = fx.sub(px);
                   const ddz = fz.sub(pz);
@@ -373,13 +384,24 @@ export class CloudMapGpu {
                   If(v.greaterThan(0), () => {
                     const w2 = v.mul(v);
                     tw.addAssign(w2);
-                    tsum.addAssign(w2.mul(t1v.y.add(float(1).sub(t1v.y).mul(unitN(e2)).mul(sqrt(env)))));
+                    // The look wave, round 1: the dome (`cellDome`).
+                    tsum.addAssign(w2.mul(t1v.y.add(float(1).sub(t1v.y).mul(unitN(e2)).mul(sqrt(env)))).mul(float(1).sub(t5v.x).add(t5v.x.mul(sqrt(v)))));
                   });
                 });
               });
             }
           }
           ctop.assign(tsum.add(0.01).div(tw.add(0.01)));
+          // The look wave, round 1: the turrets (`cellTurrets`), on the cells' own lattice at four to a cell.
+          If(t5v.y.greaterThan(0), () => {
+            const ux = gx.mul(1 << TURRET_SHIFT);
+            const uz = gz.mul(1 << TURRET_SHIFT);
+            const tfx = floor(ux);
+            const tfz = floor(uz);
+            const tix = wrapN(int(r1.x).mul(1 << TURRET_SHIFT).add(int(tfx)));
+            const tiz = wrapN(int(r1.z).mul(1 << TURRET_SHIFT).add(int(tfz)));
+            ctop.assign(ctop.mul(float(1).sub(t5v.y.mul(valueNoiseN(tix, tiz, ux.sub(tfx), uz.sub(tfz), saltN(seed, SALT_TURRETS))))));
+          });
         });
         const cov = cs.add(cc.sub(cs).mul(cells)).toVar();
         const top = float(1).add(ctop.sub(1).mul(cells)).toVar();

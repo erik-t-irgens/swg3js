@@ -151,6 +151,54 @@ export const CLOUD_LOOK = {
    * Where no star system is applied there is no floor, and the clouds keep SWG's moon.
    */
   nightDrama: 0,
+  // ---- the look wave, round 1: light that knows its depth in the cloud (`cloudLight.ts`; the plan's ranks 2 and 4)
+  /**
+   * The sharp forward lobe's share of single scattering (the silver rim round a cloud before the sun): 0.15, a rim that reads
+   * against the sky without whitening the whole lit face. 0 is the two lobes alone, as wave 2 drew.
+   */
+  rim: 0.15,
+  /** The rim lobe's eccentricity: 0.9, near the forward peak droplets really have, so the rim is a thin line, not a halo. */
+  rimSharp: 0.9,
+  /**
+   * The rim's extra share at a low sun (eased in from 15 degrees up to the horizon): 0.35, the brighter sunset rim of the
+   * cinematic dials (Guerrilla's and Rockstar's both; openly not physical). 0: the same rim all day.
+   */
+  rimLow: 0.35,
+  /**
+   * The inner glow with the sun ahead: the deep heart's light raised by this share as the depth toward the light fills in
+   * (Guerrilla's 2024 talk's "inner glow"): 0.4, a glow that shows inside a cloud before the sun without washing out its dark
+   * heart. 0 none.
+   */
+  glow: 0.4,
+  /**
+   * What the dark rims read as the sample's depth into the cloud: 1 the light march's own optical depth over its first three
+   * steps toward the light (about 180 m: by depth, so crevices are bright and rims dark with the sun behind), 0 the sample's
+   * own density times `powderDepth` (wave 1's, which darkened every thin part alike). Between, a mix.
+   */
+  rimsByDepth: 1,
+  /**
+   * How strongly the cloud above a sample takes the sky's light away (the 2024 talk's sky light = (1 − profile) ×
+   * e^(−density above), the profile being `belly`): 1, as the density above says, so storm bases and hearts go dark.
+   * 0: the sky's light unoccluded, as wave 2 drew.
+   */
+  skyAbove: 1,
+  /**
+   * The share of a cell's column above a sample counted as cloud for the sky's light (the map's cover and cell top give the
+   * column; the shape's carve and erosion leave gaps in it): 0.35, about what the carve leaves of a heap's middle.
+   */
+  skyFill: 0.35,
+  /**
+   * The least of the sky's light left under the thickest cloud above: 0.08, light from the sides and the ground a real storm
+   * base keeps, so it is near black but still shows its folds.
+   */
+  skyLeast: 0.08,
+  /**
+   * How the light march's depth takes away the sky's light from the sun's side (Red Dead Redemption 2's borrowing): the
+   * sunward third of the ambient is taken by `exp(−τ × this)`, so a cloud's shaded side takes the sky's blue-grey from the
+   * zenith and the far side while its lit side keeps the sun's colour (two colours at dusk, §1 item 8): 0.5. 0: the whole
+   * sky on every side, as wave 2 drew.
+   */
+  skyBorrow: 0.5,
 };
 
 /** The look's dials' ranges (the debug menu's sliders and the console's clamps). */
@@ -184,6 +232,15 @@ export const CLOUD_LOOK_RANGE: Readonly<Record<keyof typeof CLOUD_LOOK, readonly
   belly: [0, 1.5],
   cone: [0, 1.5],
   nightDrama: [0, 4],
+  rim: [0, 0.9],
+  rimSharp: [0, 0.98],
+  rimLow: [0, 0.9],
+  glow: [0, 4],
+  rimsByDepth: [0, 1],
+  skyAbove: [0, 4],
+  skyFill: [0, 1],
+  skyLeast: [0, 1],
+  skyBorrow: [0, 4],
 };
 
 /** A type's profile blended over a layer's types by their weights at a point (the shape's inputs from the contract's slots). */

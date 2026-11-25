@@ -167,3 +167,83 @@ export function ambientShareOf<N>(o: LightOps<N>, msHere: N, msCamera: N, h: N, 
  * (not a look: a number's floor; the table's lit values are four orders and more over it).
  */
 export const MS_KNOWN = 1e-7;
+
+// ------------------------------------------------------------------------------------------------ the look wave, round 1
+// Light that knows its depth in the cloud (the plan's rank 2, §1 items 5 to 8), the sharper sunset rim and the angle terms
+// worked once a ray (rank 4), and the clouds' own light way at dusk (rank 6). The methods are the published ones (Guerrilla's
+// 2024 talk: sky light taken away by the density above, dark rims with the sun behind and an inner glow with it ahead by
+// depth into the cloud; Red Dead Redemption 2's light march borrowed for the ambient), in our own words; every strength is a
+// `CLOUD_LOOK` dial.
+
+/**
+ * The three octaves' phases for one body along one ray: the cosine `c` between the light's way and the view's is the ray's own
+ * (its direction and the body's are the same at every sample), so the six lobes are worked once a ray, not at every lit sample.
+ * Octave 0 (single scattering) takes a sharp forward lobe at eccentricity `rimSharp` for `rimNow` of its share: the silver
+ * rim round a cloud before a low sun (the cinematic dial over the physics; 0 is the two lobes alone, as wave 1 drew).
+ */
+export function rayPhasesOf<N>(o: LightOps<N>, look: LightLook<N>, c: N, rimNow: N, rimSharp: N, out: N[]): N[] {
+  const c1 = look.octavePhase;
+  out[0] = o.mix(phaseOf(o, look, o.k(1), c), hgOf(o, rimSharp, c), rimNow);
+  out[1] = phaseOf(o, look, c1, c);
+  out[2] = phaseOf(o, look, o.mul(c1, c1), c);
+  return out;
+}
+
+/**
+ * What each octave keeps through an optical depth `tau` toward the light, its share of the light in it: `exp(−τ)`,
+ * `b·exp(−aτ)`, `b²·exp(−a²τ)`. The same for every body at a sample (they share the light march), so worked once a sample.
+ */
+export function octaveFallsOf<N>(o: LightOps<N>, look: LightLook<N>, tau: N, out: N[]): N[] {
+  const a1 = look.octaveExtinction;
+  const b1 = look.octaveLight;
+  out[0] = o.exp(o.mul(tau, o.k(-1)));
+  out[1] = o.mul(b1, o.exp(o.mul(o.mul(tau, a1), o.k(-1))));
+  out[2] = o.mul(o.mul(b1, b1), o.exp(o.mul(o.mul(tau, o.mul(a1, a1)), o.k(-1))));
+  return out;
+}
+
+/** One body's octaves from a sample's falls and its ray's phases: `octavesOf` split in two (equal to it at `rimNow` 0). */
+export function octavesWith<N>(o: LightOps<N>, falls: readonly N[], phases: readonly N[]): N {
+  return o.add(o.add(o.mul(falls[0], phases[0]), o.mul(falls[1], phases[1])), o.mul(falls[2], phases[2]));
+}
+
+/**
+ * The light by a sample's depth into the cloud toward the light (`depth`, an optical depth): with the light behind the eye
+ * (`c` −1) a thin rim or the lit skin keeps one less `powder` of its light, filling in as the depth grows (bright crevices,
+ * dark rims: Schneider's powder, worked by depth rather than by the sample's own density); with the light ahead (`c` 1) the
+ * deep heart glows by `glow` (the inner glow) while a thin edge keeps the silver lining the phase gives it. Between, both by
+ * the angle.
+ */
+export function depthLightOf<N>(o: LightOps<N>, look: LightLook<N>, glow: N, depth: N, c: N): N {
+  const filled = o.sub(o.k(1), o.exp(o.mul(depth, o.k(-2))));
+  const away = o.mul(o.sub(o.k(1), c), o.k(0.5));
+  const ahead = o.sub(o.k(1), away);
+  const dark = o.mix(o.k(1), filled, o.mul(look.powder, away));
+  return o.mul(dark, o.add(o.k(1), o.mul(o.mul(glow, ahead), filled)));
+}
+
+/**
+ * The share of the sky's light that reaches a sample through the cloud above it (the 2024 talk's `e^(−density summed above)`):
+ * `upTau` the optical depth of the cloud over it (`cloudMarch.ts`' density from its layer's cover and cell top), taken by
+ * `above` (1 as the density says), never under `least` (the light from the sides and the ground a real storm base keeps).
+ */
+export function skyLightOf<N>(o: LightOps<N>, upTau: N, above: N, least: N): N {
+  return o.mix(least, o.k(1), o.exp(o.mul(o.mul(upTau, above), o.k(-1))));
+}
+
+/**
+ * The air's datum radius in km (every world's air record's own, `airParams.ts`' 6,360), for the horizon's dip at a cloud's
+ * height. Not a look number.
+ */
+export const CLOUD_AIR_RADIUS_KM = 6360;
+
+/**
+ * Whether the sun still lights a cloud whose top stands `topKm` over the air's datum: the sun over that height's true horizon
+ * (its sine over minus the sine of the dip there). Dusk from below (§1 item 13): with the ground in shade, the high clouds
+ * are still in the sun, so their light march must look toward the sun, never toward the moon the land's light has turned to.
+ */
+export function sunLightsClouds(sunY: number, topKm: number): boolean {
+  const h = topKm > 0 ? topKm : 0;
+  const r = CLOUD_AIR_RADIUS_KM / (CLOUD_AIR_RADIUS_KM + h);
+  return sunY > -Math.sqrt(1 - r * r);
+}

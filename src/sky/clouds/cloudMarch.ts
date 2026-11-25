@@ -35,7 +35,7 @@ import { seeTextureOf } from '../air/airSee.ts';
 import { PRE_FIXED } from '../exposure/preExpose.ts';
 import { CLOUD_LAYER_MAX, CLOUD_LAYER_VEC4, CLOUD_TYPES, CLOUD_TYPE_TUNE, type CloudMapFace, type CloudTypeId } from './cloudLayers.ts';
 import { CLOUD_LOOK, shapeOf, type ShapeOps } from './cloudShape.ts';
-import { LIGHT_STEPS, ambientShareOf, octavesOf, powderOf, stepLightOf, type LightOps } from './cloudLight.ts';
+import { LIGHT_STEPS, ambientShareOf, depthLightOf, octaveFallsOf, octavesWith, rayPhasesOf, skyLightOf, stepLightOf, sunLightsClouds, type LightOps } from './cloudLight.ts';
 import { CLOUD_DRAW, CLOUD_FEED, CLOUD_FLIGHT, CLOUD_STEPS_MOST, CLOUD_TIER, CLOUD_TUNE, cloudsWhyNot, cloudsWouldDraw, traceSizeAt, traceSizeOf } from './cloudTune.ts';
 import { cloudNoise, type CloudNoise } from './cloudNoise.ts';
 // Pass 3, wave 2 (maker T): the fill-in over frames, the flight mode and the clouds' motion.
@@ -133,6 +133,15 @@ export interface CloudMarchUniforms {
    * its fade begins, and its band's world y, low and high (the low past the high where the layer is not drawn).
    */
   rch: THREE.Vector4[];
+  /**
+   * The look wave, round 1: (the rim's share now, eased up at a low sun; the rim's eccentricity; the inner glow; rims by
+   * depth), (sky above, sky fill, sky least, sky borrow), (the cheap pass on, its step, the empty samples before it returns, the
+   * decks' curvature: one over twice the radius in metres, 0 flat), (the detail's fade from, to, 0, 0).
+   */
+  l7: THREE.Vector4;
+  l8: THREE.Vector4;
+  t3: THREE.Vector4;
+  t4: THREE.Vector4;
 }
 
 function newUniforms(): CloudMarchUniforms {
@@ -161,7 +170,23 @@ function newUniforms(): CloudMarchUniforms {
     streak: each(),
     st: v(),
     rch: each(),
+    l7: v(),
+    l8: v(),
+    t3: v(),
+    t4: v(),
   };
+}
+
+/**
+ * The look wave, round 1: the rim's share now, its own and `rimLow`'s eased in as the sun's sine falls from 15 degrees' (0.26)
+ * to the horizon, held under 0.95. Worked into the field in place (a number handed back would be a number made).
+ */
+function writeRimNow(u: CloudMarchUniforms, sunY: number): void {
+  const L = CLOUD_LOOK;
+  const t0 = 1 - sunY / 0.26;
+  const t = t0 < 0 ? 0 : t0 > 1 ? 1 : t0;
+  const r = L.rim + L.rimLow * t * t * (3 - 2 * t);
+  u.l7.x = r < 0.95 ? r : 0.95;
 }
 
 /** The session's one set (every chain's pass reads the same objects). */
@@ -221,6 +246,26 @@ export function writeDials(u: CloudMarchUniforms): void {
   l6.y = L.anvilTo;
   l6.z = L.bite;
   l6.w = L.softBite;
+  // The look wave, round 1 (the rim's share now is `writeRimNow`'s, from the sun).
+  const l7 = u.l7;
+  l7.y = L.rimSharp;
+  l7.z = L.glow;
+  l7.w = L.rimsByDepth;
+  const l8 = u.l8;
+  l8.x = L.skyAbove;
+  l8.y = L.skyFill;
+  l8.z = L.skyLeast;
+  l8.w = L.skyBorrow;
+  const t3 = u.t3;
+  t3.x = T.probe;
+  t3.y = T.probeStep;
+  t3.z = T.probeAfter;
+  const cr = T.curveRadius;
+  t3.w = cr > 0 ? 1 / (2000 * cr) : 0;
+  const t4 = u.t4;
+  t4.x = T.detailNear;
+  const df = T.detailNear + 1;
+  t4.y = T.detailFar > df ? T.detailFar : df;
 }
 
 /** The types whose layers reach the storm reach (pass 3, wave 2, maker T): towering cumulus and cumulonimbus, by index. */
@@ -390,7 +435,18 @@ interface Reads {
   l6: Any;
   /** Pass 3, wave 2 (maker T): each layer's reach and where its fade begins (`CLOUD_U.rch`). */
   rch: Any;
+  /** The look wave, round 1: the sky's light numbers (`CLOUD_U.l8`) and the detail's fade (`t4`). */
+  l8: Any;
+  t4: Any;
 }
+
+/**
+ * The look wave, round 1: the density's three forms. `full` the march's lit samples (the detail, faded out with distance, and
+ * the optical depth of its own cell's column above the point for the sky's light); `light` the light march's (no detail, the
+ * erosion its mean); `probe` the cheap first pass's (no detail and no erosion at all, so it is never less than the full
+ * shape: it cannot miss a cloud the full shape draws).
+ */
+type DensityForm = 'full' | 'light' | 'probe';
 
 /**
  * The cloud at a point `p` (metres from the camera, vec3) whose world height is `y`, as a function of the program: every layer
@@ -401,13 +457,16 @@ interface Reads {
  * reach for a layer holding towers), so the march's end is no line; and the layer that gave the most is said, so the ray's
  * drift is its own layer's.
  */
-function densityFn(R: Reads, detail: boolean): Any {
+function densityFn(R: Reads, form: DensityForm): Any {
   const face = R.face;
-  const tag = detail ? 'V' : 'L';
+  const detail = form === 'full';
+  const tag = form === 'full' ? 'V' : form === 'light' ? 'L' : 'Q';
   return Fn(([p, y]: Any[]) => {
     const sigma = float(0).toVar(`swgCloud${tag}Sig`);
     const hw = float(0).toVar(`swgCloud${tag}Hw`);
     const cov = float(0).toVar(`swgCloud${tag}Cov`);
+    // The look wave, round 1: the optical depth of the cloud over the point in its own cells' columns (the full form's alone).
+    const upTau = float(0).toVar(`swgCloud${tag}Up`);
     // Pass 3, wave 2 (maker T): how far the point is, the most a layer gave and which.
     const far = length(p).toVar(`swgCloud${tag}Far`);
     const most = float(0).toVar(`swgCloud${tag}Most`);
@@ -444,27 +503,43 @@ function densityFn(R: Reads, detail: boolean): Any {
           const low = vec4(R.shape.sample(suv).level(0)).toVar(`swgCloud${tag}Low`);
           let det: Any;
           if (detail) {
-            // The curl turns the detail's samples about, most at the base, none at the top.
-            const dTile = R.l1.z;
-            const cu = vec4(R.curl.sample(suv.xz.mul(4)).level(0)).xy.mul(2).sub(1);
-            const bend = R.l1.w.mul(float(1).sub(h));
-            const da = along.add(cu.x.mul(bend)).div(dTile);
-            const du = up.div(dTile);
-            const dc = across.add(cu.y.mul(bend)).div(dTile);
-            const T3 = DETAIL_TURN;
-            const duv = vec3(da.mul(T3[0]).add(du.mul(T3[1])).add(dc.mul(T3[2])).add(o.z), da.mul(T3[3]).add(du.mul(T3[4])).add(dc.mul(T3[5])).add(o2.y), da.mul(T3[6]).add(du.mul(T3[7])).add(dc.mul(T3[8])).add(o.w));
-            det = vec4(R.detail.sample(duv).level(0)).toVar(`swgCloud${tag}Det`);
+            // The look wave, round 1: the detail by distance. Past `detailNear` it fades to its mean (0.5 a channel, the light
+            // march's), and past `detailFar` its two reads are skipped: there a trace pixel spans more than its finest cells.
+            const dw = float(1).sub(smoothstep(R.t4.x, R.t4.y, far)).toVar(`swgCloud${tag}Dw`);
+            det = vec4(0.5, 0.5, 0.5, 1).toVar(`swgCloud${tag}Det`);
+            If(dw.greaterThan(0), () => {
+              // The curl turns the detail's samples about, most at the base, none at the top.
+              const dTile = R.l1.z;
+              const cu = vec4(R.curl.sample(suv.xz.mul(4)).level(0)).xy.mul(2).sub(1);
+              const bend = R.l1.w.mul(float(1).sub(h));
+              const da = along.add(cu.x.mul(bend)).div(dTile);
+              const du = up.div(dTile);
+              const dc = across.add(cu.y.mul(bend)).div(dTile);
+              const T3 = DETAIL_TURN;
+              const duv = vec3(da.mul(T3[0]).add(du.mul(T3[1])).add(dc.mul(T3[2])).add(o.z), da.mul(T3[3]).add(du.mul(T3[4])).add(dc.mul(T3[5])).add(o2.y), da.mul(T3[6]).add(du.mul(T3[7])).add(dc.mul(T3[8])).add(o.w));
+              det.assign(mix(vec4(0.5, 0.5, 0.5, 1), vec4(R.detail.sample(duv).level(0)), dw));
+            });
           } else det = vec4(0.5, 0.5, 0.5, 1);
           const d = shapeOf(
             SHAPE_NODE,
             { h, cover: m.x, top: m.w, edge: s0.w, layerDensity: s0.z, low0: low.x, low1: low.y, low2: low.z, low3: low.w, det0: det.x, det1: det.y, det2: det.z },
             { rise: q0.x, fallFrom: q0.y, fallTo: q0.z, anvil: q0.w, billow: q1.y, erosion: q1.z, taper: q2.z, density: q2.x, reach },
-            { sigma: R.l0.x, erosion: R.l0.y, edgeHard: R.l0.z, edgeSoft: R.l0.w, wispyBand: R.l1.x, carve: R.l5.x, taperFrom: R.l5.z, anvilFrom: R.l6.x, anvilTo: R.l6.y, anvilPower: R.l5.w, bite: R.l6.z, softBite: R.l6.w },
+            // The look wave, round 1: the cheap pass's shape has no erosion (never less than the full shape's).
+            { sigma: R.l0.x, erosion: form === 'probe' ? float(0) : R.l0.y, edgeHard: R.l0.z, edgeSoft: R.l0.w, wispyBand: R.l1.x, carve: R.l5.x, taperFrom: R.l5.z, anvilFrom: R.l6.x, anvilTo: R.l6.y, anvilPower: R.l5.w, bite: R.l6.z, softBite: R.l6.w },
           );
           // Pass 3, wave 2 (maker T): faded out over the last of its reach.
           const dd = float(d).mul(float(1).sub(smoothstep(rc.y, rc.x, far))).toVar(`swgCloud${tag}D`);
           sigma.addAssign(dd);
           hw.addAssign(dd.mul(h));
+          if (detail) {
+            // The look wave, round 1: the cloud over the point in its cell's own column (the map's cover and cell top the sample
+            // already read: no read more), its share `skyFill` counted as cloud at the types' and the layer's density, to the
+            // column's top. The sky's light through it is `skyLightOf`'s.
+            const span = max(s0.y.sub(s0.x), 1);
+            const colTop = s0.x.add(max(m.w.mul(reach), 0.02).mul(span));
+            const above = max(colTop.sub(y), 0);
+            upTau.addAssign(m.x.mul(q2.x).mul(s0.z).mul(R.l0.x).mul(R.l8.y).mul(above).mul(float(1).sub(smoothstep(rc.y, rc.x, far))));
+          }
           If(dd.greaterThan(most), () => {
             most.assign(dd);
             mostL.assign(float(li));
@@ -472,8 +547,10 @@ function densityFn(R: Reads, detail: boolean): Any {
         });
       });
     });
-    return vec4(sigma, hw.div(max(sigma, 1e-9)), cov, mostL);
-  }).setLayout({ name: detail ? 'swgCloudDensity' : 'swgCloudDensityLight', type: 'vec4', inputs: [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }] });
+    // The look wave, round 1: the cloud above in z, the layer that gave the most and the most cover met packed in w (the layer
+    // its whole part, the cover under one its fraction: `int(w)` the layer, `fract(w)` the cover).
+    return vec4(sigma, hw.div(max(sigma, 1e-9)), upTau, mostL.add(min(cov, 0.999)));
+  }).setLayout({ name: form === 'full' ? 'swgCloudDensity' : form === 'light' ? 'swgCloudDensityLight' : 'swgCloudDensityProbe', type: 'vec4', inputs: [{ name: 'p', type: 'vec3' }, { name: 'y', type: 'float' }] });
 }
 
 // ---------------------------------------------------------------- the march's graph
@@ -526,6 +603,11 @@ export interface MarchSources {
  * cone step's 0.38, and its cone kernel (a unit vector, out of the six's way). Not a look number: where the extra sample stands.
  */
 export const LIGHT_EXTRA = { end: 0.52, kernel: [-0.55, 0.7, -0.45] as const };
+/**
+ * The look wave, round 1: the light march's steps whose depth is the sample's depth into the cloud toward the light (the rims'
+ * and the glow's): the first three, to a tenth of its reach (180 m at 1,800). Not a look number: which steps are read.
+ */
+export const DEPTH_STEPS = 3;
 /** Pass 3, wave 2 (maker B): one over pi, the floor's light into a sky radiance. */
 const INV_PI = 1 / Math.PI;
 
@@ -570,9 +652,15 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
   const shape = texture3D(s.noise.shape);
   const detail = texture3D(s.noise.detail);
   const curl = texture(s.noise.curl);
-  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6, rch: RCH };
-  const dens = densityFn(R, true);
-  const densL = densityFn(R, false);
+  // The look wave, round 1: the light's new numbers, the sampling's and the detail's fade.
+  const L7 = g(u.l7);
+  const L8 = g(u.l8);
+  const T3 = g(u.t3);
+  const T4 = g(u.t4);
+  const R: Reads = { face: s.face, shape, detail, curl, off: OFF, off2: OFF2, streak: STREAK, l0: L0, l1: L1, l5: L5, l6: L6, rch: RCH, l8: L8, t4: T4 };
+  const dens = densityFn(R, 'full');
+  const densL = densityFn(R, 'light');
+  const densP = densityFn(R, 'probe');
   const n = tables.nodes;
   const look = { forward: L2.x, back: L2.y, forwardShare: L2.z, octaveExtinction: L3.x, octaveLight: L3.y, octavePhase: L3.z, powder: L3.w, powderDepth: L4.x };
   const face = s.face;
@@ -631,6 +719,9 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     }
     const maxT = min(far, T1.y).toVar('swgCloudMaxT');
     const camY = P0.z;
+    // The look wave, round 1: a point's height over the decks, curved down with its distance as on a planet of `curveRadius`
+    // (T3.w one over twice the radius; nought flat, where this is the plain height to the bit).
+    const heightOf = (q: Any): Any => camY.add(q.y).add(q.x.mul(q.x).add(q.z.mul(q.z)).mul(T3.w));
     // The bands along the ray: each one's stretch of it (t0, t1), empty where the band is not or the ray misses it.
     const bands = int(face.frame.y);
     const iv: Any[] = [];
@@ -639,9 +730,6 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     const dy = select(abs(dir.y).lessThan(1e-5), select(dir.y.lessThan(0), float(-1e-5), float(1e-5)), dir.y).toVar('swgCloudDy');
     for (let b = 0; b < CLOUD_LAYER_MAX; b++) {
       const band = vec4(face.band(int(b))).toVar(`swgCloudB${b}`);
-      const ta = band.x.sub(camY).div(dy);
-      const tb = band.y.sub(camY).div(dy);
-      const a0 = max(min(ta, tb), 0);
       // Pass 3, wave 2 (maker T): a band reaches as far as the farthest-reaching layer standing in it (a storm deck's 80 km,
       // the rest 50), so a sky with towers in its low deck walks no farther through its high one.
       let rb: Any = float(0);
@@ -649,6 +737,11 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
         const rl = vec4(RCH.element(l));
         rb = max(rb, select(rl.z.lessThanEqual(band.y).and(rl.w.greaterThanEqual(band.x)), rl.x, float(0)));
       }
+      // The look wave, round 1: with the decks curved, the band's foot lowered by the most it drops within its reach, so the
+      // straight ray meets every curved sample (the density's own height test keeps each layer to its curved band).
+      const ta = band.x.sub(T3.w.mul(rb).mul(rb)).sub(camY).div(dy);
+      const tb = band.y.sub(camY).div(dy);
+      const a0 = max(min(ta, tb), 0);
       const a1 = min(max(ta, tb), min(maxT, rb));
       const ok = int(b).lessThan(bands).and(a1.greaterThan(a0));
       const v = vec2(select(ok, a0, float(1e9)), select(ok, a1, float(-1))).toVar(`swgCloudIv${b}`);
@@ -661,14 +754,23 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     // The light: the air's numbers this frame, the ambient about the sky at the camera, the multiple scattering at the camera.
     const Ldir = normalize(LIGHT.xyz).toVar('swgCloudLDir');
     const sunAz = normalize(vec3(n.sunDir.x, 0, n.sunDir.z).add(vec3(1e-4, 0, 0))).toVar('swgCloudSunAz');
-    const ambTop = vec3(tables.skyRadiance(vec3(0, 1, 0)))
-      .add(vec3(tables.skyRadiance(normalize(sunAz.add(vec3(0, 0.15, 0))))))
+    // The look wave, round 1: the ambient in two parts, the zenith's and the far side's (with the night's floor) and the sun's
+    // side's, so the light march's depth can take the sunward sky from a cloud's shaded side (`skyBorrow`).
+    const ambUp = vec3(tables.skyRadiance(vec3(0, 1, 0)))
       .add(vec3(tables.skyRadiance(normalize(sunAz.negate().add(vec3(0, 0.15, 0))))))
       .mul(1 / 3)
       // Pass 3, wave 2 (maker B, the night): the drama's share of the night's floor beside the sky's own light (at 1, as the land's
       // hemisphere takes it; at the 0 start, none).
       .add(NIGHT.xyz)
       .toVar('swgCloudAmb');
+    const ambSun = vec3(tables.skyRadiance(normalize(sunAz.add(vec3(0, 0.15, 0))))).mul(1 / 3).toVar('swgCloudAmbSun');
+    // The look wave, round 1: the angle terms once a ray (the cosines and each body's three octaves' phases are the same at
+    // every sample of it), the rim lobe in single scattering.
+    const phaseRay = (dirB: Any, tag: string): Any[] => rayPhasesOf(LIGHT_NODE, look, dot(dir, dirB), L7.x, L7.y, [0, 0, 0]).map((v: Any, k: number) => float(v).toVar(`swgCloudPh${tag}${k}`));
+    const phS = phaseRay(n.sunDir, 'S');
+    const phS2 = phaseRay(n.sun2Dir, 'S2');
+    const phM = phaseRay(n.moonDir, 'M');
+    const cL = dot(dir, Ldir).toVar('swgCloudCL');
     // Pass 3, wave 2 (maker B, the night): the height ratio read along the night light's way (the sun by day, to the bit; the
     // moon by night), never the sun's under the horizon, whose multiple scattering is nought at night (the read-back's).
     const msCamL = dot(vec3(tables.multiScatterAt(P0.w, Ldir.y)), vec3(1 / 3)).toVar('swgCloudMsCam');
@@ -682,6 +784,10 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
     // Pass 3, wave 2 (maker T): the tier's steps, the most looking up and the most along the horizon, by how high the ray looks.
     const vSum = vec2(0).toVar('swgCloudVSum');
     const steps = int(mix(ST.y, ST.x, clamp(abs(dir.y).mul(2), 0, 1)));
+    // The look wave, round 1: the cheap first pass (`probe`): 0 while the march walks with the cheap shape, 1 once it has met
+    // cloud and stepped back to take the full shape; and the empty full samples in a row since it last met cloud.
+    const fine = select(T3.x.greaterThan(0.5), float(0), float(1)).toVar('swgCloudFine');
+    const empty = float(0).toVar('swgCloudEmpty');
     If(tEnter.lessThan(tExit), () => {
       Loop({ start: int(0), end: int(CLOUD_STEPS_MOST), type: 'int', condition: '<', name: 'cs' }, ({ cs }: Any) => {
         If(cs.greaterThanEqual(steps).or(t.greaterThanEqual(tExit)).or(T.lessThan(T1.w)), () => {
@@ -711,74 +817,106 @@ export function marchGraph(u: CloudMarchUniforms, s: MarchSources): ChainGraph {
             });
           }
         });
-        // The step: fine over the first kilometre, its distance's share past it, grown over clear map.
+        // The step: fine over the first kilometre, its distance's share past it, grown over clear map. The look wave, round 1:
+        // the cheap pass takes `probeStep` times it.
         const base = select(t.lessThan(T0.z), T0.y, clamp(t.mul(T0.w), T0.y, T1.x));
-        const ds0 = min(base.mul(grow), T1.x);
+        const ds0 = min(base.mul(grow), T1.x).mul(select(fine.lessThan(0.5), T3.y, float(1)));
         const ds = max(min(ds0, bandEnd.sub(t)), 0.5).toVar('swgCloudDs');
         // Each step's sample jittered within its own stretch (a pixel's own fraction, moving each frame): a sample at each step's
         // middle sliced an opaque tower into stacked discs a step apart, which no jitter of the first step alone broke up.
         const tm = t.add(ds.mul(jit)).toVar('swgCloudTm');
         const p = dir.mul(tm).toVar('swgCloudP');
-        const y = camY.add(p.y).toVar('swgCloudY');
-        const d = vec4(dens(p, y)).toVar('swgCloudDen');
-        const sig = d.x;
-        If(sig.greaterThan(1e-7), () => {
-          grow.assign(1);
-          // The light march: six steps in a cone toward the light and one far, the cheap density (no detail) at each.
-          const tau = float(0).toVar('swgCloudTau');
-          let prevEnd = 0;
-          const cone = LIGHT_STEPS.ends.length - 1;
-          for (let k = 0; k < cone; k++) {
-            const e = LIGHT_STEPS.ends[k];
-            const mid = (prevEnd + e) * 0.5;
-            const len = e - prevEnd;
-            prevEnd = e;
-            const kv = LIGHT_STEPS.kernel[k];
-            const dist = T1.z.mul(mid);
-            const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar(`swgCloudLp${k}`);
-            tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(len)));
-          }
-          // Pass 3, wave 2 (maker T): Ultra's eighth light step (`ST.z`), in the cone past the sixth, the far one then shorter.
-          const xOn = ST.z.greaterThan(0.5);
-          If(xOn, () => {
-            const xm = (prevEnd + LIGHT_EXTRA.end) * 0.5;
-            const kv = LIGHT_EXTRA.kernel;
-            const dist = T1.z.mul(xm);
-            const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar('swgCloudLpX');
-            tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(LIGHT_EXTRA.end - prevEnd)));
+        const y = heightOf(p).toVar('swgCloudY');
+        If(fine.lessThan(0.5), () => {
+          // The look wave, round 1: the cheap pass, the shape alone (never less than the full shape's). Where it meets cloud
+          // the march steps back (this step is not taken: `t` stays) and walks on with the full shape from a fine step.
+          const q = vec4(densP(p, y)).toVar('swgCloudProbe');
+          If(q.x.greaterThan(1e-7), () => {
+            fine.assign(1);
+            empty.assign(0);
+            grow.assign(1);
+          }).Else(() => {
+            grow.assign(min(grow.mul(select(fract(q.w).lessThan(1e-3), T2.x, float(1))), 8));
+            t.addAssign(ds);
           });
-          {
-            // The far step, on the light's own axis, from the cone's end to the reach.
-            const from = select(xOn, float(LIGHT_EXTRA.end), float(prevEnd));
-            const fm = from.add(1).mul(0.5);
-            const lp = p.add(Ldir.mul(T1.z.mul(fm))).toVar(`swgCloudLp${cone}`);
-            tau.addAssign(vec4(densL(lp, camY.add(lp.y))).x.mul(T1.z.mul(float(1).sub(from))));
-          }
-          // Each body's light at the sample's own height through the air, through the cloud by the light march's depth.
-          const hKm = max(y.mul(0.001), 0.001).toVar('swgCloudHKm');
-          const lit = (dirB: Any, top: Any, tag: string): Any => {
-            const ta = vec3(tables.transmittanceAt(hKm, dirB.y)).toVar(`swgCloudTa${tag}`);
-            return top.mul(ta).mul(octavesOf(LIGHT_NODE, look, tau, dot(dir, dirB)));
-          };
-          const Ls = lit(n.sunDir, n.sunTop, 'S').add(lit(n.sun2Dir, n.sun2Top, 'S2')).add(lit(n.moonDir, n.moonTop, 'M')).toVar('swgCloudLs');
-          const powder = powderOf(LIGHT_NODE, look, sig, dot(dir, Ldir));
-          // Pass 3, wave 2 (maker B, the night): along the night light's way, as at the camera.
-          const ms = dot(vec3(tables.multiScatterAt(hKm, Ldir.y)), vec3(1 / 3));
-          const amb = ambTop.mul(ambientShareOf(LIGHT_NODE, ms, msCamL, d.y, L4.z)).mul(L4.y);
-          const S = Ls.mul(powder).add(amb).mul(L2.w).toVar('swgCloudS');
-          const add = stepLightOf(LIGHT_NODE, S, sig, ds);
-          const Tn = T.mul(exp(sig.mul(ds).negate())).toVar('swgCloudTn');
-          L.addAssign(add.mul(T));
-          dSum.addAssign(tm.mul(T.sub(Tn)));
-          wSum.addAssign(T.sub(Tn));
-          // Pass 3, wave 2 (maker T): the drift of the layer that gave this sample the most (the contract's s3.zw, m/s).
-          vSum.addAssign(vec4(face.slot(int(d.w), 3)).zw.mul(T.sub(Tn)));
-          T.assign(Tn);
         }).Else(() => {
-          // Over clear map the step grows (where a band holds the point and its map has no cover at all), up to the longest.
-          grow.assign(min(grow.mul(select(d.z.lessThan(1e-3), T2.x, float(1))), 8));
+          const d = vec4(dens(p, y)).toVar('swgCloudDen');
+          const sig = d.x;
+          If(sig.greaterThan(1e-7), () => {
+            grow.assign(1);
+            empty.assign(0);
+            // The light march: six steps in a cone toward the light and one far, the cheap density (no detail) at each. The look
+            // wave, round 1: the depth over its first three steps (about a tenth of its reach) kept for the rims and the glow.
+            const tau = float(0).toVar('swgCloudTau');
+            const tauN = float(0).toVar('swgCloudTauN');
+            let prevEnd = 0;
+            const cone = LIGHT_STEPS.ends.length - 1;
+            for (let k = 0; k < cone; k++) {
+              const e = LIGHT_STEPS.ends[k];
+              const mid = (prevEnd + e) * 0.5;
+              const len = e - prevEnd;
+              prevEnd = e;
+              const kv = LIGHT_STEPS.kernel[k];
+              const dist = T1.z.mul(mid);
+              const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar(`swgCloudLp${k}`);
+              tau.addAssign(vec4(densL(lp, heightOf(lp))).x.mul(T1.z.mul(len)));
+              if (k === DEPTH_STEPS - 1) tauN.assign(tau);
+            }
+            // Pass 3, wave 2 (maker T): Ultra's eighth light step (`ST.z`), in the cone past the sixth, the far one then shorter.
+            const xOn = ST.z.greaterThan(0.5);
+            If(xOn, () => {
+              const xm = (prevEnd + LIGHT_EXTRA.end) * 0.5;
+              const kv = LIGHT_EXTRA.kernel;
+              const dist = T1.z.mul(xm);
+              const lp = p.add(Ldir.mul(dist)).add(vec3(kv[0], kv[1], kv[2]).mul(dist.mul(L4.w))).toVar('swgCloudLpX');
+              tau.addAssign(vec4(densL(lp, heightOf(lp))).x.mul(T1.z.mul(LIGHT_EXTRA.end - prevEnd)));
+            });
+            {
+              // The far step, on the light's own axis, from the cone's end to the reach.
+              const from = select(xOn, float(LIGHT_EXTRA.end), float(prevEnd));
+              const fm = from.add(1).mul(0.5);
+              const lp = p.add(Ldir.mul(T1.z.mul(fm))).toVar(`swgCloudLp${cone}`);
+              tau.addAssign(vec4(densL(lp, heightOf(lp))).x.mul(T1.z.mul(float(1).sub(from))));
+            }
+            // Each body's light at the sample's own height through the air, through the cloud by the light march's depth: the
+            // octaves' falls worked once a sample for every body, each body's phases its ray's (the look wave, round 1).
+            const hKm = max(y.mul(0.001), 0.001).toVar('swgCloudHKm');
+            const falls = octaveFallsOf(LIGHT_NODE, look, tau, [0, 0, 0]).map((v: Any, k: number) => float(v).toVar(`swgCloudFall${k}`));
+            const lit = (dirB: Any, top: Any, ph: Any[], tag: string): Any => {
+              const ta = vec3(tables.transmittanceAt(hKm, dirB.y)).toVar(`swgCloudTa${tag}`);
+              return top.mul(ta).mul(octavesWith(LIGHT_NODE, falls, ph));
+            };
+            const Ls = lit(n.sunDir, n.sunTop, phS, 'S').add(lit(n.sun2Dir, n.sun2Top, phS2, 'S2')).add(lit(n.moonDir, n.moonTop, phM, 'M')).toVar('swgCloudLs');
+            // The look wave, round 1: dark rims with the light behind and the inner glow with it ahead, by the depth toward the
+            // light (`rimsByDepth` 1) or the sample's own density (0, wave 1's powder).
+            const depthIn = mix(sig.mul(L4.x), tauN, L7.w);
+            const dl = depthLightOf(LIGHT_NODE, look, L7.z, depthIn, cL);
+            // Pass 3, wave 2 (maker B, the night): along the night light's way, as at the camera.
+            const ms = dot(vec3(tables.multiScatterAt(hKm, Ldir.y)), vec3(1 / 3));
+            // The look wave, round 1: the sky's light taken by the cloud above (`skyAbove`, never under `skyLeast`), and its sunward
+            // third by the light march's depth (`skyBorrow`), so a shaded side takes the zenith's and the far side's colour.
+            const sky = skyLightOf(LIGHT_NODE, d.z, L8.x, L8.z);
+            const amb = ambUp.add(ambSun.mul(exp(tau.mul(L8.w).negate()))).mul(sky).mul(ambientShareOf(LIGHT_NODE, ms, msCamL, d.y, L4.z)).mul(L4.y);
+            const S = Ls.mul(dl).add(amb).mul(L2.w).toVar('swgCloudS');
+            const add = stepLightOf(LIGHT_NODE, S, sig, ds);
+            const Tn = T.mul(exp(sig.mul(ds).negate())).toVar('swgCloudTn');
+            L.addAssign(add.mul(T));
+            dSum.addAssign(tm.mul(T.sub(Tn)));
+            wSum.addAssign(T.sub(Tn));
+            // Pass 3, wave 2 (maker T): the drift of the layer that gave this sample the most (the contract's s3.zw, m/s).
+            vSum.addAssign(vec4(face.slot(int(d.w), 3)).zw.mul(T.sub(Tn)));
+            T.assign(Tn);
+          }).Else(() => {
+            // Over clear map the step grows (where a band holds the point and its map has no cover at all), up to the longest.
+            grow.assign(min(grow.mul(select(fract(d.w).lessThan(1e-3), T2.x, float(1))), 8));
+            // The look wave, round 1: past a heap's edge, back to the cheap pass.
+            empty.addAssign(1);
+            If(T3.x.greaterThan(0.5).and(empty.greaterThanEqual(T3.z)), () => {
+              fine.assign(0);
+            });
+          });
+          t.addAssign(ds);
         });
-        t.addAssign(ds);
       });
     });
     const endD = min(maxT, T1.y);
@@ -1107,6 +1245,32 @@ export class GpuCloudPass implements FxPass {
     return cloudsWhyNot(ctx.space, ctx.cameraSubmerged, AIR.frame.on && AIR.tables !== null && AIR.tables.ready);
   }
 
+  /**
+   * The look wave, round 1: the clouds' light way (`sunLightsClouds`): the sun while it is over the true horizon of the highest
+   * drawn layer's top and its top-of-air light outshines the moon's, else the air's `lightDir`. Allocates nothing.
+   */
+  lightWay(): THREE.Vector3 {
+    const f = AIR.frame;
+    const F = CLOUD_FEED;
+    const st = F.stack;
+    let top = -1e9;
+    if (st) {
+      const V = CLOUD_LAYER_VEC4 * 4;
+      for (let i = 0; i < F.count && i < CLOUD_LAYER_MAX; i++) {
+        const o = i * V;
+        if (st[o + 7] > 0 && st[o + 2] > 0 && st[o + 1] > top) top = st[o + 1];
+      }
+    }
+    if (top < -1e8) return f.lightDir;
+    // The top over the air's datum: the camera's own height over it plus the layer's top over the camera.
+    const topKm = f.heightKm + (top - CLOUD_U.p0.z) * 0.001;
+    const s = f.sunTop;
+    const m = f.moonTop;
+    const sunLum = s.r + s.g + s.b;
+    const moonLum = m.r + m.g + m.b;
+    return sunLum > moonLum && sunLightsClouds(f.sunDir.y, topKm) ? f.sunDir : f.lightDir;
+  }
+
   prepare(ctx: FxFrameContext): void {
     const u = CLOUD_U;
     const cam = ctx.camera.position;
@@ -1128,10 +1292,13 @@ export class GpuCloudPass implements FxPass {
     t[6] = mw[8];
     t[7] = mw[9];
     t[8] = mw[10];
-    const ld = AIR.frame.lightDir;
+    // The look wave, round 1 (dusk from below, §1 item 13): the light march looks toward the sun while it still lights the highest
+    // drawn layer's top and outshines the moon there, though the land's light has turned to the moon; else the air's way.
+    const ld = this.lightWay();
     u.light.x = ld.x;
     u.light.y = ld.y;
     u.light.z = ld.z;
+    writeRimNow(u, AIR.frame.sunDir.y);
     // Pass 3, wave 2 (maker B, the night): the share of the night's floor the clouds take (the drama, eased in as the sun goes 0
     // to 6 degrees down: its sine 0 to -0.1) times the floor as a sky radiance (an even hemisphere giving its light on a level
     // surface is that light over pi), field by field. At the drama's 0 start the clouds are lit by the moons and the sky they

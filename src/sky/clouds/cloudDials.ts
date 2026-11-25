@@ -46,6 +46,13 @@ const MARCH_NOTES: Record<keyof typeof CLOUD_TUNE, string> = {
   flightHold: 'seconds flight mode holds after its reason has gone',
   stormReach: 'metres a layer holding towers or storms reaches',
   fade: "the share of each layer's reach over which its clouds fade out",
+  // The look wave, round 1: sampling.
+  probe: 'the cheap first pass with a step back (1) or the full shape at every step (0)',
+  probeStep: "the cheap pass's step against the full one's",
+  probeAfter: 'empty full samples in a row before the march goes back to the cheap pass',
+  detailNear: 'metres from the lens where the detail noise starts to fade out',
+  detailFar: 'metres where it is gone (its reads skipped)',
+  curveRadius: 'the decks curved as on a planet of this radius, km (0 flat)',
 };
 
 const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
@@ -78,6 +85,16 @@ const LOOK_NOTES: Record<keyof typeof CLOUD_LOOK, string> = {
   belly: "a layer's base's ambient against its top's",
   cone: "the light march's cone, a share of the distance",
   nightDrama: "the share of the night's floor (the land's light from the whole sky) the clouds take: 0 a real night (clouds only as stars missing), 1 lit as the land is",
+  // The look wave, round 1: light that knows its depth in the cloud.
+  rim: "the sharp forward lobe's share of single scattering: the silver rim before the sun",
+  rimSharp: "the rim lobe's eccentricity: how thin the rim is",
+  rimLow: "the rim's extra share at a low sun: the brighter sunset rim",
+  glow: "the inner glow of a cloud's deep heart with the sun ahead",
+  rimsByDepth: 'dark rims by depth into the cloud toward the light (1) or by the sample\'s own density (0)',
+  skyAbove: "how strongly the cloud above a sample takes the sky's light away (dark bellies and storm bases)",
+  skyFill: "the share of a cell's column above counted as cloud for the sky's light",
+  skyLeast: "the least of the sky's light left under the thickest cloud",
+  skyBorrow: "how the light march's depth takes the sunward sky away from a shaded side (two colours at dusk)",
 };
 
 /** The march's and the look's groups (made once a call; the menu asks once). */
