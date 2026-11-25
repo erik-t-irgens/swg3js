@@ -4279,7 +4279,9 @@ function renderSystemPanel() {
       openBodies.add(id + ':' + b.id);
       systemEdited(true);
     };
-    for (const k of ['moon', 'planet', 'giant', 'star', 'group']) add.append(btn(`+ ${k}`, `Add a ${k} to the system`, () => addBody(k)));
+    // (the sky round's maker P, J) "+ belt": a ring of rocks and dust round the sun, seen from the ground as a band in the night
+    // sky where its Drawn tick is on (the game's `beltBand.ts`)
+    for (const k of ['moon', 'planet', 'giant', 'star', 'group', 'belt']) add.append(btn(`+ ${k}`, k === 'belt' ? 'Add a belt round the sun: from the ground a band of rocks and dust along its plane in the night sky (its Drawn tick)' : `Add a ${k} to the system`, () => addBody(k)));
     panel.append(add);
   }
 

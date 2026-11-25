@@ -29,7 +29,18 @@ const young = (): number => v8.getHeapSpaceStatistics().find((x) => x.space_name
 const tick = () => new Promise((r) => setImmediate(r));
 
 const renderer: Any = { getRenderTarget: () => null, setRenderTarget() {}, render() {}, compileAsync: () => Promise.resolve() };
+// (the sky round's maker P, J) the night made under a system that draws a belt (the Karthakk draft with the Spine of Lok ticked),
+// so its band is made with it and its frame runs in every other stretch of the applied frames below
+const { draftSystem: draftOf } = await import('../../../src/sky/system/drafts.js');
+const { skyMotionFor: motionFor, SKY_MOTION: MOTION_NOW } = await import('../../../src/sky/system/skyMotion.ts');
+const karthakk: Any = JSON.parse(JSON.stringify(draftOf('karthakk')));
+karthakk.bodies.find((b: Any) => b.id === 'spine').drawn = true;
+const beltMotion = motionFor({ karthakk }, 'lok', 'lok', { sun: { size: 0.6 }, moon: { size: 0.5 }, celestials: [] })!;
+beltMotion.at({ count: 1000.25 });
+MOTION_NOW.now = beltMotion;
 const night = new NightSky(renderer, { planet: 'tatooine', key: 'tatoo', placeOf: () => ({ x: 450, y: -23, z: 250 }) });
+MOTION_NOW.now = null;
+if (!night.belts) throw new Error('the night made no band for the drawn belt');
 night.setCities(
   [
     { name: 'Mos Eisley', x: 3460, z: -4768, r: 456, kind: 'city' },
@@ -94,7 +105,13 @@ function frame(): void {
     C[3] = c * cel0[3] - s * cel0[0];
     C[4] = c * cel0[4] - s * cel0[1];
     C[5] = c * cel0[5] - s * cel0[2];
-    SKY_MOTION.now = motion;
+    // (maker P, J) every other stretch under the system that draws a belt, its plane turning a little each frame
+    if ((st[0] & 1024) !== 0) {
+      const B = beltMotion.belts;
+      B[0] = s * 0.1;
+      B[2] = c * 0.1;
+      SKY_MOTION.now = beltMotion;
+    } else SKY_MOTION.now = motion;
     appliedFrames++;
   } else SKY_MOTION.now = null;
   night.frame();

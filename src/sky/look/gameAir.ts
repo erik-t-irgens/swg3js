@@ -60,6 +60,9 @@ import { nightPlaceOf } from '../night/nightPlace.ts';
 import { SKY_MOTION, skyMotionFor, type SkyMotion, type SkyPlaceSource } from '../system/skyMotion.ts';
 import { CLIENT_DAY_SECONDS } from '../system/places.js';
 import { applyFileAir, type BodiesFile } from './bodiesFile.ts';
+// (the sky round's fixer, the brief's H and I) the world's places as the game lays them, and its suns from the applied system
+import { groundPlacesMix } from './groundPlaces.ts';
+import { useSystemSuns } from '../system/systemSuns.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -471,10 +474,35 @@ export class GameLook {
     if (!this.file || !a.data) return null;
     if (a.motionAt !== this.fileRev) {
       a.motionAt = this.fileRev;
-      a.motion = skyMotionFor(this.file.systems as Any, a.world, gamePlanetOf(a.world), a.data);
+      // (the sky round's fixer, I) made over the world's places as the game lays them (`World.loadSky`: his Place tab's sizes over
+      // SWG's sky, and an extra place's), its suns the applied system's first (`sunsOf`), so its sizes and eclipses are the game's
+      this.sunsOf(a);
+      a.motion = skyMotionFor(this.file.systems as Any, a.world, gamePlanetOf(a.world), this.laidData(a));
       a.view = a.motion ? skyViewOf(a.motion, this.dayView) : null;
     }
     return a.motion;
+  }
+
+  /** (The sky round's fixer, I) a world's converted sky with the file's ground places laid over it, as the game's screen lays them. */
+  private laidData(a: WorldAir): SkyPlaceSource | null {
+    if (!a.data) return null;
+    const laid = groundPlacesMix(a.world, (this.file as Any)?.places ?? null);
+    return laid ? (laid(a.data as Any) as unknown as SkyPlaceSource) : a.data;
+  }
+
+  /**
+   * (The sky round's fixer, H and I) the applied system's suns for the world drawn (`stars.ts`' `SYSTEM_SUNS`, one world's at a
+   * time, as the game's screen sets them before its air is fitted), set again when the world drawn or the file changes, and its
+   * rows fitted again under them (the fit's answer lays the system's star on them, `airRun.ts`).
+   */
+  private sunsFor = '';
+  private sunsOf(a: WorldAir): void {
+    if (!this.file || !a.data) return;
+    const key = `${a.world}@${this.fileRev}`;
+    if (this.sunsFor === key) return;
+    this.sunsFor = key;
+    useSystemSuns(this.file.systems as Any, a.world, gamePlanetOf(a.world), this.laidData(a) as Any);
+    if (a.run && a.ready) a.run.ask();
   }
 
   /** The place view's reading of the world's applied system as the game moves it (`SkyView`), or null: SWG's sky. */
@@ -534,6 +562,8 @@ export class GameLook {
       a.readDone();
       const c = data.blocks.findIndex((b: Any) => b && b.weatherIndex === 0);
       a.clear = c >= 0 ? c : 0;
+      // (the sky round's fixer, H) the applied system's suns before the air is made and fitted, as the game's screen sets them
+      this.sunsOf(a);
       const run = new AirRun(planet, { sunElevationDegrees: +data.sunElevationDegrees || 0, blocks: data.blocks }, (file) => `/assets-private/${encodeURIComponent(a.world)}/${file}`);
       a.run = run;
       run.ask();
@@ -583,6 +613,9 @@ export class GameLook {
         this.nightWorld = '';
       }
       const at = nightPlaceOf(planet);
+      // (the sky round's maker P, J) the night is made under the world's own applied system, as the game's screen makes it, so
+      // its drawn belts are hung with it (`beltBand.ts`)
+      SKY_MOTION.now = this.motionOf(a);
       const night = new NightSky(this.S.renderer, { planet, key: at.key, placeOf: at.placeOf });
       night.setCities(((a as Any).pois ?? null) as Any, a.centre);
       await night.warm();
@@ -649,6 +682,8 @@ export class GameLook {
     const m = this.match && this.match.planet === gamePlanetOf(a.world) ? this.match : null;
     const day = this.day;
     // (wave 5) the applied system the game follows here, as its world sets it behind the screen (`SKY_MOTION.now`, the day's own)
+    // (the sky round's fixer, H) and its suns, the world drawn's (a page's call, set again only when the world or the file moves)
+    this.sunsOf(a);
     const motion = this.motionOf(a);
     SKY_MOTION.now = motion;
     if (day.motion !== motion) day.follow(motion);
@@ -779,7 +814,10 @@ export class GameLook {
     const cz = h > 1e-9 ? sz / h : 0;
     tw.radianceIn(dx * cx + dz * cz, dy, -dx * cz + dz * cx, hk, SEEN_STEPS, this.seenL);
     out.light.set(this.seenL[0], this.seenL[1], this.seenL[2]);
-    out.star.set(tw.sunTop[0] / Math.PI, tw.sunTop[1] / Math.PI, tw.sunTop[2] / Math.PI);
+    // (the sky round's fixer) the star's full light on a body, as the game's cards take it (`AIR.frame.bodyTop`: an eclipse of
+    // our own sun is no shadow on the bodies; the disc's light where no applied system shades it)
+    const bt = AIR.frame.bodyTop;
+    out.star.set(bt.r / Math.PI, bt.g / Math.PI, bt.b / Math.PI);
     return true;
   }
 

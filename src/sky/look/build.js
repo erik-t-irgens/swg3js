@@ -986,6 +986,56 @@ function shadingNormal(LU, isDome) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (The GPU port's sky round, maker L, the brief's D) Bodies shadowing each other, in the look's own light. A body built for a
+// place carries up to four casters (`skyShade.ts`' `ShadeOf`, made each frame from the system's own geometry): each a disc of
+// its radius at its middle, in the body's radii and the view's frame, with its band's two edges where it has air and the air's
+// light through them. At each pixel (its point on the body, `N` in the view's frame) the share of the star's disc each caster
+// covers there, by the smooth rule the card's tables and the twin use (`skyShade.ts`' `smoothShareReg`): a moon's shadow a
+// dark spot crossing a giant, a moon going dark in a giant's shadow, reddened through a caster's air, grey from an airless
+// one. Off (`k.z` nought), the light is the look's own to the bit.
+
+/** The casters' uniforms: `c` their middles and radii, `b` their bands' edges and the inner band's red and green, `t` its blue and the outer band's light, `k` the star's angular radius here, the ring, on and the strength. */
+function shadeUniforms() {
+  const four = () => [0, 1, 2, 3].map(() => uniform(new THREE.Vector4(0, 0, 0, 0)));
+  return { c: four(), b: four(), t: four(), k: uniform(new THREE.Vector4(0.0047, 0, 0, 1)) };
+}
+
+/** The smooth share a disc of angular radius `r` covers of the star's (`rs`), `dl` apart (`skyShade.ts`' `smoothShareReg`). */
+function shadeShare(rs, r, dl) {
+  const lo = abs(rs.sub(r));
+  const t = clamp(dl.sub(lo).div(max(rs.add(r).sub(lo), 1e-6)), 0.0, 1.0);
+  const s = t.mul(t).mul(float(3).sub(t.mul(2)));
+  return TSL.min(r.mul(r).div(max(rs.mul(rs), 1e-12)), 1.0).mul(float(1).sub(s));
+}
+
+/**
+ * The share of the star's light (rgb) reaching the point `N` of the body (view frame, unit) past its casters, or null for a
+ * look not built for a place. `Lv` the way to the star in the view's frame.
+ */
+function shadeLight(LU, N) {
+  const S = LU.shade;
+  if (!S) return null;
+  const Lv = normalize(LU.light);
+  const rs = S.k.x;
+  let light = vec3(1.0);
+  for (let i = 0; i < 4; i++) {
+    const c = S.c[i], b = S.b[i], t = S.t[i];
+    const u = c.xyz.sub(N);
+    const ud = max(length(u), 1e-6);
+    const dl = TSL.acos(clamp(dot(u, Lv).div(ud), -1.0, 1.0));
+    const s0 = shadeShare(rs, TSL.asin(TSL.min(c.w.div(ud), 1.0)), dl);
+    const sm = shadeShare(rs, TSL.asin(TSL.min(b.x.div(ud), 1.0)), dl);
+    const s1 = shadeShare(rs, TSL.asin(TSL.min(b.y.div(ud), 1.0)), dl);
+    const tin = vec3(b.z, b.w, t.x);
+    const tout = vec3(t.y, t.z, t.w);
+    const Li = vec3(float(1).sub(s1)).add(tout.mul(s1.sub(sm))).add(tin.mul(sm.sub(s0))).add(tin.mul(S.k.y.mul(s0)));
+    light = light.mul(Li);
+  }
+  // the strength (`SHADE_TUNE.shadows`), and nothing at all while off
+  return TSL.select(S.k.z.greaterThan(0.5), vec3(1.0).sub(vec3(1.0).sub(light).mul(S.k.w)), vec3(1.0));
+}
+
+// ---------------------------------------------------------------------------------------------
 // The air's parts of a material (wave A): the march to this pixel, the light that reaches a point through the air,
 // clouds lit as clouds, and the sun's glint on water. Only a Scattered look's materials are built with any of them;
 // a Painted one's are built exactly as before.
@@ -996,12 +1046,13 @@ function shadingNormal(LU, isDome) {
  * (pi times the stage's sun power, so a white Lambert surface facing the sun reads the sun power), then the place's
  * brightness and the ground's air in front as before.
  */
-function airFinish(AIR, LU, out) {
+function airFinish(AIR, LU, out, sunC = LU.sunColour) {
   return Fn(() => {
     const rd = normalize(positionView);
     const sEnd = length(positionView).sub(dot(AIR.U.centre, rd)).mul(AIR.U.kmPer);
     const m = AIR.shader.march(rd, AIR.U.centre, AIR.U.kmPer, normalize(LU.light), sEnd);
-    const sunE = LU.sunColour.mul(LU.sunPower).mul(Math.PI);
+    // (the sky round, maker L, D) `sunC` the star's light past the other bodies' shadows at this pixel (a place's look)
+    const sunE = sunC.mul(LU.sunPower).mul(Math.PI);
     return vec4(out.mul(m.Tv).add(m.L.mul(sunE)).mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
   })();
 }
@@ -1037,7 +1088,7 @@ function cloudNormal(N, cover, AIR) {
  * ground's terminator, reddened), on the relief's normal a little wrapped (thick cloud), the forward lobe where thin
  * cloud has the sun beyond it (the silver edge), the sky's light, the look's ambient.
  */
-function airCloudLight(AIR, LU, Ng, Nc, cover) {
+function airCloudLight(AIR, LU, Ng, Nc, cover, sunC = LU.sunColour) {
   const Lv = normalize(LU.light);
   const V = normalize(positionView.negate());
   const lt = AIR.shader.lightAt(AIR.U.cloudR, dot(Ng, Lv));
@@ -1048,7 +1099,8 @@ function airCloudLight(AIR, LU, Ng, Nc, cover) {
   const hg = float((1 - g * g)).div(pow(max(float(1 + g * g).sub(cosT.mul(2 * g)), 1e-4), 1.5));
   const thin = cover.mul(float(1).sub(cover)).mul(4.0);
   const silver = hg.mul(thin).mul(AIR.U.cloudForward).mul(0.12);
-  return vec3(LU.ambient).mul(AIR.U.nightFill).add(LU.sunColour.mul(LU.sunPower).mul(lt.sun.mul(lam.add(silver)).add(lt.sky.mul(0.6))));
+  // (the sky round, maker L, D) `sunC` the star's light past the other bodies' shadows (a place's look)
+  return vec3(LU.ambient).mul(AIR.U.nightFill).add(sunC.mul(LU.sunPower).mul(lt.sun.mul(lam.add(silver)).add(lt.sky.mul(0.6))));
 }
 
 /**
@@ -1138,28 +1190,32 @@ function surfaceMaterial(look, LU, U, T, sec, AIR = null) {
   const ndlG = dot(Ng, Lv);
   const ndl = dot(Nb, Lv);
   const day = smoothstep(-0.06, 0.12, ndlG);
+  // (the sky round, maker L, D) the other bodies' shadows at this point of the body (a place's look alone)
+  const SH = shadeLight(LU, Ng);
+  const sunC = SH ? LU.sunColour.mul(SH) : LU.sunColour;
   let lightTerm;
   if (AIR) {
     // (wave A, a sphere of pictures) the sun through the air, the sky after sunset, Minnaert's limb darkening
     const lt = AIR.shader.lightAt(AIR.U.bottom, ndlG);
     const mn = pow(max(max(ndl, 0.0).mul(max(dot(Nb, normalize(positionView.negate())), 0.05)), 1e-5), AIR.U.limbDark.mul(0.8));
-    lightTerm = vec3(LU.ambient).mul(AIR.U.nightFill).add(LU.sunColour.mul(LU.sunPower).mul(lt.sun.mul(max(ndl, 0.0).mul(mn)).add(lt.sky)));
+    lightTerm = vec3(LU.ambient).mul(AIR.U.nightFill).add(sunC.mul(LU.sunPower).mul(lt.sun.mul(max(ndl, 0.0).mul(mn)).add(lt.sky)));
   } else {
     const diffuse = max(ndl, 0.0).mul(day);
     // The sun's colour (a zone's sun is coloured; elsewhere it is white) tints the light it gives.
-    lightTerm = vec3(LU.ambient).add(LU.sunColour.mul(diffuse.mul(LU.sunPower)));
+    lightTerm = vec3(LU.ambient).add(sunC.mul(diffuse.mul(LU.sunPower)));
   }
   let out = colour.mul(mix(vec3(1.0), lightTerm, U.surface.lit));
   const V = normalize(positionView.negate());
 
   if (L.specular.on && T.specular && AIR) {
     const m = channel(texture(T.specular.tex, suv), L.specular.channel, T.specular.isData);
-    out = out.add(airGlint(AIR, LU, Ng, m, toL(U.specular.tint)).mul(U.surface.lit));
+    const gl = airGlint(AIR, LU, Ng, m, toL(U.specular.tint));
+    out = out.add((SH ? gl.mul(SH) : gl).mul(U.surface.lit));
   } else if (L.specular.on && T.specular) {
     const m = channel(texture(T.specular.tex, suv), L.specular.channel, T.specular.isData);
     const H = normalize(Lv.add(V));
     const sp = pow(max(dot(Nb, H), 0.0), U.specular.shine).mul(m).mul(U.specular.opacity).mul(day).mul(LU.sunPower);
-    out = out.add(toL(U.specular.tint).mul(LU.sunColour).mul(sp).mul(U.surface.lit));
+    out = out.add(toL(U.specular.tint).mul(sunC).mul(sp).mul(U.surface.lit));
   }
 
   const night = float(1).sub(smoothstep(-0.14, 0.08, ndlG));
@@ -1192,7 +1248,7 @@ function surfaceMaterial(look, LU, U, T, sec, AIR = null) {
   // layers above it and the far half of a ring are hidden behind it.
   const opaque = alphaMode(L.surface.alpha, T.surface) === 'none' && +L.surface.opacity >= 1 && !(+L.surface.mask > 0);
   const mat = basic({ transparent: !opaque, depthWrite: true });
-  mat.colorNode = AIR ? airFinish(AIR, LU, out) : vec4(out.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
+  mat.colorNode = AIR ? airFinish(AIR, LU, out, sunC) : vec4(out.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
   mat.opacityNode = alpha.mul(shape).mul(U.surface.opacity);
   return mat;
 }
@@ -1245,13 +1301,16 @@ function cloudsMaterial(layer, U, LU, T, isDome, AIR = null) {
   const colour = adjust(src === 'luma' || src === 'alpha' ? (T.clouds.isData ? toL(smp.rgb) : smp.rgb) : vec3(1), U);
   const Ng = shadingNormal(LU, isDome);
   const Lv = normalize(LU.light);
+  // (the sky round, maker L, D) the other bodies' shadows on the clouds (a place's look alone)
+  const SH = shadeLight(LU, Ng);
+  const sunC = SH ? LU.sunColour.mul(SH) : LU.sunColour;
   // (wave A, a sphere's picture clouds, Scattered: lit as clouds, through the air, as a generated look's are)
-  const shade = AIR ? airCloudLight(AIR, LU, Ng, cloudNormal(Ng, cover, AIR), cover) : vec3(LU.ambient).add(LU.sunColour.mul(max(dot(Ng, Lv), 0.0).mul(LU.sunPower)));
+  const shade = AIR ? airCloudLight(AIR, LU, Ng, cloudNormal(Ng, cover, AIR), cover, sunC) : vec3(LU.ambient).add(sunC.mul(max(dot(Ng, Lv), 0.0).mul(LU.sunPower)));
   const mat = basic({ transparent: true, depthWrite: false });
   let col = colour.mul(mix(vec3(1.0), shade, U.lit));
   // wave 4: lightning in the storm cells, inside the cloud's cover (weather.js), only when asked
   if (layer.storm?.on) col = col.add(flashLight(LU.weather, flashAt(LU.weather, isDome ? positionLocal : normalize(positionLocal), isDome), dot(Ng, Lv), colour, cover));
-  mat.colorNode = AIR ? airFinish(AIR, LU, col) : vec4(col.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
+  mat.colorNode = AIR ? airFinish(AIR, LU, col, sunC) : vec4(col.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
   mat.opacityNode = cover.mul(U.opacity).mul(discMask(base, U));
   return mat;
 }
@@ -1334,6 +1393,9 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
   const ndlG = dot(Ng, Lv);
   const ndv = max(dot(Ng, V), 0.0);
   const day = smoothstep(-0.06, 0.12, ndlG);
+  // (the sky round, maker L, D) the other bodies' shadows at this point of the body (a place's look alone), on the star's light
+  const SH = shadeLight(LU, normalize(transformNormalToView(dir0)));
+  const sunC = SH ? LU.sunColour.mul(SH) : LU.sunColour;
   const mu0 = max(dot(Nb, Lv), 0.0);
   const mu = max(dot(Nb, V), 0.05);
   const lommel = mu0.mul(2).div(mu0.add(mu));
@@ -1368,10 +1430,10 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
     const mn = pow(max(mu0.mul(mu), 1e-5), AIR.U.limbDark.mul(0.8));
     const csh = AIR.cloudShadowNode ? AIR.cloudShadowNode(dir0) : float(1);
     // (the critic) the look's ambient is a painted fill: under the real air only its night-side share is kept
-    lightTerm = vec3(LU.ambient).mul(AIR.U.nightFill).add(LU.sunColour.mul(LU.sunPower).mul(lt.sun.mul(diffuse.mul(mn).mul(csh)).add(lt.sky.mul(csh.mul(0.3).add(0.7)))));
+    lightTerm = vec3(LU.ambient).mul(AIR.U.nightFill).add(sunC.mul(LU.sunPower).mul(lt.sun.mul(diffuse.mul(mn).mul(csh)).add(lt.sky.mul(csh.mul(0.3).add(0.7)))));
   } else {
     const limb = mix(float(1), pow(ndv, 0.45), LU.limbDark);
-    lightTerm = vec3(LU.ambient).add(LU.sunColour.mul(diffuse.mul(LU.sunPower).mul(limb)));
+    lightTerm = vec3(LU.ambient).add(sunC.mul(diffuse.mul(LU.sunPower).mul(limb)));
   }
   let out = colour.mul(mix(vec3(1.0), lightTerm, U.surface.lit));
   if (deckShade) out = out.mul(mix(float(1), deckShade, U.surface.lit));
@@ -1381,13 +1443,14 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
 
   if (L.specular.on && AIR) {
     // (wave A) the sun's reflection on the water's mask: a microfacet glint through the air, none on land
-    out = out.add(airGlint(AIR, LU, Ng, S.a, toL(U.specular.tint)).mul(U.surface.lit));
+    const gl = airGlint(AIR, LU, Ng, S.a, toL(U.specular.tint));
+    out = out.add((SH ? gl.mul(SH) : gl).mul(U.surface.lit));
   } else if (L.specular.on) {
     const H = normalize(Lv.add(V));
     // the sun's glint: tighter as the shininess rises, and brighter by as much, so it stays a glint
     const fres = float(0.3).add(pow(float(1).sub(ndv), 5.0).mul(0.7));
     const sp = pow(max(dot(Ng, H), 0.0), U.specular.shine).mul(U.specular.shine.div(40.0)).mul(S.a).mul(U.specular.opacity).mul(day).mul(LU.sunPower).mul(fres);
-    out = out.add(toL(U.specular.tint).mul(LU.sunColour).mul(sp).mul(U.surface.lit));
+    out = out.add(toL(U.specular.tint).mul(sunC).mul(sp).mul(U.surface.lit));
   }
   // (the GPU port's pass 2, wave 6, maker C) the cities' own glint: the sun caught on their metal alone (the extra channels' alpha,
   // and the sharp plates where the material draws them), each plate tilted its own way, with its own colour, sharpness and strength
@@ -1397,21 +1460,22 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
     // (each plate tilted by its own numbers; the ground between, and every plate of a bake, untilted: a smooth sheen)
     const jit = RS ? RL.tilt.sub(0.5).mul(RL.plate) : vec3(0.0);
     const Nt = normalize(transformNormalToView(normalize(dir0.add(jit.mul(LU.glint.z.mul(0.35))))));
-    out = out.add(cityGlint(AIR, LU, Nt, Ng, metal, day).mul(U.surface.lit));
+    const cg = cityGlint(AIR, LU, Nt, Ng, metal, day);
+    out = out.add((SH ? cg.mul(SH) : cg).mul(U.surface.lit));
   }
 
   // air seen edge on: toward the rim the surface fades into the lit atmosphere
   // (Scattered: the air itself does this, in airFinish, so none of the painted haze is laid on as well)
   if (!AIR) {
     const hz = clamp(pow(float(1).sub(ndv), 2.2).mul(LU.haze).mul(1.4), 0.0, 1.0);
-    const hzLight = vec3(LU.ambient).add(LU.sunColour.mul(smoothstep(-0.25, 0.45, ndlG).mul(LU.sunPower)));
+    const hzLight = vec3(LU.ambient).add(sunC.mul(smoothstep(-0.25, 0.45, ndlG).mul(LU.sunPower)));
     out = mix(out, toL(U.atmosphere.tint).mul(hzLight), hz.mul(U.surface.lit));
   }
 
   // a haze world: a thick tinted haze over the whole disc, lit by the sun (a little past the
   // terminator, as high air is) and thickest toward the rim (none at all while its dial is 0)
   const veilAmt = clamp(LU.veil.mul(float(0.72).add(pow(float(1).sub(ndv), 1.5).mul(0.28))), 0.0, 1.0).mul(U.surface.lit);
-  const veilLight = vec3(LU.ambient).add(LU.sunColour.mul(smoothstep(-0.3, 0.5, ndlG).mul(LU.sunPower)));
+  const veilLight = vec3(LU.ambient).add(sunC.mul(smoothstep(-0.3, 0.5, ndlG).mul(LU.sunPower)));
   out = mix(out, LU.veilColour.xyz.mul(veilLight), veilAmt);
 
   // a look with both city lights and lava (a living world with a molten one blended in, or the other
@@ -1454,7 +1518,7 @@ function generatedSurfaceMaterial(look, LU, U, G, P = null, AIR = null) {
 
   const mat = basic({ transparent: false, depthWrite: true });
   // (Scattered: the body's own air in front of every pixel of it, then the ground's air as before)
-  mat.colorNode = AIR ? airFinish(AIR, LU, out) : vec4(out.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
+  mat.colorNode = AIR ? airFinish(AIR, LU, out, sunC) : vec4(out.mul(LU.gain).mul(LU.airTrans).add(LU.airLight), 1.0);
   if (SS) mat.positionNode = SS.positionNode;
   return mat;
 }
@@ -1474,19 +1538,22 @@ function generatedCloudsMaterial(U, LU, G, P = null, layer = null, AIR = null) {
   const colour = adjust(toL(Cs.rgb), U);
   const Ng = normalize(transformNormalToView(dir));
   const ndl = dot(Ng, normalize(LU.light));
+  // (the sky round, maker L, D) the other bodies' shadows on the clouds (a place's look alone)
+  const SH = shadeLight(LU, Ng);
+  const sunC = SH ? LU.sunColour.mul(SH) : LU.sunColour;
   if (AIR) {
     // (wave A) clouds lit as clouds: lit tops and darker sides from the cover's own relief, the sun through the air
     // to the deck's height, the silver edge of thin cloud with the sun beyond it, the sky's light; the air in front
-    const shade = airCloudLight(AIR, LU, Ng, cloudNormal(Ng, cover, AIR), cover);
+    const shade = airCloudLight(AIR, LU, Ng, cloudNormal(Ng, cover, AIR), cover, sunC);
     const mat = basic({ transparent: true, depthWrite: false });
     let col = colour.mul(mix(vec3(1.0), shade, U.lit));
     if (layer?.storm?.on) col = col.add(flashLight(LU.weather, flashAt(LU.weather, dir), ndl, colour, cover));
-    mat.colorNode = airFinish(AIR, LU, col);
+    mat.colorNode = airFinish(AIR, LU, col, sunC);
     mat.opacityNode = cover.mul(U.opacity);
     return mat;
   }
   // clouds stand high: they keep the sun a little past the ground's terminator
-  const shade = vec3(LU.ambient).add(LU.sunColour.mul(max(ndl.add(0.06).div(1.06), 0.0).mul(LU.sunPower)));
+  const shade = vec3(LU.ambient).add(sunC.mul(max(ndl.add(0.06).div(1.06), 0.0).mul(LU.sunPower)));
   const mat = basic({ transparent: true, depthWrite: false });
   let col = colour.mul(mix(vec3(1.0), shade, U.lit));
   // wave 4: lightning in the storm cells (weather.js), only when asked
@@ -1674,6 +1741,10 @@ export async function buildLook(look, { onStatus, place = false } = {}) {
   // reddened low in the night sky, nor a rock black against the day's blue. A JS flag, not a uniform: on the close-up stage
   // the programs are exactly what they were.
   if (place) LU.place = true;
+  // (the GPU port's sky round, maker L, the brief's D) built for a place, a body takes the shadows of up to four others between
+  // it and its star (`skyShade.ts`' casters, written by `updateLookWith` from the frame record's `shade`), in its own light at
+  // every pixel (`shadeLight`); built only for a place, so the close-up stage's programs are what they were
+  if (place) LU.shade = shadeUniforms();
   const U = {};
   for (const s of Object.keys(L)) U[s] = layerUniforms();
 
@@ -1938,9 +2009,11 @@ const _z = new THREE.Vector3(0, 0, 1);
 // stage's sun for a sphere, a dome's painted light on the dome's own normals.
 const _c = new THREE.Vector3();
 /** The page's frame call (the viewer's): its options made into the kept record `updateLookWith` reads. */
-export function updateLook(state, { camera, clock, sunWorld, face = null, lightWorld = null, tilt: tiltDeg = null, spin = null, sphereRadius = null }) {
+export function updateLook(state, { camera, clock, sunWorld, face = null, lightWorld = null, tilt: tiltDeg = null, spin = null, sphereRadius = null, shade = null }) {
   const a = lookFrameArgs;
   a.camera = camera; a.clock = clock; a.sunWorld = sunWorld; a.face = face; a.lightWorld = lightWorld;
+  // (the GPU port's sky round, its fixer: the brief's D and I) the body's casters, the place view's under a system, else none
+  a.shade = shade;
   a.tilt = tiltDeg ?? NaN; a.spin = spin ?? NaN; a.sphereRadius = sphereRadius ?? 0; a.sizer = null;
   updateLookWith(state, a);
 }
@@ -1952,7 +2025,8 @@ export function updateLook(state, { camera, clock, sunWorld, face = null, lightW
  * first write.
  */
 export function lookFrameRecord() {
-  return { camera: null, clock: 0.5, sunWorld: null, face: null, lightWorld: null, tilt: 0.5, spin: 0.5, sphereRadius: 0.5, sizer: null };
+  // (the sky round, maker L, D) `shade`: the body's casters this frame (`skyShade.ts`' `ShadeOf`), null for none
+  return { camera: null, clock: 0.5, sunWorld: null, face: null, lightWorld: null, tilt: 0.5, spin: 0.5, sphereRadius: 0.5, sizer: null, shade: null };
 }
 const lookFrameArgs = lookFrameRecord();
 /** The weather's clocks as the page last set them, for a drawer that writes them into the fields itself (a frame's). */
@@ -2041,6 +2115,9 @@ export function updateLookWith(state, a) {
     const e = ((+A.lightElev || 0) * Math.PI) / 180;
     LU.light.value.set(Math.cos(a) * Math.cos(e), Math.sin(a) * Math.cos(e), Math.sin(e));
   }
+  // (the GPU port's sky round, maker L, D) the body's casters (`skyShade.ts`' `ShadeOf`, in the sky's frame and its own radii)
+  // turned into the view's frame as the light is, into the vectors' fields in place; none, the shade off
+  if (LU.shade) shadeInto(LU.shade, a.shade, camera.matrixWorldInverse.elements);
   // (wave A) the air: where the body is in the view, how many km a scene unit is, the clouds' turn against the ground
   if (state.air) {
     const AU = state.air.U;
@@ -2076,6 +2153,37 @@ export function updateLookWith(state, a) {
   }
 }
 const volArgs = { motion: 0, wall: 0, lightWorld: null, sunPower: 1, sunColour: null, gain: 1, noStorms: false };
+/**
+ * (The sky round, maker L, D) A body's casters (`sh`, `skyShade.ts`' `ShadeOf`, or null) into its shade's uniforms (`S`), each
+ * middle turned by the view matrix `me` (the light's turn), every number into a vector's field. Allocates nothing.
+ */
+function shadeInto(S, sh, me) {
+  const k = S.k.value;
+  const n = sh ? sh.n : 0;
+  k.z = n > 0 ? 1 : 0;
+  if (n === 0) return;
+  k.x = sh.sunRad;
+  k.y = sh.ring;
+  k.w = sh.strength;
+  const c = sh.c;
+  for (let i = 0; i < 4; i++) {
+    const cv = S.c[i].value, bv = S.b[i].value, tv = S.t[i].value;
+    if (i < n) {
+      const o = i * 12;
+      const x = c[o], y = c[o + 1], z = c[o + 2];
+      cv.x = me[0] * x + me[4] * y + me[8] * z;
+      cv.y = me[1] * x + me[5] * y + me[9] * z;
+      cv.z = me[2] * x + me[6] * y + me[10] * z;
+      cv.w = c[o + 3];
+      bv.x = c[o + 4]; bv.y = c[o + 5]; bv.z = c[o + 6]; bv.w = c[o + 7];
+      tv.x = c[o + 8]; tv.y = c[o + 9]; tv.z = c[o + 10]; tv.w = c[o + 11];
+    } else {
+      cv.x = 0; cv.y = 0; cv.z = 0; cv.w = 0;
+      bv.x = 0; bv.y = 0; bv.z = 0; bv.w = 0;
+      tv.x = 0; tv.y = 0; tv.z = 0; tv.w = 0;
+    }
+  }
+}
 const _ws = new THREE.Vector3();
 // (wave A) the air's shell: a finely made sphere (its edge is the air's top, so its facets must not show)
 let airShellGeom = null;

@@ -455,6 +455,8 @@ import { MATCH_HOLD, clockOf, forgetMatch, holdFrom, matchList, readMatches, sav
 import { bodiesReport } from './sky/look/bodiesFile.ts';
 import { GROUND_PLACES_LAID } from './sky/look/groundPlaces.ts';
 import { motionConsole, motionHourTime, serverDayWord } from './sky/system/motionDials.ts';
+// (the sky round's maker L) the light between the bodies' dials (the debug menu's `sky` set) and `sky({ shade })`
+import { shadeConsole } from './sky/system/shadeDials.ts';
 import { SKY_MOTION } from './sky/system/skyMotion.ts';
 import { SERVER_WORLD_DAYS } from './sky/system/worldDays.ts';
 // Pass 2, wave 4b (maker A): the looks the sky's bodies wore at the last loading screen (pure).
@@ -8176,7 +8178,10 @@ class App {
               { ...bodiesReport(), worn: LOOKS_WORN, looks: GPU.webgpu && GPU.rt ? GPU.rt.looks.report() : null, groundPlaces: GROUND_PLACES_LAID }
             : // Pass 2, wave 5 (maker S): `sky({ motion: true })` says the applied star system this world follows now (its day, every
               // body's place, phase and cover, the night light); `sky({ motion: { giantshine, tint, eclipse } })` moves its dials.
-              o && typeof o === 'object' && 'motion' in o
+              // (the sky round's maker L) `sky({ shade: true })` says the light between the bodies now; `{ shade: { ...dials } }` moves them
+              o && typeof o === 'object' && 'shade' in o
+              ? shadeConsole(o.shade, SKY_MOTION.now)
+              : o && typeof o === 'object' && 'motion' in o
               ? { ...motionConsole(o.motion, SKY_MOTION.now), dayLengthSeconds: this.world.day.lengthNow, time: Number(this.world.day.time.toFixed(5)), count: Number(this.world.day.count.toFixed(6)), clock: this.world.day.clock(), held: this.world.day.held, storyHour: this.world.planet ? hourOfDay(this.world.day.time) : null, server: serverDayWord(SKY_MOTION.now, SKY_MOTION.now?.world ?? this.world.packId, SERVER_WORLD_DAYS.table, sharedClock.now(), this.world.day.time) }
             : o === 'dome' || o === 'skybox' || o === 'stars' || o === 'dust' || o === 'sprites' || o === 'clouds'
             ? (this.world.swgSky?.describe(o) ?? 'no converted sky on this world')

@@ -39,7 +39,8 @@ export function groundPlacesMix(world: string, edits: Record<string, GroundEdit>
   const mine = Object.keys(edits).filter((id) => id.startsWith(prefix) && !id.startsWith('space_'));
   if (!mine.length) return null;
   return (d: SkyData): SkyData => {
-    const out: SkyData = { ...d, celestials: d.celestials.map((c) => ({ ...c })) };
+    // (the sky round's fixer) `placeSizes`: his sizes for the world's own extra places, beside SWG's data (`skyPlacesOf` reads them)
+    const out: SkyData & { placeSizes?: Record<string, number> } = { ...d, celestials: d.celestials.map((c) => ({ ...c })) };
     const lay = (c: { size: number; glowSize: number; yaw?: number; pitch?: number } | null, id: string, turns: boolean): typeof c => {
       const e = edits[id];
       if (!c || !e) return c;
@@ -61,11 +62,27 @@ export function groundPlacesMix(world: string, edits: Record<string, GroundEdit>
     out.supplementalMoon = lay(d.supplementalMoon, `${world}:moon2`, true) as SkyData['supplementalMoon'];
     // A celestial by its picture's name, `#n` where the picture repeats (`skyMotion.ts`' `skyPlacesOf`, the viewer's ids).
     const counts: Record<string, number> = {};
+    const swgIds = new Set([`${world}:sun`, `${world}:sun2`, `${world}:moon`, `${world}:moon2`]);
     out.celestials = out.celestials.map((c) => {
       const name = pictureNameOf(c.image?.file) ?? 'unnamed';
       counts[name] = (counts[name] ?? 0) + 1;
-      return lay(c, `${world}:celestial:${name}${counts[name] > 1 ? '#' + counts[name] : ''}`, true) as typeof c;
+      const id = `${world}:celestial:${name}${counts[name] > 1 ? '#' + counts[name] : ''}`;
+      swgIds.add(id);
+      return lay(c, id, true) as typeof c;
     });
+    // (the sky round's fixer) his sizes for the world's own extra places (one SWG's file has no square for: Mustafar's Jestefad
+    // and Lefrani), which the motion's places take for their size (`skyMotion.ts`' `skyPlacesOf`), so a body he sized on the
+    // Place tab is that size in the game as in the viewer; a place's yaw and pitch stay the viewer's (the system places it)
+    const sizes: Record<string, number> = {};
+    let any = false;
+    for (const id of mine) {
+      const e = edits[id];
+      if (swgIds.has(id) || !e || typeof e.size !== 'number' || !(e.size > 0)) continue;
+      sizes[id] = e.size;
+      GROUND_PLACES_LAID.places[id] = { sizeDeg: e.size };
+      any = true;
+    }
+    if (any) out.placeSizes = sizes;
     return out;
   };
 }

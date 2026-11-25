@@ -34,6 +34,8 @@ import { CityGlow, CITY_MOST } from './cityGlow.ts';
 import { CITY_GLOW, NIGHT_STATE, NIGHT_TUNE, countOfTier, tiltOf } from './nightTune.ts';
 import { celestialFrameInto, nightFrameInto, tiltFrameInto } from './skyTurn.ts';
 import { SKY_MOTION } from '../system/skyMotion.ts';
+// (the sky round's maker P, J)
+import { BeltBand } from './beltBand.ts';
 import { kelvinToLinear } from '../stars.ts';
 import { GALAXY_TUNE } from '../../data/galaxy.ts';
 import { tierIndexOf } from './nightTier.ts';
@@ -412,6 +414,8 @@ export class NightSky {
   private readonly stars: THREE.Mesh<THREE.InstancedBufferGeometry, MeshBasicNodeMaterial>;
   private cat: StarCatalogue;
   readonly cities = new CityGlow();
+  /** (The sky round's maker P, J) the applied system's drawn belts, or null (none drawn: nothing made). */
+  readonly belts: BeltBand | null;
   /** The galaxy's frame at the day's angle nought (`tiltFrameInto`), worked when a tilt dial moves. */
   private readonly tilt = new Float64Array(9);
   /** What the band was baked under: the disc's and the layout's numbers, the shape's count, and whether it is baked at all. */
@@ -451,6 +455,11 @@ export class NightSky {
     this.stars.frustumCulled = false;
     this.stars.renderOrder = -7;
     this.group.add(this.band, this.stars);
+    // (the sky round's maker P, J) the applied system's drawn belts, a band of the night's own (`beltBand.ts`), made only where
+    // the system draws one, so a world with none builds nothing new
+    const mo = SKY_MOTION.now;
+    this.belts = mo && mo.beltKit.count > 0 ? new BeltBand(mo.beltKit, bandClip(renderer?.reversedDepthBuffer === true)) : null;
+    if (this.belts) this.group.add(this.belts.mesh);
     this.group.name = 'night sky';
     // The glow's colour and its height's start, fixed.
     const gc = kelvinColour(CITY_GLOW.kelvin);
@@ -578,6 +587,8 @@ export class NightSky {
     const motion = SKY_MOTION.now;
     if (motion !== null && motion.celestialAt === motion.T) celestialFrameInto(this.tilt, motion.celestial, this.u.frame.elements);
     else nightFrameInto(this.tilt, f.sunDir, this.u.frame.elements);
+    // (the sky round's maker P, J) the belts' numbers from the motion this frame
+    if (this.belts !== null) this.belts.frame(motion);
     // Every number written into a vector's own field, never handed to a setter (a number handed across a call is a number made).
     const T = NIGHT_TUNE;
     const look = this.u.look;
@@ -642,6 +653,8 @@ export class NightSky {
         pole: SKY_MOTION.now ? [n3(SKY_MOTION.now.celestial[6]), n3(SKY_MOTION.now.celestial[7]), n3(SKY_MOTION.now.celestial[8])] : [0, n3(Math.sin((22.5 * Math.PI) / 180)), n3(Math.cos((22.5 * Math.PI) / 180))],
       },
       towns: { count: this.cities.townCount, nearest: towns },
+      // (the sky round's maker P, J)
+      belts: this.belts ? this.belts.report() : null,
       frames: this.frames,
       hiddenByDay: this.hiddenFrames,
       ...NIGHT_STATS,
@@ -673,6 +686,8 @@ export class NightSky {
     if (this.disposed) return;
     this.disposed = true;
     this.group.removeFromParent();
+    // (the sky round's maker P, J)
+    this.belts?.dispose(forget);
     const mats = [this.band.material as THREE.Material, this.stars.material as THREE.Material];
     forget?.(mats);
     for (const m of mats) m.dispose();

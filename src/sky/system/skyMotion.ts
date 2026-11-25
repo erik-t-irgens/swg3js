@@ -42,6 +42,11 @@ import { DISC_FILL } from './places.js';
 import { EXTRA_PLACES } from './extraPlaces.js';
 import { DISC_TUNE } from '../skyDials.ts';
 import { PAIR_MOVES, PAIR_TUNE, casterOf, secondOf } from '../stars.ts';
+// (the sky round's maker P: B's poses and C's sizes, one pure module the viewer's ground view calls too)
+import { bodyPosesInto, distanceKitOf, largestSizeDeg, poseKitOf, sizesInto, type DistanceKit, type PoseKit, type PoseModel, type PoseState } from './bodyPose.ts';
+import { beltKitOf, beltsInto, type BeltKit } from './beltSky.ts';
+// (the sky round's maker L: D to G, the light between the bodies, one pure module the motion calls at the end of its frame)
+import { SkyShade } from './skyShade.ts';
 
 const DEG = Math.PI / 180;
 
@@ -64,7 +69,19 @@ const SWG_POLE = new Float64Array([0, Math.sin(POLE_ELEVATION * DEG), Math.cos(P
  *   - `eclipse`: how much of a covered sun's light an eclipse takes (1 all of the covered share, 0 none). 1 to start: a
  *     body in front of a sun hides that share of it, as it is drawn.
  */
-export const MOTION_TUNE = { giantshine: 1, tint: 1, eclipse: 1 };
+export const MOTION_TUNE = {
+  giantshine: 1,
+  tint: 1,
+  eclipse: 1,
+  /**
+   * (The sky round's maker P, the brief's C) "Size follows distance", 0 to 1: how much a body's drawn size follows its true
+   * distance from the world one stands on. A body's size setting is its size at its average distance (`bodyPose.ts`'
+   * `distanceKitOf`), so at 1 it grows as it comes near and shrinks as it goes far (Kef Bir from Endor's forest moon 4.4 times
+   * wider at its nearest than at its farthest), at 0 it keeps its setting at every distance as before. 1 to start: the owner's
+   * word ("planets don't change size dependent on their distance from you ... it looks like Kef Bir is orbiting ME").
+   */
+  distanceSize: 1,
+};
 
 /**
  * A body's share of the cards' draw order under an applied system (the fixer of pass 2, wave 5). Every body of a ground sky
@@ -76,7 +93,7 @@ export function nearOrder(distAu: number): number {
   return distAu > 0 ? 0.9 / (1 + distAu) : 0.9;
 }
 /** The dials' ranges (the console's and the sliders' alike). */
-export const MOTION_RANGE = { giantshine: [0, 4], tint: [0, 1], eclipse: [0, 1] } as const;
+export const MOTION_RANGE = { giantshine: [0, 4], tint: [0, 1], eclipse: [0, 1], distanceSize: [0, 1] } as const;
 
 /** Which of SWG's slots a place is: the game's card for it (`SwgSky`'s sun, second sun, moon, second moon, a celestial). */
 export type MotionSlot = 'sun' | 'sun2' | 'moon' | 'moon2' | 'celestial' | 'extra' | 'none';
@@ -102,6 +119,8 @@ export interface SkyPlaceSource {
   moon?: { size: number } | null;
   supplementalMoon?: { size: number } | null;
   celestials?: readonly { size: number; image?: { file: string } | null }[];
+  /** (The sky round's fixer) his sizes for the world's own extra places, degrees across (`groundPlaces.ts`), else absent. */
+  placeSizes?: Readonly<Record<string, number>>;
 }
 
 /** A square of SWG size `size` (half-wide 3 m out) as the angle it fills, degrees: `places.js`' `skySquareDegrees`. */
@@ -138,9 +157,12 @@ export function skyPlacesOf(world: string, d: SkyPlaceSource | null): Map<string
       out.set(id, { id, slot: 'celestial', index: i, sizeDeg: squareDegrees(c.size), picture: name, sheet: false });
     });
   }
+  // (the sky round's fixer) an extra place's size his Place tab set (`placeSizes`, laid by `groundPlaces.ts`), else its start
+  const own = d?.placeSizes ?? null;
   for (const e of EXTRA_PLACES) {
     if (e.zone !== world || out.has(e.id) || e.kind === 'body') continue;
-    out.set(e.id, { id: e.id, slot: 'extra', index: -1, sizeDeg: e.start.size ?? 20, picture: null, sheet: e.kind === 'sheet' });
+    const set = own !== null && typeof own[e.id] === 'number' && own[e.id] > 0 ? own[e.id] : null;
+    out.set(e.id, { id: e.id, slot: 'extra', index: -1, sizeDeg: set ?? e.start.size ?? 20, picture: null, sheet: e.kind === 'sheet' });
   }
   return out;
 }
@@ -294,6 +316,27 @@ export class SkyMotion {
   readonly dist: Float64Array;
   readonly cover: Float64Array;
   readonly spinTurn: Float64Array;
+  /**
+   * (The sky round's maker P, the brief's B and C) each item's drawn size now (degrees: its setting at its mean distance, grown
+   * and shrunk with its true distance by `MOTION_TUNE.distanceSize`), its mean, nearest and farthest distance (AU, worked once
+   * here), the largest it is ever drawn (its picture's size), and its pose: nine numbers an item, the look's x, its axis and its
+   * meridian as columns in the sky's frame, held in the system's frame and turned into the sky by its turn (`bodyPose.ts`).
+   * `locked` an item that keeps one face to its parent (its look does not turn of itself); `ownSpinDeg` the spin its look turns by.
+   */
+  readonly sizeNow: Float64Array;
+  readonly meanDist: Float64Array;
+  readonly nearDist: Float64Array;
+  readonly farDist: Float64Array;
+  readonly largestDeg: Float64Array;
+  readonly pose: Float64Array;
+  readonly locked: Uint8Array;
+  readonly ownSpinDeg: Float64Array;
+  /** (Maker P, the brief's J) the drawn belts' numbers for the night's band (`beltSky.ts`' layout), and how many are drawn. */
+  readonly belts: Float64Array;
+  beltCount = 0;
+  private readonly poseKit: PoseKit;
+  private readonly distKit: DistanceKit;
+  readonly beltKit: BeltKit;
   /** The sky's time, real days since `EPOCH_MS` (version 2), or the sky time on the game's clock (version 1). */
   T = Number.NaN;
   /** The play area's hour of its own day (version 2), 0 to 24, 12 its sun's highest at the equator. */
@@ -350,6 +393,12 @@ export class SkyMotion {
   readonly pairSays: { angleDeg: number; distanceDeg: number } | null;
   /** `PAIR_MOVES.n` when this motion was made: the pair stands by the system's own numbers until the dials are moved by hand. */
   private readonly pairMovesAt: number;
+  /**
+   * (The sky round's maker L, the brief's D to G) the light between the bodies (`skyShade.ts`): each sun's direct light and the
+   * air's through an eclipse, written over `cover`, `sunShare`, `sun2Share` and `daylight` at the end of each `at`, and every
+   * drawn body's casters for its look's own light. Null only where it could not be made (the motion stands as before).
+   */
+  readonly shade: SkyShade | null;
 
   constructor(rule: 'system' | 'one-world', id: string, sys: Record<string, unknown>, world: string, planet: string, places: Map<string, SkyPlace>) {
     this.rule = rule;
@@ -377,6 +426,23 @@ export class SkyMotion {
     this.dist = this.state.dist;
     this.cover = this.state.cover;
     this.spinTurn = new Float64Array(m);
+    // (maker P: B and C) the pose's rules and the distances, worked once here (the clockwork sampled on a state of its own)
+    const pm = model as unknown as PoseModel;
+    this.poseKit = poseKitOf(pm);
+    this.distKit = distanceKitOf(pm);
+    this.meanDist = this.distKit.mean;
+    this.nearDist = this.distKit.near;
+    this.farDist = this.distKit.far;
+    this.sizeNow = Float64Array.from(model.itemSize);
+    this.largestDeg = new Float64Array(m);
+    for (let j = 0; j < m; j++) this.largestDeg[j] = largestSizeDeg(pm, this.distKit, j);
+    this.pose = new Float64Array(9 * m);
+    this.locked = new Uint8Array(m);
+    this.ownSpinDeg = this.poseKit.spinDeg;
+    for (let j = 0; j < m; j++) this.locked[j] = this.poseKit.locked[model.items[j].body];
+    // (maker P: J) the belts the system draws (a belt's Drawn tick), their numbers written each frame
+    this.beltKit = beltKitOf(pm);
+    this.belts = new Float64Array(this.beltKit.stride * Math.max(1, this.beltKit.count));
     this.weight = new Float64Array(m);
     this.isGiant = new Uint8Array(m);
     this.tints = new Float64Array(3 * m);
@@ -441,6 +507,14 @@ export class SkyMotion {
     if (ang > 180) ang -= 360;
     this.pairSays = this.secondJ >= 0 ? { angleDeg: Math.round(ang * 1e6) / 1e6, distanceDeg: Math.round((((this.discA + this.discB) * DISC_TUNE.size + this.pairGap) / DEG) * 1e6) / 1e6 } : null;
     this.pairMovesAt = PAIR_MOVES.n;
+    // (maker L: D to G) the light between the bodies, made last: it reads the items, the casting sun and the mean distances
+    let shade: SkyShade | null = null;
+    try {
+      shade = new SkyShade(this, model as unknown as ConstructorParameters<typeof SkyShade>[1], planet);
+    } catch {
+      shade = null;
+    }
+    this.shade = shade;
   }
 
   /** The sky's time `T` for the day's unbroken count (`DayCycle.count`): version 2's real days, version 1's sky time. */
@@ -481,6 +555,10 @@ export class SkyMotion {
     st.next = T;
     skyAtNext(M, st);
     this.T = T;
+    // (maker P: C, B, J) each item's drawn size by its distance, its pose turned into the sky, and the drawn belts' numbers
+    sizesInto(M as unknown as PoseModel, st as unknown as PoseState, this.distKit, MOTION_TUNE, this.sizeNow);
+    bodyPosesInto(M as unknown as PoseModel, st as unknown as PoseState, this.poseKit, this.pose);
+    if (this.beltKit.count > 0) this.beltCount = beltsInto(M as unknown as PoseModel, st as unknown as PoseState, this.beltKit, this.belts);
     // (The fixer of pass 2, wave 6) the world's celestial frame for the night's stars: its pole the axis the bodies turn about
     // (version 2 the world's own, `poleSky`; version 1 SWG's), taken back into the system's space (R's transpose), the
     // system's +X laid into that equator, and the three turned into the sky by R. Arrays read and written: nothing made.
@@ -642,7 +720,9 @@ export class SkyMotion {
       if (w === 0) continue;
       const up = dir[3 * j + 1];
       if (!(up > 0)) continue;
-      const l = lit[j] * w * (this.isGiant[j] ? gs : 1);
+      // (maker P: C) its light by the area it is drawn at now (its weight is its setting's)
+      const grow = this.sizeNow[j] / this.items[j].sizeDeg;
+      const l = lit[j] * w * grow * grow * (this.isGiant[j] ? gs : 1);
       if (!(l > 0)) continue;
       sum += l;
       tr += l * this.tints[3 * j];
@@ -699,6 +779,9 @@ export class SkyMotion {
       this.ratio = d.ratio;
       this.isDay = d.isDay;
     }
+    // (maker L: D to G) each sun's direct light and the air's through an eclipse (over `cover`, the shares and the daylight
+    // above), and every drawn body's casters; objects handed over, no number
+    if (this.shade !== null) this.shade.frame(this, st as unknown as Parameters<SkyShade['frame']>[1], MOTION_TUNE);
   }
 
   /** The disc's angular radius `coverOf` works with (radians), written before each call so no number crosses it. */
@@ -723,7 +806,8 @@ export class SkyMotion {
       const c = dir[k3] * dir[j3] + dir[k3 + 1] * dir[j3 + 1] + dir[k3 + 2] * dir[j3 + 2];
       const d = Math.acos(c < -1 ? -1 : c > 1 ? 1 : c);
       const a = rs;
-      const b = (it.sizeDeg * DEG) / 2;
+      // (maker P: C) the size it is drawn at now hides the sun, as drawn
+      const b = (this.sizeNow[j] * DEG) / 2;
       if (d >= a + b) continue;
       const lo = a < b ? a : b;
       if (d <= Math.abs(a - b)) {
@@ -767,6 +851,12 @@ export class SkyMotion {
         look: it.look,
         drawn: it.drawn,
         sizeDeg: Number(it.sizeDeg.toFixed(3)),
+        // (maker P: C) drawn now at its distance, against its mean, nearest and farthest
+        sizeNowDeg: Number(this.sizeNow[j].toFixed(3)),
+        meanAu: Number(this.meanDist[j].toPrecision(4)),
+        nearAu: Number(this.nearDist[j].toPrecision(4)),
+        farAu: Number(this.farDist[j].toPrecision(4)),
+        ...(this.locked[j] ? { locked: true } : {}),
         dir: r3(this.dir, 3 * j),
         upDeg: deg(this.dir[3 * j + 1]),
         lit: Number(this.lit[j].toFixed(4)),

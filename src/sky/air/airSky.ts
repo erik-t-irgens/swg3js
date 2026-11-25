@@ -30,7 +30,7 @@ import { CAPTURE_TUNE } from '../capture/captureTune.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const { Fn, clamp, float, length, max, min, mix, normalize, positionLocal, renderGroup, smoothstep, sqrt, uniform, vec3, vec4 } = TSL as Any;
+const { Fn, clamp, float, length, max, min, mix, normalize, positionLocal, renderGroup, sin, smoothstep, sqrt, uniform, vec3, vec4 } = TSL as Any;
 
 /** The world's discs' spread and cap: none spread, a cap no disc reaches (a disc's light a steradian is under 1e5 of its own). */
 const WORLD_CAP = 1e9;
@@ -77,6 +77,26 @@ function disc(dir: Any, sun: Any, r: Any, top: Any, limb: Any, edge: Any, cap: A
 }
 
 /**
+ * (The sky round's fixer) The ring of light about a body covering the sun, where its air bends the sun's light round its limb
+ * (`skyShade.ts`' `ringSky`, through `AIR.frame`): `R` its middle (xyz, unit) and inner angular radius (w, radians: the body's
+ * disc), `T` its light at the top of the air (rgb, scene units) and outer radius (w: its band's top). The radiance a direction
+ * between the two sees, brightest at the limb and falling to nought at the band's top ((1 - t) squared, a third of the band's
+ * width on average), spread so the ring as a whole sends its light; nought outside it, and nought with no ring (black light).
+ * The chord stands for the angle (within half a percent at a giant's eighteen degrees).
+ */
+function ringAbout(dir: Any, R: Any, T: Any): Any {
+  const a = length(dir.sub(R.xyz));
+  const ci = sin(R.w.mul(0.5)).mul(2);
+  const co = sin(T.w.mul(0.5)).mul(2);
+  const span = max(co.sub(ci), 1e-6);
+  const t = clamp(a.sub(ci).div(span), 0, 1);
+  const inside = smoothstep(ci, ci.add(span.mul(0.08)), a).mul(float(1).sub(smoothstep(co.sub(span.mul(0.08)), co, a)));
+  const w = float(1).sub(t);
+  const area = max(ci.mul(span).mul((2 * Math.PI) / 3), 1e-12);
+  return T.xyz.mul(w.mul(w).mul(inside).div(area));
+}
+
+/**
  * The dome's material under our sky, for a world (`planet`, a PLANETS id, for its stars' sizes) whose dome writes its
  * horizon and clear colours into `horizon` and `zenith` (today's dome, the stand-in's before the tables). Built once a sky; with no air's
  * tables yet it is today's stand-in, as SWG's sky draws it.
@@ -120,7 +140,9 @@ export function airSkyMaterial(planet: string, horizon: THREE.Color, zenith: THR
     const t = vec3(tables.transmittanceToSpace(d)).toVar('swgSkyT');
     const sun1 = disc(d, n.sunDir, max(n.sunRadius.mul(size), capLeast), n.sunTop, limb, edge, capMost);
     const sun2 = disc(d, n.sun2Dir, max(n.sunRadius.mul(ratio).mul(size), capLeast), n.sun2Top, limb, edge, capMost);
-    const discs = sun1.add(sun2).mul(t).mul(float(1).sub(clamp(n.overcast, 0, 1))).mul(gain).mul(seen);
+    // (the sky round's fixer) the covering body's ring of bent light at its limb (black, nought, with none)
+    const lit = n.ringDir && n.ringTop ? sun1.add(sun2).add(ringAbout(d, n.ringDir, n.ringTop)) : sun1.add(sun2);
+    const discs = lit.mul(t).mul(float(1).sub(clamp(n.overcast, 0, 1))).mul(gain).mul(seen);
     return vec4(sky.add(discs), 1);
   })();
   return markMotion(m, 'sky');

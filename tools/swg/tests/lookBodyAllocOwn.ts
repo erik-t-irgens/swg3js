@@ -74,6 +74,11 @@ const motion: Any = {
     { drawn: true, sizeDeg: 24, spinDeg: 1200 },
   ],
   T: 0.5,
+  // (the sky round's maker P: B and C) each item's size by its distance, its pose turning in the sky each frame, none locked:
+  // the extra body is posed, sized and drawn again as its pose moves (`placeExtra`, `turnAxis`, `changed`)
+  sizeNow: new Float64Array([8, 20]),
+  pose: new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+  locked: new Uint8Array(2),
 };
 const plans: Any[] = [
   { place: 'rori:celestial:cels_naboo', id: 'proof:naboo-storms', look: looks['proof:naboo-storms'], record: null, where: 'sky', card, item: -1, group: sky, order: -5, halfRad: 0.07, fovDeg: 60 },
@@ -119,6 +124,13 @@ function frame(): void {
   motion.light[0] = c;
   motion.light[2] = s;
   motion.spinTurn[1] = (step[0] * 0.0001) % 1;
+  // (maker P) the extra body's size by its distance and its pose turning about the sky's x (the axis tipping as it crosses the sky)
+  motion.sizeNow[1] = 20 + 2 * s;
+  const P = motion.pose;
+  P[13] = c;
+  P[14] = s;
+  P[16] = -s;
+  P[17] = c;
   set.frame(motion);
   if (!noDraw) set.draw();
 }

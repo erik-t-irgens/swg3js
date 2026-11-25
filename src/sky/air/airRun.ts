@@ -16,9 +16,12 @@ import { AIR_DIAL_STATE, AIR_FILE_FIELDS, F, LUMA_B, LUMA_G, LUMA_R, airDialsOf,
 import { AirTwin, DEPTH_FLOATS, IN, MOON_SHARE, PSI_FLOATS, SMOKE_FLOATS, TWIN_STEPS, buildDepthTable, buildPsiTable, buildSmokeTable, sceneUnits, steerGain, writeTwinLighting, type TwinLighting } from './airTwin.ts';
 import { SMOKE_DIAL_NAMES, type SmokeDials } from '../look/airProfile.js';
 import { fitGradients, fitSkyOf, type FitAsk, type FitReply, type FitRow } from './airFit.ts';
-import { PAIR_TUNE, kelvinToLinear, secondOf } from '../stars.ts';
+import { PAIR_TUNE, SYSTEM_SUNS, kelvinToLinear, secondOf } from '../stars.ts';
 import { registerAirDials } from './airDials.ts';
 import { SKY_MOTION } from '../system/skyMotion.ts';
+// (the sky round, maker L) the shade's dials (the night's floor) and the system's star laid on fitted rows
+import { SHADE_AIR, SHADE_TUNE } from '../system/skyShade.ts';
+import { setStar } from './airParams.ts';
 
 /** The scene's units, worked once as the module loads (`sceneUnits`: a clear Tatooine noon's sun at today's key light there). */
 AIR_UNITS.scene = sceneUnits();
@@ -102,6 +105,13 @@ export class AirRun {
   disposed = false;
   /** Frames the run has written, for the report. */
   frames = 0;
+  /**
+   * (The sky round, maker L) under an applied system's shade: each sun's full light at the top of the air (the disc's, the
+   * moons' and the card's tables'), and the air's share the twin last summed its sky with. Kept, written in place.
+   */
+  private readonly fullTop = new Float64Array(3);
+  private readonly fullTop2 = new Float64Array(3);
+  private airSeen = 0.5;
   /** The frame's numbers the caller writes before `frame`: the camera's height over the datum, metres, and the overcast (0 to 1). */
   heightM = 0.5;
   overcast = 0.5;
@@ -220,6 +230,10 @@ export class AirRun {
         this.recs.push(r.records[i]);
         this.psis.push(r.psis[i]);
       }
+      // (the sky round, maker L, H) an applied system's star (its colour, brightness and size) laid on every fitted row, never
+      // fitted, as the haze's colour is: the worker fitted the sky's hue under the table's star (its own copy of `stars.ts`)
+      const sys = SYSTEM_SUNS.caster !== null && SYSTEM_SUNS.planet === this.planet ? SYSTEM_SUNS.caster : null;
+      if (sys !== null) for (const rec of this.recs) setStar(rec, sys);
       if (r.depth.length === DEPTH_FLOATS) this.twin.useDepth(r.depth);
       const { records: _a, psis: _b, depth: _c, ...words } = r;
       this.lastFit = words;
@@ -339,6 +353,9 @@ export class AirRun {
     tw.moonTop[1] = tw.sunTop[1] * MOON_SHARE;
     tw.moonTop[2] = tw.sunTop[2] * MOON_SHARE;
     const s = day.sunDir;
+    // (the sky round's fixer, G) the night light keeps its aim at the brightest body (the day's `moonDir`): the night's floor is
+    // light from the whole sky, laid beside the sky's own (`floorHere`), never a turn of the moon's way toward the zenith (which
+    // drew the moon's glow and the flare's source in empty sky)
     const m = day.moonDir;
     const two = this.sun2Rgb !== null;
     if (two) {
@@ -356,25 +373,78 @@ export class AirRun {
     // pair rule puts it, and the night light is what the system's moons and giants give (their lit share by their size against SWG's nearly full moon,
     // `moonShare`, in their colour), aimed from the brightest (`day.moonDir`, the day's). With none, every line above as it was.
     const mo = SKY_MOTION.now;
+    // (the sky round, maker L, F) the stars' full light at the top of the air, kept for the disc, the moons and the card's
+    // tables, which work an eclipse's shadow per place themselves (`skyShade.ts`' `gpu`)
+    const full = this.fullTop;
+    const full2 = this.fullTop2;
+    const shd = mo !== null ? mo.shade : null;
     if (mo !== null) {
       const ms = mo.moonShare;
       tw.moonTop[0] *= ms * mo.moonTint[0];
       tw.moonTop[1] *= ms * mo.moonTint[1];
       tw.moonTop[2] *= ms * mo.moonTint[2];
-      const ss = mo.sunShare;
-      tw.sunTop[0] *= ss;
-      tw.sunTop[1] *= ss;
-      tw.sunTop[2] *= ss;
+      full[0] = tw.sunTop[0];
+      full[1] = tw.sunTop[1];
+      full[2] = tw.sunTop[2];
+      if (shd !== null) {
+        // (maker L, F) the air's light (the twin's sky and ambient) by the shadow's share of the visible air; the direct light
+        // by the uncovered share of the disc, laid on the twin's after its frame
+        tw.sunTop[0] *= shd.air1[0];
+        tw.sunTop[1] *= shd.air1[1];
+        tw.sunTop[2] *= shd.air1[2];
+      } else {
+        const ss = mo.sunShare;
+        tw.sunTop[0] *= ss;
+        tw.sunTop[1] *= ss;
+        tw.sunTop[2] *= ss;
+      }
       if (two && mo.secondJ >= 0) {
         const q = mo.sun2;
         f.sun2Dir.x = q.x;
         f.sun2Dir.y = q.y;
         f.sun2Dir.z = q.z;
-        const s2s = mo.sun2Share;
-        tw.sun2Top[0] *= s2s;
-        tw.sun2Top[1] *= s2s;
-        tw.sun2Top[2] *= s2s;
+        full2[0] = tw.sun2Top[0];
+        full2[1] = tw.sun2Top[1];
+        full2[2] = tw.sun2Top[2];
+        if (shd !== null) {
+          tw.sun2Top[0] *= shd.air2[0];
+          tw.sun2Top[1] *= shd.air2[1];
+          tw.sun2Top[2] *= shd.air2[2];
+        } else {
+          const s2s = mo.sun2Share;
+          tw.sun2Top[0] *= s2s;
+          tw.sun2Top[1] *= s2s;
+          tw.sun2Top[2] *= s2s;
+        }
+      } else {
+        full2[0] = tw.sun2Top[0];
+        full2[1] = tw.sun2Top[1];
+        full2[2] = tw.sun2Top[2];
       }
+      // (maker L, F) the twin sums its sky again when the air's share of the light moved by a hundredth of itself (its sums
+      // otherwise wait for the sun to move)
+      if (shd !== null) {
+        const q = 0.2126 * shd.air1[0] + 0.7152 * shd.air1[1] + 0.0722 * shd.air1[2] + 0.5 * (0.2126 * shd.air2[0] + 0.7152 * shd.air2[1] + 0.0722 * shd.air2[2]);
+        const was = this.airSeen;
+        const dq = q - was;
+        if ((dq < 0 ? -dq : dq) > 0.01 * (was > 1e-6 ? was : 1e-6)) {
+          this.airSeen = q;
+          tw.version++;
+        }
+        // (maker L, F and G) an eclipse that leaves the air under a hundredth of the sun's light lets the twin sum the night's
+        // light (the moons' and the floor's) into the sky's, as at night
+        const byDay = q < 0.01;
+        if (byDay !== tw.moonByDay) {
+          tw.moonByDay = byDay;
+          tw.version++;
+        }
+      } else if (tw.moonByDay) {
+        tw.moonByDay = false;
+        tw.version++;
+      }
+    } else if (tw.moonByDay) {
+      tw.moonByDay = false;
+      tw.version++;
     }
     const hKm = this.heightM / 1000;
     const heightKm = hKm > 0.001 ? hKm : 0.001;
@@ -394,18 +464,97 @@ export class AirRun {
     tw.sun2 = two;
     tw.frame();
     const o = tw.out;
+    if (shd !== null) {
+      // (maker L, E and F) the light straight from each sun through its eclipse (the uncovered share of its disc, reddened
+      // through an air body's limb): the twin worked it through the air from the air's share; here the direct share instead
+      for (let c = 0; c < 3; c++) {
+        const qa = shd.air1[c];
+        o.sunHere[c] = qa > 1e-30 ? (o.sunHere[c] * shd.direct1[c]) / qa : 0;
+        const qb = shd.air2[c];
+        o.sun2Here[c] = qb > 1e-30 ? (o.sun2Here[c] * shd.direct2[c]) / qb : 0;
+      }
+      const cs = s.y > 0 ? s.y : 0;
+      const cm = m.y > 0 ? m.y : 0;
+      const c2 = two && f.sun2Dir.y > 0 ? f.sun2Dir.y : 0;
+      o.groundDown[0] = (o.skyUp[0] + o.sunHere[0] * cs + o.moonHere[0] * cm + o.sun2Here[0] * c2) * rec[F.groundR];
+      o.groundDown[1] = (o.skyUp[1] + o.sunHere[1] * cs + o.moonHere[1] * cm + o.sun2Here[1] * c2) * rec[F.groundG];
+      o.groundDown[2] = (o.skyUp[2] + o.sunHere[2] * cs + o.moonHere[2] * cm + o.sun2Here[2] * c2) * rec[F.groundB];
+    }
+    // (the sky round's fixer, G) the night's floor under an applied system: starlight, airglow and the Milky Way, light from the
+    // whole sky (the hemisphere's, beside the sky's own: `writeTwinLighting`), a share of today's full moon's at the top of the
+    // air (`SHADE_TUNE.floor` of `MOON_SHARE`) through the air straight up; nought with no applied system, as before
+    // (the sky round's fixer, F) and the ring of light about a body with air covering the sun (`skyShade.ts`' `ringSky`), the
+    // light its air bends into the full shadow: it falls from all round the body's limb, so it is laid with the floor as light
+    // from the whole sky, not as the sun's (which drew a glow and a flare at the sun's place at totality)
+    const fh = o.floorHere;
+    const fl = SHADE_TUNE.floor;
+    const rgl = shd !== null ? shd.ringSky : null;
+    const ringOn = rgl !== null && rgl[5] + rgl[6] + rgl[7] > 0;
+    if (mo !== null && (fl > 0 || ringOn)) {
+      tw.zenithNow();
+      const zt = tw.zenithT;
+      const fk = fl * MOON_SHARE;
+      fh[0] = (fk + (ringOn ? rgl![5] : 0)) * full[0] * zt[0];
+      fh[1] = (fk + (ringOn ? rgl![6] : 0)) * full[1] * zt[1];
+      fh[2] = (fk + (ringOn ? rgl![7] : 0)) * full[2] * zt[2];
+      o.groundDown[0] += fh[0] * rec[F.groundR];
+      o.groundDown[1] += fh[1] * rec[F.groundG];
+      o.groundDown[2] += fh[2] * rec[F.groundB];
+    } else {
+      fh[0] = 0;
+      fh[1] = 0;
+      fh[2] = 0;
+    }
     f.on = true;
     f.sunDir.copy(s);
     f.moonDir.copy(m);
     f.sun2 = two;
     // Each colour's fields written straight (a number handed to setRGB across a call is a number made).
+    // (maker L, E and F) under the shade the card's two marches take the stars' full light (`SHADE_AIR`, each sample shadowed
+    // there), and the disc the light that reaches the play area straight (a body's card may not hide the disc whole)
+    // (the sky round's fixer) the disc the share of its own disc left (`disc1`: the light bent into a full shadow comes from the
+    // occluder's ring, drawn about its limb, not from the sun's place); the moons and planets in the sky the star's full light (an
+    // eclipse of our sun is no shadow on them: each one's own shadows are its look's)
+    const bt = f.bodyTop;
+    const ringT = f.ringTop;
+    if (shd !== null) {
+      const A = SHADE_AIR;
+      A.on = 1;
+      for (let c = 0; c < 3; c++) {
+        A.sun[c] = full[c];
+        A.sun2[c] = full2[c];
+        tw.sunTop[c] = full[c] * shd.disc1[c];
+        tw.sun2Top[c] = full2[c] * shd.disc2[c];
+      }
+      bt.r = full[0];
+      bt.g = full[1];
+      bt.b = full[2];
+      const rg = shd.ringSky;
+      f.ringDir.x = rg[0];
+      f.ringDir.y = rg[1];
+      f.ringDir.z = rg[2];
+      f.ringIn = rg[3];
+      f.ringOut = rg[4];
+      ringT.r = full[0] * rg[5];
+      ringT.g = full[1] * rg[6];
+      ringT.b = full[2] * rg[7];
+    } else {
+      SHADE_AIR.on = 0;
+      bt.r = tw.sunTop[0];
+      bt.g = tw.sunTop[1];
+      bt.b = tw.sunTop[2];
+      ringT.r = 0;
+      ringT.g = 0;
+      ringT.b = 0;
+    }
     rgbInto(f.sunTop, tw.sunTop);
     rgbInto(f.sun2Top, tw.sun2Top);
     rgbInto(f.moonTop, tw.moonTop);
     rgbInto(f.sunHere, o.sunHere);
     rgbInto(f.sun2Here, o.sun2Here);
     rgbInto(f.moonHere, o.moonHere);
-    f.sunRadius = rec[F.sunRadius];
+    // (maker L, H) the disc grows and shrinks with the star's true distance against its mean (C's rule for the sun)
+    f.sunRadius = shd !== null ? rec[F.sunRadius] * shd.sunScale : rec[F.sunRadius];
     f.heightKm = heightKm;
     f.clearVisibilityKm = dials.visibilityKm;
     f.visibilityKm = o.visibilityKm;
@@ -443,12 +592,13 @@ export class AirRun {
     const sy = s.y > 0 ? s.y : 0;
     const my = m.y > 0 ? m.y : 0;
     const s2y = two && f.sun2Dir.y > 0 ? f.sun2Dir.y : 0;
-    f.level = sunLum * sy + moonLum * my + (LUMA_R * s2h[0] + LUMA_G * s2h[1] + LUMA_B * s2h[2]) * s2y + (LUMA_R * up[0] + LUMA_G * up[1] + LUMA_B * up[2]);
+    // (the sky round's fixer, G) the night's floor counted with the sky's light (nought with no applied system)
+    f.level = sunLum * sy + moonLum * my + (LUMA_R * s2h[0] + LUMA_G * s2h[1] + LUMA_B * s2h[2]) * s2y + (LUMA_R * (up[0] + fh[0]) + LUMA_G * (up[1] + fh[1]) + LUMA_B * (up[2] + fh[2]));
     steerGain(o, w.fog, f.gain);
     writeTwinLighting(o, w, L);
     f.fogColour.copy(L.fog as THREE.Color);
     // Wave 1's night floor is gone (wave 2): the nights are physical, made readable by the eye's dark-night rule
-    // (`src/sky/exposure/eyeMath.ts`).
+    // (`src/sky/exposure/eyeMath.ts`); under an applied system the sky round's floor (`floorHere`) is light from the whole sky.
   }
 
   /** The mix's rows blended into the twin, only where a row or a weight moved. */

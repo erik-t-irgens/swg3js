@@ -10,6 +10,8 @@ import type { DialGroup, NumberDial } from '../../ui/dials.ts';
 import { SKY_DIAL_GROUPS } from '../skyDials.ts';
 import { MOTION_RANGE, MOTION_TUNE, type SkyMotion } from './skyMotion.ts';
 import { worldHourAt } from './worldDays.ts';
+// (the sky round's maker P, J)
+import { BELT_RANGE, BELT_TUNE, tuneBelts } from './beltSky.ts';
 
 type Key = keyof typeof MOTION_TUNE;
 
@@ -18,6 +20,11 @@ export function tuneMotion(o: unknown): string[] {
   const said: string[] = [];
   if (!o || typeof o !== 'object') return said;
   for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+    // (the sky round's maker P, J) the belts' band: `sky({ motion: { belts: { lux, thick, width, surge, rocks } } })`
+    if (k === 'belts' && v && typeof v === 'object') {
+      tuneBelts(v as Partial<Record<keyof typeof BELT_TUNE, number>>);
+      continue;
+    }
     const r = (MOTION_RANGE as Record<string, readonly [number, number]>)[k];
     if (!r) {
       said.push(`motion.${k}: no such dial`);
@@ -48,11 +55,37 @@ export function motionDialGroup(): DialGroup {
       dial('giantshine', 'Giantshine', 0.05, "A giant's light at night (Yavin Prime over Yavin 4) as a share of what its lit area against the world's own moon gives: 1 lights it by the very rule a moon's light follows; 0 leaves the night to the moons."),
       dial('tint', 'Night light in the bodies\' colour', 0.05, "How much of a body's own colour its night light takes: 0 white, as SWG's moon is; 1 its colour at full (Yavin Prime's orange)."),
       dial('eclipse', 'Eclipses', 0.05, "How much of a covered sun's light an eclipse takes: 1 all of the covered share, as it is drawn; 0 none."),
+      // (the sky round's maker P, C)
+      dial('distanceSize', 'Size follows distance', 0.05, "How much a body's size follows its true distance: 1 it grows as it comes near and shrinks as it goes far (its size setting is its size at its average distance); 0 its setting at every distance, as before."),
     ],
   };
 }
 
 SKY_DIAL_GROUPS.push(motionDialGroup);
+
+/** (The sky round's maker P, J) one of the belts' band's dials on a slider, set through `tuneBelts`. */
+function beltDial(k: keyof typeof BELT_TUNE, label: string, step: number, note: string): NumberDial {
+  const r = BELT_RANGE[k];
+  return { kind: 'number', key: `motion.belts.${k}`, label, note, min: r[0], max: r[1], step, unit: '', get: () => BELT_TUNE[k], set: (v) => { tuneBelts({ [k]: v }); return []; } };
+}
+
+/** (Maker P, J) the belts seen from the ground: their band in the night sky (`beltBand.ts`), where a system draws one. */
+export function beltDialGroup(): DialGroup {
+  return {
+    title: 'Belts seen from the ground (an applied star system)',
+    note: "A belt whose Drawn tick is on in its system: a band of dust and rocks along its plane in the night sky. Its look's colour, dust and thickness, and these.",
+    dials: [
+      beltDial('lux', 'Brightness (cd/m2)', 0.00005, 'Its luminance where it is thickest and lit full on, before the air: 3e-4 between Earth\'s gegenschein and the Milky Way\'s bright clouds.'),
+      beltDial('thick', 'Thickness', 0.01, "Its half thickness as a share of its radius, per unit of its look's Thickness: 0.25 is about our asteroid belt's spread."),
+      beltDial('width', 'Width', 0.005, 'Its half width across its radius, as a share of its radius.'),
+      beltDial('surge', 'Brighter opposite the sun', 0.05, 'How much its rocks brighten with the sun right behind you (the opposition surge).'),
+      beltDial('rocks', 'Brighter rocks', 0.005, 'How many brighter rocks stand among its dust, as a share of its cells where it is thickest.'),
+      // (the sky round's fixer)
+      beltDial('rockGain', 'A rock against the dust', 0.5, "A brighter rock's light at its middle against the dust's about it: 12 a point some two and a half magnitudes over the band, never outshining the stars beside it; 0 the dust alone."),
+    ],
+  };
+}
+SKY_DIAL_GROUPS.push(beltDialGroup);
 
 /** The four hours of `__debug.sky` under a system's own day. */
 export type MotionHour = 'dawn' | 'noon' | 'dusk' | 'night';

@@ -414,6 +414,7 @@ export async function startWebGPU(canvas: HTMLCanvasElement, opts: { reversedDep
     lookBodies: {
       make: (plans, tier) => LookBodies.make(renderer, plans, tier),
       ready: (plans, putOff) => LookBodies.ready(renderer, plans, putOff),
+      warm: (plans) => LookBodies.warm(renderer, plans),
       lookIn: LOOK_BODY_IN,
       presetFor: (kind) => presetFor(kind),
     },

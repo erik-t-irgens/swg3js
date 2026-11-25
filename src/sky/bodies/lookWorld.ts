@@ -22,6 +22,8 @@ import { spaceBodyAir, spacePlaceIds } from '../../space/spaceAir.ts';
 /** The motion's items as these plans read them (maker S's `SkyMotion.items`). */
 export interface PlanMotion {
   readonly items: readonly { readonly place: string | null; readonly look: string | null; readonly drawn: boolean; readonly slot: string; readonly sizeDeg: number; readonly kind: string; readonly name: string; readonly star: boolean; readonly sheet: boolean }[];
+  /** (The sky round's maker P, C) the largest each item is ever drawn (degrees), its picture's size; absent, its setting. */
+  readonly largestDeg?: Float64Array;
 }
 
 /** A look by its id in the file: a generated one, else none. */
@@ -47,12 +49,39 @@ export function lookForPlace(place: string, systemLook: string | null): { id: st
 export function skyLookPlans(sky: string, cards: readonly SkyBodyCard[], group: THREE.Object3D, fovDeg: number, skyRadius: number, motion: PlanMotion | null, presetFor: (kind: string) => BodyLook | null): LookBodyPlan[] {
   const plans: LookBodyPlan[] = [];
   const counts: Record<string, number> = {};
-  const used = new Set<number>();
+  // each card of SWG's by its place (the viewer's id)
+  const cardAt = new Map<string, SkyBodyCard>();
   for (const card of cards) {
     if (card.held) continue;
     const nameKey = card.slot === 'celestial' ? skyPlaceId(sky, 'celestial', card.file) : card.slot;
     counts[nameKey] = (counts[nameKey] ?? 0) + 1;
-    const place = skyPlaceId(sky, card.slot, card.file, counts[nameKey]);
+    cardAt.set(skyPlaceId(sky, card.slot, card.file, counts[nameKey]), card);
+  }
+  // (The sky round's maker P, the brief's A: one route under an applied system.) Every body the system names (drawn, not a star,
+  // not a painted sheet) is drawn by its look at the motion's place, size, light and pose, whatever SWG's slot holds there (a
+  // card of SWG's stands down for it: its record marked, `markLookDrawn`; a picture with no card, as Mustafar's sun picture in its
+  // moon slot, is put away by the sky, `SwgSky.lookStands`). Its look: the system's, else the file's for its place, else (a
+  // body with no place of SWG's) its kind's preset; a body on SWG's place with no look of his keeps SWG's picture there, placed,
+  // sized and ordered by the system (`SwgSky.placeByMotion`). A place the system hides stays hidden (its item is undrawn).
+  const used = new Set<string>();
+  if (motion) {
+    for (let j = 0; j < motion.items.length; j++) {
+      const it = motion.items[j];
+      if (!it.drawn || it.star || it.sheet) continue;
+      const place = it.place ?? `${sky}:system:${it.name}`;
+      if (used.has(place)) continue;
+      const card = it.place ? cardAt.get(it.place) ?? null : null;
+      const onSwg = it.slot !== 'extra' && it.slot !== 'none';
+      const hit = lookForPlace(place, it.look) ?? (onSwg ? null : presetHit(it.kind, presetFor));
+      if (!hit) continue;
+      used.add(place);
+      const deg = motion.largestDeg ? motion.largestDeg[j] : it.sizeDeg;
+      plans.push({ place, id: hit.id, look: hit.look, record: card && card.air.kind === 'world' ? bodyRecord(card.air) : null, where: 'sky', card, item: j, byMotion: true, group, order: -5, halfRad: ((deg > 0 ? deg : 1) * Math.PI) / 360, fovDeg });
+    }
+  }
+  // SWG's cards the system does not draw by look (no system, or a place it does not name: SWG's rule there, as before)
+  for (const [place, card] of cardAt) {
+    if (used.has(place)) continue;
     let item = -1;
     if (motion) {
       for (let j = 0; j < motion.items.length; j++) {
@@ -64,7 +93,6 @@ export function skyLookPlans(sky: string, cards: readonly SkyBodyCard[], group: 
     }
     const hit = lookForPlace(place, item >= 0 ? motion!.items[item].look : null);
     if (!hit) continue;
-    if (item >= 0) used.add(item);
     const tanD = (0.5 * card.disc.scale.x) / (skyRadius > 0 ? skyRadius : 1);
     plans.push({
       place,
@@ -80,17 +108,17 @@ export function skyLookPlans(sky: string, cards: readonly SkyBodyCard[], group: 
       fovDeg,
     });
   }
-  if (motion) {
-    for (let j = 0; j < motion.items.length; j++) {
-      const it = motion.items[j];
-      if (used.has(j) || !it.drawn || it.star || it.sheet || (it.slot !== 'extra' && it.slot !== 'none')) continue;
-      const place = it.place ?? `${sky}:system:${it.name}`;
-      const hit = lookForPlace(place, it.look) ?? presetHit(it.kind, presetFor);
-      if (!hit) continue;
-      plans.push({ place, id: hit.id, look: hit.look, record: null, where: 'sky', card: null, item: j, group, order: -5, halfRad: ((it.sizeDeg > 0 ? it.sizeDeg : 1) * Math.PI) / 360, fovDeg });
-    }
-  }
   return plans;
+}
+
+/**
+ * (The sky round's maker P, A) The places a sky's plans draw by the motion's route (an item of the applied system), which the
+ * sky puts SWG's own pictures away for, whatever they are (`SwgSky.lookStands`).
+ */
+export function motionLookPlaces(plans: readonly LookBodyPlan[]): Set<string> {
+  const out = new Set<string>();
+  for (const p of plans) if (p.byMotion) out.add(p.place);
+  return out;
 }
 
 /** Where SWG's cards hang in a ground sky (`sky.ts`' `SKY_RADIUS`): a card's width over it is its angle's tangent. */

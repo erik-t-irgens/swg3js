@@ -25,6 +25,7 @@ import { sharedClock } from '../../../src/world/sharedClock.ts';
 import { DayCycle } from '../../../src/world/daycycle.ts';
 import { hourOfDay } from '../../../src/world/dayPhase.ts';
 import { WorldClock, WorldDays, ownDayFraction } from '../../../server/clock.mjs';
+import { SHADE_TUNE } from '../../../src/sky/system/skyShade.ts';
 import { storyWorlds } from '../../../server/storyWorlds.mjs';
 
 let checks = 0;
@@ -223,18 +224,30 @@ ok(!!yavin && !!tat && !!naboo && !!rori, 'each applied world has its motion');
   }
   ok(mostWander < 4.5, `Prime stands still in Yavin 4's sky all day, swinging only by the draft's wobble of 2 degrees (most ${mostWander.toFixed(2)} degrees off)`);
   ok(minShare < 0.01 && sunAtMin > 10, `once a day it hides the sun (its share of light ${minShare.toFixed(4)}) with the sun well up (${sunAtMin.toFixed(1)} degrees, at ${minHour.toFixed(2)} of Yavin 4's own clock: the near point's noon, the play area 50 degrees east of it)`);
-  // The cover is of the disc the game draws (the star table's 0.25 degrees in radius times the size dial), so the light first
-  // dims as Prime's limb meets that disc, not while the drawn sun stands clear of it.
-  let firstDim = -1;
-  for (let i = 0; i <= 28800 && firstDim < 0; i++) {
-    rec.count = base + (minHour / 24 - 0.1) + i / 144000;
-    yavin.at(rec);
-    if (yavin.sunShare < 1) firstDim = i;
-  }
-  const sunJ = yavin.casterJ;
-  const touch = angle(yavin.dir, 3 * sunJ, yavin.dir, 3 * prime);
-  const edge = 0.25 * DISC_TUNE.size + yavin.items[prime].sizeDeg / 2;
-  ok(firstDim > 0 && Math.abs(touch - edge) < 0.05, `the light first dims where Prime's limb meets the drawn sun: ${touch.toFixed(3)} degrees apart against the two radii's ${edge.toFixed(3)}`);
+  // The cover is of the disc the game draws (the star table's 0.25 degrees in radius times the size dial, and since the sky
+  // round's maker L by the star's true distance against its mean, `shade.sunScale`), so the light first dims as Prime meets
+  // that disc, not while the drawn sun stands clear of it: with the eclipse band at nought (an airless cut) at Prime's limb,
+  // and with the band at its start (Prime has air: the sky round's E) at the band's outer edge, the limb times one and its
+  // air's depth times the band (`skyShade.ts`).
+  const firstDimAt = (): { at: number; touch: number } => {
+    let firstDim = -1;
+    for (let i = 0; i <= 28800 && firstDim < 0; i++) {
+      rec.count = base + (minHour / 24 - 0.1) + i / 144000;
+      yavin.at(rec);
+      if (yavin.sunShare < 1) firstDim = i;
+    }
+    return { at: firstDim, touch: angle(yavin.dir, 3 * yavin.casterJ, yavin.dir, 3 * prime) };
+  };
+  const bandWas = SHADE_TUNE.band;
+  SHADE_TUNE.band = 0;
+  const cut = firstDimAt();
+  const sunDrawn = 0.25 * DISC_TUNE.size * yavin.shade!.sunScale;
+  const edge = sunDrawn + yavin.sizeNow[prime] / 2;
+  ok(cut.at > 0 && Math.abs(cut.touch - edge) < 0.05, `with the eclipse band at nought the light first dims where Prime's limb meets the drawn sun: ${cut.touch.toFixed(3)} degrees apart against the two radii's ${edge.toFixed(3)}`);
+  SHADE_TUNE.band = bandWas;
+  const banded = firstDimAt();
+  const bandEdge = sunDrawn + (yavin.sizeNow[prime] / 2) * (1 + yavin.shade!.air[8 * prime + 1] * SHADE_TUNE.band);
+  ok(banded.at > 0 && banded.at < cut.at && Math.abs(banded.touch - bandEdge) < 0.05, `with the band at its start (${SHADE_TUNE.band}) the light first dims where Prime's air band meets the drawn sun: ${banded.touch.toFixed(3)} degrees apart against ${bandEdge.toFixed(3)}, earlier than the bare limb`);
   rec.count = base + minHour / 24;
   yavin.at(rec);
   const day = new DayCycle(0, 1);
@@ -386,7 +399,8 @@ ok(!!yavin && !!tat && !!naboo && !!rori, 'each applied world has its motion');
   const p = runV1(false);
   const q = runV1(true);
   ok(p.every((v, i) => Object.is(v, q[i])), "under a first-round sky the day's time, count and sun are the game's own to the bit (its bodies and night light are the system's)");
-  ok(SKY_DIAL_GROUPS.includes(motionDialGroup) && motionDialGroup().dials.length === 3, 'the motion\'s dials join the sky\'s set in the debug menu');
+  // (the sky round's maker P: a fourth, size follows distance)
+ok(SKY_DIAL_GROUPS.includes(motionDialGroup) && motionDialGroup().dials.length === 4, 'the motion\'s dials join the sky\'s set in the debug menu');
   const said = tuneMotion({ giantshine: 9, nope: 1, tint: 'x' });
   ok(MOTION_TUNE.giantshine === 4 && said.length === 3, `each dial is held to its range and a wrong word said (${said.join('; ')})`);
   tuneMotion({ giantshine: 1 });

@@ -227,7 +227,8 @@ function cardGraph(form: 'painted' | 'scattered'): THREE.Material {
   const upW = cardVec('up', new THREE.Vector3(0, 1, 0));
   const pic = cardTexture('map', f.pic);
   const tune = uniform(TUNE_U).setGroup(renderGroup);
-  const sunTop = tables ? tables.nodes.sunTop : vec3(0);
+  // (the sky round's fixer) the star's full light on a body (an eclipse of our own sun is no shadow on it)
+  const sunTop = tables ? (tables.nodes.bodyTop ?? tables.nodes.sunTop) : vec3(0);
   // The eye's exposure on the card (the screen's white is one over it, in the scene's units).
   const eye = eyeExposureNode();
   const PI = Math.PI;

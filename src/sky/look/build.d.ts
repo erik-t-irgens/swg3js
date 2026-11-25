@@ -49,6 +49,8 @@ export interface LookFrameRecord {
   sphereRadius: number;
   /** What the parts' rocks measure their pixels by (`getDrawingBufferSize`), null the bake's renderer. */
   sizer: { getDrawingBufferSize(v: { x: number; y: number }): unknown } | null;
+  /** (The sky round, maker L, D) the body's casters this frame (`skyShade.ts`' `ShadeOf`), null for none. */
+  shade: { n: number; sunRad: number; ring: number; strength: number; c: Float64Array } | null;
 }
 export function lookFrameRecord(): LookFrameRecord;
 /** The frame call from a kept record: nothing made. */

@@ -63,6 +63,17 @@ ok(JSON.stringify(DATA.celestials[0]) === JSON.stringify(cel('sky/cels_naboo.png
 ok(groundPlacesMix('naboo', file.places) === null && groundPlacesMix('rori', null) === null, 'a world the file names no ground place of, or no file: no hook at all, the sky as it was');
 ok([0.5, 5, 30, 120].every((d) => near(squareDegrees(sizeOfDegrees(d)), d)), "the size goes back through SWG's square to the very degrees");
 
+{
+  // (The sky round's fixer) an extra place of the world's own (Mustafar's Jestefad: no square in SWG's file) takes his size too,
+  // laid beside SWG's data, so the motion sizes the body there as the viewer does
+  const MUS = { planet: 'mustafar', dayNightSplit: 0.7, sunElevationDegrees: 60, sun: cel('sky/sun_mustafar.png', 0.5, 0, 0), supplementalSun: null, moon: null, supplementalMoon: null, celestials: [], blocks: [] } as unknown as SkyData;
+  const lay = groundPlacesMix('mustafar', { 'mustafar:celestial:jestefad': { size: 87.5 } } as Any)!;
+  const laidM = lay(MUS) as Any;
+  const before = skyPlacesOf('mustafar', MUS as Any).get('mustafar:celestial:jestefad');
+  const after = skyPlacesOf('mustafar', laidM).get('mustafar:celestial:jestefad');
+  ok(!!before && !!after && before.slot === 'extra' && after.sizeDeg === 87.5 && before.sizeDeg !== 87.5 && laidM.placeSizes['mustafar:celestial:jestefad'] === 87.5, `an extra place of the world's own takes his size (${before?.sizeDeg} degrees as it starts, ${after?.sizeDeg} as he set it)`);
+}
+
 const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8');
 ok(world.includes('placed = groundPlacesMix(basePack);') && world.includes("const sky = await SwgSky.load(pack, placed ? (d) => placed!(mix ? mix(d) : d) : (mix ?? undefined));"), "the world lays them over its sky file before the sky is made, on WebGPU (the file's own path), over a sky of parts' mix");
 

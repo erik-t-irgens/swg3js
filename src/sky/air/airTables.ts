@@ -18,6 +18,9 @@ import { FX_CAMERA } from '../../core/fx/pass.ts';
 import { AIR, AIR_SIZES, AIR_UNITS, HAZE_REACH_M, type AirNode, type AirNodes, type AirTables } from './airApi.ts';
 import { DIFFUSIVITY, GLOW_PHASE, SMOKE_STEPS } from '../look/airProfile.js';
 import { AIR_FIELD_COUNT, F, copyRecord, newAirRecord, recordMoved, recordWords, type AirRecord } from './airParams.ts';
+// (the sky round, maker L, F) an eclipse's shadow at each sample of the air (`skyShade.ts`' card record, `gpu`)
+import { SKY_MOTION } from '../system/skyMotion.ts';
+import { SHADE_AIR } from '../system/skyShade.ts';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -124,8 +127,21 @@ class Tables implements AirTables {
   private readonly uSunTop = new THREE.Vector3(1, 1, 1);
   private readonly uSun2Top = new THREE.Vector3(0, 0, 0);
   private readonly uMoonTop = new THREE.Vector3(0, 0, 0);
+  // (the sky round's fixer) the star's light on the moons and planets in the sky, and the occluder's ring (its middle and inner
+  // radius; its light and outer)
+  private readonly uBodyTop = new THREE.Vector3(1, 1, 1);
+  private readonly uRingDir = new THREE.Vector4(0, 1, 0, 0.5);
+  private readonly uRingTop = new THREE.Vector4(0, 0, 0, 0.5);
   private readonly uGain = new THREE.Vector3(1, 1, 1);
   private readonly uSunRadius = new THREE.Vector2(0.0047, 0);
+  /**
+   * (The sky round, maker L, F) the stars' light the two marches take at each sample: the frame's own (`sunTop`, `sun2Top`) but
+   * under an applied system's shade the full light (`skyShade.ts`' `SHADE_AIR`), which each sample's own shadow then dims.
+   */
+  private readonly uSunAir = new THREE.Vector3(1, 1, 1);
+  private readonly uSun2Air = new THREE.Vector3(0, 0, 0);
+  /** (The sky round, maker L, F) an eclipse's shadow at each sample: `skyShade.ts`' card record, seven vectors (off: nought). */
+  private readonly uShade = [new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5), new THREE.Vector4(0.5, 0.5, 0.5, 0.5)];
   /**
    * Pass 2, wave 4b (maker B) and the fix round, merged: the factor the sky view and the haze's light are stored at (x; y
    * spare), a power of two, `AIR_STORE` by day and on a moonlit night, more on a darker one (`storeInto`): a moonlit night's
@@ -250,6 +266,21 @@ class Tables implements AirTables {
     if (f.sun2) this.uSun2Top.set(f.sun2Top.r, f.sun2Top.g, f.sun2Top.b);
     else this.uSun2Top.set(0, 0, 0);
     this.uMoonTop.set(f.moonTop.r, f.moonTop.g, f.moonTop.b);
+    // (the sky round's fixer) field by field
+    const bt = f.bodyTop;
+    this.uBodyTop.x = bt.r;
+    this.uBodyTop.y = bt.g;
+    this.uBodyTop.z = bt.b;
+    const rd = this.uRingDir;
+    rd.x = f.ringDir.x;
+    rd.y = f.ringDir.y;
+    rd.z = f.ringDir.z;
+    rd.w = f.ringIn;
+    const rt = this.uRingTop;
+    rt.x = f.ringTop.r;
+    rt.y = f.ringTop.g;
+    rt.z = f.ringTop.b;
+    rt.w = f.ringOut;
     this.uGain.copy(f.gain);
     const sx = f.sunDir.x;
     const sz = f.sunDir.z;
@@ -257,6 +288,34 @@ class Tables implements AirTables {
     this.uView.set(f.heightKm > 0.001 ? f.heightKm : 0.001, f.overcast, h > 1e-9 ? sx / h : 1, h > 1e-9 ? sz / h : 0);
     this.uSunRadius.x = f.sunRadius;
     storeInto(f, this.uStore);
+    // (the sky round, maker L, F) the marches' light: the frame's own, or the stars' full light under the shade
+    const A = SHADE_AIR;
+    if (A.on === 1) {
+      this.uSunAir.set(A.sun[0], A.sun[1], A.sun[2]);
+      if (f.sun2) this.uSun2Air.set(A.sun2[0], A.sun2[1], A.sun2[2]);
+      else this.uSun2Air.set(0, 0, 0);
+    } else {
+      this.uSunAir.copy(this.uSunTop);
+      this.uSun2Air.copy(this.uSun2Top);
+    }
+    // (the sky round, maker L, F) the shade's card record, field by field (all nought, off, with no applied system's shade)
+    const sh = SKY_MOTION.now !== null ? SKY_MOTION.now.shade : null;
+    const U = this.uShade;
+    for (let i = 0; i < 7; i++) {
+      const v = U[i];
+      if (sh !== null) {
+        const g = sh.gpu;
+        v.x = g[4 * i];
+        v.y = g[4 * i + 1];
+        v.z = g[4 * i + 2];
+        v.w = g[4 * i + 3];
+      } else {
+        v.x = 0;
+        v.y = 0;
+        v.z = 0;
+        v.w = 0;
+      }
+    }
   }
 
   frame(camera: THREE.PerspectiveCamera): void {
@@ -480,8 +539,8 @@ class Tables implements AirTables {
   }
 
   /** The uniform objects, for the graphs (built once). */
-  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; u6: THREE.Vector4; u7: THREE.Vector4; u8: THREE.Vector4; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; store: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture } {
-    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, u6: this.u6, u7: this.u7, u8: this.u8, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, store: this.uStore, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume };
+  get u(): { u0: THREE.Vector4; u1: THREE.Vector4; u2: THREE.Vector4; u3: THREE.Vector4; u4: THREE.Vector4; u5: THREE.Vector3; u6: THREE.Vector4; u7: THREE.Vector4; u8: THREE.Vector4; view: THREE.Vector4; sun: THREE.Vector3; sun2: THREE.Vector3; moon: THREE.Vector3; sunTop: THREE.Vector3; sun2Top: THREE.Vector3; moonTop: THREE.Vector3; gain: THREE.Vector3; sunRadius: THREE.Vector2; store: THREE.Vector2; camTurn: THREE.Matrix4; projInv: THREE.Matrix4; volume: Storage3DTexture; shade: THREE.Vector4[]; sunAir: THREE.Vector3; sun2Air: THREE.Vector3; bodyTop: THREE.Vector3; ringDir: THREE.Vector4; ringTop: THREE.Vector4 } {
+    return { u0: this.u0, u1: this.u1, u2: this.u2, u3: this.u3, u4: this.u4, u5: this.u5, u6: this.u6, u7: this.u7, u8: this.u8, view: this.uView, sun: this.uSun, sun2: this.uSun2, moon: this.uMoon, sunTop: this.uSunTop, sun2Top: this.uSun2Top, moonTop: this.uMoonTop, gain: this.uGain, sunRadius: this.uSunRadius, store: this.uStore, camTurn: this.camTurn, projInv: this.projInv, volume: this.volume, shade: this.uShade, sunAir: this.uSunAir, sun2Air: this.uSun2Air, bodyTop: this.uBodyTop, ringDir: this.uRingDir, ringTop: this.uRingTop };
   }
 
   /** The targets' textures, for the graphs. */
@@ -645,6 +704,42 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     return Ltop.mul(tl.mul(sR.mul(rayleighPhase(c)).add(sM.mul(miePhase(c)))).add(ps.mul(sR.add(sM)))).add(Ltop.mul(tl.mul(sS.mul(smokePhase(c))).add(ps.mul(sS))));
   };
 
+  // ---------------------------------------------------------------- an eclipse's shadow in the air (the sky round, maker L, F)
+  // `skyShade.ts`' card record: the shadow's plane square to the sun (e1, e2), kappa (how fast the occluder's offset from the sun
+  // moves a km across), each sun's offset there and disc, the occluder's radius and its band's two edges, the ring, the air's
+  // light through the inner and outer band, the eclipse dial, and the two suns' on. Off, every factor is 1 exactly (`select`).
+  const sunAir = live(U.sunAir);
+  const sun2Air = live(U.sun2Air);
+  const sv0 = live(U.shade[0]);
+  const sv1 = live(U.shade[1]);
+  const sv2 = live(U.shade[2]);
+  const sv3 = live(U.shade[3]);
+  const sv4 = live(U.shade[4]);
+  const sv5 = live(U.shade[5]);
+  const sv6 = live(U.shade[6]);
+  /** The smooth share a disc of radius `r` covers of one of radius `rs`, `dl` apart (`skyShade.ts`' `smoothShareReg`). */
+  const shareOf = (rs: Any, r: Any, dl: Any): Any => {
+    const lo = abs(rs.sub(r));
+    const t = clamp(dl.sub(lo).div(max(rs.add(r).sub(lo), 1e-6)), 0, 1);
+    const s = t.mul(t).mul(float(3).sub(t.mul(2)));
+    return min(r.mul(r).div(max(rs.mul(rs), 1e-12)), 1).mul(float(1).sub(s));
+  };
+  /** The share of a sun's light reaching a sample `v` km from the eye (offset `dX`, `dY` at the eye, disc `rs`, `on`). */
+  const shadeAt = (v: Any, dX: Any, dY: Any, rs: Any, on: Any): Any => {
+    const qx = dX.sub(sv0.w.mul(v.dot(sv0.xyz)));
+    const qy = dY.sub(sv0.w.mul(v.dot(sv1.xyz)));
+    const dl = sqrt(qx.mul(qx).add(qy.mul(qy)));
+    const s0 = shareOf(rs, sv2.w, dl);
+    const sm = shareOf(rs, sv3.x, dl);
+    const s1 = shareOf(rs, sv3.y, dl);
+    const tin = vec3(sv4.x, sv4.y, sv4.z);
+    const tout = vec3(sv5.x, sv5.y, sv5.z);
+    const L = vec3(float(1).sub(s1)).add(tout.mul(s1.sub(sm))).add(tin.mul(sm.sub(s0))).add(tin.mul(sv3.z.mul(s0)));
+    return select(on.greaterThan(0.5), vec3(1).sub(vec3(1).sub(L).mul(sv1.w)), vec3(1));
+  };
+  const shade1 = (v: Any): Any => shadeAt(v, sv2.x, sv2.y, sv2.z, sv6.x);
+  const shade2 = (v: Any): Any => shadeAt(v, sv4.w, sv5.w, sv6.y, sv3.w);
+
   /**
    * A view ray's light and transmittance from a point (0, r, 0) along a unit world direction `d`, `steps` steps by the square
    * of their place, to the ray's end or `maxT` km: into the two vars handed in.
@@ -666,7 +761,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
       const dS = smokeAt(rr.sub(bottom)).toVar('airVDS');
       const sS = smokeS.mul(dS).toVar('airVSS');
       const sigma = extinction(m).add(smokeE.mul(dS)).toVar('airVSig');
-      const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
+      const S = lightSource(p, rr, d, sunDir, sunAir.mul(shade1(d.mul(tm))), sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Air.mul(shade2(d.mul(tm))), sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
       L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));
       Tr.mulAssign(exp(sigma.negate().mul(dt)));
       prev.assign(e1);
@@ -841,7 +936,7 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
         const dS = smokeAt(rr.sub(bottom)).toVar('airHDS');
         const sS = smokeS.mul(dS).toVar('airHSS');
         const sigma = extinction(m).add(smokeE.mul(dS)).toVar('airHSig');
-        const S = lightSource(p, rr, d, sunDir, sunTop, sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Top, sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
+        const S = lightSource(p, rr, d, sunDir, sunAir.mul(shade1(d.mul(tm))), sR, sM, sS).add(lightSource(p, rr, d, sun2Dir, sun2Air.mul(shade2(d.mul(tm))), sR, sM, sS)).add(lightSource(p, rr, d, moonDir, moonTop, sR, sM, sS)).add(sR.add(sM).add(sS).mul(glowAt(rr.sub(bottom))));
         L.addAssign(Tr.mul(S).mul(stepIntegral(sigma, dt)));
         Tr.mulAssign(exp(sigma.negate().mul(dt)));
         prev.assign(e1);
@@ -891,7 +986,8 @@ function makeGraphs(t: Tables): { transmittance: NodeMaterial; multiScatter: Nod
     },
   };
 
-  const nodes: AirNodes = { sunDir, sun2Dir, moonDir, sunTop, sun2Top, moonTop, sunRadius: sunRadius.x, heightKm, gain, overcast: view.y };
+  // (the sky round's fixer) the star's light on the moons and planets and the occluder's ring, read by their cards and the dome alone
+  const nodes: AirNodes = { sunDir, sun2Dir, moonDir, sunTop, sun2Top, moonTop, sunRadius: sunRadius.x, heightKm, gain, overcast: view.y, bodyTop: live(U.bodyTop), ringDir: live(U.ringDir), ringTop: live(U.ringTop) };
   return { transmittance: tMat, multiScatter: msMat, skyView: svMat, haze, nodes, reads };
 }
 

@@ -944,6 +944,13 @@ export class AirTwinOut {
   /** The sky's light on a level surface facing up (the hemisphere's upper half), and the ground's bounce on one facing down. */
   readonly skyUp = new Float64Array(3);
   readonly groundDown = new Float64Array(3);
+  /**
+   * (The sky round's fixer, G and F) the night's floor on a level surface facing up (starlight, airglow and the Milky Way: light
+   * from the whole sky, no one way), and the ring of light about a body with air covering the sun (its air's bent light, from all
+   * round its limb), written by the run under an applied system and nought otherwise; the hemisphere's sky light takes it beside
+   * `skyUp` (`writeTwinLighting`), never the main light's aim.
+   */
+  readonly floorHere = new Float64Array(3);
   /** The sky's radiance at the horizon averaged round it (the fog colour), and at the zenith. */
   readonly horizon = new Float64Array(3);
   readonly zenith = new Float64Array(3);
@@ -986,6 +993,11 @@ export class AirTwin {
   readonly inp = new Float64Array(10);
   /** Whether the second sun is (a world of two stars). */
   sun2 = false;
+  /**
+   * (The sky round, maker L, F and G) the night light summed into the sky's light with the sun up: set by the run while an
+   * eclipse leaves the air less light than a hundredth of the sun's (`airRun.ts`), so a totality is lit as a night is.
+   */
+  moonByDay = false;
   /** The light at the top of the air of each (scene units, rgb), the caller's. */
   readonly sunTop = new Float64Array(3);
   readonly sun2Top = new Float64Array(3);
@@ -1135,6 +1147,19 @@ export class AirTwin {
   }
 
   /**
+   * (The sky round's fixer, G) The transmittance straight up from the camera to space (rgb) into `zenithT`: the way the night's
+   * floor (`AirTwinOut.floorHere`) is weighed by the air, as a full moon at the zenith's light would be. Allocates nothing.
+   */
+  readonly zenithT = new Float64Array(3);
+  zenithNow(): void {
+    const rec = this.record;
+    const hk = this.inp[IN.heightKm];
+    REG[0] = rec[F.bottom] + (hk > 0.001 ? hk : 0.001);
+    REG[1] = 1;
+    transmitReg(rec, this.depth, this.smoke, this.zenithT, 0);
+  }
+
+  /**
    * The lights in the sums' frame, from `inp`: turned about the vertical so the casting sun's azimuth is +X (the sky view's
    * and the hemisphere's mirror is the sun's vertical plane), each left out where it stands too deep under the horizon.
    */
@@ -1167,8 +1192,9 @@ export class AirTwin {
     L.glowScale = this.glowScale;
     L.live[0] = inp[IN.sy] > LIGHT_FLOOR_MU ? 1 : 0;
     L.live[1] = sun2 && inp[IN.s2y] > LIGHT_FLOOR_MU ? 1 : 0;
-    // The moon sends 2.3 millionths of the sun's light: summed only once the sun is under the eye's level, where it starts to tell.
-    L.live[2] = inp[IN.my] > LIGHT_FLOOR_MU && inp[IN.sy] < 0 && (this.moonTop[0] > 0 || this.moonTop[1] > 0 || this.moonTop[2] > 0) ? 1 : 0;
+    // The moon sends 2.3 millionths of the sun's light: summed only once the sun is under the eye's level, where it starts to tell
+    // (the sky round, maker L: or while an eclipse has taken the sun's light from the air by day, `moonByDay`).
+    L.live[2] = inp[IN.my] > LIGHT_FLOOR_MU && (inp[IN.sy] < 0 || this.moonByDay) && (this.moonTop[0] > 0 || this.moonTop[1] > 0 || this.moonTop[2] > 0) ? 1 : 0;
   }
 
   /** The sky's radiance toward a direction in the sums' frame (the sun's azimuth +X), from the camera at `heightKm` (the proofs'). */
@@ -1376,9 +1402,11 @@ export function writeTwinLighting(t: AirTwinOut, swg: TwinLighting, L: TwinLight
     const src = i === 0 ? key : i === 1 ? t.skyUp : i === 2 ? bounceRgb : t.sun2Here;
     const c = i === 0 ? L.main : i === 1 ? L.ambient : i === 2 ? L.bounce : L.fill;
     const sc = i === 0 ? swg.main : i === 1 ? swg.ambient : i === 2 ? swg.bounce : swg.fill;
-    const r = src[0];
-    const g = src[1];
-    const b = src[2];
+    // (the sky round's fixer, G) the hemisphere's sky light with the night's floor beside it (nought with no applied system)
+    const fl = t.floorHere;
+    const r = i === 1 ? src[0] + fl[0] : src[0];
+    const g = i === 1 ? src[1] + fl[1] : src[1];
+    const b = i === 1 ? src[2] + fl[2] : src[2];
     const lum = LUMA_R * r + LUMA_G * g + LUMA_B * b;
     if (!(lum > 1e-12)) {
       c.r = 0;

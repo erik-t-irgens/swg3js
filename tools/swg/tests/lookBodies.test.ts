@@ -412,7 +412,8 @@ presetStorm.layers.clouds.motion = { on: true, drift: 8, churn: 0.3, swirl: 0.25
   // the order: under an applied system a nearer body is drawn over a farther one where they overlap
   const S = await import('../../../src/sky/system/skyMotion.ts');
   ok(S.nearOrder(0.001) > S.nearOrder(0.01) && S.nearOrder(0.01) > S.nearOrder(5) && S.nearOrder(5) > 0 && S.nearOrder(0) < 1 && S.nearOrder(1e9) >= 0, 'nearer, later: the order share falls with distance, under one step of order');
-  ok(/b\.card\.renderOrder = p\.card \? p\.card\.disc\.renderOrder : motion && motion\.dist && p\.item !== undefined && p\.item >= 0 \? p\.order \+ nearOrder\(motion\.dist\[p\.item\]\) : p\.order;/.test(lbt) && read('src/world/sky.ts').includes('const order = j >= 0 ? -5 + nearOrder(m.dist[j]) : -5;') && read('src/sky/bodies/skyBody.ts').includes('twin.renderOrder = disc.renderOrder;'), "a body's card, its look's and its twin take that order");
+  // (the sky round's maker P, A: a body drawn by the motion's route takes the motion's order though it stands for SWG's card)
+  ok(/b\.card\.renderOrder = p\.card && !p\.byMotion \? p\.card\.disc\.renderOrder : motion && motion\.dist && p\.item !== undefined && p\.item >= 0 \? p\.order \+ nearOrder\(motion\.dist\[p\.item\]\) : p\.order;/.test(lbt) && read('src/world/sky.ts').includes('const order = j >= 0 ? -5 + nearOrder(m.dist[j]) : -5;') && read('src/sky/bodies/skyBody.ts').includes('twin.renderOrder = disc.renderOrder;'), "a body's card, its look's and its twin take that order");
 }
 
 console.log(`\nlookBodies: ${checks} checks passed`);

@@ -24,6 +24,57 @@ import { airWash } from './skywash.js';
 import { airTablesOf, airOf } from './build.js';
 // (the GPU port's pass 2, wave 4b) drawn as the game does, a body is held as the game holds it (`seenMost`)
 import { BODY_TUNE } from '../bodies/bodyTier.ts';
+// (the sky round's maker P, the brief's I) under a system the ground view takes each body's size by its distance and its pose
+// held in the system's frame from the very functions the game's frame calls (`bodyPose.ts`), on the viewer's own model or on
+// the game's motion (drawn as the game does), so what the System view shows is what the ground shows
+import { modelPoseOf, poseQuatInto } from '../system/bodyPose.ts';
+import { MOTION_TUNE } from '../system/skyMotion.ts';
+// (the sky round's fixer, the brief's I) the light between the bodies on the viewer's own model, as the game's frame works it
+import { modelShadeOf } from '../system/modelShade.ts';
+
+/**
+ * (Maker P, I) The drawn size now, the pose and the own spin of item `j` of a followed sky: the game's motion where the view is
+ * drawn as the game does (`gameAir.ts`' `skyViewOf`), else the viewer's own model at its moment. `out` is a kept record.
+ * (The sky round's fixer, D and I) and its casters (`skyShade.ts`' `ShadeOf`, the look's frame record's `shade`): the game's
+ * motion's shade, else the viewer's own model's (`modelShadeOf`, the same shade over the model at the System view's date), so
+ * a moon's shadow on a giant and a moon in a giant's shadow show from the ground in the viewer as in the game. `planet` the
+ * game's planet of the world drawn.
+ */
+function systemBodyOf(sky, j, out, planet) {
+  if (sky.game && sky.motion) {
+    const mo = sky.motion;
+    out.size = mo.sizeNow ? mo.sizeNow[j] : sky.model.itemSize[j];
+    out.poses = mo.pose ?? null;
+    out.spin = mo.ownSpinDeg ? mo.ownSpinDeg[j] : 0;
+    out.shade = mo.shade ? mo.shade.items[j] ?? null : null;
+    out.daylight = mo.daylight;
+    return out;
+  }
+  const mp = modelPoseOf(sky.model, sky.out, MOTION_TUNE.distanceSize);
+  out.size = mp.sizes[j];
+  out.poses = mp.poses;
+  out.spin = mp.kit.spinDeg[j];
+  const sh = planet ? modelShadeOf(sky.model, sky.out, planet, mp.sizes, mp.dist.mean) : null;
+  out.shade = sh ? sh.items[j] ?? null : null;
+  out.daylight = sh ? sh.airLight : sky.out.daylight;
+  return out;
+}
+const SYSTEM_BODY = { size: 1, poses: null, spin: 0, shade: null, daylight: 1 };
+
+/**
+ * (The sky round's fixer, E, F and I) the share of the stars' light the ground view's air takes under a system: the shade's (the
+ * air's share of an eclipse by the shadow's size, through air soft and reddened, as the game's daylight is), else the model's
+ * own cover. Read by the plain view's colours (`updateSky`).
+ */
+function daylightOf(sky, planet) {
+  if (sky.game && sky.motion) return sky.motion.daylight;
+  if (sky.model && sky.model.m > 0 && planet) {
+    const mp = modelPoseOf(sky.model, sky.out, MOTION_TUNE.distanceSize);
+    const sh = modelShadeOf(sky.model, sky.out, planet, mp.sizes, mp.dist.mean);
+    if (sh) return sh.airLight;
+  }
+  return sky.out.daylight;
+}
 
 /**
  * Wave 4, the ground's own storm: when the world we stand on has storm cells in its clouds (its planet
@@ -630,7 +681,9 @@ export class PlaceView {
       const d = at.dir;
       const dist = this.space ? spaceDrawDistance(e.distance ?? 600) : at.j >= 0 ? systemDrawDistance(sky.out.dist[at.j]) - order++ * 0.01 : GROUND_BODY_D - order++ * 0.5;
       // under a system, the size its model has (its own dial, else its place's), so what is drawn is what hides the sun
-      const half = Math.max(0.01, ((at.j >= 0 ? sky.model.itemSize[at.j] : e.size) || 1) / 2) * DEG;
+      // (the sky round's maker P, C and I: grown and shrunk by its true distance, as the game draws it)
+      const sb = at.j >= 0 ? systemBodyOf(sky, at.j, SYSTEM_BODY, this.zone ? gamePlanetOf(this.zone) : null) : null;
+      const half = Math.max(0.01, ((sb ? sb.size : e.size) || 1) / 2) * DEG;
       holder.position.set(d.x, d.y, d.z).multiplyScalar(dist);
       // The ring round it sits on its outline: the circle the camera's rays graze, `ringAt` along the
       // way to it and `ringRad` across (a flat picture's outline is its own edge).
@@ -718,10 +771,15 @@ export class PlaceView {
         // a body the system turns (a giant's bands): its turns a day on the sky's clock, else the place's own
         // spin (version 2: its own day in real time, degrees a real day, its clock held small)
         const v2 = at.j >= 0 && sky.model.version === 2;
-        const spinDeg = v2 ? sky.model.itemSpin[at.j] : at.j >= 0 ? sky.model.items[at.j].turns * 360 : 0;
+        // (maker P, B and I) under a system its own spin from the system alone (none for a body locked to its parent), and its
+        // pose (axis and meridian held in the system's frame) laid on its axis after the frame's turn, the place's own tilt and
+        // spin left to SWG's rule, exactly as the game's frame does
+        const spinDeg = sb ? sb.spin : 0;
         let ck = clock;
         if (spinDeg) { ck = sky.out.T; if (v2) { const span = (360 / spinDeg) * 64; ck -= Math.floor(ck / span) * span; } }
-        updateLook(b.built, { camera, clock: ck, sunWorld: lw || camera.position, face, lightWorld: lw, tilt: e.tilt, spin: spinDeg || e.spin, sphereRadius: sphereR });
+        // (the sky round's fixer, D) its casters' shadows in its own light, the game's rule (`build.js`' `shadeLight`)
+        updateLook(b.built, { camera, clock: ck, sunWorld: lw || camera.position, face, lightWorld: lw, tilt: sb ? 0 : e.tilt, spin: sb ? spinDeg : e.spin, sphereRadius: sphereR, shade: sb ? sb.shade : null });
+        if (sb && sb.poses) poseQuatInto(sb.poses, at.j, b.built.axis.quaternion);
       } else if (b.glow) {
         // (the GPU port's pass 2, wave 5) drawn as the game does from the ground, a sun is the air's own disc on the game's dome
         // (SWG's sun pictures are retired on WebGPU): its picture and glow are not drawn, nor laid in front of the bodies; its
@@ -816,7 +874,8 @@ export class PlaceView {
     let dl = smooth(s, -0.12, 0.25);
     let dusk = s > -0.2 ? Math.exp(-Math.abs(s) * 7) : 0;
     if (sky) {
-      const lightShare = 0.06 + 0.94 * sky.out.daylight;
+      // (the sky round's fixer, E, F and I) the shade's share of the air's light, as the game's daylight is
+      const lightShare = 0.06 + 0.94 * daylightOf(sky, this.zone ? gamePlanetOf(this.zone) : null);
       dl *= lightShare;
       dusk *= lightShare;
     }

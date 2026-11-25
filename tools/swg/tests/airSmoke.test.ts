@@ -494,7 +494,8 @@ const MUST = (): [Any, Any] => {
     "the card's uniforms are written from the record with the rest, the glow in the scene's units",
   );
   ok(
-    hits('.add(smokeE.mul(dS))') === 3 && hits('lightSource(p, rr, d, sunDir, sunTop, sR, sM, sS)') === 2 && hits('.mul(glowAt(rr.sub(bottom)))') === 2 && t.includes('exp(depth.negate().sub(smokeE.mul(smokeCol.mul(sdt))))') && t.includes('Loop({ start: 0, end: SMOKE_STEPS') && t.includes('.add(smokeS.mul(dS)).toVar(\'airMSS\')'),
+    // (the sky round, maker L: each sun's light at a sample of the two marches now carries an eclipse's shadow there, `shade1`)
+    hits('.add(smokeE.mul(dS))') === 3 && hits('lightSource(p, rr, d, sunDir, sunAir.mul(shade1(d.mul(tm))), sR, sM, sS)') === 2 && hits('.mul(glowAt(rr.sub(bottom)))') === 2 && t.includes('exp(depth.negate().sub(smokeE.mul(smokeCol.mul(sdt))))') && t.includes('Loop({ start: 0, end: SMOKE_STEPS') && t.includes('.add(smokeS.mul(dS)).toVar(\'airMSS\')'),
     "the card's transmittance, multiple scattering, sky view and haze volume add the layer's extinction after the rest, the light's source its own scattering by its phase, and the two marches the glow from below: the haze on solids and the fog node read the haze volume, so they carry it",
   );
   for (const [file, what] of [

@@ -227,6 +227,21 @@ export interface AirFrame {
    * its height, and the sky's. What the eye's "off" follows (`src/sky/exposure/eyeRun.ts`).
    */
   level: number;
+  /**
+   * (The sky round's fixer) the casting star's light at the top of the air as the sky's bodies take it (scene units): its full
+   * light, an eclipse of our sun being no shadow on them (each body's own shadows are its look's, `skyShade.ts`); `sunTop` (the
+   * disc's) where no applied system shades it.
+   */
+  readonly bodyTop: THREE.Color;
+  /**
+   * (The sky round's fixer) the ring of light at the limb of the body covering the casting sun, where its air bends the sun's
+   * light round it (`skyShade.ts`' `ringSky`): its middle's way, its inner and outer angular radii (radians), and its light at
+   * the top of the air (scene units; black with none). The sky draws it about the occluder (`airSky.ts`).
+   */
+  readonly ringDir: THREE.Vector3;
+  ringIn: number;
+  ringOut: number;
+  readonly ringTop: THREE.Color;
 }
 
 /** The frame record, made once: the air's maker writes it, everything else reads it. */
@@ -254,6 +269,11 @@ export function makeAirFrame(): AirFrame {
     gain: new THREE.Vector3(1, 1, 1),
     lightDir: new THREE.Vector3(0, 1, 0),
     level: 1.5,
+    bodyTop: new THREE.Color(1, 1, 1),
+    ringDir: new THREE.Vector3(0, 1, 0),
+    ringIn: 0.5,
+    ringOut: 0.5,
+    ringTop: new THREE.Color(0, 0, 0),
   };
 }
 
@@ -327,6 +347,11 @@ export interface AirNodes {
   gain: AirNode;
   /** Float: the overcast, 0 to 1. */
   overcast: AirNode;
+  /** (The sky round's fixer) the star's light the sky's bodies take (`AIR.frame.bodyTop`). */
+  bodyTop: AirNode;
+  /** (The sky round's fixer) vec4s: the occluder's ring's middle and inner radius; its light and outer radius (`AIR.frame.ring*`). */
+  ringDir: AirNode;
+  ringTop: AirNode;
 }
 
 /**

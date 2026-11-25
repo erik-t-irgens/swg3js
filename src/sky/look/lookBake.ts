@@ -157,6 +157,21 @@ export async function kitWithin(renderer: Any, look: BodyLook, size: number, wai
   return landed;
 }
 
+/**
+ * (The sky round's fixer) A generated look's kit asked for now, never awaited, through the same memo `kitWithin` waits on (so the
+ * wait that follows finds it under way or landed): true where this asked it, false where it was asked already or the look is
+ * not generated. Behind a loading screen alone.
+ */
+export function warmKit(renderer: Any, look: BodyLook, size: number): boolean {
+  if (!look?.generated) return false;
+  const clouds = lookHasClouds(look);
+  const key = lookPicturesKey(look, size, clouds);
+  const had = KITS.get(key);
+  if (had && (!had.done || had.clean)) return false;
+  askKit(renderer, key, genOf(look, size), size, clouds);
+  return true;
+}
+
 /** Whether a read-back holds a drawn picture (a pass not drawn leaves the target cleared: every texel nought). */
 function drawn(px: Uint8Array): boolean {
   const step = Math.max(4, (Math.floor(px.length / 4 / 997) | 0) * 4);

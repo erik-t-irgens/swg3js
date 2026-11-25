@@ -92,15 +92,71 @@ export function starsOf(planetId: string): StarSystemSuns {
   return s ?? STAR_SYSTEMS.plain;
 }
 
-/** A world's casting sun. */
+/**
+ * (The GPU port's sky round, maker L, the brief's H: "size of sun and color of sun based on the system you're in") The suns
+ * of the star system the bodies file applies to the world one stands on (`src/sky/system/systemSuns.ts`' `useSystemSuns`,
+ * set behind each loading screen before anything reads a sun): its caster's and its pair's second sun's colour as a
+ * temperature, brightness and size, which `casterOf` and `secondOf` hand every reader (the air's record, the disc, the flare,
+ * the pair's gap) for that world alone. `caster` null: no system's word, and the table above as it always was.
+ */
+export const SYSTEM_SUNS: { planet: string; caster: SunSpec | null; second: SunSpec | null } = { planet: '', caster: null, second: null };
+
+/** A world's casting sun: an applied system's (`SYSTEM_SUNS`) for the world it was set for, else the table's. */
 export function casterOf(planetId: string): SunSpec {
+  if (SYSTEM_SUNS.caster !== null && SYSTEM_SUNS.planet === planetId) return SYSTEM_SUNS.caster;
   return starsOf(planetId).suns[0];
 }
 
-/** A world's second sun, or null where its system has one. */
+/** A world's second sun, or null where its system has one (an applied system's word first, as `casterOf`). */
 export function secondOf(planetId: string): SunSpec | null {
+  if (SYSTEM_SUNS.caster !== null && SYSTEM_SUNS.planet === planetId) return SYSTEM_SUNS.second;
   const s = starsOf(planetId).suns;
   return s.length > 1 ? s[1] : null;
+}
+
+/**
+ * (The sky round, maker L) The black body's temperature whose colour is nearest a colour `#rrggbb` (its chromaticity: the
+ * linear channels over their luminance against `kelvinToLinear`'s), kelvin, 1,000 to 40,000: a coarse scan in steps of a
+ * twentieth of a stop, then halving about the best. A star's colour in the viewer read as the temperature the air sends.
+ * Worked once a star at a loading screen; null for no colour.
+ */
+export function kelvinOfColour(hex: string | null | undefined): number | null {
+  if (typeof hex !== 'string' || !/^#[0-9a-f]{6}$/i.test(hex)) return null;
+  const lin = (v: number): number => {
+    const c = v / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const r = lin(parseInt(hex.slice(1, 3), 16));
+  const g = lin(parseInt(hex.slice(3, 5), 16));
+  const b = lin(parseInt(hex.slice(5, 7), 16));
+  const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  if (!(l > 1e-6)) return null;
+  const want = [r / l, g / l, b / l];
+  const c = [1, 1, 1];
+  const miss = (k: number): number => {
+    kelvinToLinear(k, c);
+    return (c[0] - want[0]) ** 2 + (c[1] - want[1]) ** 2 + (c[2] - want[2]) ** 2;
+  };
+  const lo = Math.log2(1000);
+  const hi = Math.log2(40000);
+  let best = lo;
+  let bestMiss = Infinity;
+  for (let x = lo; x <= hi + 1e-9; x += 0.05) {
+    const m = miss(2 ** x);
+    if (m < bestMiss) {
+      bestMiss = m;
+      best = x;
+    }
+  }
+  let a = best - 0.05;
+  let z = best + 0.05;
+  for (let i = 0; i < 40; i++) {
+    const m1 = a + (z - a) / 3;
+    const m2 = z - (z - a) / 3;
+    if (miss(2 ** m1) < miss(2 ** m2)) z = m2;
+    else a = m1;
+  }
+  return Math.round(2 ** ((a + z) / 2));
 }
 
 // ---------------------------------------------------------------- a star's colour

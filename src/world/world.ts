@@ -22,7 +22,7 @@ import { applyFileAir, readBodiesFile } from '../sky/look/bodiesFile.ts';
 import { dropSkyLooks, warmZoneLooks, wearSkyLooks, type SkyLooksWorn } from '../sky/look/skyLooks.ts';
 // Pass 2, wave 5 (maker L): bodies wearing his looks drawn whole (`src/sky/bodies/lookBody.ts` through the runtime), which ones
 // (`lookWorld.ts`), and his imported looks in development alone (`privateSky.ts`).
-import { SKY_CARD_REACH, lookPlaces, markLookDrawn, placeSpaceBody, skyLookPlans, spaceBodyRadiusOf, spaceLookPlans } from '../sky/bodies/lookWorld.ts';
+import { SKY_CARD_REACH, lookPlaces, markLookDrawn, motionLookPlaces, placeSpaceBody, skyLookPlans, spaceBodyRadiusOf, spaceLookPlans } from '../sky/bodies/lookWorld.ts';
 import { spacePlaceOf } from '../sky/look/bodiesFile.ts';
 import { spacePlaceIds } from '../space/spaceAir.ts';
 import { tierIndexOf } from '../sky/night/nightTier.ts';
@@ -190,6 +190,8 @@ import { PLUME_TUNE, groundDistantOf, installPlumeDebug, plumeReach, setPlumesCu
 import { SKY_BODIES } from '../sky/look/bodiesFile.ts';
 import { SKY_MOTION, skyMotionFor, type SkyMotion, type SystemsRecord } from '../sky/system/skyMotion.ts';
 import { pairDialsFrom } from '../sky/stars.ts';
+// (the sky round's maker L, H) the sun's colour, brightness and size from the applied system, set before anything reads a sun
+import { clearSystemSuns, useSystemSuns } from '../sky/system/systemSuns.ts';
 import { groundPlacesMix } from '../sky/look/groundPlaces.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
@@ -4032,7 +4034,13 @@ export class World {
       // Pass 2, wave 5 (maker S): the star system the file applies for this world (`src/sky/system/skyMotion.ts`): its own day,
       // its sun's path, its bodies' places and phases, its eclipses and its night light, moved by the day from here on; none
       // (null) for a world the file does not apply and in space, which keep today's sky exactly.
+      // (the sky round's maker L, H) the applied system's suns for this world before the motion, the air and the disc read one
+      useSystemSuns(sky.data.space ? null : (SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems, basePack, this.planet.id, sky.data);
       this.followMotion(sky.data.space ? null : skyMotionFor((SKY_BODIES.file as { systems?: SystemsRecord } | null)?.systems, basePack, this.planet.id, sky.data), sky);
+      // (the sky round's fixer) the applied system's bodies' bake kits asked now, never awaited, so they compile beside the
+      // world's loading (the air's fit, the clouds, the night) rather than after it: the screen's start warms the looks of SWG's
+      // places alone, and Mustafar's giants' kits were asked only once the bodies were planned, near the screen's end
+      if (SKY_MOTION.now) GPU.rt!.lookBodies.warm(skyLookPlans(basePack, sky.bodyCards(), sky.group, this.camera?.fov ?? 60, SKY_CARD_REACH, SKY_MOTION.now, (k) => GPU.rt!.lookBodies.presetFor(k)));
     }
     // The weather's effects are made and its arrival area's sky loaded inside the awaited loadPack,
     // so the warm-up that follows compiles them and the first frame shows the area's own sky.
@@ -4227,6 +4235,11 @@ export class World {
     await night.warm();
     if (token !== this.loadToken || this.skyNight !== night) return;
     night.drawBake();
+    // (the sky round's maker P, J) the belts' band compiled behind this screen whatever the hour: by day the night's group is
+    // hidden by the time the sky is built and three's walk passes over what is hidden, so a first arrival by day left the band
+    // unbuilt, and a draw in play builds nothing (it was stepped over all night)
+    const belts = (night as unknown as { belts?: { mesh: THREE.Object3D } | null }).belts;
+    if (GPU.webgpu && belts) this.gpuMadeNow([belts.mesh]);
   }
 
   /**
@@ -4255,7 +4268,9 @@ export class World {
   private async loadBodies(sky: SwgSky): Promise<void> {
     this.dropBodies();
     const cards = sky.bodyCards();
-    if (!cards.length || !AIR.tables) return;
+    // (the sky round's maker P, A) a sky with no card of SWG's still hangs its applied system's bodies in their looks (Mustafar,
+    // whose moon slot holds a sun picture: its giants Jestefad and Lefrani and its Nur)
+    if (!AIR.tables || (!cards.length && !SKY_MOTION.now)) return;
     // Pass 2, wave 4b (maker A): his looks worn (`src/sky/look/skyLooks.ts`): each card whose place the Save to game gives a
     // generated look baked (or read from storage) within the screen's budget and handed over with its disc picture; the rest,
     // and every card with no file, as the sky made them.
@@ -4271,6 +4286,8 @@ export class World {
     const lookPlans = planned.length ? await GPU.rt!.lookBodies.ready(planned, putOff) : planned;
     if (this.swgSky !== sky) return;
     if (putOff.length) console.info(`sky: ${putOff.join(', ')} put off to the next screen, the kits of their looks not landed yet`);
+    // (maker P, A) SWG's own pictures at the places the system's bodies are drawn by their looks put away, whatever they are
+    sky.lookStands(motionLookPlaces(lookPlans));
     const worn = await wearSkyLooks(this.skyLookSky, cards, GPU.rt!.looks, lookPlaces(lookPlans));
     const set = await GPU.rt!.skyBodies.make(worn.cards);
     if (this.swgSky !== sky) {
@@ -4304,6 +4321,8 @@ export class World {
    * which the bodies read), and the sky, which places SWG's own cards where the system puts them.
    */
   private followMotion(motion: SkyMotion | null, sky: SwgSky | null): void {
+    // (the sky round's maker L, H) no system, no system's suns: the table's (each arrival begins here)
+    if (!motion) clearSystemSuns();
     this.day.follow(motion);
     SKY_MOTION.now = motion;
     sky?.useMotion(motion);

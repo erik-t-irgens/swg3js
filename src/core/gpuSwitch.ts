@@ -426,6 +426,11 @@ export interface GpuLookBodies {
    * the rest left out, their places into `putOff`, to wear their looks from the next screen. Behind a screen alone.
    */
   ready(plans: readonly import('../sky/bodies/lookBody.ts').LookBodyPlan[], putOff: string[]): Promise<import('../sky/bodies/lookBody.ts').LookBodyPlan[]>;
+  /**
+   * (The sky round's fixer) The plans' looks' bake kits asked for now, never awaited (an applied system's bodies, as soon as its
+   * motion is made behind the screen), so `ready` finds them under way. Answers how many were asked.
+   */
+  warm(plans: readonly import('../sky/bodies/lookBody.ts').LookBodyPlan[]): number;
   /** The frame's numbers (`LOOK_BODY_IN`), written into its fields by the world before `frame`. */
   readonly lookIn: typeof import('../sky/bodies/lookBody.ts').LOOK_BODY_IN;
   /** The look an extra body of an applied system wears when it names none: the viewer's preset of its kind's recipe. */

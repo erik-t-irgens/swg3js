@@ -51,7 +51,8 @@ const rel = (f: string): string => relative(ROOT, f).replace(/\\/g, '/');
  * (`lookWorld.ts`, `lookBodyMath.ts`, `privateSky.ts`) pure, the dev server's ask (`privateSkyDev.ts`) reached under
  * `import.meta.env.DEV` alone.
  */
-const GPU_SIDE_FILES = new Set(['src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/night/dither.ts', 'src/sky/bodies/skyBody.ts', 'src/sky/bodies/lookBody.ts', 'src/space/spaceRims.ts', 'src/space/spaceVolumes.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts', 'lookBake.ts'].map((f) => `src/sky/look/${f}`)]);
+// (the sky round's maker P, J: the belts' band is the night sky's, made by `nightGpu.ts` alone)
+const GPU_SIDE_FILES = new Set(['src/sky/night/beltBand.ts', 'src/sky/air/airTables.ts', 'src/sky/air/airHaze.ts', 'src/sky/air/airSee.ts', 'src/sky/air/airSky.ts', 'src/sky/exposure/eyeBuffer.ts', 'src/sky/exposure/eyeGpu.ts', 'src/sky/exposure/preExpose.ts', 'src/sky/night/nightGpu.ts', 'src/sky/night/gpuFlare.ts', 'src/sky/night/dither.ts', 'src/sky/bodies/skyBody.ts', 'src/sky/bodies/lookBody.ts', 'src/space/spaceRims.ts', 'src/space/spaceVolumes.ts', ...['build.js', 'generate.js', 'placeview.js', 'shapes.js', 'stage.js', 'volume.js', 'weather.js', 'gameAir.ts', 'lookBake.ts'].map((f) => `src/sky/look/${f}`)]);
 // Pass 3, wave 1 (maker V): the clouds' march, composite and noise, reached only through the chain's spine (`gpuChainPasses.ts`)
 // and the clouds' run on the runtime (`start.ts`); their switch and dials (`cloudTune.ts`, `cloudShape.ts`, `cloudLight.ts`)
 // are pure and loaded by the WebGL boot as plain numbers.
@@ -753,7 +754,8 @@ const CODE = /\.(ts|tsx|mts|js|mjs)$/;
     const calls = w.filter((x) => /this\.gpu(MadeNow|SkyReady|DrawablesNow)\(/.test(x) && !/^(\/\/|\*)/.test(x));
     // Pass 2, wave 3 (maker B): a ninth, the nebulae built as they hang (a jump's swap hangs them with no screen over them).
     // Pass 2, wave 4b (maker C, guarded by its fixer): a tenth, the zone's volumes of gas built as they hang, the same way.
-    ok(calls.length === 10 && calls.includes('if (GPU.webgpu) this.gpuMadeNow([built.group]);') && calls.includes('if (GPU.webgpu) this.gpuMadeNow([set.group]);') &&calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);' || x === 'this.gpuSkyReady(sky);') && calls.filter((x) => x === 'this.gpuSkyReady(sky);').length === 1, `world.ts: the swap's builds, a turret's, the warm-up bolts' and the nebulae's are reached from WebGPU guards alone (and the sky's from within its own, our sky's from within airSky's): ${calls.join('; ')}`);
+    // The sky round (maker P, J): an eleventh, the belts' band compiled behind its night's screen whatever the hour, guarded.
+    ok(calls.length === 11 && calls.includes('if (GPU.webgpu && belts) this.gpuMadeNow([belts.mesh]);') && calls.includes('if (GPU.webgpu) this.gpuMadeNow([built.group]);') && calls.includes('if (GPU.webgpu) this.gpuMadeNow([set.group]);') &&calls.every((x) => x.includes('GPU.webgpu') || x === 'this.gpuMadeNow([sky.group, sky.cloudGroup]);' || x === 'this.gpuSkyReady(sky);') && calls.filter((x) => x === 'this.gpuSkyReady(sky);').length === 1, `world.ts: the swap's builds, a turret's, the warm-up bolts' and the nebulae's are reached from WebGPU guards alone (and the sky's from within its own, our sky's from within airSky's): ${calls.join('; ')}`);
     // The two hooks are the turret manager's and the bolts' own, unset unless the world sets them, each called only where set.
     const tu = lines('src/combat/turrets.ts');
     const bo = lines('src/combat/bolts.ts');

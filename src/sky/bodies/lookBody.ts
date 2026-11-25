@@ -43,13 +43,14 @@ import { makeLook } from '../look/looks.js';
 import { SKY_BODIES } from '../look/bodiesFile.ts';
 import { GeneratedSet, PRESETS, presetLook } from '../look/generate.js';
 import { STORM_TAPE } from '../look/weather.js';
-import { kitWithin } from '../look/lookBake.ts';
+import { kitWithin, warmKit } from '../look/lookBake.ts';
 import { setVolumeQuality } from '../look/volume.js';
 import { AIR } from '../air/airApi.ts';
 import { eyeExposureNode } from '../exposure/eyeBuffer.ts';
 import { markMotion } from '../../core/gpu/motion.ts';
 import { BODY_TUNE } from './bodyTier.ts';
 import { nearOrder } from '../system/skyMotion.ts';
+import { poseQuatInto } from '../system/bodyPose.ts';
 import type { SkyBodyCard } from './bodyCard.ts';
 import type { BodyCardState } from './skyBody.ts';
 import type { BodyLook } from '../look/bodiesFile.ts';
@@ -84,6 +85,11 @@ export interface LookBodyPlan {
   readonly card?: SkyBodyCard | null;
   /** An applied system's item it stands for (`SKY_MOTION.now.items[item]`), or -1. */
   readonly item?: number;
+  /**
+   * (The sky round's maker P, A) drawn by the motion's route: placed, sized, lit and turned by the applied system whatever SWG's
+   * slot holds there (its `card`, if any, standing down for it).
+   */
+  readonly byMotion?: boolean;
   /** A space planet's own sphere (where it stands, its radius), standing down while this draws. */
   readonly mesh?: THREE.Mesh | null;
   readonly radius?: number;
@@ -121,6 +127,25 @@ export interface LookMotion {
   readonly T: number;
   /** Each item's distance from the world seen from (AU), for the cards' order (`nearOrder`); absent, the plan's own order. */
   readonly dist?: Float64Array;
+  /**
+   * (The sky round's maker P, B and C) each item's drawn size now (degrees, by its distance), its pose (nine numbers an item: the
+   * look's x, axis and meridian in the sky's frame, `bodyPose.ts`) and whether it keeps one face to its parent; absent, the
+   * item's setting and the sky's own axes.
+   */
+  readonly sizeNow?: Float64Array;
+  readonly pose?: Float64Array;
+  readonly locked?: Uint8Array;
+  /** (The sky round's maker L, D) the light between the bodies (`skyShade.ts`): each item's casters this frame; absent, none. */
+  readonly shade?: { readonly items: readonly ShadeOfLike[] } | null;
+}
+
+/** (Maker L, D) one body's casters as `skyShade.ts`' `ShadeOf` holds them (the look's frame record's `shade`). */
+interface ShadeOfLike {
+  readonly n: number;
+  readonly sunRad: number;
+  readonly ring: number;
+  readonly strength: number;
+  readonly c: Float64Array;
 }
 
 /** One body drawn in its look. */
@@ -144,6 +169,24 @@ class LookBody {
   readonly fr: LookFrameRecord;
   readonly lightW = new THREE.Vector3(0, 1, 0);
   readonly turn = new THREE.Quaternion();
+  /**
+   * (The sky round's maker P, B) its pose under an applied system: the look's axis group's turn in the sky's frame (written
+   * into the axis's quaternion after each `updateLookWith`, which turns it by the look's own tilt alone), whether it has one,
+   * and its axis and meridian in the card's frame and its own turn when last drawn (a still body is drawn again when they move).
+   */
+  // (its fields begun as fractions, so they hold doubles from the first write: a field begun as a small integer makes a number at
+  // each write of a fraction, `testing.md`)
+  readonly poseQ = { _x: 0.5, _y: 0.5, _z: 0.5, _w: 0.5 };
+  posed = false;
+  private readonly lastA = new THREE.Vector3(9, 9, 9);
+  private readonly lastM = new THREE.Vector3(9, 9, 9);
+  lastSpin = -0.5;
+  /**
+   * (The sky round's maker L, D) its casters when last drawn: how many, and each one's way and angular size from the body's
+   * middle (four numbers a caster), so a still body is drawn again when a shadow on it moves as far as a light would.
+   */
+  private lastShadeN = 0;
+  private readonly lastShade = new Float64Array(16);
   /** The light in the card's frame and the card's size when last drawn (a still body is drawn again only when they move). */
   private readonly lastL = new THREE.Vector3(9, 9, 9);
   lastTan = -1;
@@ -191,7 +234,9 @@ class LookBody {
     const motionOn = !!(clouds.motion as Record<string, unknown> | undefined)?.on;
     const stormOn = !!(clouds.storm as Record<string, unknown> | undefined)?.on;
     // (a pictured rings layer turns by its own spin; a generated look's rings and belt stand in its axis and do not)
-    this.moving = !!built.vol || (!!built.hasClouds && (motionOn || stormOn)) || !!built.storms || (L.rings?.on === true && (Number(L.rings?.spin) || 0) !== 0) || (plan.item !== undefined && plan.item >= 0);
+    // (the sky round's maker P: a body of an applied system is no longer drawn every frame for being one: its light, its pose,
+    // its own turn and its size are each held by `changed`, so a still look is drawn again only when one of them moves)
+    this.moving = !!built.vol || (!!built.hasClouds && (motionOn || stormOn)) || !!built.storms || (L.rings?.on === true && (Number(L.rings?.spin) || 0) !== 0);
     this.reach = Math.max(1, Number(built.radius) || 1);
   }
 
@@ -217,22 +262,140 @@ class LookBody {
     const d = this.lastL;
     const moved = (cx - d.x) * (cx - d.x) + (cy - d.y) * (cy - d.y) + (cz - d.z) * (cz - d.z) > LOOK_BODY_TUNE.stillMoves * LOOK_BODY_TUNE.stillMoves;
     const tan = this.cardV.x;
-    const grew = this.lastTan < 0 || Math.abs(tan - this.lastTan) > this.lastTan * 0.01;
-    return moved || grew;
+    const grew = this.lastTan < 0 || Math.abs(tan - this.lastTan) > this.lastTan * 0.01 || (this.fixedHalf > 0 && Math.abs(this.half - this.lastHalf) > this.lastHalf * 0.01);
+    if (moved || grew) return true;
+    // (the sky round's maker P, B) its axis or its meridian moved in the card's frame, or its own turn, by as much as its light
+    if (this.posed) {
+      const q = this.poseQ;
+      const sm = LOOK_BODY_TUNE.stillMoves;
+      const qx = q._x;
+      const qy = q._y;
+      const qz = q._z;
+      const qw = q._w;
+      // the turn's second column (the axis) and third (the meridian)
+      const ax = 2 * (qx * qy - qz * qw);
+      const ay = 1 - 2 * (qx * qx + qz * qz);
+      const az = 2 * (qy * qz + qx * qw);
+      const mx = 2 * (qx * qz + qy * qw);
+      const my = 2 * (qy * qz - qx * qw);
+      const mz = 1 - 2 * (qx * qx + qy * qy);
+      const r = this.rightV;
+      const u = this.upV;
+      const d = this.dirV;
+      const a1 = ax * r.x + ay * r.y + az * r.z - this.lastA.x;
+      const a2 = ax * u.x + ay * u.y + az * u.z - this.lastA.y;
+      const a3 = -(ax * d.x + ay * d.y + az * d.z) - this.lastA.z;
+      const m1 = mx * r.x + my * r.y + mz * r.z - this.lastM.x;
+      const m2 = mx * u.x + my * u.y + mz * u.z - this.lastM.y;
+      const m3 = -(mx * d.x + my * d.y + mz * d.z) - this.lastM.z;
+      if (a1 * a1 + a2 * a2 + a3 * a3 > sm * sm || m1 * m1 + m2 * m2 + m3 * m3 > sm * sm) return true;
+    }
+    // its own turn under a system (a share of its day, `spinFor`): its surface moved by the same angle as a light would
+    if (this.fr.spin === 360) {
+      let ds = this.fr.clock - this.lastSpin;
+      ds -= Math.round(ds);
+      if (ds * 6.283185307179586 > LOOK_BODY_TUNE.stillMoves || -ds * 6.283185307179586 > LOOK_BODY_TUNE.stillMoves) return true;
+    }
+    // (the sky round's maker L, D) a shadow on it came, went or moved as far as a light would
+    if (this.shadeMoved(false)) return true;
+    return false;
+  }
+
+  /**
+   * (Maker L, D) Whether its casters differ from those last drawn (their number, or a caster's way or angular size by
+   * `LOOK_BODY_TUNE.stillMoves`); with `take`, they are taken as drawn instead. Allocates nothing.
+   */
+  shadeMoved(take: boolean): boolean {
+    const sh = this.fr.shade;
+    const n = sh ? sh.n : 0;
+    const last = this.lastShade;
+    if (take) this.lastShadeN = n;
+    else if (n !== this.lastShadeN) return true;
+    if (!sh) return false;
+    const sm = LOOK_BODY_TUNE.stillMoves;
+    const c = sh.c;
+    for (let i = 0; i < n; i++) {
+      const o = i * 12;
+      const x = c[o];
+      const y = c[o + 1];
+      const z = c[o + 2];
+      const l = Math.sqrt(x * x + y * y + z * z);
+      const k = l > 1e-12 ? 1 / l : 0;
+      const ux = x * k;
+      const uy = y * k;
+      const uz = z * k;
+      const r = c[o + 5] * k;
+      const q = 4 * i;
+      if (take) {
+        last[q] = ux;
+        last[q + 1] = uy;
+        last[q + 2] = uz;
+        last[q + 3] = r;
+      } else {
+        const dx = ux - last[q];
+        const dy = uy - last[q + 1];
+        const dz = uz - last[q + 2];
+        const dr = r - last[q + 3];
+        if (dx * dx + dy * dy + dz * dz > sm * sm || (dr < 0 ? -dr : dr) > sm) return true;
+      }
+    }
+    return false;
   }
 
   /** What `changed` compares against next, taken as it is drawn. */
   took(frame: number): void {
+    // (the sky round's maker L, D) its casters, as drawn
+    this.shadeMoved(true);
     const L = this.lightW;
     this.lastL.x = L.x * this.rightV.x + L.y * this.rightV.y + L.z * this.rightV.z;
     this.lastL.y = L.x * this.upV.x + L.y * this.upV.y + L.z * this.upV.z;
     this.lastL.z = -(L.x * this.dirV.x + L.y * this.dirV.y + L.z * this.dirV.z);
     this.lastTan = this.cardV.x;
+    this.lastHalf = this.half;
     this.lastDrawn = frame;
+    // (the sky round's maker P, B) its axis and meridian in the card's frame and its own turn, as drawn
+    if (this.posed) {
+      const q = this.poseQ;
+      const qx = q._x;
+      const qy = q._y;
+      const qz = q._z;
+      const qw = q._w;
+      const ax = 2 * (qx * qy - qz * qw);
+      const ay = 1 - 2 * (qx * qx + qz * qz);
+      const az = 2 * (qy * qz + qx * qw);
+      const mx = 2 * (qx * qz + qy * qw);
+      const my = 2 * (qy * qz - qx * qw);
+      const mz = 1 - 2 * (qx * qx + qy * qy);
+      const r = this.rightV;
+      const u = this.upV;
+      const d = this.dirV;
+      this.lastA.x = ax * r.x + ay * r.y + az * r.z;
+      this.lastA.y = ax * u.x + ay * u.y + az * u.z;
+      this.lastA.z = -(ax * d.x + ay * d.y + az * d.z);
+      this.lastM.x = mx * r.x + my * r.y + mz * r.z;
+      this.lastM.y = mx * u.x + my * u.y + mz * u.z;
+      this.lastM.z = -(mx * d.x + my * d.y + mz * d.z);
+    }
+    this.lastSpin = this.fr.spin === 360 ? this.fr.clock : -0.5;
+  }
+
+  /** (The sky round's maker P, B) the look's axis group turned by its pose, after `updateLookWith` turned it by its tilt alone. */
+  turnAxis(): void {
+    if (!this.posed) return;
+    const aq = this.built.axis.quaternion as unknown as { _x: number; _y: number; _z: number; _w: number };
+    const q = this.poseQ;
+    aq._x = q._x;
+    aq._y = q._y;
+    aq._z = q._z;
+    aq._w = q._w;
   }
 
   /** Its disc's half angle across (radians) and its card's distance from the eye in its group: written by the frame. */
   half = 0.05;
+  /** (The sky round's maker P, C) the largest half angle a body sized by its distance is drawn at (radians), else 0. */
+  fixedHalf = 0;
+  /** (Maker P, C) its half angle when last drawn (a body sized by its distance is drawn again when it grows or shrinks 1%). */
+  lastHalf = -0.5;
   cardR = 1.5;
   /** A dome's scale as last worked (`domeOutline`, worked again only when its half angle moves). */
   private domeHalf = -1;
@@ -305,20 +468,28 @@ class LookBody {
     }
     // its reach's tangent (`lookExtentTan`): its bounding sphere's angle from where its body fills `half`, under 80 degrees
     const h = this.half > 0 ? this.half : 0;
-    const sh = Math.sin(h);
+    const b = this.built;
+    // (the sky round's maker P, C) a body sized by its distance stands its scene as at the largest it is ever drawn (`fixedHalf`)
+    // and is scaled down to its size now about the camera (the very picture, by similar triangles), so its frustum and its card
+    // are set once and never again as it grows and shrinks in play (three's projection hands numbers across its calls)
+    const fixed = this.fixedHalf > 0 && b.look?.kind !== 'dome';
+    const hh = fixed ? (this.fixedHalf > h ? this.fixedHalf : h) : h;
+    const sh = Math.sin(hh);
     const sE = sh * (this.reach > 1 ? this.reach * 1.05 : 1.05);
     const a = Math.asin(sE < SIN_80 ? sE : SIN_80);
     const tanE = Math.tan(a);
     this.cardV.x = tanE;
     // the look stood in its scene
-    const b = this.built;
     const D = sh > 1e-6 ? 1 / sh : 1e6;
     const root = b.root;
     root.position.x = d.x * D;
     root.position.y = d.y * D;
     root.position.z = d.z * D;
     let sc = 1;
-    if (b.look?.kind === 'dome' && b.profile) {
+    if (fixed) {
+      const s0 = Math.sin(h);
+      sc = sh > 1e-9 ? s0 / sh : 1;
+    } else if (b.look?.kind === 'dome' && b.profile) {
       if (Math.abs(h - this.domeHalf) > 1e-5) {
         this.domeHalf = h;
         this.domeScale = domeOutline(b.profile, h < HALF_PI_LESS ? h : HALF_PI_LESS, D).scale;
@@ -371,7 +542,7 @@ class LookBody {
     // its frustum, set again only when the reach outgrows it or shrinks well inside it, or its depth leaves the near and far
     // planes (three's projection hands numbers across its calls: a number made a frame were it set every frame); the card spans
     // the frustum's own tangent, so the picture lands on it at the body's true size whatever the frustum's margin
-    const reach = this.reach * sc * 1.05;
+    const reach = this.reach * (fixed ? 1 : sc) * 1.05;
     if (tanE > this.camTan || tanE < this.camTan * 0.97 || D - reach < this.camNear || D + reach > this.camFar) {
       const nearAt = (D - reach) * 0.9;
       this.camTan = tanE * 1.01;
@@ -429,7 +600,9 @@ function skyCardMaterial(b: { cardV: THREE.Vector4; dirV: THREE.Vector3; rightV:
     const dW = normalize(rightW.mul(tx).add(upW.mul(ty)).add(dirW)).toVar('lookDW');
     const Tw = (tables ? vec3(tables.transmittanceToSpace(dW)) : vec3(1)).toVar('lookTw');
     const skyBack = (tables ? vec3(tables.skyRadiance(dW)) : vec3(0)).toVar('lookSkyBack');
-    const sunTop = tables ? tables.nodes.sunTop : vec3(1);
+    // (the sky round's fixer) the star's full light on a body (`bodyTop`: an eclipse of our own sun is no shadow on it; its own
+    // shadows are its look's), the disc's where no applied system shades it
+    const sunTop = tables ? (tables.nodes.bodyTop ?? tables.nodes.sunTop) : vec3(1);
     const imp = texture(picture, pictureAt(at)).toVar('lookImp');
     // the light a white surface facing the star would send through the air, times the eye: one factor for the whole body
     const whiteLum = dot(Tw.mul(sunTop), vec3(LUMA[0], LUMA[1], LUMA[2])).mul(1 / PI).mul(eye);
@@ -568,6 +741,23 @@ export class LookBodies {
    * landed by then is left out (its SWG card stays up, or an extra body waits), to wear its look from the next screen, its kit
    * landing meanwhile behind this one. Answers the plans kept, in order, and `putOff` the places left out. Behind a screen alone.
    */
+  /**
+   * (The sky round's fixer) The bake kits of the plans' generated looks asked for now, never awaited, at the sizes `ready` will
+   * wait on them at (one memo, `lookBake.ts`' `askKit`): called as soon as an applied system's bodies are known behind a screen
+   * (`World.loadSky`, right after the motion is made), so the kits of looks the screen's start did not warm (a system body's
+   * own look, an extra's preset: Mustafar's giants) compile beside the world's loading rather than after it. Answers how many.
+   */
+  static warm(renderer: Any, plans: readonly LookBodyPlan[]): number {
+    let n = 0;
+    for (const plan of plans) {
+      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, lookSizeFor(plan.where, plan.look));
+      const gen = look.generated as Any;
+      if (!gen || look.kind !== 'sphere') continue;
+      if (warmKit(renderer, look, Number(gen.size) || 1024)) n++;
+    }
+    return n;
+  }
+
   static async ready(renderer: Any, plans: readonly LookBodyPlan[], putOff: string[]): Promise<LookBodyPlan[]> {
     const kept: LookBodyPlan[] = [];
     const t0 = performance.now();
@@ -599,6 +789,7 @@ export class LookBodies {
     }
     this.lightFor(b, null);
     updateLookWith(b.built, b.fr);
+    b.turnAxis();
   }
 
   /** The look's programs compiled against its own picture (its format, its samples, its depth), behind the screen. */
@@ -630,6 +821,9 @@ export class LookBodies {
       const p = b.plan;
       if (p.where === 'space') {
         this.placeSpace(b);
+      } else if (p.byMotion && motion && p.item !== undefined && p.item >= 0) {
+        // (the sky round's maker P, A) one route under an applied system: the motion's place, size, light and pose
+        this.placeExtra(b, motion, p.item);
       } else if (p.card) {
         const st = p.card.disc.userData.swgBodyCard as BodyCardState | undefined;
         b.up = !!st && st.shown;
@@ -655,10 +849,13 @@ export class LookBodies {
       b.card.visible = b.up && LOOK_BODY_SHOW.on;
       if (!b.up) continue;
       // its draw order: its SWG card's as the sky's frame left it, an extra's by its distance (the nearer drawn later, `nearOrder`)
-      b.card.renderOrder = p.card ? p.card.disc.renderOrder : motion && motion.dist && p.item !== undefined && p.item >= 0 ? p.order + nearOrder(motion.dist[p.item]) : p.order;
+      b.card.renderOrder = p.card && !p.byMotion ? p.card.disc.renderOrder : motion && motion.dist && p.item !== undefined && p.item >= 0 ? p.order + nearOrder(motion.dist[p.item]) : p.order;
       b.cardV.w = BODY_TUNE.seenMost;
       this.lightFor(b, motion);
       this.spinFor(b, motion);
+      // (the sky round's maker L, D) its casters this frame, the light between the bodies' (`skyShade.ts`), by reference
+      const sj = p.item ?? -1;
+      b.fr.shade = motion && motion.shade && sj >= 0 && p.where !== 'space' ? (motion.shade.items[sj] ?? null) : null;
     }
   }
 
@@ -677,6 +874,7 @@ export class LookBodies {
       const due = b.moving ? this.frames - b.lastDrawn >= every : false;
       if (!due && !b.changed()) continue;
       updateLookWith(b.built, b.fr);
+      b.turnAxis();
       this.draw1(b);
       b.took(this.frames);
     }
@@ -713,10 +911,23 @@ export class LookBodies {
     dv.x = motion.dir[k];
     dv.y = dy;
     dv.z = motion.dir[k + 2];
-    b.half = ((it.sizeDeg * Math.PI) / 180) * 0.5;
+    // (the sky round's maker P, C) its size now by its true distance, else its setting: each branch written into the field
+    // itself (one value merged from a typed array's double and an object's number is a number made each frame)
+    const sizes = motion.sizeNow;
+    if (sizes) {
+      b.half = sizes[j] * (Math.PI / 360);
+      // its frame as at the largest it is drawn (its plan's size: `largestDeg`), set once
+      b.fixedHalf = b.plan.halfRad;
+    } else b.half = it.sizeDeg * (Math.PI / 360);
     b.cardV.y = presence;
     b.cardR = LOOK_BODY_TUNE.extraReach;
     b.pose(false);
+    // (maker P, B) its pose in the sky's frame: the system's, turned by its turn (`bodyPose.ts`), into the kept turn's fields
+    const P = motion.pose;
+    if (P) {
+      poseQuatInto(P, j, b.poseQ);
+      b.posed = true;
+    }
   }
 
   /** A space planet: where its own sphere stands in the zone's group (which rides the camera), its size its sphere's. */
@@ -770,7 +981,8 @@ export class LookBodies {
   private spinFor(b: LookBody, motion: LookMotion | null): void {
     const j = b.plan.item ?? -1;
     const fr = b.fr;
-    if (motion && j >= 0 && motion.items[j] && motion.items[j].spinDeg !== 0) {
+    // (the sky round's maker P, B) a body locked to its parent keeps the face its pose turns to it: no turn of its own
+    if (motion && j >= 0 && motion.items[j] && motion.items[j].spinDeg !== 0 && !(b.posed && motion.locked && motion.locked[j])) {
       // `updateLookWith` turns by spin × clock / 360: a spin of 360 with the clock the share of its day
       fr.spin = 360;
       fr.clock = motion.spinTurn[j];

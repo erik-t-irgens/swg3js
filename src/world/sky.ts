@@ -387,7 +387,9 @@ export class SwgSky {
    * at the system's size. A place the system does not name keeps SWG's rule; one it hides is hidden. Empty with no motion.
    */
   private motion: SkyMotion | null = null;
-  private readonly motionCards: { sprites: SkyBody[]; item: number; star: boolean }[] = [];
+  // (the sky round's maker P) each card's place and its width per degree of the system's size (`own`: SWG's width over its
+  // own square's), so `placeByMotion` sizes it by the body's distance each frame
+  private readonly motionCards: { sprites: SkyBody[]; item: number; star: boolean; place: string; perTan: number }[] = [];
   /** What the lens flare follows: at most MAX_FLARE_SOURCES, index = flare slot, fixed for the life of the sky. */
   private readonly flareBodies: FlareBody[] = [];
   private readonly stars: THREE.Points | null = null;
@@ -979,7 +981,7 @@ export class SwgSky {
         const w = (s.userData.swgWidth as number) * k;
         s.scale.set(w > 0 ? w : 1e-6, w > 0 ? w : 1e-6, 1);
       }
-      this.motionCards.push({ sprites, item: it.drawn ? j : -1, star: it.star });
+      this.motionCards.push({ sprites, item: it.drawn ? j : -1, star: it.star, place, perTan: own > 0 ? (2 * SKY_RADIUS) / own : 0 });
     };
     take(this.sun, `${world}:sun`, this.data.sun);
     take(this.supplementalSun, `${world}:sun2`, this.data.supplementalSun);
@@ -990,6 +992,15 @@ export class SwgSky {
       const c = this.celestials.find((x) => x.data === this.data.celestials[it.celestial]);
       if (c && it.place) take(c.sprites, it.place, c.data);
     }
+  }
+
+  /**
+   * (The sky round's maker P, A) SWG's own pictures at the places the applied system's bodies are drawn by their looks
+   * (`lookWorld.ts`' `motionLookPlaces`) put away, whatever they are: a moon's card, a celestial, or a sun picture in a moon slot
+   * (Mustafar's). Called behind the loading screen once the looks are planned; nothing a frame calls.
+   */
+  lookStands(places: ReadonlySet<string>): void {
+    for (const c of this.motionCards) if (places.has(c.place)) c.item = -1;
   }
 
   /**
@@ -1022,10 +1033,17 @@ export class SwgSky {
         v.y = -1;
         v.z = 0;
       }
+      // (the sky round's maker P, C) a body's width by its true distance now (a star's as the system set it)
+      const tw = j >= 0 && !c.star && c.perTan > 0 ? c.perTan * Math.tan((m.sizeNow[j] * Math.PI) / 360) : 0;
       // `place`, in place (a number handed to a call the compiler does not build in is a number made).
       const sprites = c.sprites;
       for (let k = 0; k < sprites.length; k++) {
         const s = sprites[k];
+        if (tw > 0) {
+          const w = (s.userData.swgWidth as number) * tw;
+          s.scale.x = w;
+          s.scale.y = w;
+        }
         s.position.x = v.x * SKY_RADIUS;
         s.position.y = v.y * SKY_RADIUS;
         s.position.z = v.z * SKY_RADIUS;
