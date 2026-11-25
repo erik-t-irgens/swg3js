@@ -46,7 +46,7 @@ const SP = await import('../../../tools/dev/skyPrivate.mjs');
 // ---------------------------------------------------------------- 1. the dials
 {
   const T = M.LOOK_BODY_TUNE;
-  ok(T.everyFrames === 1 && T.stillMoves === 0.0005 && T.samples === 4 && T.skyMost === 512 && T.spaceMost === 2048 && T.least === 64 && T.extraReach === 3500, 'the dials start where their reasons say');
+  ok(T.everyFrames === 1 && T.stillMoves === 0.0005 && T.samples === 4 && T.skyMost === 1024 && T.spaceMost === 2048 && T.least === 64 && T.extraReach === 3500 && T.bakeScreenH === 1440, 'the dials start where their reasons say (a sky body up to 1024 since the owner\'s pixelated planets of 25 November)');
   const before = { ...T };
   M.tuneLookBodies({ everyFrames: 99, samples: 2, skyMost: 1 });
   ok(T.everyFrames === 8 && T.samples === 4 && T.skyMost === 64, 'a move is held to its range, and the samples are 1 or 4');
@@ -57,6 +57,9 @@ const SP = await import('../../../tools/dev/skyPrivate.mjs');
   ok(near(M.lookExtentTan(1.4, 3), Math.tan((80 * Math.PI) / 180), 1e-12), 'a reach round the eye held under 80 degrees');
   ok(M.lookAirChoiceFor(0).all === 'painted' && M.lookAirChoiceFor(1).quality === 'low' && M.lookAirChoiceFor(2).quality === 'medium' && M.lookAirChoiceFor(3).quality === 'high' && M.lookAirChoiceFor(3).all === 'own', "the air's form by the tier: Low Painted, the rest each look's own, the march's steps the tier's");
   ok(M.lookSizeFor('sky', { generated: { size: 4096 } }) === 1024 && M.lookSizeFor('space', { generated: { size: 4096 } }) === 2048 && M.lookSizeFor('space', { generated: { size: 1024 } }) === 1024, "a look baked at its use's size, never over its own");
+  // a sky body's bake by need: its visible half (half the bake's width) holds as many texels as its disc takes pixels
+  ok(M.lookSizeFor('sky', { generated: { size: 4096 } }, 300) === 1024 && M.lookSizeFor('sky', { generated: { size: 4096 } }, 900) === 2048 && M.lookSizeFor('sky', { generated: { size: 4096 } }, 2000) === 4096 && M.lookSizeFor('sky', { generated: { size: 2048 } }, 2000) === 2048 && M.lookSizeFor('space', { generated: { size: 4096 } }, 2000) === 2048, "a sky body's bake follows its need up to its own size: a small moon at the sky's 1024, a huge giant at its own 4096; space as before");
+  ok(M.skyBakeNeedPx(0.02, 60) < 100 && M.skyBakeNeedPx((87.5 * Math.PI) / 360, 60) > 1440, "a 2-degree moon needs under 100 pixels, an 87.5-degree giant more than the screen's height");
 }
 
 // ---------------------------------------------------------------- 2. the storms
@@ -385,7 +388,7 @@ presetStorm.layers.clouds.motion = { on: true, drift: 8, churn: 0.3, swirl: 0.25
   // the tier's share of the use's most: Low a quarter, Medium a half, High and Ultra whole; a moving look's cadence likewise
   ok(M.tierMost('space', 0) === T.spaceMost * T.lowShare && M.tierMost('space', 1) === T.spaceMost * T.mediumShare && M.tierMost('space', 2) === T.spaceMost && M.tierMost('sky', 3) === T.skyMost, `a body's most by the tier: space ${[0, 1, 2, 3].map((t) => M.tierMost('space', t)).join(', ')}, sky ${[0, 1, 2, 3].map((t) => M.tierMost('sky', t)).join(', ')}`);
   ok(M.lookBodyPictureSize(1.2, 1440, 'space', 0) === 512 && M.lookBodyPictureSize(1.2, 1440, 'space', 1) === 1024 && M.lookBodyPictureSize(1.2, 1440, 'space', 3) === 2048 && M.lookBodyPictureSize(1.2, 1440, 'space') === 2048, 'a planet filling the screen from orbit drawn at 512 on Low, 1024 on Medium, 2048 above (and 2048 where no tier is said)');
-  ok(M.lookBodyPictureSize(0.001, 1440, 'sky', 0) === T.least && M.lookBodyPictureSize(0.3, 1440, 'sky', 0) === 128 && M.lookBodyPictureSize(0.3, 1440, 'sky', 2) === 512, 'a sky body at least `least`, at most 128 on Low and 512 above');
+  ok(M.lookBodyPictureSize(0.001, 1440, 'sky', 0) === T.least && M.lookBodyPictureSize(0.3, 1440, 'sky', 0) === 256 && M.lookBodyPictureSize(0.3, 1440, 'sky', 2) === 512 && M.lookBodyPictureSize(1.2, 1440, 'sky', 3) === 1024 && M.lookBodyPictureSize(1.2, 1440, 'sky', 1) === 512, 'a sky body at least `least`, at most 256 on Low, 512 on Medium and 1024 above, and only as big as its pixels ask');
   ok(M.everyFor(0) === T.lowEvery && M.everyFor(1) === T.mediumEvery && M.everyFor(2) === T.everyFrames && M.everyFor(3) === T.everyFrames, `a moving look drawn every ${[0, 1, 2, 3].map((t) => M.everyFor(t)).join(', ')} frames by the tier`);
   const keep = { ...T };
   M.tuneLookBodies({ everyFrames: 6, kitWaitMs: -5, kitsAfterScreen: 99 });

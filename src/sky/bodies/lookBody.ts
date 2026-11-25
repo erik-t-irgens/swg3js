@@ -55,7 +55,12 @@ import { poseQuatInto } from '../system/bodyPose.ts';
 import type { SkyBodyCard } from './bodyCard.ts';
 import type { BodyCardState } from './skyBody.ts';
 import type { BodyLook } from '../look/bodiesFile.ts';
-import { LOOK_BODY_TUNE, everyFor, lookAirChoiceFor, lookBodyPictureSize, lookSizeFor, screenShareOf, tuneLookBodies } from './lookBodyMath.ts';
+import { LOOK_BODY_TUNE, everyFor, lookAirChoiceFor, lookBodyPictureSize, lookSizeFor, screenShareOf, skyBakeNeedPx, tuneLookBodies } from './lookBodyMath.ts';
+
+/** A plan's bake size: in a ground sky by its need at its largest (`skyBakeNeedPx`), in space the use's as before. */
+function planBakeSize(plan: LookBodyPlan): number {
+  return lookSizeFor(plan.where, plan.look, plan.where === 'sky' ? skyBakeNeedPx(plan.halfRad, plan.fovDeg) : 0);
+}
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -700,7 +705,7 @@ export class LookBodies {
       const t0 = performance.now();
       // the look as built: its bake at the use's size (a sky body's smaller), its air the ground world's where it shows one
       // made whole first (every slot and setting present, as the viewer makes every look it draws: `looks.js`' `makeLook`)
-      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, lookSizeFor(plan.where, plan.look));
+      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, planBakeSize(plan));
       setAirRecordFor(look, plan.record);
       const gen = look.generated as Any;
       let warmMs = 0;
@@ -752,7 +757,7 @@ export class LookBodies {
   static warm(renderer: Any, plans: readonly LookBodyPlan[]): number {
     let n = 0;
     for (const plan of plans) {
-      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, lookSizeFor(plan.where, plan.look));
+      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, planBakeSize(plan));
       const gen = look.generated as Any;
       if (!gen || look.kind !== 'sphere') continue;
       if (warmKit(renderer, look, Number(gen.size) || 1024)) n++;
@@ -764,7 +769,7 @@ export class LookBodies {
     const kept: LookBodyPlan[] = [];
     const t0 = performance.now();
     for (const plan of plans) {
-      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, lookSizeFor(plan.where, plan.look));
+      const look = sizedLook(makeLook(plan.look as unknown as Record<string, unknown>) as unknown as BodyLook, planBakeSize(plan));
       const gen = look.generated as Any;
       if (!gen || look.kind !== 'sphere') {
         kept.push(plan);

@@ -14,10 +14,17 @@ import { LOOK_BAKE_TUNE } from '../look/lookPictures.ts';
  *     moon a few degrees wide), or its size by 1%: so a still moon costs nothing on most frames.
  *   - **samples: 4.** Its picture's edge smoothing (multisampled, resolved): the limb and a ring's edge as smooth as the
  *     viewer's own stage draws them (its canvas antialiased); 1 to draw it plain.
- *   - **skyMost: 512, spaceMost: 2048.** The largest picture a body takes, a side, in a ground sky and in space: a sky body
- *     a few degrees across covers far under 512 pixels at 1440 lines, and a planet filling the screen from orbit needs the
- *     screen's own height (2048 holds 1440p); half floats, 2 MB and 32 MB with their depth and samples resolved. Each body
- *     takes the power of two over its reach's pixels at the screen's height, at least `least`.
+ *   - **skyMost: 1024, spaceMost: 2048.** The largest picture a body takes, a side, in a ground sky and in space. A sky body
+ *     a few degrees across covers far under 512 pixels at 1440 lines, but since the sky round sizes bodies by their distance
+ *     and the owner sets some very large (Jestefad 87.5 degrees, Kef Bir 39 at its nearest), the old 512 drew those
+ *     stretched and pixelated (his word of 25 November); 1024 halves that stretch for a fourfold picture only on the bodies
+ *     that need it (2048, the range's top, takes the rest, at about 32 MB a body and its redraw's cost). A planet filling the
+ *     screen from orbit needs the screen's own height (2048 holds 1440p); half floats, 8 MB and 32 MB with their depth and
+ *     samples resolved. Each body takes the power of two over its reach's pixels at the screen's height, at least `least`.
+ *   - **bakeScreenH: 1440.** A sky body's bake by need (`lookSizeFor`): the bake whose visible half holds as many texels
+ *     across as the body's disc takes pixels on a screen this many lines tall, between the sky's least (`LOOK_BAKE_TUNE.skySize`)
+ *     and the look's own size (his bake setting). A fixed height rather than the canvas's, so the bake asked early behind a
+ *     screen and the one waited on and built are the same size; 1440 lines is a large desktop's.
  *   - **least: 64.** The smallest picture (a moon of a pixel or two still drawn whole).
  *   - **extraReach: 3500.** Where an extra body's card hangs (scene units from the eye): where SWG's own cards hang (the sky's
  *     reach, its dome beyond), so the land in front takes its pixels by depth as it takes a moon's.
@@ -46,7 +53,7 @@ export const LOOK_BODY_TUNE = {
   everyFrames: 1,
   stillMoves: 0.0005,
   samples: 4,
-  skyMost: 512,
+  skyMost: 1024,
   spaceMost: 2048,
   least: 64,
   extraReach: 3500,
@@ -56,6 +63,7 @@ export const LOOK_BODY_TUNE = {
   mediumEvery: 2,
   kitWaitMs: 60000,
   kitsAfterScreen: 2,
+  bakeScreenH: 1440,
 };
 
 /** Each dial's range (the console holds a move to it). */
@@ -73,6 +81,7 @@ export const LOOK_BODY_RANGE: Record<keyof typeof LOOK_BODY_TUNE, readonly [numb
   mediumEvery: [1, 8],
   kitWaitMs: [0, 300000],
   kitsAfterScreen: [0, 16],
+  bakeScreenH: [480, 4320],
 };
 
 /** The most a body's picture may take at a tier (0 Low to 3 Ultra): the use's most times the tier's share (`lowShare`, `mediumShare`). */
@@ -127,12 +136,23 @@ export function lookBodyPictureSize(screenShare: number, screenH: number, where:
   return size;
 }
 
-/** The bake's size for a look at a use (its own at most, a size the bake makes: 1024, 2048 or 4096). */
-export function lookSizeFor(where: 'sky' | 'space', look: { generated?: Record<string, unknown> | null } | null | undefined): number {
+/**
+ * The bake's size for a look at a use (its own at most, a size the bake makes: 1024, 2048 or 4096). In a ground sky, by need
+ * (the owner's pixelated planets, 25 November): `needPx` the pixels across the body's disc at its largest (`skyBakeNeedPx`),
+ * the bake doubled from the sky's least until its visible half (half its width) holds that many texels, never past the
+ * look's own size; with no need said, the sky's least as before.
+ */
+export function lookSizeFor(where: 'sky' | 'space', look: { generated?: Record<string, unknown> | null } | null | undefined, needPx = 0): number {
   const own = Number(look?.generated?.size) || 2048;
-  const want = where === 'space' ? LOOK_BAKE_TUNE.spaceSize : LOOK_BAKE_TUNE.skySize;
+  let want = where === 'space' ? LOOK_BAKE_TUNE.spaceSize : LOOK_BAKE_TUNE.skySize;
+  if (where === 'sky' && needPx > 0) while (want < 2 * needPx && want < 4096) want *= 2;
   const s = own < want ? own : want;
   return s >= 4096 ? 4096 : s >= 2048 ? 2048 : 1024;
+}
+
+/** The pixels across a sky body's disc at its largest (`halfRad`, its plan's) on a screen `bakeScreenH` tall: its bake's need. */
+export function skyBakeNeedPx(halfRad: number, fovDeg: number): number {
+  return screenShareOf(halfRad, 1, fovDeg) * LOOK_BODY_TUNE.bakeScreenH;
 }
 
 /**
